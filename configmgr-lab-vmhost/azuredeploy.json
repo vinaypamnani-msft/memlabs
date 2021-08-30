@@ -1,0 +1,380 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "virtualMachineName": {
+      "type": "string",
+      "defaultValue": "LABHOST",
+      "metadata": {
+        "description": "Name of the VM"
+      }
+    },
+    "adminUsername": {
+      "type": "string",
+      "defaultValue": "labadmin",
+      "metadata": {
+        "description": "Admin user name of the VM"
+      }
+    },
+    "adminPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Admin password of the VM"
+      }
+    },
+    "windowsOSVersion": {
+      "type": "string",
+      "defaultValue": "2022-datacenter-g2",
+      "allowedValues": [
+        "2022-datacenter-g2",
+        "2019-datacenter-gensecond"
+      ],
+      "metadata": {
+        "description": "Windows version for the VM."
+      }
+    },
+    "timeZone": {
+      "type": "string",
+      "defaultValue": "Eastern Standard Time",
+      "metadata": {
+        "description": "Time Zone for the Operating System."
+      }
+    }
+  },
+  "variables": {
+    "tagName": "[parameters('virtualMachineName')]",
+    "subnetName": "[concat(resourceGroup().name,'-subnet')]",
+    "virtualNetworkName": "[concat(resourceGroup().name,'-vnet')]",
+    "networkSecurityGroupName": "[concat(resourceGroup().name,'-nsg')]",
+    "publicIpAddressName": "[concat(parameters('virtualMachineName'),'-ip')]",
+    "networkInterfaceName": "[concat(parameters('virtualMachineName'),'-ni')]",
+    "nsgId": "[resourceId(resourceGroup().name, 'Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]",
+    "vnetId": "[resourceId(resourceGroup().name,'Microsoft.Network/virtualNetworks', variables('virtualNetworkName'))]",
+    "subnetRef": "[concat(variables('vnetId'), '/subnets/', variables('subnetName'))]",
+    "vmSize": "Standard_E16ds_v4",
+    "addressPrefix": "10.1.0.0/24",
+    "subnetPrefix": "10.1.0.0/24",
+    "dataDisksCount": 2,
+    "dataDiskSize": 2048,
+    "dataDiskType": "StandardSSD_LRS",
+    "location": "[resourceGroup().location]",
+    "aadLoginExtensionName": "AADLoginForWindows",
+    "windowsAdminCenterPort": "6516",
+    "dscScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/DSC/Host.zip",
+    "dscFunction": "Host.ps1\\Host"
+  },
+  "resources": [
+    {
+      "name": "[variables('networkInterfaceName')]",
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2020-05-01",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[concat('Microsoft.Network/networkSecurityGroups/', variables('networkSecurityGroupName'))]",
+        "[concat('Microsoft.Network/virtualNetworks/', variables('virtualNetworkName'))]",
+        "[concat('Microsoft.Network/publicIpAddresses/', variables('publicIpAddressName'))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "subnet": {
+                "id": "[variables('subnetRef')]"
+              },
+              "privateIPAllocationMethod": "Dynamic",
+              "publicIpAddress": {
+                "id": "[resourceId(resourceGroup().name, 'Microsoft.Network/publicIpAddresses', variables('publicIpAddressName'))]"
+              }
+            }
+          }
+        ],
+        "enableAcceleratedNetworking": true,
+        "networkSecurityGroup": {
+          "id": "[variables('nsgId')]"
+        }
+      },
+      "tags": {
+        "CSSLAB": "[variables('tagName')]",
+        "Automation": "Ignore"
+      }
+    },
+    {
+      "name": "[variables('networkSecurityGroupName')]",
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2019-02-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "windows-admin-center",
+            "properties": {
+              "priority": 900,
+              "access": "Allow",
+              "direction": "Inbound",
+              "destinationPortRange": "[variables('windowsAdminCenterPort')]",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*"
+            }
+          }
+        ]
+      },
+      "tags": {
+        "CSSLAB": "[variables('tagName')]",
+        "Automation": "Ignore"
+      }
+    },
+    {
+      "name": "[variables('virtualNetworkName')]",
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2020-05-01",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]"
+      ],
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "[variables('addressPrefix')]"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "[variables('subnetName')]",
+            "properties": {
+              "addressPrefix": "[variables('subnetPrefix')]",
+              "networkSecurityGroup": {
+                "id": "[variables('nsgId')]"
+              }
+            }
+          }
+        ]
+      },
+      "tags": {
+        "CSSLAB": "[variables('tagName')]",
+        "Automation": "Ignore"
+      }
+    },
+    {
+      "name": "[variables('publicIpAddressName')]",
+      "type": "Microsoft.Network/publicIpAddresses",
+      "apiVersion": "2020-05-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "publicIPAddressVersion": "IPv4",
+        "publicIpAllocationMethod": "Static"
+      },
+      "sku": {
+        "name": "Standard",
+        "tier": "Regional"
+      },
+      "tags": {
+        "CSSLAB": "[variables('tagName')]",
+        "Automation": "Ignore"
+      }
+    },
+    {
+      "name": "[concat(parameters('virtualMachineName'),'_DataDisk_',copyIndex())]",
+      "type": "Microsoft.Compute/disks",
+      "apiVersion": "2020-09-30",
+      "location": "[variables('location')]",
+      "properties": {
+        "diskSizeGB": "[variables('dataDiskSize')]",
+        "creationData": {
+          "createOption": "Empty"
+        },
+        "encryption": {
+          "type": "EncryptionAtRestWithPlatformKey"
+        },
+        "networkAccessPolicy": "AllowAll"
+      },
+      "sku": {
+        "name": "[variables('dataDiskType')]"
+      },
+      "copy": {
+        "name": "managedDiskResources",
+        "count": "[variables('dataDisksCount')]"
+      },
+      "tags": {
+        "CSSLAB": "[variables('tagName')]",
+        "Automation": "Ignore"
+      }
+    },
+    {
+      "name": "[parameters('virtualMachineName')]",
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2021-03-01",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "managedDiskResources",
+        "[concat('Microsoft.Network/networkInterfaces/', variables('networkInterfaceName'))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[variables('vmSize')]"
+        },
+        "storageProfile": {
+          "osDisk": {
+            "osType": "Windows",
+            "name": "[concat(parameters('virtualMachineName'),'_OSDisk')]",
+            "createOption": "FromImage",
+            "managedDisk": {
+              "storageAccountType": "StandardSSD_LRS"
+            },
+            "diskSizeGB": 128
+          },
+          "imageReference": {
+            "publisher": "MicrosoftWindowsServer",
+            "offer": "WindowsServer",
+            "sku": "[parameters('windowsOSVersion')]",
+            "version": "latest"
+          },
+          "copy": [
+            {
+              "name": "dataDisks",
+              "count": "[variables('dataDisksCount')]",
+              "input": {
+                "lun": "[copyIndex('dataDisks')]",
+                "createOption": "attach",
+                "caching": "ReadWrite",
+                "writeAcceleratorEnabled": false,
+                "managedDisk": {
+                  "id": "[resourceId('Microsoft.Compute/disks/', concat(parameters('virtualMachineName'),'_DataDisk_',copyIndex('dataDisks')))]",
+                  "storageAccountType": "[variables('dataDiskType')]"
+                }
+              }
+            }
+          ]
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('networkInterfaceName'))]"
+            }
+          ]
+        },
+        "osProfile": {
+          "computerName": "[parameters('virtualMachineName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]",
+          "windowsConfiguration": {
+            "enableAutomaticUpdates": true,
+            "timeZone": "[parameters('timeZone')]",
+            "provisionVmAgent": true,
+            "patchSettings": {
+              "enableHotpatching": false,
+              "patchMode": "AutomaticByOS"
+            }
+          }
+        },
+        "licenseType": "Windows_Server",
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true
+          }
+        }
+      },
+      "identity": {
+        "type": "systemAssigned"
+      },
+      "tags": {
+        "CSSLAB": "[variables('tagName')]",
+        "Automation": "Ignore"
+      }
+    },
+    {
+      "name": "[concat(parameters('virtualMachineName'),'/', variables('aadLoginExtensionName'))]",
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2018-10-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "publisher": "Microsoft.Azure.ActiveDirectory",
+        "type": "[variables('aadLoginExtensionName')]",
+        "typeHandlerVersion": "1.0",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "mdmId": ""
+        }
+      },
+      "dependsOn": [
+        "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "name": "[concat(parameters('virtualMachineName'), '/AzurePolicyforWindows')]",
+      "apiVersion": "2019-07-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "publisher": "Microsoft.GuestConfiguration",
+        "type": "ConfigurationforWindows",
+        "typeHandlerVersion": "1.0",
+        "autoUpgradeMinorVersion": true,
+        "settings": {},
+        "protectedSettings": {}
+      },
+      "dependsOn": [
+        "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "name": "[concat( parameters('virtualMachineName'), '/' , 'AdminCenter' )]",
+      "apiVersion": "2018-10-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "publisher": "Microsoft.AdminCenter",
+        "type": "AdminCenter",
+        "typeHandlerVersion": "0.0",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "port": "[variables('windowsAdminCenterPort')]",
+          "salt": "[parameters('virtualMachineName')]",
+          "cspFrameAncestors": [
+            "https://*.hosting.portal.azure.net",
+            "https://localhost:1340",
+            "https://ms.portal.azure.com",
+            "https://portal.azure.com",
+            "https://preview.portal.azure.com"
+          ],
+          "corsOrigins": [
+            "https://ms.portal.azure.com",
+            "https://portal.azure.com",
+            "https://preview.portal.azure.com",
+            "https://waconazure.com"
+          ]
+        }
+      },
+      "dependsOn": [
+        "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2019-12-01",
+      "name": "[concat( parameters('virtualMachineName'), '/configureHost' )]",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Powershell",
+        "type": "DSC",
+        "typeHandlerVersion": "2.21",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "modulesUrl": "[variables('dscScript')]",
+          "configurationFunction": "[variables('dscFunction')]"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "adminUsername": {
+      "type": "string",
+      "value": "[parameters('adminUsername')]"
+    }
+  }
+}
