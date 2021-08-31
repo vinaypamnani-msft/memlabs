@@ -26,3 +26,6 @@ _imageList.json
 # Ignore wim/vhdx files, if accidentally placed elsewhere
 *.wim
 *.vhdx
+
+# Ignore vmbuild log(s)
+*.log

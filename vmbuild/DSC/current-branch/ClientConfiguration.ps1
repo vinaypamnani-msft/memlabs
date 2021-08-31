@@ -1,4 +1,4 @@
-﻿configuration Configuration
+﻿configuration ClientConfiguration
 {
    param
    (

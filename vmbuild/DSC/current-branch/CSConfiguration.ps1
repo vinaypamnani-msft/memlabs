@@ -1,4 +1,4 @@
-﻿configuration Configuration
+﻿configuration CSConfiguration
 {
    param
    (

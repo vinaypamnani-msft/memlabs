@@ -14,34 +14,46 @@ function Write-Log {
         [Parameter(Mandatory=$false)]
         [switch]$Success,
         [Parameter(Mandatory=$false)]
-        [switch]$Activity
+        [switch]$Activity,
+        [Parameter(Mandatory=$false)]
+        [switch]$LogOnly
     )
 
     $time = Get-Date -Format 'HH:mm:ss'
     $Text = "$time $Text"
 
+    If ($LogOnly.IsPresent) {                
+        "LOG: $Text" | Out-File $Common.LogPath -Append
+        return  
+    }
+
     If ($Warning.IsPresent) {
         Write-Host $Text -ForegroundColor Yellow    
+        "WARNING: $Text" | Out-File $Common.LogPath -Append
         return
     }
 
     If ($Failure.IsPresent) {
         Write-Host $Text -ForegroundColor Red
+        "FAILURE: $Text" | Out-File $Common.LogPath -Append
         return  
     }
 
     If ($Success.IsPresent) {
         Write-Host $Text -ForegroundColor Green
+        "SUCCESS: $Text" | Out-File $Common.LogPath -Append
         return  
     }
 
     If ($Activity.IsPresent) {
         Write-Host 
         Write-Host $Text -ForegroundColor Cyan
+        "ACTIVITY: $Text" | Out-File $Common.LogPath -Append
         return  
     }
 
     Write-Host $Text -ForegroundColor White
+    "INFO: $Text" | Out-File $Common.LogPath -Append
 }
 
 function Get-File {
@@ -276,44 +288,63 @@ function New-VirtualMachine {
         [Parameter(Mandatory=$true)]
         [string]$VmName,
         [Parameter(Mandatory=$true)]
-        [string]$HardDiskPath,
+        [string]$VmPath,
+        [Parameter(Mandatory=$true)]
+        [string]$SourceDiskPath,
+        [Parameter(Mandatory=$true)]
+        [string]$Memory,
+        [Parameter(Mandatory=$true)]
+        [int]$Processors,
+        [Parameter(Mandatory=$true)]
+        [int]$Generation,
+        [Parameter(Mandatory=$true)]
+        [string]$SwitchName,
         [Parameter(Mandatory=$false)]
         [switch]$WhatIf
     )
 
     if ($WhatIf) {
-        Write-Log "New-VirtualMachine - WhatIf: Will create VM $VmName using VHDX $HardDiskPath"
+        Write-Log "New-VirtualMachine - WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, SwitchName: $SwitchName"
         return $true
     }
     
-    Write-Log "New-VirtualMachine: Creating Virtual Machine $VmName"
+    Write-Log "New-VirtualMachine: $VmName`: Creating Virtual Machine"
 
-    # Create a Switch
-    $switchName = "InternalSwitchCB1"
-    if (-not (Get-VMSwitch -Name $switchName  -ErrorAction SilentlyContinue)) {
-        Write-Log "New-VirtualMachine: Creating Virtual Machine Switch $switchName"
-        New-VMSwitch -Name "LabSwitch1" -SwitchType Internal | Out-Null
+    # Create a Switch    
+    if (-not (Get-VMSwitch -Name $SwitchName  -ErrorAction SilentlyContinue)) {
+        Write-Log "New-VirtualMachine: $VmName`: Creating Virtual Machine Switch $SwitchName"
+        New-VMSwitch -Name $SwitchName -SwitchType Internal | Out-Null
     }
 
-    $testVmPath = Join-Path $Common.StagingVMPath $vmName
-    if (Test-Path -Path $testVmPath) {
-        Write-Log "New-VirtualMachine: Found existing directory for $vmName. Purging $testVmPath folder..."
-        Remove-Item -Path $testVmPath -Force -Recurse
-        Write-Log "New-VirtualMachine: Purge complete."
+    $VmSubPath = Join-Path $VmPath $VmName
+    if (Test-Path -Path $VmSubPath) {
+        Write-Log "New-VirtualMachine: $VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
+        Remove-Item -Path $VmSubPath -Force -Recurse
+        Write-Log "New-VirtualMachine: $VmName`: Purge complete."
     }
 
-    $vm = New-VM -Name $vmName -Path $Common.StagingVMPath -Generation 2 -MemoryStartupBytes 4GB -SwitchName $switchName
+    try {
+        $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory/1) -SwitchName $SwitchName -ErrorAction Stop
+    }
+    catch {
+        Write-Log "New-VirtualMachine: $VmName`: New-VM failed for $VmName. $_"
+        return $false
+    }
+
     $osDiskName = "$($VmName)_OS.vhdx"
-    $osDiskPath = Join-Path $vm.Path $osDiskName
-    Get-File -Source $HardDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
+    $osDiskPath = Join-Path $vm.Path $osDiskName    
+    Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
     
-    Write-Log "New-VirtualMachine: Adding virtual disk $osDiskPath to $VmName"
+    Write-Log "New-VirtualMachine: $VmName`: Setting Processor count for $VmName to $Processors"
+    Set-VM -Name $vmName -ProcessorCount $Processors
+
+    Write-Log "New-VirtualMachine: $VmName`: Adding virtual disk $osDiskPath to $VmName"
     Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0
     
-    Write-Log "New-VirtualMachine: Adding a DVD drive to $VmName"
+    Write-Log "New-VirtualMachine: $VmName`: Adding a DVD drive to $VmName"
     Add-VMDvdDrive -VMName $VmName    
     
-    Write-Log "New-VirtualMachine: Changing boot order of $VmName"
+    Write-Log "New-VirtualMachine: $VmName`: Changing boot order of $VmName"
     
     $f = Get-VM $VmName | Get-VMFirmware
     $f_file = $f.BootOrder | Where-Object{$_.BootType -eq "File" }
@@ -329,7 +360,7 @@ function New-VirtualMachine {
         Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net
     }
     
-    Write-Log "New-VirtualMachine: Starting $VmName"
+    Write-Log "New-VirtualMachine: $VmName`: Starting VM"
     Start-VM -Name $VmName
 
     return $true
@@ -347,7 +378,7 @@ function Wait-ForVm {
         [Parameter(Mandatory=$false, ParameterSetName="VmTestPath")]
         [string]$PathToVerify,
         [Parameter(Mandatory=$false)]
-        [int]$TimeoutMinutes=8,
+        [int]$TimeoutMinutes=10,
         [Parameter(Mandatory=$false)]
         [switch]$WhatIf
     )
@@ -364,10 +395,10 @@ function Wait-ForVm {
     $stopWatch.Start()
 
     if ($VmState) {
-        Write-Log "Wait-ForVm: Waiting for $VmName to go in $VmState state..."
+        Write-Log "Wait-ForVm: $VmName`: Waiting for VM to go in $VmState state..."
         do {
             try {
-                Write-Progress -Activity  "Waiting $TimeoutMinutes minutes for $VmName" -Status "Elapsed time: $($stopWatch.Elapsed)" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for VM to go in '$VmState' state" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 5
                 $vmTest = Get-VM -Name $VmName
                 $ready = $vmTest.State -eq $VmState
@@ -379,11 +410,11 @@ function Wait-ForVm {
     }
 
     if ($OobeComplete.IsPresent) {
-        Write-Log "Wait-ForVm: Waiting for $VmName to complete OOBE..."
+        Write-Log "Wait-ForVm: $VmName`: Waiting for VM to complete OOBE..."
         $readyOobe = $false
         $readySmb = $false
         do {            
-            Write-Progress -Activity  "Waiting $TimeoutMinutes minutes for $VmName. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for OOBE" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for OOBE" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
             Start-Sleep -Seconds 5
             
             # Run a test command inside VM, if it works, VM is ready. SuppressLog since we're in a loop.
@@ -391,14 +422,14 @@ function Wait-ForVm {
             if ($null -ne  $out.ScriptBlockOutput -and -not $readyOobe) { Write-Log "Wait-ForVm: OOBE State is $($out.ScriptBlockOutput)" }
             $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
             if ($readyOobe) {
-                Write-Progress -Activity  "Waiting $TimeoutMinutes minutes for $VmName. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 15
                 $out = Invoke-VmCommand -VmName $VmName -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue } -SuppressLog
                 if ($null -ne  $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "Wait-ForVm: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
             }
             if ($readySmb) {
-                Write-Progress -Activity  "Waiting $TimeoutMinutes minutes for $VmName. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete, and SMB available. Waiting 30 seconds for login screen" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete, and SMB available. Waiting 30 seconds for login screen" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 30
                 $ready = $true
             }
@@ -406,26 +437,26 @@ function Wait-ForVm {
     }
 
     if ($PathToVerify) {
-        Write-Log "Wait-ForVm: Waiting for $VmName to be ready..."
+        Write-Log "Wait-ForVm: $VmName`: Waiting for VM to have $PathToVerify..."
         do {            
-            Write-Progress -Activity  "Waiting $TimeoutMinutes minutes for $VmName" -Status "Elapsed time: $($stopWatch.Elapsed)" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for $PathToVerify to be created" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
             Start-Sleep -Seconds 5
             
-            # Run a test command inside VM, if it works, VM is ready. SuppressLog since we're in a loop.
+            # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
             $out = Invoke-VmCommand -VmName $VmName -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
             $ready = $true -eq $out.ScriptBlockOutput
             
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
     }    
 
-    Write-Progress -Activity "Waiting for $VmName" -Completed
+    Write-Progress -Activity "$VmName`: Waiting for $VmName" -Status "Complete" -Completed
 
-    if ($ready) {        
-        Write-Log "Wait-ForVm: $VmName is now available." -Success                        
+    if ($ready) {
+        Write-Log "Wait-ForVm: $VmName`: VM is now available." -Success
     }
 
     if (-not $ready) {
-        Write-Log "Wait-ForVm: Timer expired while waiting for $VmName" -Warning
+        Write-Log "Wait-ForVm: $VmName`: Timer expired while waiting for VM" -Warning
     }
 
     return $ready
@@ -453,6 +484,8 @@ function Invoke-VmCommand {
         Write-Log "Invoke-VmCommand: WhatIf: Will run '$ScriptBlock' inside '$VmName'"
         return $true
     }
+
+    Write-Log "Invoke-VmCommand: Starting command '$ScriptBlock' inside '$VmName'"
 
     $return = [PSCustomObject]@{
 		CommandResult 	    = $false
@@ -561,7 +594,7 @@ function Get-LocalAdmin {
     if ($updateFile) {
         try {
             $item = $Common.ImageList.Files | Where-Object {$_.id -eq $username}
-            $fileUrl = "$($StorageConfig.StorageLocation)/$($item.container)/$($item.filename)"    
+            $fileUrl = "$($StorageConfig.StorageLocation)/$($item.container)/$($item.filename)"
             Get-File -Source $fileUrl -Destination $destination -DisplayName "Obtaining local admin creds" -Action "Downloading" -Silent
         }
         catch {
@@ -597,6 +630,7 @@ $global:Common = [PSCustomObject]@{
     WimagePath          = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
     BaseImagePath       = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
     StagingVMPath       = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
+    LogPath             = Join-Path $PSScriptRoot "vmbuild.log"
     FatalError          = $null
     ImageList           = $null
     LocalAdmin          = $null

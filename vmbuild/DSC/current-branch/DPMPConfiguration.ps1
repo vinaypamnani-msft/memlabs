@@ -1,4 +1,4 @@
-﻿configuration Configuration
+﻿configuration DPMPConfiguration
 {
    param
    (

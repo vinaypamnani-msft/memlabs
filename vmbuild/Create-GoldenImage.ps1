@@ -195,7 +195,7 @@ if ($vmTest) {
 }
 
 if ($createVm) {
-    $worked = New-VirtualMachine -VmName $vmName -HardDiskPath $vhdxPath -WhatIf:$WhatIf
+    $worked = New-VirtualMachine -VmName $vmName -VmPath $Common.StagingVMPath -SourceDiskPath $vhdxPath -Memory "4GB" -Generation 2 -Processors 1 -SwitchName "InternalSwitchCB1" -WhatIf:$WhatIf
     if (-not $worked) {
         Write-Log "Main: VM not created. Exiting!" -Failure
         return

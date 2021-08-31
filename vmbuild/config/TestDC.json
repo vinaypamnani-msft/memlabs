@@ -1,0 +1,15 @@
+[
+	{
+		"vmName" : "CM-DC1",
+        "role": "DC",
+        "hardware" : [{
+            "memory" : "2GB",
+            "virtualProcs" : 1,
+            "osDiskSize" : "127GB",
+            "generation" : 2
+        }],		
+		"joinDomain" : true,
+		"domainName" : "contoso.com",
+		"operatingSystem" : "Server 2022"		
+	}
+]

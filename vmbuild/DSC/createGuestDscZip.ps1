@@ -28,6 +28,6 @@ Compress-Archive -Path .\$cb\TemplateHelpDSC -Update -DestinationPath .\$cb\DSC.
 
 # Inject the appropriate TemplateHelpDSC
 Write-Host "Creating DSC.zip for $tp.."
-Compress-Archive -Path .\$cb\TemplateHelpDSC -Update -DestinationPath .\$tp\DSC.zip
+Compress-Archive -Path .\$tp\TemplateHelpDSC -Update -DestinationPath .\$tp\DSC.zip
 Write-Host "Adding $tp TemplateHelpDSC to DSC.ZIP.."
 Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$tp\DSC.zip -Force
