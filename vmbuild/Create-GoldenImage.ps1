@@ -34,7 +34,7 @@ if (-not (Test-Path "$($Common.InjectPath)\staging\bginfo\bginfo.exe") -and -not
     return
 }
 
-#Clear-Host
+Clear-Host
 Write-Host
 Write-Host 
 Write-Host 
@@ -170,16 +170,6 @@ if ($vmTest) {
     Write-Log "Main: Found $vmName in Hyper-V."
     if ($ForceNewVm.IsPresent) {
         Write-Log "Main: ForceNewVm switch present. Removing pre-existing VM..." -Warning
-        if (-not $WhatIf) {
-            if ($vmTest.State -ne "Off") { 
-                Write-Log "Main: Turning the VM off forcefully..."
-                $vmTest | Stop-VM -TurnOff -Force 
-            }
-            $vmTest | Remove-VM -Force
-            Write-Log "Main: Purging $($vmTest.Path) folder..."
-            Remove-Item -Path $($vmTest.Path) -Force -Recurse
-            Write-Log "Main: Purge complete."
-        }
     }
     else {
         Write-Log "Main: ForceNewVm switch not present. Re-using existing VM may have undesired effects. Check if use of existing VM is allowed..." -Warning
@@ -195,7 +185,9 @@ if ($vmTest) {
 }
 
 if ($createVm) {
-    $worked = New-VirtualMachine -VmName $vmName -VmPath $Common.StagingVMPath -SourceDiskPath $vhdxPath -Memory "4GB" -Generation 2 -Processors 1 -SwitchName "InternalSwitchCB1" -WhatIf:$WhatIf
+    $response = Read-Host -Prompt "For Server OS, please make sure the switch used for creating VM has Internet. Continue? [y/N]"
+    if ($response -ne 'Y' -or $response -ne 'y') { return }
+    $worked = New-VirtualMachine -VmName $vmName -VmPath $Common.StagingVMPath -SourceDiskPath $vhdxPath -Memory "8GB" -Generation 2 -Processors 8 -SwitchName "External" -ForceNew:$ForceNewVm -WhatIf:$WhatIf
     if (-not $worked) {
         Write-Log "Main: VM not created. Exiting!" -Failure
         return

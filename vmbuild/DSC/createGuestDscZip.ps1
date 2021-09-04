@@ -1,8 +1,12 @@
+param(
+    $role = "PS",
+    $version = "current-branch",    
+    [switch]$force
+)
+
+
 # Prepare DSC ZIP files
 Set-Location $PSScriptRoot
-
-$cb = "current-branch"
-$tp = "tech-preview"
 
 #####################
 ### Install modules
@@ -13,21 +17,58 @@ $tp = "tech-preview"
 # Modules used by VM Guests, include all so the ZIP contains all required modules to make it easier to move them to guest VMs.
 
 Write-Host "Importing Modules.."
-if (-not (Get-DscResource -Module xNetworking)) { Install-Module xNetworking -Force }
-if (-not (Get-DscResource -Module xDhcpServer)) { Install-Module xDhcpServer -Force }
-if (-not (Get-DscResource -Module SqlServerDsc)) { Install-Module SqlServerDsc -Force }
-if (-not (Get-DscResource -Module DnsServerDsc)) { Install-Module DnsServerDsc -Force }
-if (-not (Get-DscResource -Module ComputerManagementDsc )) { Install-Module ComputerManagementDsc  -Force }
+$modules = @(
+    'ActiveDirectoryDsc',
+    'xDscDiagnostics',
+    'ComputerManagementDsc',
+    'DnsServerDsc',
+    'SqlServerDsc',
+    'xDhcpServer',
+    'NetworkingDsc'    
+)
+foreach($module in $modules)
+{
+    if (Get-Module -ListAvailable -Name $module) {        
+        if ($force) {
+            Write-Host "Module exists: $module. Updating..."
+            Update-Module $module -Force    
+        }
+        else {
+            Write-Host "Module exists: $module "
+        }
+    }
+    else {
+        Install-Module $module -Force
+    }
+}
 
-# Create local compressed file
-Write-Host "Creating DSC.zip for $cb.."
-Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$cb\DSC.zip -Force
-Write-Host "Adding $cb TemplateHelpDSC to DSC.ZIP.."
-Compress-Archive -Path .\$cb\TemplateHelpDSC -Update -DestinationPath .\$cb\DSC.zip
+# Create local compressed file and inject appropriate appropriate TemplateHelpDSC
+Write-Host "Creating DSC.zip for $version.."
+Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$version\DSC.zip -Force
+Write-Host "Adding $version TemplateHelpDSC to DSC.ZIP.."
+Compress-Archive -Path .\$version\TemplateHelpDSC -Update -DestinationPath .\$version\DSC.zip
 
+# install templatehelpdsc module on this machine for specified version
+Write-Host "Installing $version TemlateHelpDSC on this machine.."
+Copy-Item .\$version\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
 
-# Inject the appropriate TemplateHelpDSC
-Write-Host "Creating DSC.zip for $tp.."
-Compress-Archive -Path .\$tp\TemplateHelpDSC -Update -DestinationPath .\$tp\DSC.zip
-Write-Host "Adding $tp TemplateHelpDSC to DSC.ZIP.."
-Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$tp\DSC.zip -Force
+# Create test config, for testing if the config definition is good.
+Write-Host "Creating a test config for $role in C:\Temp"
+$adminCreds = Get-Credential
+. ".\$version\$($role)Configuration.ps1"
+
+# Configuration Data
+$cd = @{
+    AllNodes = @(
+        @{
+            NodeName = 'LOCALHOST'
+            PSDscAllowPlainTextPassword = $true
+            PSDscAllowDomainUser = $true
+        }
+    )
+}
+
+& "$($role)Configuration" -DomainName contoso.com `
+    -DCName CM-DC1 -DPMPName CM-MP1 -CSName CM-CS1 -PSName CM-SITE1 -ClientName CM-CL1 `
+    -Configuration "Standalone" -DNSIPAddress "192.168.1.1" -AdminCreds $adminCreds `
+    -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config"

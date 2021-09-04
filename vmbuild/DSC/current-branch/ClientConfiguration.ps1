@@ -1,7 +1,7 @@
 ﻿configuration ClientConfiguration
 {
-   param
-   (
+    param
+    (
         [Parameter(Mandatory)]
         [String]$DomainName,
         [Parameter(Mandatory)]
@@ -13,7 +13,7 @@
         [Parameter(Mandatory)]
         [String]$PSName,
         [Parameter(Mandatory)]
-        [System.Array]$ClientName,
+        [String]$ClientName,
         [Parameter(Mandatory)]
         [String]$Configuration,
         [Parameter(Mandatory)]
@@ -21,8 +21,10 @@
         [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
+
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
-    Import-DscResource -ModuleName TemplateHelpDSC
+    Import-DscResource -ModuleName 'TemplateHelpDSC'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
 
     $LogFolder = "TempLog"
     $LogPath = "c:\$LogFolder"
@@ -35,100 +37,113 @@
 
     Node localhost
     {
-        LocalConfigurationManager
-        {
-            ConfigurationMode = 'ApplyOnly'
+        LocalConfigurationManager {
+            ConfigurationMode  = 'ApplyOnly'
             RebootNodeIfNeeded = $true
         }
 
-        SetCustomPagingFile PagingSettings
-        {
+        WriteStatus Rename {
+            Status = "Renaming the computer to $ClientName"
+        }
+        
+        Computer NewName {            
+            Name = $ClientName
+        }
+
+        SetCustomPagingFile PagingSettings {
+            DependsOn   = "[Computer]NewName"
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
-        }
+        }        
 
-        SetDNS DnsServerAddress
-        {
-            DNSIPAddress = $DNSIPAddress
-            Ensure = "Present"
+        InstallFeatureForSCCM InstallFeature {
+            Name      = "Client"
+            Role      = "Client"
             DependsOn = "[SetCustomPagingFile]PagingSettings"
         }
 
-        InstallFeatureForSCCM InstallFeature
-        {
-            Name = "Client"
-            Role = "Client"
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
+        WriteStatus WaitDomain {
+            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
+            Status    = "Waiting for domain to be ready to obtain an IP"
         }
 
-        WaitForDomainReady WaitForDomain
-        {
-            Ensure = "Present"
-            DCName = $DCName
-            DependsOn = "[SetDNS]DnsServerAddress"
+        WaitForDomainReady WaitForDomain {
+            DependsOn  = "[InstallFeatureForSCCM]InstallFeature"
+            Ensure     = "Present"
+            DomainName = $DomainName
+            DCName     = $DCName  
         }
 
-        JoinDomain JoinDomain
-        {
+        WriteStatus DomainJoin {
+            DependsOn = "[WaitForDomainReady]WaitForDomain"
+            Status    = "Joining computer to the domain"
+        }
+
+        JoinDomain JoinDomain {
             DomainName = $DomainName
             Credential = $DomainCreds
-            DependsOn = "[WaitForDomainReady]WaitForDomain"
+            DependsOn  = "[WaitForDomainReady]WaitForDomain"
         }
 
-        WaitForConfigurationFile WaitForPSJoinDomain
-        {
-            Role = "DC"
+        OpenFirewallPortForSCCM OpenFirewall {
+            Name      = "Client"
+            Role      = "Client"
+            DependsOn = "[JoinDomain]JoinDomain"
+        }
+
+        WriteStatus WaitPrimaryJoinDomain {
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            Status    = "Waiting for Primary Site to join domain, before adding it to Local Administrators group"
+        }
+
+        WaitForConfigurationFile WaitForPSJoinDomain {
+            Role        = "DC"
             MachineName = $DCName
-            LogFolder = $LogFolder
-            ReadNode = "PSJoinDomain"
-            Ensure = "Present"
-            DependsOn = "[JoinDomain]JoinDomain"
+            LogFolder   = $LogFolder
+            ReadNode    = "PSJoinDomain"
+            Ensure      = "Present"
+            DependsOn   = "[OpenFirewallPortForSCCM]OpenFirewall"
         }
 
-        File ShareFolder
-        {            
+        File ShareFolder {            
             DestinationPath = $LogPath     
-            Type = 'Directory'            
-            Ensure = 'Present'
-            DependsOn = "[WaitForConfigurationFile]WaitForPSJoinDomain"
+            Type            = 'Directory'            
+            Ensure          = 'Present'
+            DependsOn       = "[WaitForConfigurationFile]WaitForPSJoinDomain"
         }
 
-        FileReadAccessShare DomainSMBShare
-        {
-            Name = $LogFolder
-            Path = $LogPath
-            Account = $DCComputerAccount,$PSComputerAccount
+        FileReadAccessShare DomainSMBShare {
+            Name      = $LogFolder
+            Path      = $LogPath
+            Account   = $DCComputerAccount, $PSComputerAccount
             DependsOn = "[File]ShareFolder"
-        }
-
-        OpenFirewallPortForSCCM OpenFirewall
-        {
-            Name = "Client"
-            Role = "Client"
-            DependsOn = "[JoinDomain]JoinDomain"
-        }
+        }        
 
         AddUserToLocalAdminGroup AddADUserToLocalAdminGroup {
-            Name = $($Admincreds.UserName)
+            Name       = $($Admincreds.UserName)
             DomainName = $DomainName
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn  = "[FileReadAccessShare]DomainSMBShare"
         }
 
         AddUserToLocalAdminGroup AddADComputerToLocalAdminGroup {
-            Name = "$PrimarySiteName"
+            Name       = "$PrimarySiteName"
             DomainName = $DomainName
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn  = "[FileReadAccessShare]DomainSMBShare"
         }
 
-        WriteConfigurationFile WriteClientFinished
-        {
-            Role = "Client"
-            LogPath = $LogPath
+        WriteConfigurationFile WriteClientFinished {
+            Role      = "Client"
+            LogPath   = $LogPath
             WriteNode = "ClientFinished"
-            Status = "Passed"
-            Ensure = "Present"
-            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup","[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup", "[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup", "[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
+            Status    = "Complete!"
         }
     }
 }

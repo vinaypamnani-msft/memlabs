@@ -5,6 +5,7 @@ RootModule = 'TemplateHelpDSC.psm1'
 
 DscResourcesToExport = @(
     'InstallADK',
+    'InstallSSMS',
     'InstallAndConfigWSUS',
     'InstallAZCopy',
     'WriteConfigurationFile',
@@ -17,9 +18,11 @@ DscResourcesToExport = @(
     'WaitForDomainReady',
     'VerifyComputerJoinDomain',
     'SetDNS',
+    'WriteStatus',
     'ChangeSQLServicesAccount',
     'RegisterTaskScheduler',
     'DownloadSCCM',
+    'DownloadFile',
     'WaitForExtendSchemaFile',
     'SetAutomaticManagedPageFile',
     'ChangeServices',

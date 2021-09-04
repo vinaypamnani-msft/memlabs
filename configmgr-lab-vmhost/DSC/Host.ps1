@@ -18,7 +18,7 @@ Configuration Host {
     $internalInterfaceTPIP = "192.168.10.200"
 
     $repoName = "memlabs"
-    $repoUrl = "https://github.com/vinaypamnani-msft/$repoName/archive/refs/heads/main.zip"
+    $repoUrl = "https://github.com/vinaypamnani-msft/$repoName"
     
     Node LOCALHOST {
     
@@ -216,24 +216,22 @@ Configuration Host {
         Script DownloadFiles {
             DependsOn = "[Script]FormatDisk"
             SetScript = {
-                Start-Transcript -Path $env:windir\temp\RepoDownloadLog.txt -Append -Force
+                Start-Transcript -Path $env:windir\temp\RepoClone.txt -Append -Force
 
-                $zip = "$env:windir\temp\memlabfiles.zip"
-                $destination = "E:\"
-                
-                "Downloading $using:repoUrl"
-                Invoke-WebRequest -Uri $using:repoUrl -OutFile $zip
-                
-                "Unblocking file $zip"
-                Unblock-File -Path $zip -Confirm:$false
-                
-                "Expanding zip to E:\"
-                Expand-Archive -Path $zip -DestinationPath $destination -Force
+                "Downloading and installing chocolatey"
+                Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+                "Installing git via choco"
+                & choco install git -y
+
+                "Cloning the repository"
+                $destination = "E:\$using:repoName"
+                git clone $using:repoUrl $destination
 
                 Stop-Transcript
             }
             TestScript = {
-                return (Test-Path "E:\$using:repoName-main")
+                return (Test-Path "E:\$using:repoName")
             }
             GetScript = {
                 # Do nothing

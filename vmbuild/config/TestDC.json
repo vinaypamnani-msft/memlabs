@@ -4,12 +4,23 @@
         "role": "DC",
         "hardware" : [{
             "memory" : "2GB",
-            "virtualProcs" : 1,
-            "osDiskSize" : "127GB",
+            "virtualProcs" : 1,            
             "generation" : 2
         }],		
 		"joinDomain" : true,
 		"domainName" : "contoso.com",
 		"operatingSystem" : "Server 2022"		
+	},
+    {
+		"vmName" : "CM-MP1",
+        "role": "DPMP",
+        "hardware" : [{
+            "memory" : "2GB",
+            "virtualProcs" : 1,
+            "generation" : 2
+        }],		
+		"joinDomain" : true,
+		"domainName" : "contoso.com",
+		"operatingSystem" : "Server 2022"
 	}
 ]

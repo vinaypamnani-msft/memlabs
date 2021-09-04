@@ -5,6 +5,7 @@
 param(
     [switch]$RunSysprep,
     [switch]$DisableFirewall,
+    [switch]$InstallWindowsFeatures,
     [switch]$RunOptional
 )
 
@@ -49,8 +50,19 @@ if ($server) {
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}" -Name IsInstalled -Value 0 # Admins
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A8-37EF-4b3f-8CFC-4F3A74704073}" -Name IsInstalled -Value 0 # Users
 
-    Update-Log "Disable Windows Update"
-    New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | New-ItemProperty -Name NoAutoUpdate -Value 1 -Force | Out-Null
+    if ($InstallWindowsFeatures.IsPresent) {
+        Update-Log "Installing Windows Features: .NET 3.5 & 4.5"
+        Install-WindowsFeature Net-Framework-Core
+        Install-WindowsFeature NET-Framework-45-Core
+
+        Update-Log "Installing Windows Features: IIS"
+        Install-WindowsFeature Web-Server -IncludeManagementTools
+        Install-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net 
+        Install-WindowsFeature Web-Mgmt-Console,Web-Lgcy-Mgmt-Console,Web-Lgcy-Scripting,Web-WMI,Web-Mgmt-Service,Web-Mgmt-Tools,Web-Scripting-Tools
+    }
+
+    #Update-Log "Disable Windows Update"
+    #New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | New-ItemProperty -Name NoAutoUpdate -Value 1 -Force | Out-Null
 }
 
 # Common Windows Settings

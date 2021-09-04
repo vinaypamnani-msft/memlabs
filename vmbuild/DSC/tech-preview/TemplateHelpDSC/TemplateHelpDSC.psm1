@@ -33,7 +33,7 @@ class InstallADK
         {
             #ADK 2004 (19041)
             $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120254"
-            Invoke-WebRequest -Uri $adkurl -OutFile $_adkpath
+            Start-BitsTransfer -Source $adkurl -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
         $_adkWinPEpath = $this.ADKWinPEPath
@@ -41,7 +41,7 @@ class InstallADK
         {
             #ADK add-on (19041)
             $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"
-            Invoke-WebRequest -Uri $adkurl -OutFile $_adkWinPEpath
+            Start-BitsTransfer -Source $adkurl -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
         }
         #Install DeploymentTools
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
@@ -524,13 +524,12 @@ class DownloadSCCM
     {
         $_CM = $this.CM
         $_ExtPath = $this.ExtPath
-        $cmpath = "c:\$_CM.exe"
+        $cmpath = "c:\temp\$_CM.exe"
         $cmsourcepath = "c:\$_CM"
 
         Write-Verbose "Downloading SCCM installation source..."
         $cmurl = "https://go.microsoft.com/fwlink/?linkid=2077212&clcid=0x409"
-        $WebClient = New-Object System.Net.WebClient
-        $WebClient.DownloadFile($cmurl,$cmpath)
+        Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
         if(!(Test-Path $cmsourcepath))
         {
             Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
@@ -540,7 +539,7 @@ class DownloadSCCM
     [bool] Test()
     {
         $_CM = $this.CM
-        $cmpath = "c:\$_CM.exe"
+        $cmpath = "c:\temp\$_CM.exe"
         $cmsourcepath = "c:\$_CM"
         if(!(Test-Path $cmpath))
         {
@@ -1528,18 +1527,18 @@ class InstallFeatureForSCCM
         }
         if($_Role -contains "Site Server")
         { 
-            Add-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net 
-            Add-WindowsFeature Web-Mgmt-Console,Web-Lgcy-Mgmt-Console,Web-Lgcy-Scripting,Web-WMI,Web-Mgmt-Service,Web-Mgmt-Tools,Web-Scripting-Tools 
+            Install-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net 
+            Install-WindowsFeature Web-Mgmt-Console,Web-Lgcy-Mgmt-Console,Web-Lgcy-Scripting,Web-WMI,Web-Mgmt-Service,Web-Mgmt-Tools,Web-Scripting-Tools 
         }
         if($_Role -contains "Application Catalog website point")
         {
             #IIS
-            Add-WindowsFeature Web-Default-Doc,Web-Static-Content,Web-Windows-Auth,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Static-Content,Web-Windows-Auth,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
         if($_Role -contains "Application Catalog web service point")
         {
             #IIS
-            Add-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
         if($_Role -contains "Asset Intelligence synchronization point")
         {
@@ -1548,13 +1547,13 @@ class InstallFeatureForSCCM
         if($_Role -contains "Certificate registration point")
         {
             #IIS
-            Add-WindowsFeature Web-Asp-Net,Web-Asp-Net45,Web-Metabase,Web-WMI
+            Install-WindowsFeature Web-Asp-Net,Web-Asp-Net45,Web-Metabase,Web-WMI
         }
         if($_Role -contains "Distribution point")
         {
             #IIS 
-            Add-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
-            Add-WindowsFeature Web-WMI,Web-Metabase
+            Install-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
+            Install-WindowsFeature Web-WMI,Web-Metabase
         }
     
         if($_Role -contains "Endpoint Protection point")
@@ -1565,24 +1564,24 @@ class InstallFeatureForSCCM
         if($_Role -contains "Enrollment point")
         {
             #iis
-            Add-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
         if($_Role -contains "Enrollment proxy point")
         {
             #iis
-            Add-WindowsFeature Web-Default-Doc,Web-Static-Content,Web-Windows-Auth,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Static-Content,Web-Windows-Auth,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
         if($_Role -contains "Fallback status point")
         {
-            Add-WindowsFeature Web-Metabase
+            Install-WindowsFeature Web-Metabase
         }
         if($_Role -contains "Management point")
         {
             #BITS
-            Add-WindowsFeature BITS,BITS-IIS-Ext
+            Install-WindowsFeature BITS,BITS-IIS-Ext
             #IIS 
-            Add-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
-            Add-WindowsFeature Web-WMI,Web-Metabase
+            Install-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
+            Install-WindowsFeature Web-WMI,Web-Metabase
         }
         if($_Role -contains "Reporting services point")
         {
@@ -1595,12 +1594,12 @@ class InstallFeatureForSCCM
         if($_Role -contains "Software update point")
         {
             #default iis configuration
-            add-windowsfeature web-server 
+            Install-WindowsFeature web-server 
         }
         if($_Role -contains "State migration point")
         {
             #iis
-            Add-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
 
         $StatusPath = "$env:windir\temp\InstallFeatureStatus.txt"

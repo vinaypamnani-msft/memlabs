@@ -22,7 +22,8 @@
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
-    Import-DscResource -ModuleName TemplateHelpDSC
+    Import-DscResource -ModuleName 'TemplateHelpDSC'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
 
     $LogFolder = "TempLog"
     $LogPath = "c:\$LogFolder"
@@ -41,18 +42,28 @@
             RebootNodeIfNeeded = $true
         }
 
+        WriteStatus Rename
+        {
+            Status = "Renaming the computer to $DPMPName"
+        }
+
+        Computer NewName
+        {            
+            Name          = $DPMPName
+        }
+
         SetCustomPagingFile PagingSettings
         {
+            DependsOn = "[Computer]NewName"
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
         }
 
-        SetDNS DnsServerAddress
+        WriteStatus InstallFeature
         {
-            DNSIPAddress = $DNSIPAddress
-            Ensure = "Present"
             DependsOn = "[SetCustomPagingFile]PagingSettings"
+            Status = "Installing required windows features"
         }
 
         InstallFeatureForSCCM InstallFeature
@@ -62,11 +73,25 @@
             DependsOn = "[SetCustomPagingFile]PagingSettings"
         }
 
+        WriteStatus WaitDomain
+        {
+            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
+            Status = "Waiting for domain to be ready to obtain an IP"
+        }
+
         WaitForDomainReady WaitForDomain
         {
-            Ensure = "Present"
-            DCName = $DCName
-            DependsOn = "[SetDNS]DnsServerAddress"
+            
+            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
+            Ensure      = "Present"
+            DomainName  = $DomainName
+            DCName      = $DCName            
+        }
+
+        WriteStatus DomainJoin
+        {
+            DependsOn = "[WaitForDomainReady]WaitForDomain"
+            Status = "Joining computer to the domain"
         }
 
         JoinDomain JoinDomain
@@ -76,6 +101,25 @@
             DependsOn = "[WaitForDomainReady]WaitForDomain"
         }
 
+        WriteStatus OpenPorts
+        {
+            DependsOn = "[JoinDomain]JoinDomain"
+            Status = "Open required firewall ports"
+        }
+
+        OpenFirewallPortForSCCM OpenFirewallPortForSCCM
+        {
+            Name = "DPMP"
+            Role = "Distribution Point","Management Point"
+            DependsOn = "[JoinDomain]JoinDomain"
+        }
+
+        WriteStatus WaitPrimaryJoinDomain
+        {
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewallPortForSCCM"
+            Status = "Waiting for Primary Site to join domain, before adding it to Local Administrators group"
+        }
+
         WaitForConfigurationFile WaitForPSJoinDomain
         {
             Role = "DC"
@@ -83,7 +127,7 @@
             LogFolder = $LogFolder
             ReadNode = "PSJoinDomain"
             Ensure = "Present"
-            DependsOn = "[JoinDomain]JoinDomain"
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewallPortForSCCM"
         }
 
         File ShareFolder
@@ -92,7 +136,7 @@
             Type = 'Directory'            
             Ensure = 'Present'
             DependsOn = "[WaitForConfigurationFile]WaitForPSJoinDomain"
-        }
+        }        
 
         FileReadAccessShare DomainSMBShare
         {
@@ -100,13 +144,6 @@
             Path = $LogPath
             Account = $DCComputerAccount,$PSComputerAccount
             DependsOn = "[File]ShareFolder"
-        }
-
-        OpenFirewallPortForSCCM OpenFirewall
-        {
-            Name = "DPMP"
-            Role = "Distribution Point","Management Point"
-            DependsOn = "[JoinDomain]JoinDomain"
         }
 
         AddUserToLocalAdminGroup AddADUserToLocalAdminGroup {
@@ -129,6 +166,12 @@
             Status = "Passed"
             Ensure = "Present"
             DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup","[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
+        }
+
+        WriteStatus Complete
+        {
+            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup","[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
+            Status = "Complete!"
         }
     }
 }

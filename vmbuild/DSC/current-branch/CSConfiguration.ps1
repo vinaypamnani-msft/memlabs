@@ -21,7 +21,9 @@
         [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
-    Import-DscResource -ModuleName TemplateHelpDSC
+    
+    Import-DscResource -ModuleName 'TemplateHelpDSC'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
     
     $LogFolder = "TempLog"
     $CM = "CMCB"
@@ -43,12 +45,19 @@
             ConfigurationMode = 'ApplyOnly'
             RebootNodeIfNeeded = $true
         }
+        
+        Computer NewName
+        {            
+            Name          = $CSName
+        }
+
         SetCustomPagingFile PagingSettings
         {
+            DependsOn = "[Computer]NewName"
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
-        }
+        } 
 
         AddBuiltinPermission AddSQLPermission
         {

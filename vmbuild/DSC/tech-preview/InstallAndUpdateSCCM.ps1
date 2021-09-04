@@ -8,13 +8,13 @@ $Configuration.InstallSCCM.Status = 'Running'
 $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-$cmpath = "c:\$CM.exe"
+$cmpath = "c:\temp\$CM.exe"
 $cmsourcepath = "c:\$CM"
 if(!(Test-Path $cmpath))
 {
     "[$(Get-Date -format HH:mm:ss)] Copying SCCM installation source..." | Out-File -Append $logpath
-    $cmurl = "http://download.microsoft.com/download/1/B/C/1BCADBD7-47F6-40BB-8B1F-0B2D9B51B289/SC_Configmgr_SCEP_1902.exe"
-    Invoke-WebRequest -Uri $cmurl -OutFile $cmpath
+    $cmurl = "http://download.microsoft.com/download/1/B/C/1BCADBD7-47F6-40BB-8B1F-0B2D9B51B289/SC_Configmgr_SCEP_1902.exe"    
+    Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
     if(!(Test-Path $cmsourcepath))
     {
         Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait

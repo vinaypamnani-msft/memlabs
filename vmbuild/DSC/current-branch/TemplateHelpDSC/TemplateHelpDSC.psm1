@@ -33,7 +33,7 @@ class InstallADK
         {
             #ADK 2004 (19041)
             $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120254"
-            Invoke-WebRequest -Uri $adkurl -OutFile $_adkpath
+            Start-BitsTransfer -Source $adkurl -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
         $_adkWinPEpath = $this.ADKWinPEPath
@@ -41,7 +41,7 @@ class InstallADK
         {
             #ADK add-on (19041)
             $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"
-            Invoke-WebRequest -Uri $adkurl -OutFile $_adkWinPEpath
+            Start-BitsTransfer -Source $adkurl -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop            
         }
         #Install DeploymentTools
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
@@ -138,6 +138,74 @@ class InstallADK
         return $this
     }
 }
+
+[DscResource()]
+class InstallSSMS
+{
+    [DscProperty(Key)]
+    [string] $DownloadUrl
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [void] Set()
+    {
+        # Download SSMS
+
+        $ssmsSetup = "C:\temp\SSMS-Setup-ENU.exe"
+        if(!(Test-Path $ssmsSetup))
+        {
+            Write-Verbose "Downloading SSMS from $($this.DownloadUrl)..."
+            Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
+        }
+
+        # Install SSMS        
+        $adkinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
+        while(!(Test-Path $adkinstallpath))
+        {
+            $cmd = $ssmsSetup
+            $arg1 = "/install"
+            $arg2 = "/quiet"
+            $arg3 = "/norestart"
+
+            try
+            {
+                Write-Verbose "Installing SSMS..."
+                & $cmd $arg1 $arg2 $arg3 | out-null
+                Write-Verbose "SSMS Installed Successfully!"
+            }
+            catch
+            {
+                $ErrorMessage = $_.Exception.Message
+                throw "Failed to install SSMS with below error: $ErrorMessage"
+            }
+
+            Start-Sleep -Seconds 10
+        }
+
+    }
+
+    [bool] Test()
+    {
+        $adkinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
+        if(!(Test-Path $adkinstallpath))
+        {
+            return $false
+        }
+
+        If (!(Get-Item $adkinstallpath).length -gt 0kb) {
+            return $false
+        }
+
+        return $true
+    }
+
+    [InstallSSMS] Get()
+    {
+        return $this
+    }
+}
+
 
 [DscResource()]
 class InstallAndConfigWSUS
@@ -471,11 +539,11 @@ class AddBuiltinPermission
 
     [void] Set()
     {
-        Start-Sleep -Seconds 240
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
         sqlcmd -Q "if not exists(select * from sys.server_principals where name='BUILTIN\administrators') CREATE LOGIN [BUILTIN\administrators] FROM WINDOWS;EXEC master..sp_addsrvrolemember @loginame = N'BUILTIN\administrators', @rolename = N'sysadmin'"
         $retrycount = 0
         $sqlpermission = sqlcmd -Q "if exists(select * from sys.server_principals where name='BUILTIN\administrators') Print 1"
-        while($sqlpermission -eq $null)
+        while($null -eq $sqlpermission)
         {
             if($retrycount -eq 3)
             {
@@ -493,8 +561,10 @@ class AddBuiltinPermission
 
     [bool] Test()
     {
+        Start-Sleep -Seconds 60
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
         $sqlpermission = sqlcmd -Q "if exists(select * from sys.server_principals where name='BUILTIN\administrators') Print 1"
-        if($sqlpermission -eq $null)
+        if($null -eq $sqlpermission)
         {
             Write-Verbose "Need to add the builtin administrators permission."
             return $false
@@ -524,13 +594,12 @@ class DownloadSCCM
     [void] Set()
     {
         $_CM = $this.CM
-        $cmpath = "c:\$_CM.exe"
-        $cmsourcepath = "c:\$_CM"
-
+        $cmpath = "c:\temp\$_CM.exe"
+        $cmsourcepath = "c:\$_CM"        
+        
         Write-Verbose "Downloading SCCM installation source..."
         $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
-        $WebClient = New-Object System.Net.WebClient
-        $WebClient.DownloadFile($cmurl,$cmpath)
+        Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
         if(!(Test-Path $cmsourcepath))
         {
             Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
@@ -540,7 +609,7 @@ class DownloadSCCM
     [bool] Test()
     {
         $_CM = $this.CM
-        $cmpath = "c:\$_CM.exe"
+        $cmpath = "c:\temp\$_CM.exe"
         $cmsourcepath = "c:\$_CM"
         if(!(Test-Path $cmpath))
         {
@@ -551,6 +620,44 @@ class DownloadSCCM
     }
 
     [DownloadSCCM] Get()
+    {
+        return $this
+    }
+}
+
+[DscResource()]
+class DownloadFile
+{
+    [DscProperty(Key)]
+    [string] $DownloadUrl
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(Mandatory)]
+    [string] $FilePath
+
+    [void] Set()
+    {        
+        Write-Verbose "Downloading file from $($this.DownloadUrl)..."        
+        Start-BitsTransfer -Source $this.DownloadUrl -Destination $this.FilePath -Priority Foreground -ErrorAction Stop
+    }
+
+    [bool] Test()
+    {
+        if(!(Test-Path $this.FilePath))
+        {
+            return $false
+        }
+
+        If (!(Get-Item $this.FilePath).length -gt 0kb) {
+            return $false
+        }
+
+        return $true
+    }
+
+    [DownloadFile] Get()
     {
         return $this
     }
@@ -706,8 +813,11 @@ class WaitForDomainReady
     [DscProperty(key)]
     [string] $DCName
 
+    [DscProperty(Key)]
+    [string] $DomainName
+
     [DscProperty(Mandatory=$false)]
-    [int] $WaitSeconds = 900
+    [int] $WaitSeconds = 30
 
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
@@ -718,14 +828,16 @@ class WaitForDomainReady
     [void] Set()
     {
         $_DCName = $this.DCName
+        $_DomainName = $this.DomainName
         $_WaitSeconds = $this.WaitSeconds
+        $_DCFullName = "$_DCName.$_DomainName"
         Write-Verbose "Domain computer is: $_DCName"
-        $testconnection = test-connection -ComputerName $_DCName -ErrorAction Ignore
+        $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         while(!$testconnection)
         {
             Write-Verbose "Waiting for Domain ready , will try again 30 seconds later..."
-            Start-Sleep -Seconds 30
-            $testconnection = test-connection -ComputerName $_DCName -ErrorAction Ignore
+            Start-Sleep -Seconds $_WaitSeconds
+            $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         }
         Write-Verbose "Domain is ready now."
     }
@@ -733,11 +845,14 @@ class WaitForDomainReady
     [bool] Test()
     {
         $_DCName = $this.DCName
-        Write-Verbose "Domain computer is: $_DCName"
-        $testconnection = test-connection -ComputerName $_DCName -ErrorAction Ignore
+        $_DomainName = $this.DomainName        
+        $_DCFullName = "$_DCName.$_DomainName"
+        Write-Verbose "Domain computer is: $_DCFullName"
+        $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
 
         if(!$testconnection)
         {
+            ipconfig /renew
             return $false
         }
         return $true
@@ -820,6 +935,46 @@ class SetDNS
     }
 
     [SetDNS] Get()
+    {
+        return $this
+    }
+}
+
+[DscResource()]
+class WriteStatus
+{
+    [DscProperty(key)]
+    [string] $Status
+
+    [void] Set()
+    {
+        $_Status = $this.Status
+        $StatusFile = "C:\staging\DSC\DSC_Status.txt"
+        $_Status | Out-File -FilePath $StatusFile -Force
+
+        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
+        $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
+        "$time $_Status" | Out-File -FilePath $StatusLog -Append
+
+    }
+
+    [bool] Test()
+    {
+        $_Status = $this.Status
+        $StatusFile = "C:\staging\DSC\DSC_Status.txt"
+
+        if (Test-Path $StatusFile) {
+            $content = Get-Content -Path $StatusFile -Force
+            if($content.StartsWith($_Status))
+            {
+                return $true
+            }
+        }
+        
+        return $false
+    }
+
+    [WriteStatus] Get()
     {
         return $this
     }
@@ -1528,18 +1683,20 @@ class InstallFeatureForSCCM
         }
         if($_Role -contains "Site Server")
         { 
-            Add-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net 
-            Add-WindowsFeature Web-Mgmt-Console,Web-Lgcy-Mgmt-Console,Web-Lgcy-Scripting,Web-WMI,Web-Mgmt-Service,Web-Mgmt-Tools,Web-Scripting-Tools 
+            Install-WindowsFeature Net-Framework-Core
+            Install-WindowsFeature NET-Framework-45-Core
+            Install-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net 
+            Install-WindowsFeature Web-Mgmt-Console,Web-Lgcy-Mgmt-Console,Web-Lgcy-Scripting,Web-WMI,Web-Mgmt-Service,Web-Mgmt-Tools,Web-Scripting-Tools            
         }
         if($_Role -contains "Application Catalog website point")
         {
             #IIS
-            Add-WindowsFeature Web-Default-Doc,Web-Static-Content,Web-Windows-Auth,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Static-Content,Web-Windows-Auth,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
         if($_Role -contains "Application Catalog web service point")
         {
             #IIS
-            Add-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
         if($_Role -contains "Asset Intelligence synchronization point")
         {
@@ -1548,13 +1705,13 @@ class InstallFeatureForSCCM
         if($_Role -contains "Certificate registration point")
         {
             #IIS
-            Add-WindowsFeature Web-Asp-Net,Web-Asp-Net45,Web-Metabase,Web-WMI
+            Install-WindowsFeature Web-Asp-Net,Web-Asp-Net45,Web-Metabase,Web-WMI
         }
         if($_Role -contains "Distribution point")
         {
             #IIS 
-            Add-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
-            Add-WindowsFeature Web-WMI,Web-Metabase
+            Install-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
+            Install-WindowsFeature Web-WMI,Web-Metabase
         }
     
         if($_Role -contains "Endpoint Protection point")
@@ -1565,24 +1722,24 @@ class InstallFeatureForSCCM
         if($_Role -contains "Enrollment point")
         {
             #iis
-            Add-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
         if($_Role -contains "Enrollment proxy point")
         {
             #iis
-            Add-WindowsFeature Web-Default-Doc,Web-Static-Content,Web-Windows-Auth,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Static-Content,Web-Windows-Auth,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
         if($_Role -contains "Fallback status point")
         {
-            Add-WindowsFeature Web-Metabase
+            Install-WindowsFeature Web-Metabase
         }
         if($_Role -contains "Management point")
         {
             #BITS
-            Add-WindowsFeature BITS,BITS-IIS-Ext
+            Install-WindowsFeature BITS,BITS-IIS-Ext
             #IIS 
-            Add-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
-            Add-WindowsFeature Web-WMI,Web-Metabase
+            Install-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
+            Install-WindowsFeature Web-WMI,Web-Metabase
         }
         if($_Role -contains "Reporting services point")
         {
@@ -1595,12 +1752,12 @@ class InstallFeatureForSCCM
         if($_Role -contains "Software update point")
         {
             #default iis configuration
-            add-windowsfeature web-server 
+            Install-WindowsFeature web-server 
         }
         if($_Role -contains "State migration point")
         {
             #iis
-            Add-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
+            Install-WindowsFeature Web-Default-Doc,Web-Asp-Net,Web-Asp-Net45,Web-Net-Ext,Web-Net-Ext45,Web-Metabase
         }
 
         $StatusPath = "$env:windir\temp\InstallFeatureStatus.txt"
@@ -1843,7 +2000,7 @@ class InstallCA
             Write-Verbose "Installing CA..."
             #Install CA
             Import-Module ServerManager
-            Add-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools
+            Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools
             Install-AdcsCertificationAuthority -CAType EnterpriseRootCa -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" -KeyLength 2048 -HashAlgorithmName $_HashAlgorithm -force
 
             $StatusPath = "$env:windir\temp\InstallCAStatus.txt"
