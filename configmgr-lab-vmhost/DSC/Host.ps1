@@ -44,12 +44,6 @@ Configuration Host {
             Name                 = 'Hyper-V-PowerShell'
             IncludeAllSubFeature = $true
         }
-
-        WindowsFeature Routing {
-            Ensure               = 'Present'
-            Name                 = 'Routing'
-            IncludeAllSubFeature = $true            
-        }
         
         WindowsFeature DirectAccess-VPN {
             Ensure               = 'Present'
