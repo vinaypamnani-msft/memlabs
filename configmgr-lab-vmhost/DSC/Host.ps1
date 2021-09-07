@@ -78,7 +78,7 @@ Configuration Host {
 
         Script ConfigureNAT
         {
-            DependsOn = '[xIPAddress]NewIPAddressTP'
+            DependsOn = '[xVMSwitch]ExternalSwitch'
             SetScript = {
                 
                 Install-RemoteAccess -VpnType RoutingOnly                
