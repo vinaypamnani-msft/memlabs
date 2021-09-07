@@ -377,7 +377,7 @@
       "name": "[concat( parameters('virtualMachineName'), '/configureRRAS' )]",
       "location": "[variables('location')]",
       "dependsOn": [
-          "[concat('Microsoft.Compute/virtualMachines/extensions/', concat( parameters('virtualMachineName'), '/configureHost' ))]"
+          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/configureHost' )]"
       ],
       "properties": {
           "publisher": "Microsoft.Compute",
@@ -385,7 +385,7 @@
           "typeHandlerVersion": "1.7",
           "autoUpgradeMinorVersion":true,
           "settings": {
-            "fileUris": "[variables('rrasScript')]",
+            "fileUris": ["[variables('rrasScript')]"],
             "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -File configureRRAS.ps1"
           }
       }
