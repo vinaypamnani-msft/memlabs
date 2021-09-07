@@ -1,6 +1,6 @@
 Configuration Host {
     
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking', 'xDscDiagnostics'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking', 'xDscDiagnostics', 'xPSDesiredStateConfiguration'
     
     $externalSwitchName = "External"
     
@@ -21,37 +21,37 @@ Configuration Host {
 
         # Windows Features
 
-        WindowsFeature Routing {
+        xWindowsFeature Routing {
             Ensure               = 'Present'
             Name                 = 'Routing'
             IncludeAllSubFeature = $true            
         }
 
-        WindowsFeature Hyper-V {
+        xWindowsFeature Hyper-V {
             Ensure               = 'Present'
             Name                 = "Hyper-V"
             IncludeAllSubFeature = $true
         }
 
-        WindowsFeature Hyper-V-Tools {
+        xWindowsFeature Hyper-V-Tools {
             Ensure               = 'Present'
             Name                 = 'Hyper-V-Tools'
             IncludeAllSubFeature = $true
         }
     
-        WindowsFeature Hyper-V-PowerShell {
+        xWindowsFeature Hyper-V-PowerShell {
             Ensure               = 'Present'
             Name                 = 'Hyper-V-PowerShell'
             IncludeAllSubFeature = $true
         }
         
-        WindowsFeature DirectAccess-VPN {
+        xWindowsFeature DirectAccess-VPN {
             Ensure               = 'Present'
             Name                 = 'DirectAccess-VPN'
             IncludeAllSubFeature = $true            
         }
 
-        WindowsFeature RSAT-RemoteAccess {
+        xWindowsFeature RSAT-RemoteAccess {
             Ensure               = 'Present'
             Name                 = 'RSAT-RemoteAccess'
             IncludeAllSubFeature = $true
@@ -61,7 +61,7 @@ Configuration Host {
 
         xVMSwitch ExternalSwitch
         {
-            DependsOn      = '[WindowsFeature]Hyper-V'
+            DependsOn      = '[xWindowsFeature]Hyper-V'
             Ensure         = 'Present'
             Name           = $externalSwitchName
             Type           = 'External'
