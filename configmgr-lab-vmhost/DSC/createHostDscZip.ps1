@@ -16,8 +16,7 @@ Write-Host "Importing Modules.."
 $modules = @(
     'xHyper-V',
     'xDscDiagnostics',
-    'xNetworking',
-    'xPSDesiredStateConfiguration'
+    'xNetworking'    
 )
 
 foreach($module in $modules)

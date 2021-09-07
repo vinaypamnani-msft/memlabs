@@ -1,13 +1,11 @@
 Configuration Host {
     
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking', 'xDscDiagnostics', 'xPSDesiredStateConfiguration'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking', 'xDscDiagnostics'
     
     $externalSwitchName = "External"
     
-    $phsyicalNic = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
-    
-    $phsyicalInterface = $phsyicalNic.Name
-    $externalInterface = "vEthernet ($externalSwitchName)"
+    $phsyicalNic = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }    
+    $phsyicalInterface = $phsyicalNic.Name    
 
     $repoName = "memlabs"
     $repoUrl = "https://github.com/vinaypamnani-msft/$repoName"
@@ -21,39 +19,21 @@ Configuration Host {
 
         # Windows Features
 
-        xWindowsFeature Routing {
-            Ensure               = 'Present'
-            Name                 = 'Routing'
-            IncludeAllSubFeature = $true            
-        }
-
-        xWindowsFeature Hyper-V {
+        WindowsFeature Hyper-V {
             Ensure               = 'Present'
             Name                 = "Hyper-V"
             IncludeAllSubFeature = $true
         }
 
-        xWindowsFeature Hyper-V-Tools {
+        WindowsFeature Hyper-V-Tools {
             Ensure               = 'Present'
             Name                 = 'Hyper-V-Tools'
             IncludeAllSubFeature = $true
         }
     
-        xWindowsFeature Hyper-V-PowerShell {
+        WindowsFeature Hyper-V-PowerShell {
             Ensure               = 'Present'
             Name                 = 'Hyper-V-PowerShell'
-            IncludeAllSubFeature = $true
-        }
-        
-        xWindowsFeature DirectAccess-VPN {
-            Ensure               = 'Present'
-            Name                 = 'DirectAccess-VPN'
-            IncludeAllSubFeature = $true            
-        }
-
-        xWindowsFeature RSAT-RemoteAccess {
-            Ensure               = 'Present'
-            Name                 = 'RSAT-RemoteAccess'
             IncludeAllSubFeature = $true
         }
     
@@ -61,40 +41,18 @@ Configuration Host {
 
         xVMSwitch ExternalSwitch
         {
-            DependsOn      = '[xWindowsFeature]Hyper-V'
+            DependsOn      = '[WindowsFeature]Hyper-V-PowerShell'
             Ensure         = 'Present'
             Name           = $externalSwitchName
             Type           = 'External'
             NetAdapterName = $phsyicalInterface
         }
     
-        # RRAS Settings
-
-        Script ConfigureNAT
-        {
-            DependsOn = '[xVMSwitch]ExternalSwitch'
-            SetScript = {
-                
-                Install-RemoteAccess -VpnType RoutingOnly                
-                
-                cmd.exe /c netsh routing ip nat install
-                cmd.exe /c netsh routing ip nat add interface "$using:externalInterface"
-                cmd.exe /c netsh routing ip nat set interface "$using:externalInterface" mode=full                
-                cmd.exe /c reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\RemoteAccess\Parameters /v ModernStackEnabled /t REG_DWORD /d 0 /f
-
-            }
-            TestScript = {
-                $text = & netsh routing ip nat show interface
-                if ($text -like "*$using:externalInterface*") { return $true } else { return $false }
-            }
-            GetScript = {
-                # Do Nothing
-            }
-        }
+        # Storage Pool
 
         Script MoveCDDrive
         {
-            DependsOn = '[Script]ConfigureNAT'
+            DependsOn = '[xVMSwitch]ExternalSwitch'
             SetScript = {
                 # Start logging the actions 
                 Start-Transcript -Path $env:windir\temp\CDMovelog.txt -Append -Force
@@ -156,6 +114,8 @@ Configuration Host {
                 @{Ensure = if ((get-volume -filesystemlabel VirtualDisk1).filesystem -EQ 'NTFS') {'Present'} Else {'Absent'}}
             }            
         }
+
+        # Clone repo
 
         Script DownloadFiles {
             DependsOn = "[Script]FormatDisk"
