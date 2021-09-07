@@ -377,7 +377,7 @@
       "name": "[concat( parameters('virtualMachineName'), '/configureRRAS' )]",
       "location": "[variables('location')]",
       "dependsOn": [
-          "[concat('Microsoft.Compute/virtualMachines/extensions', concat( parameters('virtualMachineName'), '/configureHost' ))]"
+          "[concat('Microsoft.Compute/virtualMachines/extensions/', concat( parameters('virtualMachineName'), '/configureHost' ))]"
       ],
       "properties": {
           "publisher": "Microsoft.Compute",
