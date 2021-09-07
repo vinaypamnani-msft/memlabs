@@ -1,21 +1,11 @@
 Configuration Host {
     
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking'    
-
-    $internalSwitchNameCB = "InternalSwitchCB1"
-    $internalSwitchNameTP = "InternalSwitchTP1"
-    $externalSwitchName = "External"
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking', 'xDscDiagnostics'
     
-    $phsyicalNic = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
-    
+    $phsyicalNic = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }    
     $phsyicalInterface = $phsyicalNic.Name
+    $externalSwitchName = "External"
     $externalInterface = "vEthernet ($externalSwitchName)"
-    
-    $internalInterfaceCB = "vEthernet ($internalSwitchNameCB)"
-    $internalInterfaceCBIP = "192.168.1.200"
-
-    $internalInterfaceTP = "vEthernet ($internalSwitchNameTP)"
-    $internalInterfaceTPIP = "192.168.10.200"
 
     $repoName = "memlabs"
     $repoUrl = "https://github.com/vinaypamnani-msft/$repoName"
@@ -74,74 +64,26 @@ Configuration Host {
             Name           = $externalSwitchName
             Type           = 'External'
             NetAdapterName = $phsyicalInterface
-        }
-    
-        xVMSwitch InternalSwitchCB {
-            DependsOn = '[xVMSwitch]ExternalSwitch'
-            Name      = $internalSwitchNameCB
-            Ensure    = 'Present'
-            Type      = 'Internal'
-        }
-
-        xVMSwitch InternalSwitchTP {
-            DependsOn = '[xVMSwitch]InternalSwitchCB'
-            Name      = $internalSwitchNameTP
-            Ensure    = 'Present'
-            Type      = 'Internal'
-        }    
+        }  
     
         # RRAS Settings
 
-        xDhcpClient DisableDhcpClientCB
-        {
-            DependsOn = '[xVMSwitch]InternalSwitchTP'
-            State          = 'Disabled'
-            InterfaceAlias = $internalInterfaceCB
-            AddressFamily  = "IPv4"
-        }
-
-        xDhcpClient DisableDhcpClientTP
-        {
-            DependsOn = '[xDhcpClient]DisableDhcpClientCB'
-            State          = 'Disabled'
-            InterfaceAlias = $internalInterfaceTP
-            AddressFamily  = "IPv4"
-        }
-
-        xIPAddress NewIPAddressCB
-        {
-            DependsOn = '[xDhcpClient]DisableDhcpClientTP' 
-            IPAddress      = $internalInterfaceCBIP
-            InterfaceAlias = $internalInterfaceCB
-            AddressFamily  = "IPV4"
-        }
-
-        xIPAddress NewIPAddressTP
-        {
-            DependsOn = '[xIPAddress]NewIPAddressCB'
-            IPAddress      = $internalInterfaceTPIP
-            InterfaceAlias = $internalInterfaceTP
-            AddressFamily  = "IPV4"
-        }
-
         Script ConfigureNAT
         {
-            DependsOn = '[xIPAddress]NewIPAddressTP'
+            DependsOn = '[xVMSwitch]ExternalSwitch'
             SetScript = {
                 
-                Install-RemoteAccess -VpnType RoutingOnly                
+                Install-RemoteAccess -VpnType RoutingOnly
                 
                 cmd.exe /c netsh routing ip nat install
                 cmd.exe /c netsh routing ip nat add interface "$using:externalInterface"
-                cmd.exe /c netsh routing ip nat set interface "$using:externalInterface" mode=full
-                cmd.exe /c netsh routing ip nat add interface "$using:internalInterfaceCB"
-                cmd.exe /c netsh routing ip nat add interface "$using:internalInterfaceTP"
+                cmd.exe /c netsh routing ip nat set interface "$using:externalInterface" mode=full                
                 cmd.exe /c reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\RemoteAccess\Parameters /v ModernStackEnabled /t REG_DWORD /d 0 /f
 
             }
             TestScript = {
                 $text = & netsh routing ip nat show interface
-                if ($text -like "*$using:internalInterfaceCB*" -and $text -like "*$using:internalInterfaceTP*") { return $true } else { return $false }
+                if ($text -like "*$using:externalInterface*") { return $true } else { return $false }
             }
             GetScript = {
                 # Do Nothing
@@ -153,7 +95,7 @@ Configuration Host {
             DependsOn = '[Script]ConfigureNAT'
             SetScript = {
                 # Start logging the actions 
-                Start-Transcript -Path $env:windir\temp\CDMovelog.txt -Append -Force
+                Start-Transcript -Path $env:windir\temp\MoveCDDriveLetter.txt -Append -Force
     
                 # Move CD-ROM drive to Z:
                 "Moving CD-ROM drive to Z:.."
@@ -216,7 +158,7 @@ Configuration Host {
         Script DownloadFiles {
             DependsOn = "[Script]FormatDisk"
             SetScript = {
-                Start-Transcript -Path $env:windir\temp\RepoClone.txt -Append -Force
+                Start-Transcript -Path $env:windir\temp\CloneRepo.txt -Append -Force
 
                 "Downloading and installing chocolatey"
                 Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))

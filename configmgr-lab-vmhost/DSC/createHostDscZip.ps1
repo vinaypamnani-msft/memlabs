@@ -1,3 +1,7 @@
+param(
+    [switch]$force
+)
+
 # Prepare DSC ZIP files
 Set-Location $PSScriptRoot
 
@@ -9,8 +13,27 @@ Set-Location $PSScriptRoot
 
 # Modules used by VM Host
 Write-Host "Importing Modules.."
-if (-not (Get-DscResource -Module xHyper-V)) { Install-Module xHyper-V -Force }
-if (-not (Get-DscResource -Module xNetworking)) { Install-Module xNetworking -Force }
+$modules = @(
+    'xHyper-V',
+    'xDscDiagnostics',
+    'xNetworking'
+)
+
+foreach($module in $modules)
+{
+    if (Get-Module -ListAvailable -Name $module) {        
+        if ($force) {
+            Write-Host "Module exists: $module. Updating..."
+            Update-Module $module -Force    
+        }
+        else {
+            Write-Host "Module exists: $module "
+        }
+    }
+    else {
+        Install-Module $module -Force
+    }
+}
 
 # Create local compressed file
 Write-Host "Creating DSC Host.zip for VM Host.."
