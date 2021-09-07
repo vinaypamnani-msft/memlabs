@@ -26,12 +26,14 @@ Configuration Host {
         }
 
         WindowsFeature Hyper-V-Tools {
+            DependsOn      = '[WindowsFeature]Hyper-V'
             Ensure               = 'Present'
             Name                 = 'Hyper-V-Tools'
             IncludeAllSubFeature = $true
         }
     
         WindowsFeature Hyper-V-PowerShell {
+            DependsOn      = '[WindowsFeature]Hyper-V-Tools'
             Ensure               = 'Present'
             Name                 = 'Hyper-V-PowerShell'
             IncludeAllSubFeature = $true
@@ -44,12 +46,14 @@ Configuration Host {
         }
         
         WindowsFeature DirectAccess-VPN {
+            DependsOn      = '[WindowsFeature]Routing'
             Ensure               = 'Present'
             Name                 = 'DirectAccess-VPN'
             IncludeAllSubFeature = $true            
         }
 
         WindowsFeature RSAT-RemoteAccess {
+            DependsOn      = '[WindowsFeature]DirectAccess-VPN'
             Ensure               = 'Present'
             Name                 = 'RSAT-RemoteAccess'
             IncludeAllSubFeature = $true
@@ -59,7 +63,7 @@ Configuration Host {
 
         xVMSwitch ExternalSwitch
         {
-            DependsOn      = '[WindowsFeature]Hyper-V'
+            DependsOn      = '[WindowsFeature]Hyper-V-PowerShell'
             Ensure         = 'Present'
             Name           = $externalSwitchName
             Type           = 'External'
@@ -70,7 +74,7 @@ Configuration Host {
 
         Script ConfigureNAT
         {
-            DependsOn = '[xVMSwitch]ExternalSwitch'
+            DependsOn = @('[xVMSwitch]ExternalSwitch', '[WindowsFeature]RSAT-RemoteAccess')
             SetScript = {
                 
                 Install-RemoteAccess -VpnType RoutingOnly
