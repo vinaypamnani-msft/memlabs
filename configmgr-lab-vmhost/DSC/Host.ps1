@@ -2,7 +2,7 @@ Configuration Host {
     
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking', 'xDscDiagnostics'
     
-    $phsyicalNic = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }    
+    $phsyicalNic = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }    
     $phsyicalInterface = $phsyicalNic.Name
     $externalSwitchName = "External"
     $externalInterface = "vEthernet ($externalSwitchName)"
@@ -19,50 +19,50 @@ Configuration Host {
 
         # Windows Features
 
-        WindowsFeature Hyper-V {
-            Ensure               = 'Present'
-            Name                 = "Hyper-V"
-            IncludeAllSubFeature = $true
-        }
-
-        WindowsFeature Hyper-V-Tools {
-            DependsOn      = '[WindowsFeature]Hyper-V'
-            Ensure               = 'Present'
-            Name                 = 'Hyper-V-Tools'
-            IncludeAllSubFeature = $true
-        }
-    
-        WindowsFeature Hyper-V-PowerShell {
-            DependsOn      = '[WindowsFeature]Hyper-V-Tools'
-            Ensure               = 'Present'
-            Name                 = 'Hyper-V-PowerShell'
-            IncludeAllSubFeature = $true
-        }
-
         WindowsFeature Routing {
             Ensure               = 'Present'
             Name                 = 'Routing'
             IncludeAllSubFeature = $true            
         }
-        
+
         WindowsFeature DirectAccess-VPN {
-            DependsOn      = '[WindowsFeature]Routing'
+            DependsOn            = '[WindowsFeature]Routing'
             Ensure               = 'Present'
             Name                 = 'DirectAccess-VPN'
             IncludeAllSubFeature = $true            
         }
 
         WindowsFeature RSAT-RemoteAccess {
-            DependsOn      = '[WindowsFeature]DirectAccess-VPN'
+            DependsOn            = '[WindowsFeature]DirectAccess-VPN'
             Ensure               = 'Present'
             Name                 = 'RSAT-RemoteAccess'
             IncludeAllSubFeature = $true
         }
+
+        WindowsFeature Hyper-V {
+            DependsOn            = '[WindowsFeature]RSAT-RemoteAccess'
+            Ensure               = 'Present'
+            Name                 = "Hyper-V"
+            IncludeAllSubFeature = $true
+        }
+
+        WindowsFeature Hyper-V-Tools {
+            DependsOn            = '[WindowsFeature]Hyper-V'
+            Ensure               = 'Present'
+            Name                 = 'Hyper-V-Tools'
+            IncludeAllSubFeature = $true
+        }
+    
+        WindowsFeature Hyper-V-PowerShell {
+            DependsOn            = '[WindowsFeature]Hyper-V-Tools'
+            Ensure               = 'Present'
+            Name                 = 'Hyper-V-PowerShell'
+            IncludeAllSubFeature = $true
+        }        
     
         # Hyper-V Host Network Settings
 
-        xVMSwitch ExternalSwitch
-        {
+        xVMSwitch ExternalSwitch {
             DependsOn      = '[WindowsFeature]Hyper-V-PowerShell'
             Ensure         = 'Present'
             Name           = $externalSwitchName
@@ -72,10 +72,9 @@ Configuration Host {
     
         # RRAS Settings
 
-        Script ConfigureNAT
-        {
-            DependsOn = @('[xVMSwitch]ExternalSwitch', '[WindowsFeature]RSAT-RemoteAccess')
-            SetScript = {
+        Script ConfigureNAT {
+            DependsOn  = @('[xVMSwitch]ExternalSwitch', '[WindowsFeature]RSAT-RemoteAccess')
+            SetScript  = {
                 
                 Install-RemoteAccess -VpnType RoutingOnly
                 
@@ -89,79 +88,78 @@ Configuration Host {
                 $text = & netsh routing ip nat show interface
                 if ($text -like "*$using:externalInterface*") { return $true } else { return $false }
             }
-            GetScript = {
+            GetScript  = {
                 # Do Nothing
             }
         }
 
-        Script MoveCDDrive
-        {
-            DependsOn = '[Script]ConfigureNAT'
-            SetScript = {
+        Script MoveCDDrive {
+            DependsOn  = '[Script]ConfigureNAT'
+            SetScript  = {
                 # Start logging the actions 
                 Start-Transcript -Path $env:windir\temp\MoveCDDriveLetter.txt -Append -Force
     
                 # Move CD-ROM drive to Z:
                 "Moving CD-ROM drive to Z:.."
-                Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter='Z:'}
+                Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter = 'Z:' }
     
                 Stop-Transcript
             }
             
             TestScript = {
                 $x = Get-WmiObject -Class Win32_volume -Filter 'DriveType=5 AND DriveLetter="Z:"'
-                if ($x) {return $true } else { return $false }
+                if ($x) { return $true } else { return $false }
             }    
     
-            GetScript = { 
+            GetScript  = { 
                 # Do nothing
             }
         }        
 
         Script StoragePool {
-            DependsOn = "[Script]MoveCDDrive"
-            SetScript = {
+            DependsOn  = "[Script]MoveCDDrive"
+            SetScript  = {
                 New-StoragePool -FriendlyName StoragePool1 -StorageSubSystemFriendlyName '*storage*' -PhysicalDisks (Get-PhysicalDisk -CanPool $True)
             }
             TestScript = {
                 (Get-StoragePool -ErrorAction SilentlyContinue -FriendlyName StoragePool1).OperationalStatus -eq 'OK'
             }
-            GetScript = {
-                @{Ensure = if ((Get-StoragePool -FriendlyName StoragePool1).OperationalStatus -eq 'OK') {'Present'} Else {'Absent'}}
+            GetScript  = {
+                @{Ensure = if ((Get-StoragePool -FriendlyName StoragePool1).OperationalStatus -eq 'OK') { 'Present' } Else { 'Absent' } }
             }
         }
 
         Script VirtualDisk {
-            DependsOn = "[Script]StoragePool"
-            SetScript = {
-              $disks = Get-StoragePool -FriendlyName StoragePool1 -IsPrimordial $False | Get-PhysicalDisk
-              $diskNum = $disks.Count
-              New-VirtualDisk -StoragePoolFriendlyName StoragePool1 -FriendlyName VirtualDisk1 -ResiliencySettingName simple -NumberOfColumns $diskNum -UseMaximumSize 
+            DependsOn  = "[Script]StoragePool"
+            SetScript  = {
+                $disks = Get-StoragePool -FriendlyName StoragePool1 -IsPrimordial $False | Get-PhysicalDisk
+                $diskNum = $disks.Count
+                New-VirtualDisk -StoragePoolFriendlyName StoragePool1 -FriendlyName VirtualDisk1 -ResiliencySettingName simple -NumberOfColumns $diskNum -UseMaximumSize 
             }
             TestScript = {
-              (get-virtualdisk -ErrorAction SilentlyContinue -friendlyName VirtualDisk1).OperationalStatus -eq 'OK'
+                (get-virtualdisk -ErrorAction SilentlyContinue -friendlyName VirtualDisk1).OperationalStatus -eq 'OK'
             }
-            GetScript = {
-              @{Ensure = if ((Get-VirtualDisk -FriendlyName VirtualDisk1).OperationalStatus -eq 'OK') {'Present'} Else {'Absent'}}
+            GetScript  = {
+                @{Ensure = if ((Get-VirtualDisk -FriendlyName VirtualDisk1).OperationalStatus -eq 'OK') { 'Present' } Else { 'Absent' } }
             }            
         }
 
         Script FormatDisk {
-            DependsOn = "[Script]VirtualDisk"
-            SetScript = {
+            DependsOn  = "[Script]VirtualDisk"
+            SetScript  = {
                 Get-VirtualDisk -FriendlyName VirtualDisk1 | Get-Disk | Initialize-Disk -Passthru | New-Partition -AssignDriveLetter -UseMaximumSize | Format-Volume -NewFileSystemLabel VirtualDisk1 -AllocationUnitSize 64KB -FileSystem NTFS
             }
             TestScript = {
                 (get-volume -ErrorAction SilentlyContinue -filesystemlabel VirtualDisk1).filesystem -EQ 'NTFS'
             }
-            GetScript = {
-                @{Ensure = if ((get-volume -filesystemlabel VirtualDisk1).filesystem -EQ 'NTFS') {'Present'} Else {'Absent'}}
+            GetScript  = {
+                @{Ensure = if ((get-volume -filesystemlabel VirtualDisk1).filesystem -EQ 'NTFS') { 'Present' } Else { 'Absent' } }
             }            
         }
 
         Script DownloadFiles {
-            DependsOn = "[Script]FormatDisk"
-            SetScript = {
+            DependsOn  = "[Script]FormatDisk"
+            SetScript  = {
                 Start-Transcript -Path $env:windir\temp\CloneRepo.txt -Append -Force
 
                 "Downloading and installing chocolatey"
@@ -179,7 +177,7 @@ Configuration Host {
             TestScript = {
                 return (Test-Path "E:\$using:repoName")
             }
-            GetScript = {
+            GetScript  = {
                 # Do nothing
             }
         }
