@@ -1,21 +1,13 @@
 Configuration Host {
     
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking'    
-
-    $internalSwitchNameCB = "InternalSwitchCB1"
-    $internalSwitchNameTP = "InternalSwitchTP1"
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking', 'xDscDiagnostics'
+    
     $externalSwitchName = "External"
     
     $phsyicalNic = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
     
     $phsyicalInterface = $phsyicalNic.Name
     $externalInterface = "vEthernet ($externalSwitchName)"
-    
-    $internalInterfaceCB = "vEthernet ($internalSwitchNameCB)"
-    $internalInterfaceCBIP = "192.168.1.200"
-
-    $internalInterfaceTP = "vEthernet ($internalSwitchNameTP)"
-    $internalInterfaceTPIP = "192.168.10.200"
 
     $repoName = "memlabs"
     $repoUrl = "https://github.com/vinaypamnani-msft/$repoName"
@@ -28,6 +20,12 @@ Configuration Host {
         }
 
         # Windows Features
+
+        WindowsFeature Routing {
+            Ensure               = 'Present'
+            Name                 = 'Routing'
+            IncludeAllSubFeature = $true            
+        }
 
         WindowsFeature Hyper-V {
             Ensure               = 'Present'
@@ -74,41 +72,9 @@ Configuration Host {
             Name           = $externalSwitchName
             Type           = 'External'
             NetAdapterName = $phsyicalInterface
-        }  
+        }
     
         # RRAS Settings
-
-        xDhcpClient DisableDhcpClientCB
-        {
-            DependsOn = '[xVMSwitch]InternalSwitchTP'
-            State          = 'Disabled'
-            InterfaceAlias = $internalInterfaceCB
-            AddressFamily  = "IPv4"
-        }
-
-        xDhcpClient DisableDhcpClientTP
-        {
-            DependsOn = '[xDhcpClient]DisableDhcpClientCB'
-            State          = 'Disabled'
-            InterfaceAlias = $internalInterfaceTP
-            AddressFamily  = "IPv4"
-        }
-
-        xIPAddress NewIPAddressCB
-        {
-            DependsOn = '[xDhcpClient]DisableDhcpClientTP' 
-            IPAddress      = $internalInterfaceCBIP
-            InterfaceAlias = $internalInterfaceCB
-            AddressFamily  = "IPV4"
-        }
-
-        xIPAddress NewIPAddressTP
-        {
-            DependsOn = '[xIPAddress]NewIPAddressCB'
-            IPAddress      = $internalInterfaceTPIP
-            InterfaceAlias = $internalInterfaceTP
-            AddressFamily  = "IPV4"
-        }
 
         Script ConfigureNAT
         {
@@ -119,15 +85,13 @@ Configuration Host {
                 
                 cmd.exe /c netsh routing ip nat install
                 cmd.exe /c netsh routing ip nat add interface "$using:externalInterface"
-                cmd.exe /c netsh routing ip nat set interface "$using:externalInterface" mode=full
-                cmd.exe /c netsh routing ip nat add interface "$using:internalInterfaceCB"
-                cmd.exe /c netsh routing ip nat add interface "$using:internalInterfaceTP"
+                cmd.exe /c netsh routing ip nat set interface "$using:externalInterface" mode=full                
                 cmd.exe /c reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\RemoteAccess\Parameters /v ModernStackEnabled /t REG_DWORD /d 0 /f
 
             }
             TestScript = {
                 $text = & netsh routing ip nat show interface
-                if ($text -like "*$using:internalInterfaceCB*" -and $text -like "*$using:internalInterfaceTP*") { return $true } else { return $false }
+                if ($text -like "*$using:externalInterface*") { return $true } else { return $false }
             }
             GetScript = {
                 # Do Nothing
