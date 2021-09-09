@@ -16,12 +16,12 @@ if ($Common.FatalError) {
 
 #Clear-Host
 Write-Host
-Write-Host 
-Write-Host 
-Write-Host 
-Write-Host 
-Write-Host 
-Write-Host 
+Write-Host
+Write-Host
+Write-Host
+Write-Host
+Write-Host
+Write-Host
 
 # Timer
 Write-Log "### START." -Success
@@ -29,26 +29,27 @@ Write-Log "### START." -Success
 $timer = New-Object -TypeName System.Diagnostics.Stopwatch
 $timer.Start()
 
-Write-Host 
-Write-Log "Main: Downloading 'golden' images to $($Common.GoldImagePath)..." -Success
+Write-Host
+Write-Log "Main: Downloading required files to $($Common.AzureFilesPath)..." -Success
 
 foreach ($item in $Common.ImageList.Files) {
     $imageName = $item.id
-    $imageUrl =  "$($StorageConfig.StorageLocation)/$($item.container)/$($item.filename)"
-    $imageFileName = $item.filename
+    $imageUrl =  "$($StorageConfig.StorageLocation)/$($item.filename)"
+    $imageFileRelative = $item.filename
+    $imageFileName = Split-Path $item.filename -Leaf
 
     if ($imageName -eq "vmbuildadmin") { continue }
 
-    Write-Log "Main: Downloading '$imageName' image from $imageUrl, saving as $imageFileName" -Activity
-    $localImagePath = Join-Path $Common.GoldImagePath $imageFileName
+    Write-Log "Main: Downloading '$imageName' file from Azure storage, saving as $imageFileName" -Activity
+    $localImagePath = Join-Path $Common.AzureFilesPath $imageFileRelative
 
     $download = $true
 
-    if (-not $WhatIf -and (Test-Path $localImagePath)) {
-        Write-Log "Main: Found $imageFileName in $($Common.GoldImagePath)."
+    if (Test-Path $localImagePath) {
+        Write-Log "Main: Found $imageFileRelative in $($Common.AzureFilesPath)."
         if ($Force.IsPresent) {
             Write-Log "Main: Force switch present. Removing pre-existing $imageFileName file..." -Warning
-            Remove-Item -Path $localImagePath -Force | Out-Null
+            Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
         }
         else {
             Write-Log "Main: Force switch not present. Skip downloading '$imageFileName'." -Warning
@@ -59,12 +60,12 @@ foreach ($item in $Common.ImageList.Files) {
 
     if ($download) {
         Write-Log "Main: Downloading '$imageName' image..."
-        Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading"
+        Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
     }
 }
 
 
 $timer.Stop()
-Write-Host 
+Write-Host
 Write-Log "### COMPLETE. Elapsed Time: $($timer.Elapsed)" -Success
-Write-Host 
+Write-Host

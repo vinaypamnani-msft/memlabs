@@ -146,7 +146,7 @@ New-CMAdministrativeUser -Name $CMUser -RoleName "Full Administrator" -SecurityS
 #Add cm_svc user as a CM Account
 if (Test-Path "C:\staging\DSC\cm_svc.txt") {
     $cm_svc = $DomainFullName.Split(".")[0] + "\cm_svc"
-    $secure = Get-Content "C:\staging\DSC\cm_svc.txt" | ConvertTo-SecureString
+    $secure = Get-Content "C:\staging\DSC\cm_svc.txt" | ConvertTo-SecureString -AsPlainText -Force
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Setting cm_svc domain account as CM account." | Out-File -Append $logpath
     New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode -Confirm:$false
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Done" | Out-File -Append $logpath

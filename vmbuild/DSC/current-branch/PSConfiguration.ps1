@@ -247,7 +247,7 @@
 
             WriteFileOnce CMSvc {
                 FilePath  = "$LogPath\cm_svc.txt"
-                Content   = $Admincreds.Password | ConvertFrom-SecureString
+                Content   = $Admincreds.GetNetworkCredentials().Password
                 DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
             }
 

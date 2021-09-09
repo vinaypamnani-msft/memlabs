@@ -1,0 +1,24 @@
+
+{
+    "addToExisting": {
+        "domainController": "CM-DC1"
+    },
+    "virtualMachines": [
+        {
+            "vmName": "CM-MP1",
+            "joinDomain": "contoso.com",
+            "operatingSystem": "Server 2022",
+            "role": "DPMP",
+            "memory": "4GB",
+            "virtualProcs": 4
+        },
+        {
+            "vmName": "CM-CL3",
+            "joinDomain": "contoso.com",
+            "operatingSystem": "Windows 10 21H1 (64-bit)",
+            "role": "DomainMember",
+            "memory": "4GB",
+            "virtualProcs": 4
+        }
+    ]
+}

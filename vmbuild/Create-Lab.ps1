@@ -92,10 +92,11 @@ $VM_Create = {
     $jsonConfig = $using:jsonConfig
     $forceNew = $using:ForceNew
 
-    # TODO: Add Validation here
+    # TODO: Add Validation here & Switch Creation + NAT config code
     if ($cmVersion -eq "current-branch") {$SwitchName = "InternalSwitchCB1"} else { $SwitchName = "InternalSwitchTP1"}
     $imageFile = $Common.ImageList.Files | Where-Object {$_.id -eq $currentItem.operatingSystem }
-    $vhdxPath = Join-Path $Common.GoldImagePath $imageFile.filename
+    $imageFileName = $imageFile.filename
+    $vhdxPath = Join-Path $Common.AzureFilesPath $imageFileName
     $virtualMachinePath = "E:\VirtualMachines"
 
     # Create VM
@@ -146,8 +147,8 @@ $VM_Create = {
     # Copy SQL files to VM for CS/PS roles
     Write-Log "PSJOB: $($currentItem.vmName): Copying SQL installation files to the VM."
     Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Activity "Working" -Completed
-    $sqlIsoPath = Join-Path $using:Common.IsoPath "SQL Server 2019\en_sql_server_2019_enterprise_x64_dvd_5e1ecc6b.iso"
-    $sqlCUPath = Join-Path $using:Common.IsoPath "SQL Server 2019\SQLServer2019-KB5004524-x64.exe"
+    $sqlIsoPath = Join-Path $using:Common.IsoPath "SQL-2019\en_sql_server_2019_enterprise_x64_dvd_5e1ecc6b.iso"
+    $sqlCUPath = Join-Path $using:Common.IsoPath "SQL-2019\SQLServer2019-KB5004524-x64.exe"
     $sqlCUFile = Split-Path $sqlCUPath -Leaf
 
     if ($currentItem.role -eq "PS" -or $currentItem.role -eq "CS") {
@@ -249,7 +250,7 @@ $VM_Create = {
             DHCPScopeId      = "192.168.1.0"
             DHCPScopeStart   = "192.168.1.20"
             DHCPScopeEnd     = "192.168.1.199"
-            InstallConfigMgr = $true
+            InstallConfigMgr = $false
             UpdateToLatest   = $false
             PushClients      = $true
         }

@@ -89,9 +89,9 @@ foreach($client in $ClientNameList)
         Start-Sleep -Seconds 20
         $machinelist = (get-cmdevice -CollectionName "all systems").Name
     }
-    "[$(Get-Date -format HH:mm:ss)] " + $client + "push Client..." | Out-File -Append $logpath
+    "[$(Get-Date -format HH:mm:ss)] " + $client + " push Client..." | Out-File -Append $logpath
     Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true
-    "[$(Get-Date -format HH:mm:ss)] " + $client + "push Client Done." | Out-File -Append $logpath
+    "[$(Get-Date -format HH:mm:ss)] " + $client + " push Client Done." | Out-File -Append $logpath
 }
 
 $Configuration.InstallClient.Status = 'Completed'
