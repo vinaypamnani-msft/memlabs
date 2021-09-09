@@ -1,5 +1,5 @@
 {
-    "globalOptions": {
+    "configOptions": {
         "prefix": "PS-",
         "installConfigMgr": true,
         "cmVersion": "current-branch",

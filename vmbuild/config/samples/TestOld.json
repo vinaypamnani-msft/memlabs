@@ -1,0 +1,22 @@
+{
+    "configOptions": {
+        "prefix": "CS-",
+        "cmVersion": "current-branch",
+        "installCM": true,
+        "updateCM": true,
+        "pushClientToDomainMembers": true,
+        "siteCodeCS": "CS1",
+        "siteCodePS": "PS1",
+        "installDirCS": "<default>",
+        "installDirPS": "<default>",
+        "sqlVersion": "SQL Server 2019",
+        "domainName": "contoso.com",
+        "network": "192.168.1.0"
+    },
+    "parameters": {
+        "DCName": "Name1",
+        "CSName": "Name2",
+        "Clients": "Name1,Name2,etc",
+        "scenario": "Standalone"
+    }
+}

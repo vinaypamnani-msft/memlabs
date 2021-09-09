@@ -1,17 +1,20 @@
 {
-    "globalOptions": {
-        "prefix": "CS-",
-        "installConfigMgr": true,
-        "cmVersion": "current-branch",
-        "upgradeToLatest": true,
-        "pushClients": true,
-        "siteCodeCS": "CS1",
-        "siteCodePS": "PS1",
+    "cmOptions" : {
+        "version": "current-branch",
+        "sqlVersion": "SQL Server 2019",
+        "install": true,
+        "updateToLatest": true,
+        "installDPMPRoles": true,
+        "pushClientToDomainMembers": true,
         "installDirCS": "<default>",
         "installDirPS": "<default>",
-        "sqlVersion": "SQL Server 2019",
-        "domainName": "contoso.com",
-        "network": "192.168.1.0"
+        "siteCodeCS": "CS1",
+        "siteCodePS": "PS1"
+    },
+    "vmOptions": {
+        "prefix": "CS-",
+        "domainName": "fabrikam.com",
+        "network": "192.168.2.0"
     },
     "virtualMachines": [
         {

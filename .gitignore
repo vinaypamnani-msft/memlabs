@@ -24,6 +24,10 @@ _fileList.json
 /vmbuild/zStaging
 /vmbuild/azureFiles
 
+# Ignore everything inside config, except samples
+/vmbuild/config/*
+!/vmbuild/config/samples
+
 # Ignore everything that is not inside /vmbuild/zInput/filesToInject/staging
 
 /vmbuild/zInput/*
