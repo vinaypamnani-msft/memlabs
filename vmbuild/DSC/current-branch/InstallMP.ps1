@@ -1,5 +1,7 @@
 Param($DomainFullName,$DPMPName,$Role,$ProvisionToolPath)
 
+Write-DscStatus "Installing MP Role on $DPMPName"
+
 $logpath = $ProvisionToolPath+"\InstallMPlog.txt"
 $ConfigurationFile = Join-Path -Path $ProvisionToolPath -ChildPath "$Role.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -14,7 +16,7 @@ $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]
 $subKey =  $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
 $uiInstallPath = $subKey.GetValue("UI Installation Directory")
 $modulePath = $uiInstallPath+"bin\ConfigurationManager.psd1"
-# Import the ConfigurationManager.psd1 module 
+# Import the ConfigurationManager.psd1 module
 if((Get-Module ConfigurationManager) -eq $null) {
     Import-Module $modulePath
 }
@@ -29,7 +31,7 @@ $ProviderMachineName = $env:COMPUTERNAME+"."+$DomainFullName # SMS Provider mach
 "[$(Get-Date -format HH:mm:ss)] Setting PS Drive..." | Out-File -Append $logpath
 New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
 
-while((Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null) 
+while((Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null)
 {
     "[$(Get-Date -format HH:mm:ss)] Retry in 10s to set PS Drive. Please wait." | Out-File -Append $logpath
     Start-Sleep -Seconds 10
@@ -49,7 +51,8 @@ $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MachineName
 if(!$SystemServer)
 {
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Creating cm site system server..." | Out-File -Append $logpath
-    New-CMSiteSystemServer -SiteSystemServerName $MachineName | Out-File -Append $logpath
+    $cm_svc = $DomainFullName.Split(".")[0] + "\cm_svc"
+    New-CMSiteSystemServer -SiteSystemServerName $MachineName -AccountName $cm_svc | Out-File -Append $logpath
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Finished creating cm site system server." | Out-File -Append $logpath
     $Date = [DateTime]::Now.AddYears(30)
     $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MachineName
@@ -61,7 +64,7 @@ if((Get-CMManagementPoint -SiteSystemServerName $MachineName).count -ne 1)
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Adding management point on $MachineName ..." | Out-File -Append $logpath
     Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File -Append $logpath
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Finished adding management point on $MachineName ..." | Out-File -Append $logpath
-    
+
     $connectionString = "Data Source=.; Integrated Security=SSPI; Initial Catalog=$DatabaseName"
     if($InstanceName.ToUpper() -ne 'MSSQLSERVER')
     {

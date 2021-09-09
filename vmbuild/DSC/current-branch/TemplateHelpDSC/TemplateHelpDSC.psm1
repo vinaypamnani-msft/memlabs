@@ -41,7 +41,7 @@ class InstallADK
         {
             #ADK add-on (19041)
             $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"
-            Start-BitsTransfer -Source $adkurl -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop            
+            Start-BitsTransfer -Source $adkurl -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
         }
         #Install DeploymentTools
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
@@ -159,7 +159,7 @@ class InstallSSMS
             Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
         }
 
-        # Install SSMS        
+        # Install SSMS
         $adkinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
         while(!(Test-Path $adkinstallpath))
         {
@@ -249,7 +249,7 @@ class InstallAndConfigWSUS
     {
         return $this
     }
-    
+
 }
 
 [DscResource()]
@@ -284,7 +284,7 @@ class WriteConfigurationFile
 
         $Configuration.$_Node.Status = $_Status
         $Configuration.$_Node.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        
+
         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     }
 
@@ -294,11 +294,11 @@ class WriteConfigurationFile
         $_LogPath = $this.LogPath
         $Configuration = ""
         $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_Role.json"
-        if (Test-Path -Path $ConfigurationFile) 
+        if (Test-Path -Path $ConfigurationFile)
         {
             $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-        } 
-        else 
+        }
+        else
         {
             [hashtable]$Actions = @{
                 CSJoinDomain = @{
@@ -316,7 +316,7 @@ class WriteConfigurationFile
                     StartTime = ''
                     EndTime = ''
                 }
-                ClientJoinDomain = @{
+                DomainMemberJoinDomain = @{
                     Status = 'NotStart'
                     StartTime = ''
                     EndTime = ''
@@ -336,7 +336,7 @@ class WriteConfigurationFile
                     StartTime = ''
                     EndTime = ''
                 }
-                ClientFinished = @{
+                DomainMemberFinished = @{
                     Status = 'NotStart'
                     StartTime = ''
                     EndTime = ''
@@ -345,7 +345,7 @@ class WriteConfigurationFile
             $Configuration = New-Object -TypeName psobject -Property $Actions
             $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
         }
-        
+
         return $false
     }
 
@@ -381,7 +381,7 @@ class WaitForConfigurationFile
         $_Role = $this.Role
         $_FilePath = "\\$($this.MachineName)\$($this.LogFolder)"
         $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
-        
+
         while(!(Test-Path $ConfigurationFile))
         {
             Write-Verbose "Wait for configuration file exist on $($this.MachineName), will try 60 seconds later..."
@@ -427,7 +427,7 @@ class WaitForExtendSchemaFile
     {
         $_FilePath = "\\$($this.MachineName)\$($this.ExtFolder)"
         $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
-        
+
         while(!(Test-Path $extadschpath))
         {
             Write-Verbose "Wait for extadsch.exe exist on $($this.MachineName), will try 10 seconds later..."
@@ -471,18 +471,18 @@ class DelegateControl
     [void] Set()
     {
         $root = (Get-ADRootDSE).defaultNamingContext
-        $ou = $null 
-        try 
-        { 
+        $ou = $null
+        try
+        {
             $ou = Get-ADObject "CN=System Management,CN=System,$root"
-        } 
-        catch 
-        { 
+        }
+        catch
+        {
             Write-Verbose "System Management container does not currently exist."
         }
-        if ($ou -eq $null) 
-        { 
-            $ou = New-ADObject -Type Container -name "System Management" -Path "CN=System,$root" -Passthru 
+        if ($ou -eq $null)
+        {
+            $ou = New-ADObject -Type Container -name "System Management" -Path "CN=System,$root" -Passthru
         }
         $DomainName = $this.DomainFullName.split('.')[0]
         #Delegate Control
@@ -499,12 +499,12 @@ class DelegateControl
     {
         $_machinename = $this.Machine
         $root = (Get-ADRootDSE).defaultNamingContext
-        try 
-        { 
+        try
+        {
             $ou = Get-ADObject "CN=System Management,CN=System,$root"
-        } 
-        catch 
-        { 
+        }
+        catch
+        {
             Write-Verbose "System Management container does not currently exist."
             return $false
         }
@@ -595,8 +595,8 @@ class DownloadSCCM
     {
         $_CM = $this.CM
         $cmpath = "c:\temp\$_CM.exe"
-        $cmsourcepath = "c:\$_CM"        
-        
+        $cmsourcepath = "c:\$_CM"
+
         Write-Verbose "Downloading SCCM installation source..."
         $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
@@ -638,8 +638,8 @@ class DownloadFile
     [string] $FilePath
 
     [void] Set()
-    {        
-        Write-Verbose "Downloading file from $($this.DownloadUrl)..."        
+    {
+        Write-Verbose "Downloading file from $($this.DownloadUrl)..."
         Start-BitsTransfer -Source $this.DownloadUrl -Destination $this.FilePath -Priority Foreground -ErrorAction Stop
     }
 
@@ -674,7 +674,7 @@ class InstallDP
 
     [DscProperty(Mandatory)]
     [string] $DPMPName
-    
+
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
@@ -692,7 +692,7 @@ class InstallDP
             $ENV:SMS_ADMIN_UI_PATH = "C:\Program Files (x86)\Microsoft Configuration Manager\AdminConsole\bin\i386"
         }
 
-        # Import the ConfigurationManager.psd1 module 
+        # Import the ConfigurationManager.psd1 module
         if((Get-Module ConfigurationManager) -eq $null) {
             Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1" @initParams
         }
@@ -701,7 +701,7 @@ class InstallDP
         Write-Verbose "Setting PS Drive..."
 
         New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-        while((Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null) 
+        while((Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null)
         {
             Write-Verbose "Failed ,retry in 10s. Please wait."
             Start-Sleep -Seconds 10
@@ -743,7 +743,7 @@ class InstallMP
 
     [DscProperty(Mandatory)]
     [string] $DPMPName
-    
+
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
@@ -760,7 +760,7 @@ class InstallMP
             $ENV:SMS_ADMIN_UI_PATH = "C:\Program Files (x86)\Microsoft Configuration Manager\AdminConsole\bin\i386"
         }
 
-        # Import the ConfigurationManager.psd1 module 
+        # Import the ConfigurationManager.psd1 module
         if((Get-Module ConfigurationManager) -eq $null) {
             Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1" @initParams
         }
@@ -769,7 +769,7 @@ class InstallMP
         Write-Verbose "Setting PS Drive..."
 
         New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-        while((Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null) 
+        while((Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null)
         {
             Write-Verbose "Failed ,retry in 10s. Please wait."
             Start-Sleep -Seconds 10
@@ -836,6 +836,7 @@ class WaitForDomainReady
         while(!$testconnection)
         {
             Write-Verbose "Waiting for Domain ready , will try again 30 seconds later..."
+            ipconfig /renew
             Start-Sleep -Seconds $_WaitSeconds
             $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         }
@@ -845,7 +846,7 @@ class WaitForDomainReady
     [bool] Test()
     {
         $_DCName = $this.DCName
-        $_DomainName = $this.DomainName        
+        $_DomainName = $this.DomainName
         $_DCFullName = "$_DCName.$_DomainName"
         Write-Verbose "Domain computer is: $_DCFullName"
         $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
@@ -948,6 +949,7 @@ class WriteStatus
 
     [void] Set()
     {
+
         $_Status = $this.Status
         $StatusFile = "C:\staging\DSC\DSC_Status.txt"
         $_Status | Out-File -FilePath $StatusFile -Force
@@ -956,25 +958,115 @@ class WriteStatus
         $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
         "$time $_Status" | Out-File -FilePath $StatusLog -Append
 
+        Write-Verbose "Writing Status: $_Status"
+
     }
 
     [bool] Test()
     {
         $_Status = $this.Status
-        $StatusFile = "C:\staging\DSC\DSC_Status.txt"
+        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
 
-        if (Test-Path $StatusFile) {
-            $content = Get-Content -Path $StatusFile -Force
-            if($content.StartsWith($_Status))
+        if (Test-Path $StatusLog) {
+            Write-Verbose "Testing if $StatusLog contains: $_Status"
+            $contains = Get-Content -Path $StatusLog -Force | Select-String -Pattern $_Status -SimpleMatch
+            if($contains)
             {
+                Write-Verbose "StatusLog contains status."
                 return $true
             }
         }
-        
+
+        Write-Verbose "StatusLog does NOT contain status."
         return $false
     }
 
     [WriteStatus] Get()
+    {
+        return $this
+    }
+}
+
+[DscResource()]
+class WriteFileOnce
+{
+    [DscProperty(key)]
+    [string] $FilePath
+
+    [DscProperty(key)]
+    [string] $Content
+
+    [void] Set()
+    {
+        $_FilePath = $this.FilePath
+        $_Content = $this.Content
+        $flag = Join-Path $_FilePath ".done"
+
+        $_Content | Out-File -FilePath $_FilePath -Force
+        "" | Out-File -FilePath $flag -Force
+        Write-Verbose "Writing to $_FilePath`: $_Content"
+    }
+
+    [bool] Test()
+    {
+        $_FilePath = $this.FilePath
+        $_Content = $this.Content
+        $flag = Join-Path $_FilePath ".done"
+
+        # Wrote once, don't do it again
+        if (Test-Path $flag) {
+            return $true
+        }
+
+        if (Test-Path $_FilePath) {
+            Write-Verbose "Testing if $_FilePath contains: $_Content"
+            $contains = (Get-Content -Path $_FilePath -Force) -eq $_Content
+            if($contains)
+            {
+                Write-Verbose "FilePath contains content."
+                return $true
+            }
+        }
+
+        Write-Verbose "FilePath does not contain content."
+        return $false
+    }
+
+    [WriteFileOnce] Get()
+    {
+        return $this
+    }
+}
+
+[DscResource()]
+class WaitForFileToExist
+{
+    [DscProperty(key)]
+    [string] $FilePath
+
+    [void] Set()
+    {
+        $_FilePath = $this.FilePath
+        while(!(Test-Path $_FilePath))
+        {
+            Write-Verbose "Wait for $_FilePath to exist, will try 60 seconds later..."
+            Start-Sleep -Seconds 60
+        }
+
+    }
+
+    [bool] Test()
+    {
+        $_FilePath = $this.FilePath
+
+        if (Test-Path $_FilePath) {
+            return $true
+        }
+
+        return $false
+    }
+
+    [WaitForFileToExist] Get()
     {
         return $this
     }
@@ -1025,8 +1117,8 @@ class ChangeSQLServicesAccount
             }
 
             Write-Verbose "[$(Get-Date -format HH:mm:ss)] Changing the services account..."
-            
-            $Result = $services.change($null,$null,$null,$null,$null,$null,"LocalSystem",$null,$null,$null,$null) 
+
+            $Result = $services.change($null,$null,$null,$null,$null,$null,"LocalSystem",$null,$null,$null,$null)
             if ($Result.ReturnValue -eq '0')
             {
                 Write-Verbose "[$(Get-Date -format HH:mm:ss)] Successfully Change the services account"
@@ -1041,7 +1133,7 @@ class ChangeSQLServicesAccount
                 }
                 $Result = $services.StartService()
                 Write-Verbose "[$(Get-Date -format HH:mm:ss)] Starting SQL Server services.."
-                while($Result.ReturnValue -ne '0') 
+                while($Result.ReturnValue -ne '0')
                 {
                     $returncode = $Result.ReturnValue
                     Write-Verbose "[$(Get-Date -format HH:mm:ss)] Return $returncode , will try again"
@@ -1091,10 +1183,10 @@ class RegisterTaskScheduler
 
     [DscProperty(Mandatory)]
     [string] $ScriptPath
-    
+
     [DscProperty(Mandatory)]
     [string] $ScriptArgument
-    
+
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
@@ -1115,7 +1207,7 @@ class RegisterTaskScheduler
 
         $sourceDirctory = "$_ScriptPath\*"
         $destDirctory = "$ProvisionToolPath\"
-        
+
         Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
 
         $_TaskName = $this.TaskName
@@ -1129,7 +1221,7 @@ class RegisterTaskScheduler
 
         Write-Verbose "command is : $TaskArg"
 
-        $TaskStartTime = [datetime]::Now.AddMinutes(5)
+        $TaskStartTime = [datetime]::Now.AddMinutes(2)
         $service = new-object -ComObject("Schedule.Service")
         $service.Connect()
         $rootFolder = $service.GetFolder("\")
@@ -1157,7 +1249,7 @@ class RegisterTaskScheduler
         {
             return $false
         }
-        
+
         return $true
     }
 
@@ -1172,7 +1264,7 @@ class SetAutomaticManagedPageFile
 {
     [DscProperty(key)]
     [string] $TaskName
-    
+
     [DscProperty(Mandatory)]
     [bool] $Value
 
@@ -1199,7 +1291,7 @@ class SetAutomaticManagedPageFile
         {
             return $false
         }
-        
+
         return $true
     }
 
@@ -1214,7 +1306,7 @@ class ChangeServices
 {
     [DscProperty(key)]
     [string] $Name
-    
+
     [DscProperty(Mandatory)]
     [StartupType] $StartupType
 
@@ -1261,7 +1353,7 @@ class ChangeServices
                 break
             }
         }
-        
+
         return $true
     }
 
@@ -1288,7 +1380,7 @@ class AddUserToLocalAdminGroup
         $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
         Write-Verbose "[$(Get-Date -format HH:mm:ss)] add $_Name to administrators group"
         $GroupObj.Add("WinNT://$_DomainName/$_Name")
-        
+
     }
 
     [bool] Test()
@@ -1308,7 +1400,7 @@ class AddUserToLocalAdminGroup
     {
         return $this
     }
-    
+
 }
 
 [DscResource()]
@@ -1326,7 +1418,7 @@ class JoinDomain
         $_DomainName = $this.DomainName
         $_retryCount = 100
         try
-        {       
+        {
             Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Stop
             $global:DSCMachineStatus = 1
         }
@@ -1344,7 +1436,7 @@ class JoinDomain
                     Write-Verbose "retry count: $count"
                     Start-Sleep -Seconds 30
                     Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Ignore
-                    
+
                     $CurrentDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
                 }
                 else
@@ -1378,7 +1470,7 @@ class JoinDomain
     {
         return $this
     }
-    
+
 }
 
 [DscResource()]
@@ -1401,7 +1493,7 @@ class OpenFirewallPortForSCCM
             #HTTP(S) Requests
             New-NetFirewallRule -DisplayName 'HTTP(S) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(80,443) -Group "For DC"
             New-NetFirewallRule -DisplayName 'HTTP(S) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(80,443) -Group "For DC"
-        
+
             #PS-->DC(in)
             New-NetFirewallRule -DisplayName 'LDAP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 389 -Group "For DC"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For DC"
@@ -1422,7 +1514,7 @@ class OpenFirewallPortForSCCM
         {
             New-NetFirewallRule -DisplayName 'HTTP(S) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(80,443) -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'HTTP(S) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(80,443) -Group "For SCCM"
-    
+
             #site server<->site server
             New-NetFirewallRule -DisplayName 'SMB Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'SMB Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM"
@@ -1460,7 +1552,7 @@ class OpenFirewallPortForSCCM
             New-NetFirewallRule -DisplayName 'HTTP(S) SUP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(8530,8531) -Group "For SCCM SUP"
             #SUP->Internet
             New-NetFirewallRule -DisplayName 'HTTP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 80 -Group "For SCCM SUP"
-        
+
             New-NetFirewallRule -DisplayName 'HTTP(S) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(80,443) -Group "For SCCM SUP"
             New-NetFirewallRule -DisplayName 'HTTP(S) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(80,443) -Group "For SCCM SUP"
         }
@@ -1503,7 +1595,7 @@ class OpenFirewallPortForSCCM
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For SCCM System Health Validator"
             #dynamic port
             New-NetFirewallRule -DisplayName 'RPC Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM System Health Validator"
-            New-NetFirewallRule -DisplayName 'RPC Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM System Health Validator"  
+            New-NetFirewallRule -DisplayName 'RPC Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM System Health Validator"
         }
         if($_Role -contains "Fallback Status Point")
         {
@@ -1516,8 +1608,8 @@ class OpenFirewallPortForSCCM
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For SCCM FSP"
             #dynamic port
             New-NetFirewallRule -DisplayName 'RPC Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM FSP"
-            New-NetFirewallRule -DisplayName 'RPC Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM FSP"  
-        
+            New-NetFirewallRule -DisplayName 'RPC Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM FSP"
+
             New-NetFirewallRule -DisplayName 'HTTP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80 -Group "For SCCM FSP"
         }
         if($_Role -contains "Reporting Services Point")
@@ -1555,7 +1647,7 @@ class OpenFirewallPortForSCCM
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For SCCM MP"
             #dynamic port
             New-NetFirewallRule -DisplayName 'RPC Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM MP"
-            New-NetFirewallRule -DisplayName 'RPC Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM MP"  
+            New-NetFirewallRule -DisplayName 'RPC Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM MP"
         }
         if($_Role -contains "Branch Distribution Point")
         {
@@ -1607,7 +1699,7 @@ class OpenFirewallPortForSCCM
             New-NetFirewallRule -DisplayName 'Remote Control(RPC Endpoint Mapper) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM Console"
             New-NetFirewallRule -DisplayName 'Remote Assistance(RDP AND RTC) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For SCCM Console"
         }
-        if($_Role -contains "Client")
+        if($_Role -contains "DomainMember")
         {
             #Client Push Installation
             Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
@@ -1632,7 +1724,7 @@ class OpenFirewallPortForSCCM
 
             #SUP
             New-NetFirewallRule -DisplayName 'CM Connect SUP' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort (8530,8531) -Group "For SCCM Client"
-        
+
             #enable firewall public profile
             Set-NetFirewallProfile -Profile Public -Enabled True
         }
@@ -1655,7 +1747,7 @@ class OpenFirewallPortForSCCM
     {
         return $this
     }
-    
+
 }
 
 [DscResource()]
@@ -1670,10 +1762,10 @@ class InstallFeatureForSCCM
     [void] Set()
     {
         $_Role = $this.Role
-        
+
         Write-Verbose "Current Role is : $_Role"
 
-        if($_Role -notcontains "Client")
+        if($_Role -notcontains "DomainMember")
         {
             Install-WindowsFeature -Name "Rdc"
         }
@@ -1682,11 +1774,11 @@ class InstallFeatureForSCCM
         {
         }
         if($_Role -contains "Site Server")
-        { 
+        {
             Install-WindowsFeature Net-Framework-Core
             Install-WindowsFeature NET-Framework-45-Core
-            Install-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net 
-            Install-WindowsFeature Web-Mgmt-Console,Web-Lgcy-Mgmt-Console,Web-Lgcy-Scripting,Web-WMI,Web-Mgmt-Service,Web-Mgmt-Tools,Web-Scripting-Tools            
+            Install-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net
+            Install-WindowsFeature Web-Mgmt-Console,Web-Lgcy-Mgmt-Console,Web-Lgcy-Scripting,Web-WMI,Web-Mgmt-Service,Web-Mgmt-Tools,Web-Scripting-Tools
         }
         if($_Role -contains "Application Catalog website point")
         {
@@ -1709,16 +1801,16 @@ class InstallFeatureForSCCM
         }
         if($_Role -contains "Distribution point")
         {
-            #IIS 
+            #IIS
             Install-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
             Install-WindowsFeature Web-WMI,Web-Metabase
         }
-    
+
         if($_Role -contains "Endpoint Protection point")
         {
             #.NET 3.5 SP1 is intalled
         }
-    
+
         if($_Role -contains "Enrollment point")
         {
             #iis
@@ -1737,13 +1829,13 @@ class InstallFeatureForSCCM
         {
             #BITS
             Install-WindowsFeature BITS,BITS-IIS-Ext
-            #IIS 
+            #IIS
             Install-WindowsFeature Web-Windows-Auth,web-ISAPI-Ext
             Install-WindowsFeature Web-WMI,Web-Metabase
         }
         if($_Role -contains "Reporting services point")
         {
-            #installed .net 4.5 or later   
+            #installed .net 4.5 or later
         }
         if($_Role -contains "Service connection point")
         {
@@ -1752,7 +1844,7 @@ class InstallFeatureForSCCM
         if($_Role -contains "Software update point")
         {
             #default iis configuration
-            Install-WindowsFeature web-server 
+            Install-WindowsFeature web-server
         }
         if($_Role -contains "State migration point")
         {
@@ -1805,7 +1897,7 @@ class SetCustomPagingFile
             set-ciminstance $currentstatus -Property @{AutomaticManagedPagefile= $false}
         }
 
-        $currentpagingfile = Get-CimInstance -ClassName 'Win32_PageFileSetting' -Filter "SettingID='pagefile.sys @ $_Drive'" 
+        $currentpagingfile = Get-CimInstance -ClassName 'Win32_PageFileSetting' -Filter "SettingID='pagefile.sys @ $_Drive'"
 
         if(!($currentpagingfile))
         {
@@ -1815,7 +1907,7 @@ class SetCustomPagingFile
         {
             Set-CimInstance $currentpagingfile -Property @{InitialSize = $_InitialSize ; MaximumSize = $_MaximumSize}
         }
-        
+
 
         $global:DSCMachineStatus = 1
     }
@@ -1833,7 +1925,7 @@ class SetCustomPagingFile
         }
 
         $_Drive = $this.Drive
-        $currentpagingfile = Get-CimInstance -ClassName 'Win32_PageFileSetting' -Filter "SettingID='pagefile.sys @ $_Drive'" 
+        $currentpagingfile = Get-CimInstance -ClassName 'Win32_PageFileSetting' -Filter "SettingID='pagefile.sys @ $_Drive'"
         if(!($currentpagingfile) -or !($currentpagingfile.InitialSize -eq $_InitialSize -and $currentpagingfile.MaximumSize -eq $_MaximumSize))
         {
             return $false
@@ -1846,7 +1938,7 @@ class SetCustomPagingFile
     {
         return $this
     }
-    
+
 }
 
 [DscResource()]
@@ -1911,7 +2003,7 @@ class SetupDomain
                     Start-Sleep -Seconds 30
                 }
             }
-            
+
         }
 
         return $true
@@ -1921,7 +2013,7 @@ class SetupDomain
     {
         return $this
     }
-    
+
 }
 
 [DscResource()]
@@ -1933,37 +2025,12 @@ class FileReadAccessShare
     [DscProperty(Mandatory)]
     [string] $Path
 
-    [DscProperty(Mandatory)]
-    [string[]] $Account
-
     [void] Set()
     {
         $_Name = $this.Name
         $_Path = $this.Path
-        $_Account = $this.Account
 
-        for($i = 0; $i -lt $_Account.Length; $i++)
-        {    
-            if($_Account[$i].ToLower().Contains(","))
-            {   
-                $DName = $_Account[$i].Split("\")[0]         
-                $clientNamelist = ($_Account[$i].Split("\")[1]).Split(",")        
-                        
-                foreach($clientname in $clientNamelist)
-                {
-                    if($clientname -eq $clientNamelist[$clientNamelist.Length-1])
-                    {
-                        $clientaccount = "$DName\$clientname"
-                        $_Account[$i] = $clientaccount
-                    }else
-                    {
-                        $clientaccount = "$DName\$clientname$"                 
-                        $_Account+=$clientaccount           
-                    }
-                }                    
-            }
-        }
-        New-SMBShare -Name $_Name -Path $_Path -ReadAccess $_Account
+        New-SMBShare -Name $_Name -Path $_Path
     }
 
     [bool] Test()
@@ -1983,7 +2050,7 @@ class FileReadAccessShare
     {
         return $this
     }
-    
+
 }
 
 [DscResource()]
@@ -2029,5 +2096,5 @@ class InstallCA
     {
         return $this
     }
-    
+
 }

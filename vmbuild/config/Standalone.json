@@ -36,7 +36,19 @@
 	},
     {
 		"vmName" : "CM-CL1",
-        "role": "Client",
+        "role": "DomainMember",
+        "hardware" : [{
+            "memory" : "4GB",
+            "virtualProcs" : 2,
+            "generation" : 2
+        }],
+		"joinDomain" : true,
+		"domainName" : "contoso.com",
+		"operatingSystem" : "Windows 10 21H1 (64-bit)"
+	},
+    {
+		"vmName" : "CM-CL2",
+        "role": "DomainMember",
         "hardware" : [{
             "memory" : "4GB",
             "virtualProcs" : 2,

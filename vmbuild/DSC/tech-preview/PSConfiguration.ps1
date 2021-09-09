@@ -19,9 +19,9 @@ configuration Configuration
     )
     Import-DscResource -ModuleName TemplateHelpDSC
     
-    $LogFolder = "TempLog"
-    $CM = "CMTP"
-    $LogPath = "c:\$LogFolder"
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
+    $CM = "CMTP"    
     $DName = $DomainName.Split(".")[0]
     $DCComputerAccount = "$DName\$DCName$"
     $DPMPComputerAccount = "$DName\$DPMPName$"

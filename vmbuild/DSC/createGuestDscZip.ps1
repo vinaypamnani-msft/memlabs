@@ -1,6 +1,6 @@
 param(
     $role = "PS",
-    $version = "current-branch",    
+    $version = "current-branch",
     [switch]$force
 )
 
@@ -24,14 +24,13 @@ $modules = @(
     'DnsServerDsc',
     'SqlServerDsc',
     'xDhcpServer',
-    'NetworkingDsc'    
+    'NetworkingDsc'
 )
-foreach($module in $modules)
-{
-    if (Get-Module -ListAvailable -Name $module) {        
+foreach ($module in $modules) {
+    if (Get-Module -ListAvailable -Name $module) {
         if ($force) {
             Write-Host "Module exists: $module. Updating..."
-            Update-Module $module -Force    
+            Update-Module $module -Force
         }
         else {
             Write-Host "Module exists: $module "
@@ -61,14 +60,31 @@ $adminCreds = Get-Credential
 $cd = @{
     AllNodes = @(
         @{
-            NodeName = 'LOCALHOST'
+            NodeName                    = 'LOCALHOST'
             PSDscAllowPlainTextPassword = $true
-            PSDscAllowDomainUser = $true
+            PSDscAllowDomainUser        = $true
         }
     )
 }
 
-& "$($role)Configuration" -DomainName contoso.com `
-    -DCName CM-DC1 -DPMPName CM-MP1 -CSName CM-CS1 -PSName CM-SITE1 -ClientName CM-CL1 `
-    -Configuration "Standalone" -DNSIPAddress "192.168.1.1" -AdminCreds $adminCreds `
-    -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config"
+# Config Arguments
+$HashArguments = @{
+    DomainName       = "contoso.com"
+    DCName           = "CM-DC1"
+    DPMPName         = "CM-MP1"
+    CSName           = "CM-CS1"
+    PSName           = "CM-PS1"
+    ClientName       = "CM-CL1"
+    Configuration    = "Standalone"
+    DNSIPAddress     = "192.168.1.1"
+    AdminCreds       = $adminCreds
+    DefaultGateway   = "192.168.1.100"
+    DHCPScopeId      = "192.168.1.0"
+    DHCPScopeStart   = "192.168.1.20"
+    DHCPScopeEnd     = "192.168.1.199"
+    InstallConfigMgr = $true
+    UpdateToLatest   = $true
+    PushClients      = $true
+}
+
+& "$($role)Configuration" @HashArguments -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config"

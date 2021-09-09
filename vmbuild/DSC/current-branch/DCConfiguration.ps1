@@ -19,28 +19,32 @@
         [Parameter(Mandatory)]
         [String]$DNSIPAddress,
         [Parameter(Mandatory)]
+        [String]$DefaultGateway,
+        [Parameter(Mandatory)]
+        [String]$DHCPScopeId,
+        [Parameter(Mandatory)]
+        [String]$DHCPScopeStart,
+        [Parameter(Mandatory)]
+        [String]$DHCPScopeEnd,
+        [Parameter(Mandatory)]
+        [bool]$InstallConfigMgr = $true,
+        [Parameter(Mandatory)]
+        [bool]$UpdateToLatest = $true,
+        [Parameter(Mandatory)]
+        [bool]$PushClients = $true,
+        [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
 
-
-    $LogFolder = "TempLog"
-    $LogPath = "c:\$LogFolder"
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
     $CM = "CMCB"
-    $DName = $DomainName.Split(".")[0]
-    if ($Configuration -ne "Standalone") {
-        $CSComputerAccount = "$DName\$CSName$"
-    }
-    $PSComputerAccount = "$DName\$PSName$"
-    $DPMPComputerAccount = "$DName\$DPMPName$"
     $Clients = [system.String]::Join(",", $ClientName)
-    $ClientComputerAccount = "$DName\$Clients$"
 
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
-
-    $DHCPScopeId = "192.168.1.0"
 
     Node LOCALHOST
     {
@@ -53,7 +57,7 @@
             Status = "Renaming the computer to $DCName"
         }
 
-        Computer NewName {            
+        Computer NewName {
             Name = $DCName
         }
 
@@ -79,16 +83,25 @@
             DependsOn = "[InstallFeatureForSCCM]InstallFeature"
             Status    = "Configuring ADDS and setting up the domain. The computer will reboot a couple of times."
         }
-        
+
         SetupDomain FirstDS {
             DependsOn                     = "[InstallFeatureForSCCM]InstallFeature"
             DomainFullName                = $DomainName
-            SafemodeAdministratorPassword = $DomainCreds            
+            SafemodeAdministratorPassword = $DomainCreds
         }
 
         ADUser Admin {
             Ensure              = 'Present'
             UserName            = 'admin'
+            Password            = $DomainCreds
+            PasswordNeverResets = $true
+            DomainName          = $DomainName
+            DependsOn           = "[SetupDomain]FirstDS"
+        }
+
+        ADUser cm-svc {
+            Ensure              = 'Present'
+            UserName            = 'cm_svc'
             Password            = $DomainCreds
             PasswordNeverResets = $true
             DomainName          = $DomainName
@@ -104,7 +117,7 @@
         ADGroup AddToDomainAdmin {
             GroupName        = "Domain Admins"
             MembersToInclude = @("admin")
-            DependsOn        = "[ADUser]Admin"
+            DependsOn        = @("[ADUser]Admin", "[ADUser]cm-svc")
         }
 
         ADGroup AddToSchemaAdmin {
@@ -127,10 +140,10 @@
 
         DefaultGatewayAddress SetDefaultGateway {
             DependsOn      = "[IPAddress]NewIPAddressDC"
-            Address        = '192.168.1.200'
+            Address        = $DefaultGateway
             InterfaceAlias = 'Ethernet'
             AddressFamily  = 'IPv4'
-        }        
+        }
 
         DnsServerForwarder DnsServerForwarder {
             DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
@@ -158,7 +171,7 @@
             Ensure               = 'Present'
             IncludeAllSubFeature = $true
         }
-    
+
         xDhcpServerAuthorization LocalServerActivation {
             DependsOn        = "[WindowsFeature]RSAT-DHCP"
             IsSingleInstance = 'Yes'
@@ -169,9 +182,9 @@
             DependsOn     = "[xDhcpServerAuthorization]LocalServerActivation"
             Ensure        = 'Present'
             ScopeId       = $DHCPScopeId
-            IPStartRange  = '192.168.1.20'
-            IPEndRange    = '192.168.1.199'
-            Name          = 'ScopeCB1'
+            IPStartRange  = $DHCPScopeStart
+            IPEndRange    = $DHCPScopeEnd
+            Name          = $DHCPScopeId
             SubnetMask    = '255.255.255.0'
             LeaseDuration = ((New-TimeSpan -Hours 72).ToString())
             State         = 'Active'
@@ -181,7 +194,7 @@
         DhcpScopeOptionValue ScopeOptionGateway {
             DependsOn     = "[xDhcpServerScope]Scope"
             OptionId      = 3
-            Value         = '192.168.1.200'
+            Value         = $DefaultGateway
             ScopeId       = $DHCPScopeId
             VendorClass   = ''
             UserClass     = ''
@@ -210,7 +223,7 @@
 
         WriteStatus WaitDomainJoin {
             DependsOn = "[InstallCA]InstallCA"
-            Status    = "Waiting for required servers to join the domain"
+            Status    = "Waiting for computers to join the domain"
         }
 
         VerifyComputerJoinDomain WaitForPS {
@@ -223,9 +236,9 @@
             ComputerName = $DPMPName
             Ensure       = "Present"
             DependsOn    = "[InstallCA]InstallCA"
-        }        
+        }
 
-        VerifyComputerJoinDomain WaitForClient {
+        VerifyComputerJoinDomain WaitForDomainMember {
             ComputerName = $Clients
             Ensure       = "Present"
             DependsOn    = "[InstallCA]InstallCA"
@@ -233,17 +246,16 @@
 
         if ($Configuration -eq 'Standalone') {
 
-            File ShareFolder {            
-                DestinationPath = $LogPath     
-                Type            = 'Directory'            
+            File ShareFolder {
+                DestinationPath = $LogPath
+                Type            = 'Directory'
                 Ensure          = 'Present'
-                DependsOn       = @("[VerifyComputerJoinDomain]WaitForPS", "[VerifyComputerJoinDomain]WaitForDPMP", "[VerifyComputerJoinDomain]WaitForClient")
+                DependsOn       = @("[VerifyComputerJoinDomain]WaitForPS", "[VerifyComputerJoinDomain]WaitForDPMP", "[VerifyComputerJoinDomain]WaitForDomainMember")
             }
 
             FileReadAccessShare DomainSMBShare {
                 Name      = $LogFolder
                 Path      = $LogPath
-                Account   = $PSComputerAccount, $DPMPComputerAccount, $ClientComputerAccount
                 DependsOn = "[File]ShareFolder"
             }
 
@@ -253,7 +265,12 @@
                 WriteNode = "DelegateControl"
                 Status    = "Passed"
                 Ensure    = "Present"
-                DependsOn = @("[DelegateControl]AddPS", "[DelegateControl]AddDPMP")
+                DependsOn = "[DelegateControl]AddPS"
+            }
+
+            WriteStatus WaitExtSchema {
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
@@ -264,7 +281,7 @@
             }
 
             WriteStatus Complete {
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
                 Status    = "Complete!"
             }
 
@@ -279,20 +296,19 @@
                 DependsOn    = "[InstallCA]InstallCA"
             }
 
-            File ShareFolder {            
-                DestinationPath = $LogPath     
-                Type            = 'Directory'            
+            File ShareFolder {
+                DestinationPath = $LogPath
+                Type            = 'Directory'
                 Ensure          = 'Present'
-                DependsOn       = @("[VerifyComputerJoinDomain]WaitForCS", "[VerifyComputerJoinDomain]WaitForPS", "[VerifyComputerJoinDomain]WaitForDPMP", "[VerifyComputerJoinDomain]WaitForClient")
+                DependsOn       = @("[VerifyComputerJoinDomain]WaitForCS", "[VerifyComputerJoinDomain]WaitForPS", "[VerifyComputerJoinDomain]WaitForDPMP", "[VerifyComputerJoinDomain]WaitForDomainMember")
             }
 
             FileReadAccessShare DomainSMBShare {
                 Name      = $LogFolder
                 Path      = $LogPath
-                Account   = $CSComputerAccount, $PSComputerAccount, $DPMPComputerAccount, $ClientComputerAccount
                 DependsOn = "[File]ShareFolder"
             }
-            
+
             WriteConfigurationFile WriteCSJoinDomain {
                 Role      = "DC"
                 LogPath   = $LogPath
@@ -315,7 +331,12 @@
                 WriteNode = "DelegateControl"
                 Status    = "Passed"
                 Ensure    = "Present"
-                DependsOn = @("[DelegateControl]AddCS", "[DelegateControl]AddPS", "[DelegateControl]AddDPMP")
+                DependsOn = @("[DelegateControl]AddCS", "[DelegateControl]AddPS")
+            }
+
+            WriteStatus WaitExtSchema {
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
@@ -326,7 +347,7 @@
             }
 
             WriteStatus Complete {
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
                 Status    = "Complete!"
             }
 
@@ -350,9 +371,13 @@
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
         }
 
-        WriteStatus AddPS {
-            DependsOn = "[WriteConfigurationFile]WritePSJoinDomain"
-            Status    = "Waiting for Configuration Manager installation"
+        WriteConfigurationFile WriteDomainMemberJoinDomain {
+            Role      = "DC"
+            LogPath   = $LogPath
+            WriteNode = "DomainMemberJoinDomain"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
         }
 
         DelegateControl AddPS {
@@ -360,13 +385,6 @@
             DomainFullName = $DomainName
             Ensure         = "Present"
             DependsOn      = "[WriteConfigurationFile]WritePSJoinDomain"
-        }
-
-        DelegateControl AddDPMP {
-            Machine        = $DPMPName
-            DomainFullName = $DomainName
-            Ensure         = "Present"
-            DependsOn      = "[WriteConfigurationFile]WriteDPMPJoinDomain"
         }
     }
 }

@@ -19,26 +19,35 @@
         [Parameter(Mandatory)]
         [String]$DNSIPAddress,
         [Parameter(Mandatory)]
+        [String]$DefaultGateway,
+        [Parameter(Mandatory)]
+        [String]$DHCPScopeId,
+        [Parameter(Mandatory)]
+        [String]$DHCPScopeStart,
+        [Parameter(Mandatory)]
+        [String]$DHCPScopeEnd,
+        [Parameter(Mandatory)]
+        [bool]$InstallConfigMgr = $true,
+        [Parameter(Mandatory)]
+        [bool]$UpdateToLatest = $true,
+        [Parameter(Mandatory)]
+        [bool]$PushClients = $true,
+        [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc', 'SqlServerDsc'
-    
-    $LogFolder = "TempLog"
+
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
     $CM = "CMCB"
-    $LogPath = "c:\$LogFolder"
+
     $DName = $DomainName.Split(".")[0]
-    $DCComputerAccount = "$DName\$DCName$"
     $CurrentRole = "PS"
-    
-    if ($Configuration -ne "Standalone") {
-        $CSComputerAccount = "$DName\$CSName$"
-    }
-    $DPMPComputerAccount = "$DName\$DPMPName$"
 
     $Clients = [system.String]::Join(",", $ClientName)
-    
+
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
     Node LOCALHOST
@@ -47,12 +56,12 @@
             ConfigurationMode  = 'ApplyOnly'
             RebootNodeIfNeeded = $true
         }
-        
+
         WriteStatus Rename {
             Status = "Renaming the computer to $PSName"
         }
 
-        Computer NewName {            
+        Computer NewName {
             Name = $PSName
         }
 
@@ -61,7 +70,7 @@
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
-        }        
+        }
 
         WriteStatus InstallFeature {
             DependsOn = "[SetCustomPagingFile]PagingSettings"
@@ -101,7 +110,7 @@
             DependsOn = "[JoinDomain]JoinDomain"
             Status    = "Open required firewall ports"
         }
-        
+
         OpenFirewallPortForSCCM OpenFirewall {
             DependsOn = "[JoinDomain]JoinDomain"
             Name      = "PS"
@@ -118,7 +127,7 @@
             ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
             Ensure       = "Present"
             DependsOn    = "[OpenFirewallPortForSCCM]OpenFirewall"
-        }        
+        }
 
         WriteStatus InstallSQL {
             DependsOn = '[InstallADK]ADKInstall'
@@ -146,9 +155,17 @@
             DependsOn   = '[SqlSetup]InstallSQL'
         }
 
+        File ShareFolder {
+            DestinationPath = $LogPath
+            Type            = 'Directory'
+            Ensure          = 'Present'
+            DependsOn       = "[InstallSSMS]SSMS"
+        }
+
         if ($Configuration -eq "Standalone") {
+
             WriteStatus DownLoadSCCM {
-                DependsOn = "[SqlSetup]InstallSQL"
+                DependsOn = "[File]ShareFolder"
                 Status    = "Downloading Configuration Manager current branch (latest baseline version)"
             }
 
@@ -158,36 +175,26 @@
                 DependsOn = "[InstallADK]ADKInstall"
             }
 
-            FileReadAccessShare DomainSMBShare {
-                Name      = $LogFolder
-                Path      = $LogPath
-                Account   = $DCComputerAccount
-                DependsOn = "[File]ShareFolder"
-            }
-
             FileReadAccessShare CMSourceSMBShare {
                 Name      = $CM
                 Path      = "c:\$CM"
-                Account   = $DCComputerAccount
-                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+                DependsOn = "[DownloadSCCM]DownLoadSCCM"
             }
 
-            WriteStatus InstallAndUpdateSCCM {
+            FileReadAccessShare DomainSMBShare {
+                Name      = $LogFolder
+                Path      = $LogPath
                 DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
-                Status    = "Setting up ConfigMgr."
             }
 
-            RegisterTaskScheduler InstallAndUpdateSCCM {
-                TaskName       = "ScriptWorkFlow"
-                ScriptName     = "ScriptWorkFlow.ps1"
-                ScriptPath     = $PSScriptRoot
-                ScriptArgument = "$DomainName $CM $DName\admin $DPMPName $Clients $Configuration $CurrentRole $LogFolder $CSName $PSName"
-                Ensure         = "Present"
-                DependsOn      = "[FileReadAccessShare]CMSourceSMBShare"
-            }
         }
         else {
             # Hierarchy
+
+            WriteStatus WaitCS {
+                DependsOn = "[File]ShareFolder"
+                Status    = "Waiting for CS Server to join domain"
+            }
 
             WaitForConfigurationFile WaitCSJoinDomain {
                 Role        = "DC"
@@ -201,26 +208,15 @@
             FileReadAccessShare DomainSMBShare {
                 Name      = $LogFolder
                 Path      = $LogPath
-                Account   = $DCComputerAccount, $CSComputerAccount
                 DependsOn = "[WaitForConfigurationFile]WaitCSJoinDomain"
             }
 
-            RegisterTaskScheduler InstallAndUpdateSCCM {
-                TaskName       = "ScriptWorkFlow"
-                ScriptName     = "ScriptWorkFlow.ps1"
-                ScriptPath     = $PSScriptRoot
-                ScriptArgument = "$DomainName $CM $DName\$($Admincreds.UserName) $DPMPName $Clients $Configuration $CurrentRole $LogFolder $CSName $PSName"
-                Ensure         = "Present"
-                DependsOn      = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-            }
         }
-        
-        File ShareFolder {            
-            DestinationPath = $LogPath     
-            Type            = 'Directory'            
-            Ensure          = 'Present'
-            DependsOn       = "[DownloadSCCM]DownloadSCCM"
-        }        
+
+        WriteStatus WaitDelegate {
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            Status    = "Waiting for DC to assign permissions to Systems Management container"
+        }
 
         WaitForConfigurationFile DelegateControl {
             Role        = "DC"
@@ -228,18 +224,60 @@
             LogFolder   = $LogFolder
             ReadNode    = "DelegateControl"
             Ensure      = "Present"
-            DependsOn   = "[JoinDomain]JoinDomain"
+            DependsOn   = "[FileReadAccessShare]DomainSMBShare"
         }
 
         AddBuiltinPermission AddSQLPermission {
-            Ensure    = "Present"            
-            DependsOn = @("[DownloadSCCM]DownloadSCCM", "[InstallSSMS]SSMS")
+            Ensure    = "Present"
+            DependsOn = "[WaitForConfigurationFile]DelegateControl"
         }
 
         ChangeSQLServicesAccount ChangeToLocalSystem {
             SQLInstanceName = "MSSQLSERVER"
             Ensure          = "Present"
             DependsOn       = "[AddBuiltinPermission]AddSQLPermission"
+        }
+
+        if ($InstallConfigMgr) {
+
+            WriteStatus InstallAndUpdateSCCM {
+                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+                Status    = "Setting up ConfigMgr."
+            }
+
+            WriteFileOnce CMSvc {
+                FilePath  = "$LogPath\cm_svc.txt"
+                Content   = $Admincreds.Password | ConvertFrom-SecureString
+                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+            }
+
+            RegisterTaskScheduler InstallAndUpdateSCCM {
+                TaskName       = "ScriptWorkFlow"
+                ScriptName     = "ScriptWorkFlow.ps1"
+                ScriptPath     = $PSScriptRoot
+                ScriptArgument = "$DomainName $CM $DName\admin $DPMPName $Clients $Configuration $CurrentRole $LogFolder $CSName $PSName $UpdateToLatest $PushClients"
+                Ensure         = "Present"
+                DependsOn      = "[WriteFileOnce]CMSvc"
+            }
+
+            WaitForFileToExist WorkflowComplete {
+                FilePath  = "$LogPath\ScriptWorkflow.txt"
+                DependsOn = "[RegisterTaskScheduler]InstallAndUpdateSCCM"
+            }
+
+            WriteStatus Complete {
+                DependsOn = "[WaitForFileToExist]WorkflowComplete"
+                Status    = "Complete!"
+            }
+
+        }
+        else {
+
+            WriteStatus Complete {
+                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+                Status    = "Complete!"
+            }
+
         }
     }
 }

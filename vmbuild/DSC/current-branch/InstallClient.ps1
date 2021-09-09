@@ -1,5 +1,7 @@
 Param($DomainFullName,$CMUser,$ClientName,$DPMPName,$Role,$ProvisionToolPath)
 
+Write-DscStatus "Pushing client to $ClientName"
+
 $logpath = $ProvisionToolPath+"\InstallClientLog.txt"
 $ConfigurationFile = Join-Path -Path $ProvisionToolPath -ChildPath "$Role.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -14,7 +16,7 @@ $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]
 $subKey =  $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
 $uiInstallPath = $subKey.GetValue("UI Installation Directory")
 $modulePath = $uiInstallPath+"bin\ConfigurationManager.psd1"
-# Import the ConfigurationManager.psd1 module 
+# Import the ConfigurationManager.psd1 module
 if((Get-Module ConfigurationManager) -eq $null) {
     Import-Module $modulePath
 }
@@ -29,7 +31,7 @@ $ProviderMachineName = $env:COMPUTERNAME+"."+$DomainFullName # SMS Provider mach
 "[$(Get-Date -format HH:mm:ss)] Setting PS Drive..." | Out-File -Append $logpath
 New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
 
-while((Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null) 
+while((Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null)
 {
     "[$(Get-Date -format HH:mm:ss)] Retry in 10s to set PS Drive. Please wait." | Out-File -Append $logpath
     Start-Sleep -Seconds 10
@@ -49,11 +51,15 @@ while(((Get-CMDiscoveryMethod | ?{$_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT
     Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://DC=$DomainName,DC=$lastdomainname" -Recursive
 }
 "[$(Get-Date -format HH:mm:ss)] Invoke system descovery..." | Out-File -Append $logpath
-Invoke-CMSystemDiscovery 
+Invoke-CMSystemDiscovery
 
 #Create Boundry Group
 "[$(Get-Date -format HH:mm:ss)] Create boundary group." | Out-File -Append $logpath
 New-CMBoundaryGroup -Name $SiteCode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $DPMPMachineName
+
+# Set client push account
+$cm_svc = $DomainFullName.Split(".")[0] + "\cm_svc"
+Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
 
 #Get Client IP
 $ClientNameList = $ClientName.split(",")
@@ -63,7 +69,7 @@ foreach($client in $ClientNameList)
 
     "[$(Get-Date -format HH:mm:ss)] $client IP is $clientIP." | Out-File -Append $logpath
     $boundaryrange = $clientIP+"-"+$clientIP
-    
+
     "[$(Get-Date -format HH:mm:ss)] Create boundary..." | Out-File -Append $logpath
     New-CMBoundary -Type IPRange -Name $client -Value $boundaryrange
 

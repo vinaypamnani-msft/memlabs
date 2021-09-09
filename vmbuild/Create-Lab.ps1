@@ -1,4 +1,4 @@
-param (    
+param (
     [Parameter(Mandatory=$true, HelpMessage="Lab Configuration: Standalone, Hierarchy, SingleMachine.")]
     [string]$Configuration,
     [Parameter(Mandatory=$false, HelpMessage="Force recreation of virtual machines, if already present.")]
@@ -21,11 +21,11 @@ if ($Common.FatalError) {
 function Write-JobProgress
 {
     param($Job)
- 
+
     #Make sure the first child job exists
     if($null -ne $Job.ChildJobs[0].Progress)
     {
-        #Extracts the latest progress of the job and writes the progress        
+        #Extracts the latest progress of the job and writes the progress
         $latestPercentComplete = 0
         $lastProgress = $Job.ChildJobs[0].Progress | Where-Object {$_.Activity -ne "Preparing modules for first use."} | Select-Object -Last 1
 
@@ -46,12 +46,12 @@ function Write-JobProgress
 
 #Clear-Host
 Write-Host
-Write-Host 
-Write-Host 
-Write-Host 
-Write-Host 
-Write-Host 
-Write-Host 
+Write-Host
+Write-Host
+Write-Host
+Write-Host
+Write-Host
+Write-Host
 
 
 Write-Log "### START." -Success
@@ -69,6 +69,15 @@ if (-not (Test-Path $configPath)) {
 }
 else {
     Write-Log "Main: $configPath will be used for creating the lab environment."
+}
+
+try {
+    # Load configuration
+    $jsonConfig = Get-Content -Path $configPath | ConvertFrom-Json
+}
+catch {
+    Write-Log "Main: Failed to load $Configuration.json file. $_" -Failure
+    return
 }
 
 # Create VM script block
@@ -91,16 +100,15 @@ $VM_Create = {
 
     # Create VM
     $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -Memory $currentItem.hardware.memory -Generation $currentItem.hardware.generation -Processors $currentItem.hardware.virtualProcs -SwitchName $SwitchName -WhatIf:$using:WhatIf
-    # $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -SourceDiskPath $vhdxPath -Memory 4GB -Generation 2 -Processors 2 -SwitchName $SwitchName -ForceNew:$forceNew -WhatIf:$using:WhatIf
     if (-not $created) {
         Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Use ForceNew switch if it already exists." -Warning
         Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Use ForceNew switch if it already exists. Check vmbuild.log." -Warning -OutputStream -HostOnly
         return
     }
 
-    # Wait for VM to finish OOBE    
+    # Wait for VM to finish OOBE
     $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
-    if (-not $connected) {        
+    if (-not $connected) {
         Write-Log "PSJOB: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
         return
     }
@@ -134,14 +142,14 @@ $VM_Create = {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
     }
-    
+
     # Copy SQL files to VM for CS/PS roles
     Write-Log "PSJOB: $($currentItem.vmName): Copying SQL installation files to the VM."
     Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Activity "Working" -Completed
     $sqlIsoPath = Join-Path $using:Common.IsoPath "SQL Server 2019\en_sql_server_2019_enterprise_x64_dvd_5e1ecc6b.iso"
     $sqlCUPath = Join-Path $using:Common.IsoPath "SQL Server 2019\SQLServer2019-KB5004524-x64.exe"
     $sqlCUFile = Split-Path $sqlCUPath -Leaf
-    
+
     if ($currentItem.role -eq "PS" -or $currentItem.role -eq "CS") {
 
         # Get SQL 2019 CU12
@@ -166,7 +174,7 @@ $VM_Create = {
         # Eject ISO from guest
         Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
     }
-    
+
     # Define DSC ScriptBlock
     $DSC_InstallModules = {
 
@@ -183,19 +191,19 @@ $VM_Create = {
         $modules = Get-ChildItem -Path "C:\staging\DSC\$cmVersion\modules" -Directory
         foreach ($folder in $modules) {
             Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
-            Import-Module $folder.Name -Force; 
+            Import-Module $folder.Name -Force;
         }
     }
 
     $DSC_CreateConfig = {
-        
+
         # Get required variables from parent scope
         $cmVersion = $using:cmVersion
         $currentItem = $using:currentItem
         $adminCreds = $using:Common.LocalAdmin
         $jsonConfig = $using:jsonConfig
 
-        # Define DSC variables    
+        # Define DSC variables
         $dscConfigScript = "C:\staging\DSC\$cmVersion\$($currentItem.role)Configuration.ps1"
         $dscConfigPath = "C:\staging\DSC\$cmVersion\DSCConfiguration"
 
@@ -208,30 +216,54 @@ $VM_Create = {
         "Current Item = $currentItem" | Out-File $log -Append
         "Role Name = $($currentItem.role)" | Out-File $log -Append
         "Config Script = $dscConfigScript" | Out-File $log -Append
-        "Config Path = $dscConfigPath" | Out-File $log -Append        
+        "Config Path = $dscConfigPath" | Out-File $log -Append
 
         # Dot Source config script
-        . "$dscConfigScript"        
+        . "$dscConfigScript"
 
         # Configuration Data
         $cd = @{
             AllNodes = @(
                 @{
-                    NodeName = 'LOCALHOST'
+                    NodeName                    = 'LOCALHOST'
                     PSDscAllowPlainTextPassword = $true
                 }
             )
         }
-    
+
         # Compile config to create MOFs
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
-        & "$($currentItem.role)Configuration" -DomainName contoso.com `
-        -DCName CM-DC1 -DPMPName CM-MP1 -CSName CM-CS1 -PSName CM-SITE1 -ClientName CM-CL1 `
-        -Configuration "Standalone" -DNSIPAddress "192.168.1.1" -AdminCreds $adminCreds `
-        -ConfigurationData $cd -OutputPath $dscConfigPath
+
+        # Define Arguments (TODO: convert this to a function which returns config values)
+        $HashArguments = @{
+            DomainName       = "contoso.com"
+            DCName           = "CM-DC1"
+            DPMPName         = "CM-MP1"
+            CSName           = "CM-CS1"
+            PSName           = "CM-PS1"
+            ClientName       = "CM-CL1,CM-CL2"
+            Configuration    = "Standalone"
+            DNSIPAddress     = "192.168.1.1"
+            AdminCreds       = $adminCreds
+            DefaultGateway   = "192.168.1.200"
+            DHCPScopeId      = "192.168.1.0"
+            DHCPScopeStart   = "192.168.1.20"
+            DHCPScopeEnd     = "192.168.1.199"
+            InstallConfigMgr = $true
+            UpdateToLatest   = $false
+            PushClients      = $true
+        }
+
+        if ($currentItem.role -eq "DomainMember") {
+            # Overwrite client name for Client Config, since it needs it's actual name
+            $HashArguments["ClientName"] = $currentItem.vmName
+        }
+
+        # Compile config, to create MOF
+        & "$($currentItem.role)Configuration" @HashArguments -ConfigurationData $cd -OutputPath $dscConfigPath
     }
 
-    $DSC_StartConfig = {        
+    $DSC_StartConfig = {
 
         # Get required variables from parent scope
         $cmVersion = $using:cmVersion
@@ -245,7 +277,7 @@ $VM_Create = {
         "DSC_StartConfig: Started at $time" | Out-File $log -Append
 
         "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
-        Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose        
+        Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
 
         "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
         Start-DscConfiguration -Wait -Path $dscConfigPath -Verbose -ErrorAction Stop
@@ -267,7 +299,7 @@ $VM_Create = {
 
     # Enable PS Remoting on client OS before starting DSC. Ignore failures, this will work but reports a failure...
     if ($currentItem.operatingSystem -notlike "*SERVER*") {
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $currentItem.domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures." -WhatIf:$WhatIf        
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $currentItem.domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures." -WhatIf:$WhatIf
     }
 
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $currentItem.domainName -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration" -WhatIf:$WhatIf
@@ -275,15 +307,15 @@ $VM_Create = {
         Write-Log "$($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
         # Retry once before exiting
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $currentItem.domainName -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration" -WhatIf:$WhatIf
-        if ($result.ScriptBlockFailed) { 
+        if ($result.ScriptBlockFailed) {
             Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
         }
     }
-    
+
     # Wait for DSC, timeout after X minutes
     # Write-Log "PSJOB: $($currentItem.vmName): Waiting for $($currentItem.role) role configuration via DSC." -OutputStream
-    
+
     $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
     $timeout = if ($using:RoleConfigTimeoutMinutes) { $using:RoleConfigTimeoutMinutes } else { 300 }
     $timeSpan = New-TimeSpan -Minutes $timeout
@@ -310,7 +342,7 @@ $VM_Create = {
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $currentItem.domainName -ScriptBlock { Get-Content "C:\ConfigMgrSetup.log" -tail 1 } -SuppressLog -WhatIf:$WhatIf
                 if (-not $result.ScriptBlockFailed) {
                     $logEntry = $result.ScriptBlockOutput
-                    $logEntry = $logEntry.Substring(0, $logEntry.IndexOf("$"))
+                    $logEntry = "ConfigMgrSetup.log: " + $logEntry.Substring(0, $logEntry.IndexOf("$"))
                     Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed)" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
                     $skipProgress = $true
                 }
@@ -337,13 +369,10 @@ $VM_Create = {
 # CM Version
 $cmVersion = "current-branch"
 
-# Load configuration
-$jsonConfig = Get-Content -Path $configPath | ConvertFrom-Json
-
 # Array to store PS jobs
 [System.Collections.ArrayList]$jobs = @()
 
-foreach ($currentItem in $jsonConfig) {    
+foreach ($currentItem in $jsonConfig) {
 
     if ($WhatIf) {
         Write-Log "Main: Will start a job to create VM $($currentItem.vmName)"
@@ -358,7 +387,7 @@ foreach ($currentItem in $jsonConfig) {
     else {
         Write-Log "Main: Created job $($job.Id) to create VM $($currentItem.vmName)"
         $jobs += $job
-    }   
+    }
 }
 
 Write-Log "Main: Waiting for VM Jobs to deploy and finish configuring the virtual machines." -Activity
@@ -370,7 +399,7 @@ do {
     }
 
     $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
-    foreach($job in $completedJobs) {        
+    foreach($job in $completedJobs) {
         Write-Host "`n$($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Green
         $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
         Write-JobProgress($job)
@@ -386,6 +415,6 @@ do {
 # Write-Progress -Activity "Waiting for virtual machines to be created" -Completed
 
 $timer.Stop()
-Write-Host 
+Write-Host
 Write-Log "### COMPLETE. Elapsed Time: $($timer.Elapsed)" -Success
-Write-Host 
+Write-Host

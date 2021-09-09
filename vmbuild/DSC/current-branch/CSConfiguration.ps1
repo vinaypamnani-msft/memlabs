@@ -21,13 +21,13 @@
         [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
-    
+
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
-    
-    $LogFolder = "TempLog"
+
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
     $CM = "CMCB"
-    $LogPath = "c:\$LogFolder"
     $DName = $DomainName.Split(".")[0]
     $DCComputerAccount = "$DName\$DCName$"
     $PSComputerAccount = "$DName\$PSName$"
@@ -35,7 +35,7 @@
     [String]$Clients = [system.String]::Join(",", $ClientName)
     $CurrentRole = "CS"
     $PrimarySiteName = $PSName.split(".")[0] + "$"
-    
+
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
     Node LOCALHOST
@@ -45,9 +45,9 @@
             ConfigurationMode = 'ApplyOnly'
             RebootNodeIfNeeded = $true
         }
-        
+
         Computer NewName
-        {            
+        {
             Name          = $CSName
         }
 
@@ -57,7 +57,7 @@
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
-        } 
+        }
 
         AddBuiltinPermission AddSQLPermission
         {
@@ -97,8 +97,8 @@
         WaitForDomainReady WaitForDomain
         {
             Ensure = "Present"
-            DCName = $DCName
-            WaitSeconds = 0
+            DomainName = $DomainName
+            DCName     = $DCName
             DependsOn = "[SetDNS]DnsServerAddress"
         }
 
@@ -108,11 +108,11 @@
             Credential = $DomainCreds
             DependsOn = "[WaitForDomainReady]WaitForDomain"
         }
-        
+
         File ShareFolder
-        {            
-            DestinationPath = $LogPath     
-            Type = 'Directory'            
+        {
+            DestinationPath = $LogPath
+            Type = 'Directory'
             Ensure = 'Present'
             DependsOn = "[JoinDomain]JoinDomain"
         }
@@ -131,10 +131,9 @@
         {
             Name = $LogFolder
             Path = $LogPath
-            Account = $DCComputerAccount,$PSComputerAccount
             DependsOn = "[WaitForConfigurationFile]WaitPSJoinDomain"
         }
-        
+
         OpenFirewallPortForSCCM OpenFirewall
         {
             Name = "CS"
@@ -163,7 +162,6 @@
         {
             Name = $CM
             Path = "c:\$CM"
-            Account = $DCComputerAccount
             DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
         }
 

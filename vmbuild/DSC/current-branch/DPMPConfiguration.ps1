@@ -1,7 +1,7 @@
 ﻿configuration DPMPConfiguration
 {
-   param
-   (
+    param
+    (
         [Parameter(Mandatory)]
         [String]$DomainName,
         [Parameter(Mandatory)]
@@ -19,159 +19,134 @@
         [Parameter(Mandatory)]
         [String]$DNSIPAddress,
         [Parameter(Mandatory)]
+        [String]$DefaultGateway,
+        [Parameter(Mandatory)]
+        [String]$DHCPScopeId,
+        [Parameter(Mandatory)]
+        [String]$DHCPScopeStart,
+        [Parameter(Mandatory)]
+        [String]$DHCPScopeEnd,
+        [Parameter(Mandatory)]
+        [bool]$InstallConfigMgr = $true,
+        [Parameter(Mandatory)]
+        [bool]$UpdateToLatest = $true,
+        [Parameter(Mandatory)]
+        [bool]$PushClients = $true,
+        [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
 
-    $LogFolder = "TempLog"
-    $LogPath = "c:\$LogFolder"
-    $DName = $DomainName.Split(".")[0]
-    $DCComputerAccount = "$DName\$DCName$"
-    $PSComputerAccount = "$DName\$PSName$"
-
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
-    $PrimarySiteName = $PSName.split(".")[0] + "$"
 
     Node localhost
     {
-        LocalConfigurationManager
-        {
-            ConfigurationMode = 'ApplyOnly'
+        LocalConfigurationManager {
+            ConfigurationMode  = 'ApplyOnly'
             RebootNodeIfNeeded = $true
         }
 
-        WriteStatus Rename
-        {
+        WriteStatus Rename {
             Status = "Renaming the computer to $DPMPName"
         }
 
-        Computer NewName
-        {            
-            Name          = $DPMPName
+        Computer NewName {
+            Name = $DPMPName
         }
 
-        SetCustomPagingFile PagingSettings
-        {
-            DependsOn = "[Computer]NewName"
+        SetCustomPagingFile PagingSettings {
+            DependsOn   = "[Computer]NewName"
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
         }
 
-        WriteStatus InstallFeature
-        {
+        WriteStatus InstallFeature {
             DependsOn = "[SetCustomPagingFile]PagingSettings"
-            Status = "Installing required windows features"
+            Status    = "Installing required windows features"
         }
 
-        InstallFeatureForSCCM InstallFeature
-        {
-            Name = "DPMP"
-            Role = "Distribution Point","Management Point"
+        InstallFeatureForSCCM InstallFeature {
+            Name      = "DPMP"
+            Role      = "Distribution Point", "Management Point"
             DependsOn = "[SetCustomPagingFile]PagingSettings"
         }
 
-        WriteStatus WaitDomain
-        {
+        WriteStatus WaitDomain {
             DependsOn = "[InstallFeatureForSCCM]InstallFeature"
-            Status = "Waiting for domain to be ready to obtain an IP"
+            Status    = "Waiting for domain to be ready to obtain an IP"
         }
 
-        WaitForDomainReady WaitForDomain
-        {
-            
-            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
-            Ensure      = "Present"
-            DomainName  = $DomainName
-            DCName      = $DCName            
+        WaitForDomainReady WaitForDomain {
+
+            DependsOn  = "[InstallFeatureForSCCM]InstallFeature"
+            Ensure     = "Present"
+            DomainName = $DomainName
+            DCName     = $DCName
         }
 
-        WriteStatus DomainJoin
-        {
+        WriteStatus DomainJoin {
             DependsOn = "[WaitForDomainReady]WaitForDomain"
-            Status = "Joining computer to the domain"
+            Status    = "Joining computer to the domain"
         }
 
-        JoinDomain JoinDomain
-        {
+        JoinDomain JoinDomain {
             DomainName = $DomainName
             Credential = $DomainCreds
-            DependsOn = "[WaitForDomainReady]WaitForDomain"
+            DependsOn  = "[WaitForDomainReady]WaitForDomain"
         }
 
-        WriteStatus OpenPorts
-        {
+        WriteStatus OpenPorts {
             DependsOn = "[JoinDomain]JoinDomain"
-            Status = "Open required firewall ports"
+            Status    = "Open required firewall ports"
         }
 
-        OpenFirewallPortForSCCM OpenFirewallPortForSCCM
-        {
-            Name = "DPMP"
-            Role = "Distribution Point","Management Point"
+        OpenFirewallPortForSCCM OpenFirewall {
+            Name      = "DPMP"
+            Role      = "Distribution Point", "Management Point"
             DependsOn = "[JoinDomain]JoinDomain"
         }
 
-        WriteStatus WaitPrimaryJoinDomain
-        {
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewallPortForSCCM"
-            Status = "Waiting for Primary Site to join domain, before adding it to Local Administrators group"
+        WriteStatus AddLocalAdmin {
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            Status    = "Adding cm_svc domain account to Local Administrators group"
         }
 
-        WaitForConfigurationFile WaitForPSJoinDomain
-        {
-            Role = "DC"
-            MachineName = $DCName
-            LogFolder = $LogFolder
-            ReadNode = "PSJoinDomain"
-            Ensure = "Present"
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewallPortForSCCM"
+        File ShareFolder {
+            DestinationPath = $LogPath
+            Type            = 'Directory'
+            Ensure          = 'Present'
+            DependsOn       = "[OpenFirewallPortForSCCM]OpenFirewall"
         }
 
-        File ShareFolder
-        {            
-            DestinationPath = $LogPath     
-            Type = 'Directory'            
-            Ensure = 'Present'
-            DependsOn = "[WaitForConfigurationFile]WaitForPSJoinDomain"
-        }        
-
-        FileReadAccessShare DomainSMBShare
-        {
-            Name = $LogFolder
-            Path = $LogPath
-            Account = $DCComputerAccount,$PSComputerAccount
+        FileReadAccessShare DomainSMBShare {
+            Name      = $LogFolder
+            Path      = $LogPath
             DependsOn = "[File]ShareFolder"
         }
 
         AddUserToLocalAdminGroup AddADUserToLocalAdminGroup {
-            Name = $($Admincreds.UserName)
+            Name       = "cm_svc"
             DomainName = $DomainName
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn  = "[FileReadAccessShare]DomainSMBShare"
         }
 
-        AddUserToLocalAdminGroup AddADComputerToLocalAdminGroup {
-            Name = "$PrimarySiteName"
-            DomainName = $DomainName
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
-        }
-
-        WriteConfigurationFile WriteDPMPFinished
-        {
-            Role = "DPMP"
-            LogPath = $LogPath
+        WriteConfigurationFile WriteDPMPFinished {
+            Role      = "DPMP"
+            LogPath   = $LogPath
             WriteNode = "DPMPFinished"
-            Status = "Passed"
-            Ensure = "Present"
-            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup","[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup"
         }
 
-        WriteStatus Complete
-        {
-            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup","[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
-            Status = "Complete!"
+        WriteStatus Complete {
+            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup"
+            Status    = "Complete!"
         }
     }
 }

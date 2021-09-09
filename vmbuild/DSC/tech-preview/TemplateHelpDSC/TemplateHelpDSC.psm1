@@ -244,7 +244,7 @@ class WriteConfigurationFile
                     StartTime = ''
                     EndTime = ''
                 }
-                ClientJoinDomain = @{
+                DomainMemberJoinDomain = @{
                     Status = 'NotStart'
                     StartTime = ''
                     EndTime = ''
@@ -264,7 +264,7 @@ class WriteConfigurationFile
                     StartTime = ''
                     EndTime = ''
                 }
-                ClientFinished = @{
+                DomainMemberFinished = @{
                     Status = 'NotStart'
                     StartTime = ''
                     EndTime = ''
@@ -1451,7 +1451,7 @@ class OpenFirewallPortForSCCM
             New-NetFirewallRule -DisplayName 'Remote Control(RPC Endpoint Mapper) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM Console"
             New-NetFirewallRule -DisplayName 'Remote Assistance(RDP AND RTC) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For SCCM Console"
         }
-        if($_Role -contains "Client")
+        if($_Role -contains "DomainMember")
         {
             #Client Push Installation
             Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
@@ -1517,7 +1517,7 @@ class InstallFeatureForSCCM
         
         Write-Verbose "Current Role is : $_Role"
 
-        if($_Role -notcontains "Client")
+        if($_Role -notcontains "DomainMember")
         {
             Install-WindowsFeature -Name "Rdc"
         }

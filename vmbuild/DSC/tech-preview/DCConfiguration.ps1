@@ -20,8 +20,8 @@ configuration Configuration
 
     Import-DscResource -ModuleName TemplateHelpDSC
 
-    $LogFolder = "TempLog"
-    $LogPath = "c:\$LogFolder"
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
     $CM = "CMTP"
     $DName = $DomainName.Split(".")[0]
     $PSComputerAccount = "$DName\$PSName$"
@@ -93,7 +93,7 @@ configuration Configuration
         }
         else
         {
-            VerifyComputerJoinDomain WaitForClient
+            VerifyComputerJoinDomain WaitForDomainMember
             {
                 ComputerName = $Clients
                 Ensure = "Present"
@@ -105,7 +105,7 @@ configuration Configuration
                 DestinationPath = $LogPath     
                 Type = 'Directory'            
                 Ensure = 'Present'
-                DependsOn = @("[VerifyComputerJoinDomain]WaitForPS","[VerifyComputerJoinDomain]WaitForDPMP","[VerifyComputerJoinDomain]WaitForClient")
+                DependsOn = @("[VerifyComputerJoinDomain]WaitForPS","[VerifyComputerJoinDomain]WaitForDPMP","[VerifyComputerJoinDomain]WaitForDomainMember")
             }
 
             FileReadAccessShare DomainSMBShare
@@ -116,11 +116,11 @@ configuration Configuration
                 DependsOn = "[File]ShareFolder"
             }
 
-            WriteConfigurationFile WriteClientJoinDomain
+            WriteConfigurationFile WriteDomainMemberJoinDomain
             {
                 Role = "DC"
                 LogPath = $LogPath
-                WriteNode = "ClientJoinDomain"
+                WriteNode = "DomainMemberJoinDomain"
                 Status = "Passed"
                 Ensure = "Present"
                 DependsOn = "[FileReadAccessShare]DomainSMBShare"

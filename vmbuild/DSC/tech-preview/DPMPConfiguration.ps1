@@ -20,8 +20,8 @@ configuration Configuration
     
     Import-DscResource -ModuleName TemplateHelpDSC
 
-    $LogFolder = "TempLog"
-    $LogPath = "c:\$LogFolder"
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
     $DName = $DomainName.Split(".")[0]
     $DCComputerAccount = "$DName\$DCName$"
     $PSComputerAccount = "$DName\$PSName$"

@@ -1,4 +1,8 @@
-Param($DomainFullName,$CM,$CMUser,$DPMPName,$ClientName,$Config,$CurrentRole,$LogFolder,$CSName,$PSName)
+Param($DomainFullName,$CM,$CMUser,$DPMPName,$ClientName,$Config,$CurrentRole,$LogFolder,$CSName,$PSName,$UpdateToLatest=$true,$PushClients=$true)
+
+# Explicit bool conversion since we're triggered from scheduled task
+$UpdateToLatest = [System.Convert]::ToBoolean($UpdateToLatest)
+$PushClients = [System.Convert]::ToBoolean($PushClients)
 
 $CSRole = "CAS"
 $PSRole = "PS1"
@@ -16,11 +20,11 @@ if(!(Test-Path $ProvisionToolPath))
 
 $ConfigurationFile = Join-Path -Path $ProvisionToolPath -ChildPath "$Role.json"
 
-if (Test-Path -Path $ConfigurationFile) 
+if (Test-Path -Path $ConfigurationFile)
 {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-} 
-else 
+}
+else
 {
     if($Config -eq "Standalone")
     {
@@ -52,7 +56,7 @@ else
             }
         }
     }
-    else 
+    else
     {
         if($CurrentRole -eq "CS")
         {
@@ -74,7 +78,7 @@ else
                 }
             }
         }
-        elseif($CurrentRole -eq "PS") 
+        elseif($CurrentRole -eq "PS")
         {
             [hashtable]$Actions = @{
                 WaitingForCASFinsihedInstall = @{
@@ -109,34 +113,44 @@ else
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
 
+function Write-DscStatusSetup {
+    $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
+    $StatusFile = "C:\staging\DSC\DSC_Status.txt"
+    $StatusPrefix | Out-File $StatusFile -Force
+}
+
+function Write-DscStatus {
+    param($status)
+    $StatusPrefix = "Setting up ConfigMgr."
+    $StatusFile = "C:\staging\DSC\DSC_Status.txt"
+    "$StatusPrefix Current Status: $status" | Out-File $StatusFile -Force
+}
+
 if($Config -eq "Standalone")
 {
     #Install CM and Config
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
-
-    . $ScriptFile $DomainFullName $CM $CMUser $Role $ProvisionToolPath
+    . $ScriptFile $DomainFullName $CM $CMUser $Role $ProvisionToolPath $UpdateToLatest
 
     #Install DP
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDP.ps1"
-
     . $ScriptFile $DomainFullName $DPMPName $Role $ProvisionToolPath
 
     #Install MP
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallMP.ps1"
-
     . $ScriptFile $DomainFullName $DPMPName $Role $ProvisionToolPath
 
-    #Install Client
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallClient.ps1"
-
-    . $ScriptFile $DomainFullName $CMUser $ClientName $DPMPName $Role $ProvisionToolPath
+    if ($PushClients) {
+        #Install Client
+        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallClient.ps1"
+        . $ScriptFile $DomainFullName $CMUser $ClientName $DPMPName $Role $ProvisionToolPath
+    }
 }
 else {
     if($CurrentRole -eq "CS")
     {
         #Install CM and Config
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallCSForHierarchy.ps1"
-    
         . $ScriptFile $DomainFullName $CM $CMUser $Role $ProvisionToolPath $LogFolder $PSName $PSRole
 
     }
@@ -144,22 +158,23 @@ else {
     {
         #Install CM and Config
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPSForHierarchy.ps1"
-    
         . $ScriptFile $DomainFullName $CM $CMUser $Role $ProvisionToolPath $CSName $CSRole $LogFolder
-    
+
         #Install DP
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDP.ps1"
-    
         . $ScriptFile $DomainFullName $DPMPName $Role $ProvisionToolPath
-    
+
         #Install MP
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallMP.ps1"
-    
         . $ScriptFile $DomainFullName $DPMPName $Role $ProvisionToolPath
 
-        #Install Client
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallClient.ps1"
-
-        . $ScriptFile $DomainFullName $CMUser $ClientName $DPMPName $Role $ProvisionToolPath
+        if ($PushClients) {
+            #Install Client
+            $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallClient.ps1"
+            . $ScriptFile $DomainFullName $CMUser $ClientName $DPMPName $Role $ProvisionToolPath
+        }
     }
 }
+
+Write-DscStatus "Finished setting up ConfigMgr."
+"Finished!" | Out-File "C:\staging\DSC\ScriptWorkflow.txt" -Force

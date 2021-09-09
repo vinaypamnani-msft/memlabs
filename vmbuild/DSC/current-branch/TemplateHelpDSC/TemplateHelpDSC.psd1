@@ -19,6 +19,8 @@ DscResourcesToExport = @(
     'VerifyComputerJoinDomain',
     'SetDNS',
     'WriteStatus',
+    'WriteFileOnce',
+    'WaitForFileToExist',
     'ChangeSQLServicesAccount',
     'RegisterTaskScheduler',
     'DownloadSCCM',

@@ -20,8 +20,8 @@ configuration Configuration
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName TemplateHelpDSC
 
-    $LogFolder = "TempLog"
-    $LogPath = "c:\$LogFolder"
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
     $DName = $DomainName.Split(".")[0]
     $DCComputerAccount = "$DName\$DCName$"
     $PSComputerAccount = "$DName\$PSName$"
@@ -53,8 +53,8 @@ configuration Configuration
 
         InstallFeatureForSCCM InstallFeature
         {
-            Name = "Client"
-            Role = "Client"
+            Name = "DomainMember"
+            Role = "DomainMember"
             DependsOn = "[SetCustomPagingFile]PagingSettings"
         }
 
@@ -100,8 +100,8 @@ configuration Configuration
 
         OpenFirewallPortForSCCM OpenFirewall
         {
-            Name = "Client"
-            Role = "Client"
+            Name = "DomainMember"
+            Role = "DomainMember"
             DependsOn = "[JoinDomain]JoinDomain"
         }
 
@@ -117,11 +117,11 @@ configuration Configuration
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
         }
 
-        WriteConfigurationFile WriteClientFinished
+        WriteConfigurationFile WriteDomainMemberFinished
         {
-            Role = "Client"
+            Role = "DomainMember"
             LogPath = $LogPath
-            WriteNode = "ClientFinished"
+            WriteNode = "DomainMemberFinished"
             Status = "Passed"
             Ensure = "Present"
             DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup","[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
