@@ -1,0 +1,48 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<RDCMan programVersion="2.83" schemaVersion="3">
+  <file>
+    <credentialsProfiles />
+    <properties>
+      <expanded>True</expanded>
+      <name>template</name>
+    </properties>
+    <group>
+      <properties>
+        <expanded>True</expanded>
+        <name>VMASTEMPLATE</name>
+      </properties>
+      <logonCredentials inherit="None">
+        <profileName scope="Local">Custom</profileName>
+        <userName>TEMPLATECREDENTIALS</userName>
+        <password />
+        <domain>TEMPLATE</domain>
+      </logonCredentials>
+      <localResources inherit="None">
+        <audioRedirection>Client</audioRedirection>
+        <audioRedirectionQuality>Dynamic</audioRedirectionQuality>
+        <audioCaptureRedirection>DoNotRecord</audioCaptureRedirection>
+        <keyboardHook>FullScreenClient</keyboardHook>
+        <redirectClipboard>True</redirectClipboard>
+        <redirectDrives>True</redirectDrives>
+        <redirectDrivesList>
+          <item>C:\</item>
+          <item>D:\</item>
+          <item>E:\</item>
+          <item>Z:\</item>
+        </redirectDrivesList>
+        <redirectPrinters>True</redirectPrinters>
+        <redirectPorts>True</redirectPorts>
+        <redirectSmartCards>True</redirectSmartCards>
+        <redirectPnpDevices>True</redirectPnpDevices>
+      </localResources>
+      <server>
+        <properties>
+          <name>TEMPLATE</name>
+        </properties>
+      </server>
+    </group>
+  </file>
+  <connected />
+  <favorites />
+  <recentlyUsed />
+</RDCMan>
