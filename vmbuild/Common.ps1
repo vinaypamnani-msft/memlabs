@@ -884,10 +884,10 @@ function Test-Configuration {
     $clientsCsv = $virtualMachines.vmName -join ","
     $params = [PSCustomObject]@{
         DomainName         = $configJson.vmOptions.domainName
-        DCName             = $configJson.vmOptions.prefix + ($configJson.virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
-        CSName             = $configJson.vmOptions.prefix + ($configJson.virtualMachines | Where-Object { $_.role -eq "CS" }).vmName
-        PSName             = $configJson.vmOptions.prefix + ($configJson.virtualMachines | Where-Object { $_.role -eq "PS" }).vmName
-        DPMPName           = $configJson.vmOptions.prefix + ($configJson.virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
+        DCName             = ($configJson.virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
+        CSName             = ($configJson.virtualMachines | Where-Object { $_.role -eq "CS" }).vmName
+        PSName             = ($configJson.virtualMachines | Where-Object { $_.role -eq "PS" }).vmName
+        DPMPName           = ($configJson.virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
         DomainMembers      = $clientsCsv
         Scenario           = $scenario
         DHCPScopeId        = $configJson.vmOptions.Network
