@@ -5,23 +5,23 @@
 
 function Write-Log {
     param(
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [object]$Text,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$Warning,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$Failure,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$Success,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$Activity,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$VerboseOnly,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$LogOnly,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$OutputStream,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$HostOnly
     )
 
@@ -106,18 +106,18 @@ function Write-Log {
 
 function Get-File {
     param(
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         $Source,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         $Destination,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         $DisplayName,
-        [Parameter(Mandatory=$false)]
-        [ValidateSet("Downloading","Copying")]
+        [Parameter(Mandatory = $false)]
+        [ValidateSet("Downloading", "Copying")]
         $Action,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$Silent,
-        [Parameter(Mandatory=$false, ParameterSetName="WhatIf")]
+        [Parameter(Mandatory = $false, ParameterSetName = "WhatIf")]
         [switch]$WhatIf
     )
 
@@ -142,7 +142,7 @@ function Get-File {
     }
 
     $HashArguments = @{
-        Source = $Source
+        Source      = $Source
         Destination = $Destination
     }
 
@@ -174,14 +174,14 @@ function New-Directory {
     return $DirectoryPath
 }
 
-function Import-WimFromIso{
+function Import-WimFromIso {
 
     param (
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$IsoPath,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$WimName,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -196,7 +196,8 @@ function Import-WimFromIso{
         $isomount = Mount-DiskImage -ImagePath $IsoPath -PassThru -NoDriveLetter -ErrorAction Stop
         $iso = $isomount.devicepath
 
-    } catch {
+    }
+    catch {
         Write-Log "Import-WimFromIso: Could not mount the ISO!"
         return $null
     }
@@ -209,7 +210,8 @@ function Import-WimFromIso{
         Write-Log "Import-WimFromIso: Error accessing install.wim!" -Failure
         try {
             invoke-removeISOmount -inputObject $isomount
-        } catch {
+        }
+        catch {
             Write-Log "Import-WimFromIso: Attempted to dismount iso - might have failed..." -Failure
         }
         return $null
@@ -220,7 +222,7 @@ function Import-WimFromIso{
         Write-Log "Import-WimFromIso: Purging temp folder at $($Common.TempPath)..."
         Remove-Item -Path "$($Common.TempPath)\$WimName" -Force -ErrorAction SilentlyContinue
         Write-Log "Import-WimFromIso: Purge complete."
-        if($installWimFound){
+        if ($installWimFound) {
             Write-Log "Import-WimFromIso: Copying WIM file to the temp folder..."
             Copy-Item -Path "$iso\sources\install.wim" -Destination $Common.TempPath -Force -ErrorAction Stop -PassThru | Out-Null
             #Change file attribute to normal
@@ -255,17 +257,17 @@ function Invoke-RemoveISOmount ($inputObject) {
     do {
         Dismount-DiskImage -InputObject $inputObject
     }
-    while(Dismount-DiskImage -InputObject $inputObject)
+    while (Dismount-DiskImage -InputObject $inputObject)
     Write-Log "Invoke-RemoveISOmount: Dismount complete"
 }
 
 function New-VhdxFile {
     param (
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$WimName,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$VhdxPath,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -281,7 +283,7 @@ function New-VhdxFile {
         $windowsImage = Get-WindowsImage -ImagePath $wimPath -ErrorVariable Failed | Select-Object ImageName, ImageIndex, ImageDescription
 
         if ($WimName -like "SERVER-*") {
-            $selectedImage = $windowsImage | Where-Object {$_.ImageName -like "*DATACENTER*Desktop*"}
+            $selectedImage = $windowsImage | Where-Object { $_.ImageName -like "*DATACENTER*Desktop*" }
         }
         else {
             $selectedImage = $windowsImage | Out-GridView -Title "Select Image for creating a VHDX file." -OutputMode Single
@@ -318,7 +320,7 @@ function New-VhdxFile {
     # Prepare filesToInject
     $filesToInject = @()
     $items = Get-ChildItem -Directory -Path $Common.InjectPath -ErrorAction SilentlyContinue
-    foreach($item in $items) {
+    foreach ($item in $items) {
         $filesToInject += $item.FullName
     }
 
@@ -347,23 +349,23 @@ function New-VhdxFile {
 
 function New-VirtualMachine {
     param (
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$VmName,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$VmPath,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$SourceDiskPath,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$Memory,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [int]$Processors,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [int]$Generation,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$SwitchName,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -410,7 +412,7 @@ function New-VirtualMachine {
 
     # Create new VM
     try {
-        $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory/1) -SwitchName $SwitchName -ErrorAction Stop
+        $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
     }
     catch {
         Write-Log "New-VirtualMachine: $VmName`: New-VM failed for $VmName. $_"
@@ -433,10 +435,10 @@ function New-VirtualMachine {
 
     Write-Log "New-VirtualMachine: $VmName`: Changing boot order of $VmName"
     $f = Get-VM $VmName | Get-VMFirmware
-    $f_file = $f.BootOrder | Where-Object{$_.BootType -eq "File" }
-    $f_net = $f.BootOrder | Where-Object{$_.BootType -eq "Network" }
-    $f_hd = $f.BootOrder | Where-Object{$_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive]}
-    $f_dvd = $f.BootOrder | Where-Object{$_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.DvdDrive]}
+    $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
+    $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
+    $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
+    $f_dvd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.DvdDrive] }
 
     # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
     if ($null -ne $f_file) {
@@ -455,17 +457,17 @@ function New-VirtualMachine {
 function Wait-ForVm {
 
     param (
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$VmName,
-        [Parameter(Mandatory=$true, ParameterSetName="VmState")]
+        [Parameter(Mandatory = $true, ParameterSetName = "VmState")]
         [string]$VmState,
-        [Parameter(Mandatory=$false, ParameterSetName="OobeComplete")]
+        [Parameter(Mandatory = $false, ParameterSetName = "OobeComplete")]
         [switch]$OobeComplete,
-        [Parameter(Mandatory=$false, ParameterSetName="VmTestPath")]
+        [Parameter(Mandatory = $false, ParameterSetName = "VmTestPath")]
         [string]$PathToVerify,
-        [Parameter(Mandatory=$false)]
-        [int]$TimeoutMinutes=10,
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutMinutes = 10,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -485,7 +487,7 @@ function Wait-ForVm {
         do {
             try {
                 $vmTest = Get-VM -Name $VmName
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 $ready = $vmTest.State -eq $VmState
                 Start-Sleep -Seconds 5
             }
@@ -507,18 +509,18 @@ function Wait-ForVm {
 
             # Wait until OOBE is ready
             $status = "Waiting for OOBE to complete. "
-            if ($null -ne  $out.ScriptBlockOutput -and -not $readyOobe) {
+            if ($null -ne $out.ScriptBlockOutput -and -not $readyOobe) {
                 Write-Log "Wait-ForVm: $VmName`: OOBE State is $($out.ScriptBlockOutput)"
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
             }
 
-            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             Start-Sleep -Seconds 5
 
             # Wait until \\localhost\c$ is accessible
             if ($readyOobe) {
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 15
                 $out = Invoke-VmCommand -VmName $VmName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "Wait-ForVm: $VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
@@ -528,7 +530,7 @@ function Wait-ForVm {
             # OOBE and SMB ready, buffer wait to ensure we're at login screen. Bad things happen if you reboot the machine before it really finished OOBE.
             if ($readySmb) {
                 Write-Log "Wait-ForVm: $VmName`: OOBE complete, and SMB available. Waiting 30 seconds before continuing."
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete, and SMB available. Waiting 30 seconds before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete, and SMB available. Waiting 30 seconds before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 30
                 $ready = $true
             }
@@ -539,7 +541,7 @@ function Wait-ForVm {
     if ($PathToVerify) {
         Write-Log "Wait-ForVm: $VmName`: Waiting for $PathToVerify to be present..."
         do {
-            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for $PathToVerify to be present" -PercentComplete ($stopWatch.ElapsedMilliseconds/$timespan.TotalMilliseconds * 100)
+            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for $PathToVerify to be present" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             Start-Sleep -Seconds 5
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
@@ -564,23 +566,23 @@ function Wait-ForVm {
 
 function Invoke-VmCommand {
     param (
-        [Parameter(Mandatory=$true, HelpMessage="VM Name")]
+        [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
         [string]$VmName,
-        [Parameter(Mandatory=$true, HelpMessage="Script Block to execute")]
+        [Parameter(Mandatory = $true, HelpMessage = "Script Block to execute")]
         [ScriptBlock]$ScriptBlock,
-        [Parameter(Mandatory=$false, HelpMessage="Argument List to supply to ScriptBlock")]
+        [Parameter(Mandatory = $false, HelpMessage = "Argument List to supply to ScriptBlock")]
         [string[]]$ArgumentList,
-        [Parameter(Mandatory=$false, HelpMessage="Display Name of the script for log/console")]
+        [Parameter(Mandatory = $false, HelpMessage = "Display Name of the script for log/console")]
         [string]$DisplayName,
-        [Parameter(Mandatory=$false, HelpMessage="Seconds to wait before running ScriptBlock")]
+        [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait before running ScriptBlock")]
         [int]$SecondsToWaitBefore,
-        [Parameter(Mandatory=$false, HelpMessage="Seconds to wait after running ScriptBlock")]
+        [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait after running ScriptBlock")]
         [int]$SecondsToWaitAfter,
-        [Parameter(Mandatory=$false, HelpMessage="Suppress log entries. Useful when waiting for VM to be ready to run commands.")]
+        [Parameter(Mandatory = $false, HelpMessage = "Suppress log entries. Useful when waiting for VM to be ready to run commands.")]
         [switch]$SuppressLog,
-        [Parameter(Mandatory=$false, HelpMessage="Domain Name to use for creating domain creds")]
-        [string]$VmDomainName="WORKGROUP",
-        [Parameter(Mandatory=$false, HelpMessage="What If")]
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
+        [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
 
@@ -608,19 +610,19 @@ function Invoke-VmCommand {
 
     # Create return object
     $return = [PSCustomObject]@{
-		CommandResult 	    = $false
-        ScriptBlockFailed   = $false
-		ScriptBlockOutput	= $null
-	}
+        CommandResult     = $false
+        ScriptBlockFailed = $false
+        ScriptBlockOutput	= $null
+    }
 
     # Prepare args
     $HashArguments = @{
         ScriptBlock = $ScriptBlock
     }
 
-    if ($ArgumentList){
-		$HashArguments.Add("ArgumentList", $ArgumentList)
-	}
+    if ($ArgumentList) {
+        $HashArguments.Add("ArgumentList", $ArgumentList)
+    }
 
     # Wait before
     if ($SecondsToWaitBefore) { Start-Sleep -Seconds $SecondsToWaitBefore }
@@ -659,10 +661,10 @@ function Invoke-VmCommand {
 $global:ps_cache = @{}
 function Get-VmSession {
     param (
-        [Parameter(Mandatory=$true, HelpMessage="VM Name")]
+        [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
         [string]$VmName,
-        [Parameter(Mandatory=$false, HelpMessage="Domain Name for creating creds.")]
-        [string]$DomainName="WORKGROUP"
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name for creating creds.")]
+        [string]$DomainName = "WORKGROUP"
     )
 
     # Retrieve session from cache
@@ -694,12 +696,12 @@ function Get-VmSession {
 
 function Get-VmSession2 {
     param (
-        [Parameter(Mandatory=$true, ParameterSetName="LocalCreds", HelpMessage="VM Name")]
-        [Parameter(Mandatory=$true, ParameterSetName="DomainCreds", HelpMessage="VM Name")]
+        [Parameter(Mandatory = $true, ParameterSetName = "LocalCreds", HelpMessage = "VM Name")]
+        [Parameter(Mandatory = $true, ParameterSetName = "DomainCreds", HelpMessage = "VM Name")]
         [string]$VmName,
-        [Parameter(Mandatory=$true, ParameterSetName="DomainCreds", HelpMessage="Domain Name for creating creds.")]
+        [Parameter(Mandatory = $true, ParameterSetName = "DomainCreds", HelpMessage = "Domain Name for creating creds.")]
         [string]$DomainName,
-        [Parameter(Mandatory=$false, ParameterSetName="DomainCreds", HelpMessage="If domain creds failed, return local creds.")]
+        [Parameter(Mandatory = $false, ParameterSetName = "DomainCreds", HelpMessage = "If domain creds failed, return local creds.")]
         [switch]$FallbackLocal
     )
 
@@ -773,7 +775,7 @@ function Get-StorageConfig {
                 $updateList = $Common.ImageList.UpdateFromStorage
             }
 
-            if($updateList) {
+            if ($updateList) {
                 Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent
                 $Common.ImageList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             }
@@ -807,7 +809,7 @@ function Get-LocalAdmin {
 
     if ($updateFile) {
         try {
-            $item = $Common.ImageList.Files | Where-Object {$_.id -eq $username}
+            $item = $Common.ImageList.Files | Where-Object { $_.id -eq $username }
             $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)"
             Get-File -Source $fileUrl -Destination $destination -DisplayName "Obtaining local admin creds" -Action "Downloading" -Silent
         }
@@ -828,30 +830,112 @@ function Get-LocalAdmin {
     }
 }
 
+function Test-Configuration {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Configuration File")]
+        [string]$FilePath
+    )
+
+    $return = [PSCustomObject]@{
+        Valid        = $false
+        DeployConfig = $null
+        Message      = $null
+    }
+
+    $configJson = Get-Content $FilePath -Force | ConvertFrom-Json
+
+    $containsDC = $configJson.virtualMachines.role.Contains("DC")
+    $containsCAS = $configJson.virtualMachines.role.Contains("CS")
+
+    # config must contain DC role, or existingDCName
+    if (-not $containsDC) {
+        $existingDC = $configJson.vmOptions.existingDCName
+        if (-not $existingDC) {
+            $return.Message = "DC role not specified in the configuration file and vmOptions.existingDCName not present."
+            return $return
+        }
+    }
+
+    # tech preview and CAS
+    if ($containsCAS -and $configJson.cmOptions.version -eq "tech-preview") {
+        $return.Message = "Tech-Preview specified in configuration along with CAS Role; Tech Preview doesn't support CAS."
+        return $return
+    }
+
+    # hierarchy
+    if ($containsCAS) {
+        $scenario = "Hierarchy"
+    }
+    else {
+        $scenario = "Standalone"
+    }
+
+    # standalone primary
+
+
+    # everything is good, create deployJson
+
+    # add prefix to vm names
+    $virtualMachines = $configJson.virtualMachines
+    $virtualMachines | foreach-object {$_.vmName = $configJson.vmOptions.prefix + $_.vmName}
+
+    # create params object
+    $network = $configJson.vmOptions.network.Substring(0, $configJson.vmOptions.network.LastIndexOf("."))
+    $clientsCsv = $virtualMachines.vmName -join ","
+    $params = [PSCustomObject]@{
+        DomainName         = $configJson.vmOptions.domainName
+        DCName             = $configJson.vmOptions.prefix + ($configJson.virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
+        CSName             = $configJson.vmOptions.prefix + ($configJson.virtualMachines | Where-Object { $_.role -eq "CS" }).vmName
+        PSName             = $configJson.vmOptions.prefix + ($configJson.virtualMachines | Where-Object { $_.role -eq "PS" }).vmName
+        DPMPName           = $configJson.vmOptions.prefix + ($configJson.virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
+        DomainMembers      = $clientsCsv
+        Scenario           = $scenario
+        DHCPScopeId        = $configJson.vmOptions.Network
+        DHCPDNSAddress     = $network + ".1"
+        DHCPDefaultGateway = $network + ".200"
+        DHCPScopeStart     = $network + ".20"
+        DHCPScopeEnd       = $network + ".199"
+        ThisMachineName    = $null
+        ThisMachineRole    = $null
+    }
+
+    $deploy = [PSCustomObject]@{
+        cmOptions       = $configJson.cmOptions
+        vmOptions       = $configJson.vmOptions
+        virtualMachines = $virtualMachines
+        parameters      = $params
+    }
+
+    $return.Valid = $true
+    $return.DeployConfig = $deploy
+
+    return $return
+}
+
 ############################
 ### Required Directories ###
 ############################
 
 $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "zStaging")                        # Path where staged files go
-$inPath  = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "zInput")                          # Path where input files are found
-$storagePath  = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")                 # Path for downloaded files
+$inPath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "zInput")                          # Path where input files are found
+$storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")                 # Path for downloaded files
 
 $global:Common = [PSCustomObject]@{
-	TempPath		    = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "zTemp")            # Path for temporary files
-    ConfigPath		    = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
-    AzureFilesPath      = $storagePath                                                              # Path for downloaded files
-    GoldImagePath       = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
-    IsoPath             = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
-    AnswerFilePath      = New-Directory -DirectoryPath (Join-Path $inPath "unattend")               # Path for Answer files
-    InjectPath          = New-Directory -DirectoryPath (Join-Path $inPath "filesToInject")          # Path to files to inject in VHDX
-    WimagePath          = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
-    BaseImagePath       = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
-    StagingVMPath       = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
-    LogPath             = Join-Path $PSScriptRoot "vmbuild.log"
-    VerboseLog          = $false
-    FatalError          = $null
-    ImageList           = $null
-    LocalAdmin          = $null
+    TempPath       = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "zTemp")            # Path for temporary files
+    ConfigPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
+    AzureFilesPath = $storagePath                                                              # Path for downloaded files
+    GoldImagePath  = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
+    IsoPath        = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
+    AnswerFilePath = New-Directory -DirectoryPath (Join-Path $inPath "unattend")               # Path for Answer files
+    InjectPath     = New-Directory -DirectoryPath (Join-Path $inPath "filesToInject")          # Path to files to inject in VHDX
+    WimagePath     = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
+    BaseImagePath  = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
+    StagingVMPath  = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
+    LogPath        = Join-Path $PSScriptRoot "vmbuild.log"
+    VerboseLog     = $false
+    FatalError     = $null
+    ImageList      = $null
+    LocalAdmin     = $null
 }
 
 $global:StorageConfig = [PSCustomObject]@{
