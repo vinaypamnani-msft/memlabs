@@ -117,8 +117,7 @@ $VM_Create = {
     # Create VM
     $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -WhatIf:$using:WhatIf
     if (-not $created) {
-        Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Use ForceNew switch if it already exists." -Warning
-        Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Use ForceNew switch if it already exists. Check vmbuild.log." -Warning -OutputStream -HostOnly
+        Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild.log." -Failure -OutputStream -HostOnly
         return
     }
 
@@ -169,11 +168,11 @@ $VM_Create = {
         $sqlFiles = $Common.ImageList.Files | Where-Object { $_.id -eq $currentItem.sqlVersion }
 
         # SQL Iso Path
-        $sqlIso = $sqlFiles | Where-Object {$_.filename.EndsWith(".iso")}
+        $sqlIso = $sqlFiles | Where-Object { $_.filename.EndsWith(".iso") }
         $sqlIsoPath = Join-Path $using:Common.AzureFilesPath $sqlIso.filename
 
         # SQL CU Path and FileName
-        $sqlCU = $sqlFiles | Where-Object {$_.filename.EndsWith(".exe")}
+        $sqlCU = $sqlFiles | Where-Object { $_.filename.EndsWith(".exe") }
         $sqlCUPath = Join-Path $using:Common.AzureFilesPath $sqlCU.filename
         $sqlCUFileName = Split-Path $sqlCUPath -Leaf
 
@@ -185,7 +184,7 @@ $VM_Create = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force } -WhatIf:$WhatIf
 
         # Copy files from DVD
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { $cd = Get-Volume | Where-Object {$_.DriveType -eq "CD-ROM"}; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false } -WhatIf:$WhatIf
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false } -WhatIf:$WhatIf
         if ($result.ScriptBlockFailed) {
             Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
@@ -382,6 +381,18 @@ if (-not $switch) {
 
 # CM Version
 $cmVersion = $deployConfig.cmOptions.version
+
+# Remove existing jobs
+$existingJobs = Get-Job
+if ($existingJobs) {
+    Write-Log "Main: Stopping and removing existing jobs." -Activity
+    foreach ($job in $existingJobs) {
+        Write-Log "Main: Removing job $($job.Id) with name $($job.Name)"
+        $job | Stop-Job -ErrorAction SilentlyContinue
+        $job | Remove-Job -ErrorAction SilentlyContinue
+    }
+}
+
 
 Write-Log "Main: Creating Virtual Machines." -Activity
 
