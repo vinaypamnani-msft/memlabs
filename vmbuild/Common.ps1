@@ -127,6 +127,7 @@ function Get-File {
     # Add storage token, if source is like Storage URL
     if ($Source -and $Source -like "$($StorageConfig.StorageLocation)*") {
         $Source = "$Source`?$($StorageConfig.StorageToken)"
+        $sourceDisplay = Split-Path $sourceDisplay -Leaf
     }
 
     # What If
@@ -152,6 +153,12 @@ function Get-File {
     if (-not $Silent) {
         Write-Log "Get-File: $Action $sourceDisplay using BITS to $Destination... "
         if ($DisplayName) { Write-Log "Get-File: $DisplayName" -LogOnly }
+    }
+
+    # Create destination directory if it doesn't exist
+    $destinationDirectory = Split-Path $Destination -Parent
+    if (-not (Test-Path $destinationDirectory)){
+        New-Item -Path $destinationDirectory -ItemType Directory -Force | Out-Null
     }
 
     try {
