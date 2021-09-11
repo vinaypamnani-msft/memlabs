@@ -452,10 +452,10 @@ function New-VirtualMachine {
 
     Write-Log "New-VirtualMachine: $VmName`: Creating Virtual Machine"
 
-    # Create a Switch
-    if (-not (Get-VMSwitch -Name $SwitchName  -ErrorAction SilentlyContinue)) {
-        Write-Log "New-VirtualMachine: $VmName`: Creating Virtual Machine Switch $SwitchName"
-        New-VMSwitch -Name $SwitchName -SwitchType Internal | Out-Null
+    # Test if source file exists
+    if (-not (Test-Path $SourceDiskPath)) {
+        Write-Log "New-VirtualMachine: $VmName`: $SourceDiskPath not found. Cannot create new VM."
+        return $false
     }
 
     # VM Exists
