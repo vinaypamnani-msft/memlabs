@@ -240,19 +240,13 @@
             DependsOn    = "[InstallCA]InstallCA"
         }
 
-        VerifyComputerJoinDomain WaitForDomainMember {
-            ComputerName = $DomainMembers
-            Ensure       = "Present"
-            DependsOn    = "[InstallCA]InstallCA"
-        }
-
         if ($Configuration -eq 'Standalone') {
 
             File ShareFolder {
                 DestinationPath = $LogPath
                 Type            = 'Directory'
                 Ensure          = 'Present'
-                DependsOn       = @("[VerifyComputerJoinDomain]WaitForPS", "[VerifyComputerJoinDomain]WaitForDPMP", "[VerifyComputerJoinDomain]WaitForDomainMember")
+                DependsOn       = @("[VerifyComputerJoinDomain]WaitForPS", "[VerifyComputerJoinDomain]WaitForDPMP")
             }
 
             FileReadAccessShare DomainSMBShare {
@@ -302,7 +296,7 @@
                 DestinationPath = $LogPath
                 Type            = 'Directory'
                 Ensure          = 'Present'
-                DependsOn       = @("[VerifyComputerJoinDomain]WaitForCS", "[VerifyComputerJoinDomain]WaitForPS", "[VerifyComputerJoinDomain]WaitForDPMP", "[VerifyComputerJoinDomain]WaitForDomainMember")
+                DependsOn       = @("[VerifyComputerJoinDomain]WaitForCS", "[VerifyComputerJoinDomain]WaitForPS", "[VerifyComputerJoinDomain]WaitForDPMP")
             }
 
             FileReadAccessShare DomainSMBShare {
@@ -368,15 +362,6 @@
             Role      = "DC"
             LogPath   = $LogPath
             WriteNode = "DPMPJoinDomain"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
-        }
-
-        WriteConfigurationFile WriteDomainMemberJoinDomain {
-            Role      = "DC"
-            LogPath   = $LogPath
-            WriteNode = "DomainMemberJoinDomain"
             Status    = "Passed"
             Ensure    = "Present"
             DependsOn = "[FileReadAccessShare]DomainSMBShare"

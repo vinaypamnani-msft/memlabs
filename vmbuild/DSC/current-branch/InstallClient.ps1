@@ -100,6 +100,13 @@ $machinelist = (get-cmdevice -CollectionName "all systems").Name
 
 foreach($client in $ClientNameList)
 {
+    # Don't wait for client to appear in collection if it's not online
+    $testClient = Test-NetConnection -ComputerName $client -ErrorAction SilentlyContinue
+    if (-not $testClient.PingSucceeded){
+        "[$(Get-Date -format HH:mm:ss)] " + $client + " is not online. Skipping." | Out-File -Append $logpath
+        continue
+    }
+
     while($machinelist -notcontains $client)
     {
         Invoke-CMDeviceCollectionUpdate -Name "all systems"
