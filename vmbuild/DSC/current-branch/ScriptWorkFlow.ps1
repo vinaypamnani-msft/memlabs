@@ -1,24 +1,43 @@
-Param($DomainFullName,$CM,$CMUser,$DPMPName,$ClientName,$Config,$CurrentRole,$LogFolder,$CSName,$PSName,$UpdateToLatest=$true,$PushClients=$true)
+Param($ConfigFilePath, $LogFolder)
 
-# Explicit bool conversion since we're triggered from scheduled task
-$UpdateToLatest = [System.Convert]::ToBoolean($UpdateToLatest)
-$PushClients = [System.Convert]::ToBoolean($PushClients)
+#Param($DomainFullName,$CM,$CMUser,$DPMPName,$ClientName,$Config,$CurrentRole,$LogFolder,$CSName,$PSName)
+#ScriptArgument = "$DomainName $CM $DName\admin $DPMPName $Clients $Configuration $CurrentRole $LogFolder $CSName $PSName"
 
-$CSRole = "CAS"
-$PSRole = "PS1"
-
-$Role = $PSRole
-if($CurrentRole -eq "CS")
-{
-    $Role = $CSRole
+function Write-DscStatusSetup {
+    $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
+    $StatusFile = "C:\staging\DSC\DSC_Status.txt"
+    $StatusPrefix | Out-File $StatusFile -Force
 }
+
+function Write-DscStatus {
+    param($status)
+    $StatusPrefix = "Setting up ConfigMgr."
+    $StatusFile = "C:\staging\DSC\DSC_Status.txt"
+    "$StatusPrefix Current Status: $status" | Out-File $StatusFile -Force
+}
+
+$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
+$Config = $deployConfig.parameters.Scenario
+$CurrentRole = $deployConfig.parameters.ThisMachineRole
+
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+
+if ($ThisVM.siteCode) {
+    $SiteCode = $ThisVM.siteCode
+}
+else {
+    Write-DscStatus "SiteCode not found."
+    return
+}
+
 $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
 if(!(Test-Path $ProvisionToolPath))
 {
     New-Item $ProvisionToolPath -ItemType directory | Out-Null
 }
 
-$ConfigurationFile = Join-Path -Path $ProvisionToolPath -ChildPath "$Role.json"
+$ConfigurationFile = Join-Path -Path $ProvisionToolPath -ChildPath "$SiteCode.json"
 
 if (Test-Path -Path $ConfigurationFile)
 {
@@ -113,65 +132,51 @@ else
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
 
-function Write-DscStatusSetup {
-    $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
-    $StatusFile = "C:\staging\DSC\DSC_Status.txt"
-    $StatusPrefix | Out-File $StatusFile -Force
-}
-
-function Write-DscStatus {
-    param($status)
-    $StatusPrefix = "Setting up ConfigMgr."
-    $StatusFile = "C:\staging\DSC\DSC_Status.txt"
-    "$StatusPrefix Current Status: $status" | Out-File $StatusFile -Force
-}
-
 if($Config -eq "Standalone")
 {
     #Install CM and Config
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
-    . $ScriptFile $DomainFullName $CM $CMUser $Role $ProvisionToolPath $UpdateToLatest
+    . $ScriptFile $ConfigFilePath $ProvisionToolPath
 
     #Install DP
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDP.ps1"
-    . $ScriptFile $DomainFullName $DPMPName $Role $ProvisionToolPath
+    . $ScriptFile $ConfigFilePath $ProvisionToolPath
 
     #Install MP
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallMP.ps1"
-    . $ScriptFile $DomainFullName $DPMPName $Role $ProvisionToolPath
+    . $ScriptFile $ConfigFilePath $ProvisionToolPath
 
-    if ($PushClients) {
-        #Install Client
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallClient.ps1"
-        . $ScriptFile $DomainFullName $CMUser $ClientName $DPMPName $Role $ProvisionToolPath
-    }
+    #Install Client
+    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallClient.ps1"
+    . $ScriptFile $ConfigFilePath $ProvisionToolPath
+
 }
 else {
     if($CurrentRole -eq "CS")
     {
         #Install CM and Config
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallCSForHierarchy.ps1"
-        . $ScriptFile $DomainFullName $CM $CMUser $Role $ProvisionToolPath $LogFolder $PSName $PSRole
+        . $ScriptFile $DomainFullName $CM $CMUser $SiteCode $ProvisionToolPath $LogFolder $PSName $PSRole
 
     }
     elseif($CurrentRole -eq "PS")
     {
         #Install CM and Config
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPSForHierarchy.ps1"
-        . $ScriptFile $DomainFullName $CM $CMUser $Role $ProvisionToolPath $CSName $CSRole $LogFolder
+        . $ScriptFile $DomainFullName $CM $CMUser $SiteCode $ProvisionToolPath $CSName $CSRole $LogFolder
 
         #Install DP
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDP.ps1"
-        . $ScriptFile $DomainFullName $DPMPName $Role $ProvisionToolPath
+        . $ScriptFile $DomainFullName $DPMPName $SiteCode $ProvisionToolPath
 
         #Install MP
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallMP.ps1"
-        . $ScriptFile $DomainFullName $DPMPName $Role $ProvisionToolPath
+        . $ScriptFile $DomainFullName $DPMPName $SiteCode $ProvisionToolPath
 
         if ($PushClients) {
             #Install Client
             $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallClient.ps1"
-            . $ScriptFile $DomainFullName $CMUser $ClientName $DPMPName $Role $ProvisionToolPath
+            . $ScriptFile $DomainFullName $CMUser $ClientName $DPMPName $SiteCode $ProvisionToolPath
         }
     }
 }

@@ -1,9 +1,34 @@
-Param($DomainFullName,$CM,$CMUser,$Role,$ProvisionToolPath,$UpdateToLatest=$true)
+Param($ConfigFilePath, $ProvisionToolPath)
+
+$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
+$Config = $deployConfig.parameters.Scenario
+$CurrentRole = $deployConfig.parameters.ThisMachineRole
+$DomainFullName = $deployConfig.parameters.domainName
+$DName = $DomainFullName.Split(".")[0]
+$CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+$CMUser = "$DName\admin"
+$DPMPName = $deployConfig.parameters.DPMPName
+$ClientName = $deployConfig.parameters.DomainMembers
+$CSName = $deployConfig.parameters.CSName
+$PSName = $deployConfig.parameters.PSName
+
+$UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 
 $SMSInstallDir="C:\Program Files\Microsoft Configuration Manager"
 
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+
+if ($ThisVM.cmInstallDir) {
+    $SMSInstallDir = $ThisVM.cmInstallDir
+}
+
+if ($ThisVM.siteCode) {
+    $SiteCode = $ThisVM.siteCode
+}
+
 $logpath = $ProvisionToolPath+"\InstallSCCMlog.txt"
-$ConfigurationFile = Join-Path -Path $ProvisionToolPath -ChildPath "$Role.json"
+$ConfigurationFile = Join-Path -Path $ProvisionToolPath -ChildPath "$SiteCode.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
 $Configuration.InstallSCCM.Status = 'Running'
@@ -74,7 +99,7 @@ $sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$i
 $cmini = $cmini.Replace('%InstallDir%',$SMSInstallDir)
 $cmini = $cmini.Replace('%MachineFQDN%',"$env:computername.$DomainFullName")
 $cmini = $cmini.Replace('%SQLMachineFQDN%',"$env:computername.$DomainFullName")
-$cmini = $cmini.Replace('%Role%',$Role)
+$cmini = $cmini.Replace('%Role%',$SiteCode)
 $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
 $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
 $cmini = $cmini.Replace('%CM%',$CM)
@@ -113,16 +138,15 @@ $SiteCode =  Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identific
 $ProviderMachineName = $env:COMPUTERNAME+"."+$DomainFullName # SMS Provider machine name
 
 # Customizations
-$initParams = @{}
-if($null -eq $ENV:SMS_ADMIN_UI_PATH)
-{
-    $ENV:SMS_ADMIN_UI_PATH = "C:\Program Files (x86)\Microsoft Configuration Manager\AdminConsole\bin\i386"
-}
-
+$key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+$subKey =  $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+$uiInstallPath = $subKey.GetValue("UI Installation Directory")
+$modulePath = $uiInstallPath+"bin\ConfigurationManager.psd1"
 # Import the ConfigurationManager.psd1 module
-if($null -eq (Get-Module ConfigurationManager)) {
-    Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1" @initParams
+if((Get-Module ConfigurationManager) -eq $null) {
+    Import-Module $modulePath
 }
+$initParams = @{}
 
 # Connect to the site's drive if it is not already present
 "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Setting PS Drive..." | Out-File -Append $logpath

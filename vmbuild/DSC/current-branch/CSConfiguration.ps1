@@ -1,23 +1,7 @@
 ﻿configuration CSConfiguration
 {
-   param
-   (
-        [Parameter(Mandatory)]
-        [String]$DomainName,
-        [Parameter(Mandatory)]
-        [String]$DCName,
-        [Parameter(Mandatory)]
-        [String]$DPMPName,
-        [Parameter(Mandatory)]
-        [String]$CSName,
-        [Parameter(Mandatory)]
-        [String]$PSName,
-        [Parameter(Mandatory)]
-        [System.Array]$ClientName,
-        [Parameter(Mandatory)]
-        [String]$Configuration,
-        [Parameter(Mandatory)]
-        [String]$DNSIPAddress,
+    param
+    (
         [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
@@ -40,145 +24,127 @@
 
     Node LOCALHOST
     {
-        LocalConfigurationManager
-        {
-            ConfigurationMode = 'ApplyOnly'
+        LocalConfigurationManager {
+            ConfigurationMode  = 'ApplyOnly'
             RebootNodeIfNeeded = $true
         }
 
-        Computer NewName
-        {
-            Name          = $CSName
+        Computer NewName {
+            Name = $CSName
         }
 
-        SetCustomPagingFile PagingSettings
-        {
-            DependsOn = "[Computer]NewName"
+        SetCustomPagingFile PagingSettings {
+            DependsOn   = "[Computer]NewName"
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
         }
 
-        AddBuiltinPermission AddSQLPermission
-        {
-            Ensure = "Present"
+        AddBuiltinPermission AddSQLPermission {
+            Ensure    = "Present"
             DependsOn = "[SetCustomPagingFile]PagingSettings"
         }
 
-        InstallFeatureForSCCM InstallFeature
-        {
-            NAME = "CS"
-            Role = "Site Server"
+        InstallFeatureForSCCM InstallFeature {
+            NAME      = "CS"
+            Role      = "Site Server"
             DependsOn = "[AddBuiltinPermission]AddSQLPermission"
         }
 
-        InstallADK ADKInstall
-        {
-            ADKPath = "C:\adksetup.exe"
+        InstallADK ADKInstall {
+            ADKPath      = "C:\adksetup.exe"
             ADKWinPEPath = "c:\adksetupwinpe.exe"
-            Ensure = "Present"
-            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
+            Ensure       = "Present"
+            DependsOn    = "[InstallFeatureForSCCM]InstallFeature"
         }
 
-        DownloadSCCM DownLoadSCCM
-        {
-            CM = $CM
-            Ensure = "Present"
+        DownloadSCCM DownLoadSCCM {
+            CM        = $CM
+            Ensure    = "Present"
             DependsOn = "[InstallADK]ADKInstall"
         }
 
-        SetDNS DnsServerAddress
-        {
+        SetDNS DnsServerAddress {
             DNSIPAddress = $DNSIPAddress
-            Ensure = "Present"
-            DependsOn = "[DownloadSCCM]DownLoadSCCM"
+            Ensure       = "Present"
+            DependsOn    = "[DownloadSCCM]DownLoadSCCM"
         }
 
-        WaitForDomainReady WaitForDomain
-        {
-            Ensure = "Present"
+        WaitForDomainReady WaitForDomain {
+            Ensure     = "Present"
             DomainName = $DomainName
             DCName     = $DCName
-            DependsOn = "[SetDNS]DnsServerAddress"
+            DependsOn  = "[SetDNS]DnsServerAddress"
         }
 
-        JoinDomain JoinDomain
-        {
+        JoinDomain JoinDomain {
             DomainName = $DomainName
             Credential = $DomainCreds
-            DependsOn = "[WaitForDomainReady]WaitForDomain"
+            DependsOn  = "[WaitForDomainReady]WaitForDomain"
         }
 
-        File ShareFolder
-        {
+        File ShareFolder {
             DestinationPath = $LogPath
-            Type = 'Directory'
-            Ensure = 'Present'
-            DependsOn = "[JoinDomain]JoinDomain"
+            Type            = 'Directory'
+            Ensure          = 'Present'
+            DependsOn       = "[JoinDomain]JoinDomain"
         }
 
-        WaitForConfigurationFile WaitPSJoinDomain
-        {
-            Role = "DC"
+        WaitForConfigurationFile WaitPSJoinDomain {
+            Role        = "DC"
             MachineName = $DCName
-            LogFolder = $LogFolder
-            ReadNode = "PSJoinDomain"
-            Ensure = "Present"
-            DependsOn = "[File]ShareFolder"
+            LogFolder   = $LogFolder
+            ReadNode    = "PSJoinDomain"
+            Ensure      = "Present"
+            DependsOn   = "[File]ShareFolder"
         }
 
-        FileReadAccessShare DomainSMBShare
-        {
-            Name = $LogFolder
-            Path = $LogPath
+        FileReadAccessShare DomainSMBShare {
+            Name      = $LogFolder
+            Path      = $LogPath
             DependsOn = "[WaitForConfigurationFile]WaitPSJoinDomain"
         }
 
-        OpenFirewallPortForSCCM OpenFirewall
-        {
-            Name = "CS"
-            Role = "Site Server"
+        OpenFirewallPortForSCCM OpenFirewall {
+            Name      = "CS"
+            Role      = "Site Server"
             DependsOn = "[JoinDomain]JoinDomain"
         }
 
-        WaitForConfigurationFile DelegateControl
-        {
-            Role = "DC"
+        WaitForConfigurationFile DelegateControl {
+            Role        = "DC"
             MachineName = $DCName
-            LogFolder = $LogFolder
-            ReadNode = "DelegateControl"
-            Ensure = "Present"
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            LogFolder   = $LogFolder
+            ReadNode    = "DelegateControl"
+            Ensure      = "Present"
+            DependsOn   = "[OpenFirewallPortForSCCM]OpenFirewall"
         }
 
-        ChangeSQLServicesAccount ChangeToLocalSystem
-        {
+        ChangeSQLServicesAccount ChangeToLocalSystem {
             SQLInstanceName = "MSSQLSERVER"
-            Ensure = "Present"
-            DependsOn = "[WaitForConfigurationFile]DelegateControl"
+            Ensure          = "Present"
+            DependsOn       = "[WaitForConfigurationFile]DelegateControl"
         }
 
-        FileReadAccessShare CMSourceSMBShare
-        {
-            Name = $CM
-            Path = "c:\$CM"
+        FileReadAccessShare CMSourceSMBShare {
+            Name      = $CM
+            Path      = "c:\$CM"
             DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
         }
 
         AddUserToLocalAdminGroup AddADComputerToLocalAdminGroup {
-            Name = "$PrimarySiteName"
+            Name       = "$PrimarySiteName"
             DomainName = $DomainName
-            DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
+            DependsOn  = "[FileReadAccessShare]CMSourceSMBShare"
         }
 
-        RegisterTaskScheduler InstallAndUpdateSCCM
-        {
-            TaskName = "ScriptWorkFlow"
-            ScriptName = "ScriptWorkFlow.ps1"
-            ScriptPath = $PSScriptRoot
+        RegisterTaskScheduler InstallAndUpdateSCCM {
+            TaskName       = "ScriptWorkFlow"
+            ScriptName     = "ScriptWorkFlow.ps1"
+            ScriptPath     = $PSScriptRoot
             ScriptArgument = "$DomainName $CM $DName\$($Admincreds.UserName) $DPMPName $Clients $Configuration $CurrentRole $LogFolder $CSName $PSName"
-            Ensure = "Present"
-            DependsOn = "[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
+            Ensure         = "Present"
+            DependsOn      = "[AddUserToLocalAdminGroup]AddADComputerToLocalAdminGroup"
         }
     }
 }

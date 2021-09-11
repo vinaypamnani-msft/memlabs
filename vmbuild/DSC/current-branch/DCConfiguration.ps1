@@ -3,35 +3,7 @@
     param
     (
         [Parameter(Mandatory)]
-        [String]$DomainName,
-        [Parameter(Mandatory)]
-        [String]$DCName,
-        [Parameter(Mandatory)]
-        [String]$DPMPName,
-        [Parameter(Mandatory)]
-        [String]$CSName,
-        [Parameter(Mandatory)]
-        [String]$PSName,
-        [Parameter(Mandatory)]
-        [System.Array]$ClientName,
-        [Parameter(Mandatory)]
-        [String]$Configuration,
-        [Parameter(Mandatory)]
-        [String]$DNSIPAddress,
-        [Parameter(Mandatory)]
-        [String]$DefaultGateway,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeId,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeStart,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeEnd,
-        [Parameter(Mandatory)]
-        [bool]$InstallConfigMgr = $true,
-        [Parameter(Mandatory)]
-        [bool]$UpdateToLatest = $true,
-        [Parameter(Mandatory)]
-        [bool]$PushClients = $true,
+        [string]$ConfigFilePath,
         [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
@@ -39,11 +11,30 @@
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
 
+    # Read config
+    $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
+    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+    $DomainName = $deployConfig.parameters.domainName
+    $PSName = $deployConfig.parameters.PSName
+    $CSName = $deployConfig.parameters.CSName
+    $DPMPName = $deployConfig.parameters.DPMPName
+    $DomainMembers = $deployConfig.parameters.DomainMembers
+    $DHCP_DNSAddress = $deployConfig.parameters.DHCPDNSAddress
+    $DHCP_DefaultGateway = $deployConfig.parameters.DHCPDefaultGateway
+    $DHCP_ScopeId = $deployConfig.parameters.DHCPScopeId
+    $DHCP_ScopeStart = $deployConfig.parameters.DHCPScopeStart
+    $DHCP_ScopeEnd = $deployConfig.parameters.DHCPScopeEnd
+    $Configuration = $deployConfig.parameters.Scenario
+
+    # Define log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
-    $CM = "CMCB"
-    $Clients = [system.String]::Join(",", $ClientName)
 
+    # CM Files folder/share
+    $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+
+    # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
     Node LOCALHOST
@@ -54,15 +45,26 @@
         }
 
         WriteStatus NewName {
-            Status = "Renaming the computer to $DCName"
+            Status = "Renaming the computer to $ThisMachineName"
         }
 
         Computer NewName {
-            Name = $DCName
+            Name = $ThisMachineName
+        }
+
+        WriteStatus InitDisks {
+            DependsOn = "[Computer]NewName"
+            Status    = "Initializing disks"
+        }
+
+        InitializeDisks InitDisks {
+            DependsOn = "[Computer]NewName"
+            DummyKey  = "Dummy"
+            VM        = $ThisVM | ConvertTo-Json
         }
 
         SetCustomPagingFile PagingSettings {
-            DependsOn   = "[Computer]NewName"
+            DependsOn   = "[InitializeDisks]InitDisks"
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
@@ -133,14 +135,14 @@
 
         IPAddress NewIPAddressDC {
             DependsOn      = "[SetupDomain]FirstDS"
-            IPAddress      = $DNSIPAddress
+            IPAddress      = $DHCP_DNSAddress
             InterfaceAlias = 'Ethernet'
             AddressFamily  = 'IPV4'
         }
 
         DefaultGatewayAddress SetDefaultGateway {
             DependsOn      = "[IPAddress]NewIPAddressDC"
-            Address        = $DefaultGateway
+            Address        = $DHCP_DefaultGateway
             InterfaceAlias = 'Ethernet'
             AddressFamily  = 'IPv4'
         }
@@ -181,10 +183,10 @@
         xDhcpServerScope Scope {
             DependsOn     = "[xDhcpServerAuthorization]LocalServerActivation"
             Ensure        = 'Present'
-            ScopeId       = $DHCPScopeId
-            IPStartRange  = $DHCPScopeStart
-            IPEndRange    = $DHCPScopeEnd
-            Name          = $DHCPScopeId
+            ScopeId       = $DHCP_ScopeId
+            IPStartRange  = $DHCP_ScopeStart
+            IPEndRange    = $DHCP_ScopeEnd
+            Name          = $DHCP_ScopeId
             SubnetMask    = '255.255.255.0'
             LeaseDuration = ((New-TimeSpan -Hours 72).ToString())
             State         = 'Active'
@@ -194,8 +196,8 @@
         DhcpScopeOptionValue ScopeOptionGateway {
             DependsOn     = "[xDhcpServerScope]Scope"
             OptionId      = 3
-            Value         = $DefaultGateway
-            ScopeId       = $DHCPScopeId
+            Value         = $DHCP_DefaultGateway
+            ScopeId       = $DHCP_ScopeId
             VendorClass   = ''
             UserClass     = ''
             AddressFamily = 'IPv4'
@@ -204,8 +206,8 @@
         DhcpScopeOptionValue ScopeOptionDNS {
             DependsOn     = "[DhcpScopeOptionValue]ScopeOptionGateway"
             OptionId      = 6
-            Value         = @($DNSIPAddress)
-            ScopeId       = $DHCPScopeId
+            Value         = @($DHCP_DNSAddress)
+            ScopeId       = $DHCP_ScopeId
             VendorClass   = ''
             UserClass     = ''
             AddressFamily = 'IPv4'
@@ -239,7 +241,7 @@
         }
 
         VerifyComputerJoinDomain WaitForDomainMember {
-            ComputerName = $Clients
+            ComputerName = $DomainMembers
             Ensure       = "Present"
             DependsOn    = "[InstallCA]InstallCA"
         }

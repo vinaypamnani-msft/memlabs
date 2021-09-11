@@ -1,9 +1,16 @@
 param(
     $role = "PS",
-    $version = "current-branch",
+    $vmName,
     [switch]$force
 )
 
+if (-not $vmName) {
+    Write-Host "Specify VMName param. "
+    return
+}
+
+# To remove later
+$version = "current-branch"
 
 # Prepare DSC ZIP files
 Set-Location $PSScriptRoot
@@ -52,6 +59,7 @@ Write-Host "Installing $version TemlateHelpDSC on this machine.."
 Copy-Item .\$version\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
 
 # Create test config, for testing if the config definition is good.
+$role = if ($role -eq "DPMP") { "DomainMember" } else { $role }
 Write-Host "Creating a test config for $role in C:\Temp"
 $adminCreds = Get-Credential
 . ".\$version\$($role)Configuration.ps1"
@@ -67,24 +75,12 @@ $cd = @{
     )
 }
 
-# Config Arguments
-$HashArguments = @{
-    DomainName       = "contoso.com"
-    DCName           = "CM-DC1"
-    DPMPName         = "CM-MP1"
-    CSName           = "CM-CS1"
-    PSName           = "CM-PS1"
-    ClientName       = "CM-CL1"
-    Configuration    = "Standalone"
-    DNSIPAddress     = "192.168.1.1"
-    AdminCreds       = $adminCreds
-    DefaultGateway   = "192.168.1.100"
-    DHCPScopeId      = "192.168.1.0"
-    DHCPScopeStart   = "192.168.1.20"
-    DHCPScopeEnd     = "192.168.1.199"
-    InstallConfigMgr = $true
-    UpdateToLatest   = $true
-    PushClients      = $true
-}
+# Create dummy file so config doesn't fail
+. "..\Common.ps1"
+$result = Test-Configuration -FilePath "E:\repos\memlabs\vmbuild\config\samples\Standalone.json"
+$filePath = "C:\temp\deployConfig.json"
+$result.DeployConfig.parameters.ThisMachineName = $vmName
+$result.DeployConfig | ConvertTo-Json | Set-Clipboard
+$result.DeployConfig | ConvertTo-Json -Depth 3| Out-File $filePath -Force
 
-& "$($role)Configuration" @HashArguments -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config"
+& "$($role)Configuration" -ConfigFilePath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config"

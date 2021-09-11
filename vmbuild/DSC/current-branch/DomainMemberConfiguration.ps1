@@ -3,45 +3,28 @@
     param
     (
         [Parameter(Mandatory)]
-        [String]$DomainName,
-        [Parameter(Mandatory)]
-        [String]$DCName,
-        [Parameter(Mandatory)]
-        [String]$DPMPName,
-        [Parameter(Mandatory)]
-        [String]$CSName,
-        [Parameter(Mandatory)]
-        [String]$PSName,
-        [Parameter(Mandatory)]
-        [String]$ClientName,
-        [Parameter(Mandatory)]
-        [String]$Configuration,
-        [Parameter(Mandatory)]
-        [String]$DNSIPAddress,
-        [Parameter(Mandatory)]
-        [String]$DefaultGateway,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeId,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeStart,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeEnd,
-        [Parameter(Mandatory)]
-        [bool]$InstallConfigMgr=$true,
-        [Parameter(Mandatory)]
-        [bool]$UpdateToLatest=$true,
-        [Parameter(Mandatory)]
-        [bool]$PushClients=$true,
+        [string]$ConfigFilePath,
         [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc', 'SqlServerDsc'
 
+    # Read config
+    $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
+    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+    $DomainName = $deployConfig.parameters.domainName
+    $DCName = $deployConfig.parameters.DCName
+    $IsDPMP = $deployConfig.parameters.ThisMachineRole -eq "DPMP"
+
+    # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
+
+    # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
     Node localhost
@@ -52,27 +35,58 @@
         }
 
         WriteStatus Rename {
-            Status = "Renaming the computer to $ClientName"
+            Status = "Renaming the computer to $ThisMachineName"
         }
 
         Computer NewName {
-            Name = $ClientName
+            Name = $ThisMachineName
+        }
+
+        WriteStatus InitDisks {
+            DependsOn = "[Computer]NewName"
+            Status    = "Initializing disks"
+        }
+
+        InitializeDisks InitDisks {
+            DependsOn = "[Computer]NewName"
+            DummyKey  = "Dummy"
+            VM        = $ThisVM | ConvertTo-Json
         }
 
         SetCustomPagingFile PagingSettings {
-            DependsOn   = "[Computer]NewName"
+            DependsOn   = "[InitializeDisks]InitDisks"
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
         }
 
-        WriteStatus WaitDomain {
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
-            Status    = "Waiting for domain to be ready to obtain an IP"
+        if ($IsDPMP) {
+
+            WriteStatus InstallFeature {
+                DependsOn = "[SetCustomPagingFile]PagingSettings"
+                Status    = "Installing required windows features"
+            }
+
+            InstallFeatureForSCCM InstallFeature {
+                Name      = "DPMP"
+                Role      = "Distribution Point", "Management Point"
+                DependsOn = "[SetCustomPagingFile]PagingSettings"
+            }
+
+            WriteStatus WaitDomain {
+                DependsOn = "[InstallFeatureForSCCM]InstallFeature"
+                Status    = "Waiting for domain to be ready to obtain an IP"
+            }
+        }
+        else {
+            WriteStatus WaitDomain {
+                DependsOn = "[SetCustomPagingFile]PagingSettings"
+                Status    = "Waiting for domain to be ready to obtain an IP"
+            }
         }
 
         WaitForDomainReady WaitForDomain {
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            DependsOn  = "[WriteStatus]WaitDomain"
             Ensure     = "Present"
             DomainName = $DomainName
             DCName     = $DCName

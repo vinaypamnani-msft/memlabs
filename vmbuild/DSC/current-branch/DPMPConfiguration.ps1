@@ -3,35 +3,7 @@
     param
     (
         [Parameter(Mandatory)]
-        [String]$DomainName,
-        [Parameter(Mandatory)]
-        [String]$DCName,
-        [Parameter(Mandatory)]
-        [String]$DPMPName,
-        [Parameter(Mandatory)]
-        [String]$CSName,
-        [Parameter(Mandatory)]
-        [String]$PSName,
-        [Parameter(Mandatory)]
-        [System.Array]$ClientName,
-        [Parameter(Mandatory)]
-        [String]$Configuration,
-        [Parameter(Mandatory)]
-        [String]$DNSIPAddress,
-        [Parameter(Mandatory)]
-        [String]$DefaultGateway,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeId,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeStart,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeEnd,
-        [Parameter(Mandatory)]
-        [bool]$InstallConfigMgr = $true,
-        [Parameter(Mandatory)]
-        [bool]$UpdateToLatest = $true,
-        [Parameter(Mandatory)]
-        [bool]$PushClients = $true,
+        [string]$ConfigFilePath,
         [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
@@ -39,8 +11,18 @@
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
 
+    # Read config
+    $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
+    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisVM = $deployConfig.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+    $DomainName = $deployConfig.parameters.domainName
+    $DCName = $deployConfig.parameters.DCName
+
+    # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
+
+    # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
     Node localhost
@@ -51,11 +33,11 @@
         }
 
         WriteStatus Rename {
-            Status = "Renaming the computer to $DPMPName"
+            Status = "Renaming the computer to $ThisMachineName"
         }
 
         Computer NewName {
-            Name = $DPMPName
+            Name = $ThisMachineName
         }
 
         SetCustomPagingFile PagingSettings {

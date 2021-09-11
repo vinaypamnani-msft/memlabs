@@ -1,4 +1,16 @@
-Param($DomainFullName,$DPMPName,$Role,$ProvisionToolPath)
+Param($ConfigFilePath, $ProvisionToolPath)
+
+$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
+$Config = $deployConfig.parameters.Scenario
+$CurrentRole = $deployConfig.parameters.ThisMachineRole
+$DomainFullName = $deployConfig.parameters.domainName
+$DName = $DomainName.Split(".")[0]
+$CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+$CMUser = "$DName\admin"
+$DPMPName = $deployConfig.parameters.DPMPName
+$ClientName = $deployConfig.parameters.DomainMembers
+$CSName = $deployConfig.parameters.CSName
+$PSName = $deployConfig.parameters.PSName
 
 Write-DscStatus "Installing DP Role on $DPMPName"
 

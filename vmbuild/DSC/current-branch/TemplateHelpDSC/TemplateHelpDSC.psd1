@@ -27,6 +27,7 @@ DscResourcesToExport = @(
     'DownloadFile',
     'WaitForExtendSchemaFile',
     'SetAutomaticManagedPageFile',
+    'InitializeDisks',
     'ChangeServices',
     'AddUserToLocalAdminGroup',
     'JoinDomain',

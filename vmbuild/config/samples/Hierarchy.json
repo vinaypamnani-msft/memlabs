@@ -1,18 +1,14 @@
 {
     "cmOptions" : {
         "version": "current-branch",
-        "sqlVersion": "SQL Server 2019",
         "install": true,
         "updateToLatest": true,
         "installDPMPRoles": true,
-        "pushClientToDomainMembers": true,
-        "installDirCS": "<default>",
-        "installDirPS": "<default>",
-        "siteCodeCS": "CS1",
-        "siteCodePS": "PS1"
+        "pushClientToDomainMembers": true
     },
     "vmOptions": {
         "prefix": "CS-",
+        "basePath": "E:\\VirtualMachines",
         "domainName": "fabrikam.com",
         "network": "192.168.2.0"
     },
@@ -25,16 +21,29 @@
             "virtualProcs": 4
         },
         {
-            "vmName": "CAS",
-            "operatingSystem": "Server 2022",
+            "vmName": "CS1",
             "role": "CS",
+            "siteCode": "CS1",
+            "operatingSystem": "Server 2022",
+            "sqlVersion": "SQL Server 2019",
+            "cmInstallDir": "E:\\ConfigMgr",
+            "sqlInstanceDir": "E:\\SQL",
+            "additionalDisks": {
+                "E": "250GB"
+            },
             "memory": "16GB",
             "virtualProcs": 8
         },
         {
             "vmName": "PS1",
-            "operatingSystem": "Server 2022",
             "role": "PS",
+            "siteCode": "PS1",
+            "operatingSystem": "Server 2022",
+            "cmInstallDir": "E:\\ConfigMgr",
+            "sqlInstanceDir": "E:\\SQL",
+            "additionalDisks": {
+                "E": "250GB"
+            },
             "memory": "16GB",
             "virtualProcs": 8
         },
@@ -42,6 +51,9 @@
             "vmName": "DPMP1",
             "operatingSystem": "Server 2022",
             "role": "DPMP",
+            "additionalDisks": {
+                "E": "250GB"
+            },
             "memory": "4GB",
             "virtualProcs": 4
         },

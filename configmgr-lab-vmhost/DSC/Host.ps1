@@ -1,20 +1,20 @@
 Configuration Host {
-    
+
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking', 'xDscDiagnostics'
-    
+
     $externalSwitchName = "External"
-    
-    $phsyicalNic = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }    
-    $phsyicalInterface = $phsyicalNic.Name    
+
+    $phsyicalNic = Get-NetAdapter | Where-Object {$_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
+    $phsyicalInterface = $phsyicalNic.Name
 
     $repoName = "memlabs"
     $repoUrl = "https://github.com/vinaypamnani-msft/$repoName"
-    
+
     Node LOCALHOST {
-    
-        LocalConfigurationManager {            
+
+        LocalConfigurationManager {
             ConfigurationMode  = 'ApplyOnly'
-            RebootNodeIfNeeded = $true                       
+            RebootNodeIfNeeded = $true
         }
 
         # Windows Features
@@ -30,13 +30,13 @@ Configuration Host {
             Name                 = 'Hyper-V-Tools'
             IncludeAllSubFeature = $true
         }
-    
+
         WindowsFeature Hyper-V-PowerShell {
             Ensure               = 'Present'
             Name                 = 'Hyper-V-PowerShell'
             IncludeAllSubFeature = $true
         }
-    
+
         # Hyper-V Host Network Settings
 
         xVMSwitch ExternalSwitch
@@ -47,32 +47,32 @@ Configuration Host {
             Type           = 'External'
             NetAdapterName = $phsyicalInterface
         }
-    
+
         # Storage Pool
 
         Script MoveCDDrive
         {
             DependsOn = '[xVMSwitch]ExternalSwitch'
             SetScript = {
-                # Start logging the actions 
+                # Start logging the actions
                 Start-Transcript -Path $env:windir\temp\CDMovelog.txt -Append -Force
-    
+
                 # Move CD-ROM drive to Z:
                 "Moving CD-ROM drive to Z:.."
                 Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter='Z:'}
-    
+
                 Stop-Transcript
             }
-            
+
             TestScript = {
                 $x = Get-WmiObject -Class Win32_volume -Filter 'DriveType=5 AND DriveLetter="Z:"'
                 if ($x) {return $true } else { return $false }
-            }    
-    
-            GetScript = { 
+            }
+
+            GetScript = {
                 # Do nothing
             }
-        }        
+        }
 
         Script StoragePool {
             DependsOn = "[Script]MoveCDDrive"
@@ -92,14 +92,14 @@ Configuration Host {
             SetScript = {
               $disks = Get-StoragePool -FriendlyName StoragePool1 -IsPrimordial $False | Get-PhysicalDisk
               $diskNum = $disks.Count
-              New-VirtualDisk -StoragePoolFriendlyName StoragePool1 -FriendlyName VirtualDisk1 -ResiliencySettingName simple -NumberOfColumns $diskNum -UseMaximumSize 
+              New-VirtualDisk -StoragePoolFriendlyName StoragePool1 -FriendlyName VirtualDisk1 -ResiliencySettingName simple -NumberOfColumns $diskNum -UseMaximumSize
             }
             TestScript = {
               (get-virtualdisk -ErrorAction SilentlyContinue -friendlyName VirtualDisk1).OperationalStatus -eq 'OK'
             }
             GetScript = {
               @{Ensure = if ((Get-VirtualDisk -FriendlyName VirtualDisk1).OperationalStatus -eq 'OK') {'Present'} Else {'Absent'}}
-            }            
+            }
         }
 
         Script FormatDisk {
@@ -112,7 +112,7 @@ Configuration Host {
             }
             GetScript = {
                 @{Ensure = if ((get-volume -filesystemlabel VirtualDisk1).filesystem -EQ 'NTFS') {'Present'} Else {'Absent'}}
-            }            
+            }
         }
 
         # Clone repo
@@ -127,6 +127,9 @@ Configuration Host {
 
                 "Installing git via choco"
                 & choco install git -y
+
+                "Installing sysinternals via choco"
+                & choco install sysinternals -y
 
                 "Cloning the repository"
                 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")

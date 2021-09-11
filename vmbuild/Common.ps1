@@ -347,6 +347,72 @@ function New-VhdxFile {
     }
 }
 
+function Test-NetworkSwitch {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Network Subnet.")]
+        [string]$Network,
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name.")]
+        [string]$DomainName
+    )
+
+    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $Network }
+    if (-not $exists) {
+        Write-Log "Get-NetworkSwitch: HyperV Network switch for $Network not found. Creating a new one."
+        New-VMSwitch -Name $Network -SwitchType Internal -Notes $DomainName | Out-Null
+        Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
+    }
+
+    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $Network }
+    if (-not $exists) {
+        Write-Log "Get-NetworkSwitch: HyperV Network switch could not be created."
+        return $false
+    }
+
+    $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$Network*" }
+
+    if (-not $adapter) {
+        Write-Log "Get-NetworkSwitch: Network adapter for $Network was not found."
+        return $false
+    }
+
+    $interfaceAlias = $adapter.InterfaceAlias
+    $desiredIp = $Network.Substring(0, $Network.LastIndexOf(".")) + ".200"
+
+    $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
+    if ($currentIp.IPAddress -ne $desiredIp) {
+        Write-Log "Get-NetworkSwitch: $interfaceAlias IP is $($currentIp.IPAddress). Changing it to $desiredIp."
+        New-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $desiredIp -PrefixLength 24 | Out-Null
+        Start-Sleep -Seconds 5 # Sleep to make sure IP changed
+    }
+
+    $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
+    if ($currentIp.IPAddress -ne $desiredIp) {
+        Write-Log "Get-NetworkSwitch: Unable to set IP for '$interfaceAlias' network adapter to $desiredIp."
+        return $false
+    }
+
+    $text = & netsh routing ip nat show interface
+    if ($text -like "*$interfaceAlias*") {
+        Write-Log "Get-NetworkSwitch: '$interfaceAlias' interface is already present in NAT." -Success
+        return $true
+    }
+    else {
+        Write-Log "Get-NetworkSwitch: '$interfaceAlias' not found in NAT. Restarting RemoteAccess service before adding it."
+        Restart-Service RemoteAccess
+        & netsh routing ip nat add interface "$interfaceAlias"
+    }
+
+    $text = & netsh routing ip nat show interface
+    if ($text -like "*$interfaceAlias*") {
+        Write-Log "Get-NetworkSwitch: '$interfaceAlias' interface added to NAT." -Success
+        return $true
+    }
+    else {
+        Write-Log "Get-NetworkSwitch: Unable to add '$interfaceAlias' to NAT."
+        return $false
+    }
+}
+
 function New-VirtualMachine {
     param (
         [Parameter(Mandatory = $true)]
@@ -364,6 +430,8 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $true)]
         [string]$SwitchName,
         [Parameter(Mandatory = $false)]
+        [object]$AdditionalDisks,
+        [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
@@ -371,7 +439,7 @@ function New-VirtualMachine {
 
     # WhatIf
     if ($WhatIf) {
-        Write-Log "New-VirtualMachine - WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, SwitchName: $SwitchName, ForceNew: $ForceNew"
+        Write-Log "New-VirtualMachine - WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName, ForceNew: $ForceNew"
         return $true
     }
 
@@ -415,7 +483,7 @@ function New-VirtualMachine {
         $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
     }
     catch {
-        Write-Log "New-VirtualMachine: $VmName`: New-VM failed for $VmName. $_"
+        Write-Log "New-VirtualMachine: $VmName`: Failed to create new VM. $_"
         return $false
     }
 
@@ -424,21 +492,35 @@ function New-VirtualMachine {
     $osDiskPath = Join-Path $vm.Path $osDiskName
     Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
 
-    Write-Log "New-VirtualMachine: $VmName`: Setting Processor count for $VmName to $Processors"
+    Write-Log "New-VirtualMachine: $VmName`: Setting Processor count to $Processors"
     Set-VM -Name $vmName -ProcessorCount $Processors
 
-    Write-Log "New-VirtualMachine: $VmName`: Adding virtual disk $osDiskPath to $VmName"
+    Write-Log "New-VirtualMachine: $VmName`: Adding virtual disk $osDiskPath"
     Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0
 
-    Write-Log "New-VirtualMachine: $VmName`: Adding a DVD drive to $VmName"
+    Write-Log "New-VirtualMachine: $VmName`: Adding a DVD drive"
     Add-VMDvdDrive -VMName $VmName
 
-    Write-Log "New-VirtualMachine: $VmName`: Changing boot order of $VmName"
+    Write-Log "New-VirtualMachine: $VmName`: Changing boot order"
     $f = Get-VM $VmName | Get-VMFirmware
     $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
     $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
     $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
     $f_dvd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.DvdDrive] }
+
+    # Add additional disks
+    if ($AdditionalDisks) {
+        $count = 0
+        $label = "DATA"
+        foreach($disk in $AdditionalDisks.psobject.properties) {
+            $newDiskName = "$VmName`_$label`_$count.vhdx"
+            $newDiskPath = Join-Path $vm.Path $newDiskName
+            Write-Log "New-VirtualMachine: $VmName`: Adding $newDiskPath"
+            New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic
+            Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath
+            $count++
+        }
+    }
 
     # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
     if ($null -ne $f_file) {
@@ -871,23 +953,24 @@ function Test-Configuration {
     }
 
     # standalone primary
-
+    # TODO: Ensure PS/CS config has SQL config values...
+    # TODO: Validate additionalDisk contains a single letter between E-Y
 
     # everything is good, create deployJson
 
     # add prefix to vm names
     $virtualMachines = $configJson.virtualMachines
-    $virtualMachines | foreach-object {$_.vmName = $configJson.vmOptions.prefix + $_.vmName}
+    $virtualMachines | foreach-object { $_.vmName = $configJson.vmOptions.prefix + $_.vmName }
 
     # create params object
     $network = $configJson.vmOptions.network.Substring(0, $configJson.vmOptions.network.LastIndexOf("."))
-    $clientsCsv = $virtualMachines.vmName -join ","
+    $clientsCsv = ($virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
     $params = [PSCustomObject]@{
         DomainName         = $configJson.vmOptions.domainName
-        DCName             = ($configJson.virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
-        CSName             = ($configJson.virtualMachines | Where-Object { $_.role -eq "CS" }).vmName
-        PSName             = ($configJson.virtualMachines | Where-Object { $_.role -eq "PS" }).vmName
-        DPMPName           = ($configJson.virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
+        DCName             = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
+        CSName             = ($virtualMachines | Where-Object { $_.role -eq "CS" }).vmName
+        PSName             = ($virtualMachines | Where-Object { $_.role -eq "PS" }).vmName
+        DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
         DomainMembers      = $clientsCsv
         Scenario           = $scenario
         DHCPScopeId        = $configJson.vmOptions.Network

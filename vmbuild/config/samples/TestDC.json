@@ -6,7 +6,7 @@
         "updateToLatest": true,
         "installDPMPRoles": true,
         "pushClientToDomainMembers": true,
-        "installDirPS": "<default>",
+        "installDirPS": "{default}",
         "siteCodePS": "PRI"
     },
     "vmOptions": {
@@ -14,10 +14,13 @@
         "domainName": "contoso.com",
         "network": "192.168.1.0"
     },
-    "parameters": {
-        "DCName": "Name1",
-        "CSName": "Name2",
-        "Clients": "Name1,Name2,etc",
-        "scenario": "Standalone"
-    }
+    "virtualMachines": [
+        {
+            "vmName": "DC1",
+            "operatingSystem": "Server 2022",
+            "role": "DC",
+            "memory": "4GB",
+            "virtualProcs": 4
+        }
+    ]
 }

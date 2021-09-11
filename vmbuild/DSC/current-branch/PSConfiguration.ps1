@@ -3,35 +3,7 @@
     param
     (
         [Parameter(Mandatory)]
-        [String]$DomainName,
-        [Parameter(Mandatory)]
-        [String]$DCName,
-        [Parameter(Mandatory)]
-        [String]$DPMPName,
-        [Parameter(Mandatory)]
-        [String]$CSName,
-        [Parameter(Mandatory)]
-        [String]$PSName,
-        [Parameter(Mandatory)]
-        [System.Array]$ClientName,
-        [Parameter(Mandatory)]
-        [String]$Configuration,
-        [Parameter(Mandatory)]
-        [String]$DNSIPAddress,
-        [Parameter(Mandatory)]
-        [String]$DefaultGateway,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeId,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeStart,
-        [Parameter(Mandatory)]
-        [String]$DHCPScopeEnd,
-        [Parameter(Mandatory)]
-        [bool]$InstallConfigMgr = $true,
-        [Parameter(Mandatory)]
-        [bool]$UpdateToLatest = $true,
-        [Parameter(Mandatory)]
-        [bool]$PushClients = $true,
+        [string]$ConfigFilePath,
         [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
@@ -39,15 +11,34 @@
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc', 'SqlServerDsc'
 
+    # Read config
+    $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
+    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+    $DomainName = $deployConfig.parameters.domainName
+    $DCName = $deployConfig.parameters.DCName
+    $CurrentRole = $deployConfig.parameters.ThisMachineRole
+    $Clients = $deployConfig.parameters.DomainMembers
+    $Configuration = $deployConfig.parameters.Scenario
+
+    # CM Options
+    $InstallConfigMgr = $deployConfig.cmOptions.install
+
+    # Netbios domain name
+    $DName = $DomainName.Split(".")[0]
+
+    # SQL Instance Location
+    $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
+    if ($ThisVM.sqlInstanceDir) { $SQLInstanceDir = $ThisVM.sqlInstanceDir }
+
+    # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
-    $CM = "CMCB"
 
-    $DName = $DomainName.Split(".")[0]
-    $CurrentRole = "PS"
+    # CM Files folder/share
+    $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
-    $Clients = [system.String]::Join(",", $ClientName)
-
+    # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
     Node LOCALHOST
@@ -58,15 +49,26 @@
         }
 
         WriteStatus Rename {
-            Status = "Renaming the computer to $PSName"
+            Status = "Renaming the computer to $ThisMachineName"
         }
 
         Computer NewName {
-            Name = $PSName
+            Name = $ThisMachineName
+        }
+
+        WriteStatus InitDisks {
+            DependsOn = "[Computer]NewName"
+            Status    = "Initializing disks"
+        }
+
+        InitializeDisks InitDisks {
+            DependsOn = "[Computer]NewName"
+            DummyKey  = "Dummy"
+            VM        = $ThisVM | ConvertTo-Json
         }
 
         SetCustomPagingFile PagingSettings {
-            DependsOn   = "[Computer]NewName"
+            DependsOn   = "[InitializeDisks]InitDisks"
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
@@ -136,6 +138,7 @@
 
         SqlSetup InstallSQL {
             InstanceName        = 'MSSQLSERVER'
+            InstanceDir         = $SQLInstanceDir
             Features            = 'SQLENGINE,CONN,BC'
             SourcePath          = 'C:\temp\SQL'
             UpdateEnabled       = 'True'
@@ -215,7 +218,7 @@
 
         WriteStatus WaitDelegate {
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
-            Status    = "Waiting for DC to assign permissions to Systems Management container"
+            Status    = "Verifying Systems Management container and SQL permissions"
         }
 
         WaitForConfigurationFile DelegateControl {
@@ -242,12 +245,12 @@
 
             WriteStatus InstallAndUpdateSCCM {
                 DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-                Status    = "Setting up ConfigMgr."
+                Status    = "Setting up ConfigMgr. Waiting for installation to begin."
             }
 
             WriteFileOnce CMSvc {
                 FilePath  = "$LogPath\cm_svc.txt"
-                Content   = $Admincreds.GetNetworkCredentials().Password
+                Content   = $Admincreds.GetNetworkCredential().Password
                 DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
             }
 
@@ -255,7 +258,7 @@
                 TaskName       = "ScriptWorkFlow"
                 ScriptName     = "ScriptWorkFlow.ps1"
                 ScriptPath     = $PSScriptRoot
-                ScriptArgument = "$DomainName $CM $DName\admin $DPMPName $Clients $Configuration $CurrentRole $LogFolder $CSName $PSName $UpdateToLatest $PushClients"
+                ScriptArgument = "$ConfigFilePath $LogFolder"
                 Ensure         = "Present"
                 DependsOn      = "[WriteFileOnce]CMSvc"
             }

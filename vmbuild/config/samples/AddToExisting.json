@@ -1,8 +1,9 @@
 
 {
     "vmOptions": {
-        "prefix": "PS-",
         "existingDCName": "PS-DC1",
+        "prefix": "PS-",
+        "basePath": "E:\\VirtualMachines",
         "domainName": "contoso.com",
         "network": "192.168.1.0"
     },
