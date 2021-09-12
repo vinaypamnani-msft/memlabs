@@ -102,7 +102,7 @@ function Get-RDCManTemplate($rdcmanfile){
 }
 
 function Get-RDCManPassword(){
-    $rdcmanpath = "C:\ProgramData\chocolatey\bin"
+    $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
     
     if (-not(test-path "$($env:temp)\rdcman.dll")) {
         Write-Host "Rdcman.dll not found in $($env:temp).  Copying."
