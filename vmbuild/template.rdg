@@ -4,8 +4,13 @@
     <credentialsProfiles />
     <properties>
       <expanded>True</expanded>
-      <name>template</name>
+      <name>memlabs</name>
     </properties>
+    <remoteDesktop inherit="None">
+      <sameSizeAsClientArea>True</sameSizeAsClientArea>
+      <fullScreen>False</fullScreen>
+      <colorDepth>24</colorDepth>
+    </remoteDesktop>
     <group>
       <properties>
         <expanded>True</expanded>
