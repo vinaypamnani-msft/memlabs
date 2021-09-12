@@ -157,7 +157,7 @@ function Get-File {
 
     # Create destination directory if it doesn't exist
     $destinationDirectory = Split-Path $Destination -Parent
-    if (-not (Test-Path $destinationDirectory)){
+    if (-not (Test-Path $destinationDirectory)) {
         New-Item -Path $destinationDirectory -ItemType Directory -Force | Out-Null
     }
 
@@ -519,7 +519,7 @@ function New-VirtualMachine {
     if ($AdditionalDisks) {
         $count = 0
         $label = "DATA"
-        foreach($disk in $AdditionalDisks.psobject.properties) {
+        foreach ($disk in $AdditionalDisks.psobject.properties) {
             $newDiskName = "$VmName`_$label`_$count.vhdx"
             $newDiskPath = Join-Path $vm.Path $newDiskName
             Write-Log "New-VirtualMachine: $VmName`: Adding $newDiskPath"
@@ -846,76 +846,52 @@ function Get-StorageConfig {
 
     $configPath = Join-Path $Common.ConfigPath "_storageConfig.json"
 
-    if (Test-Path $configPath) {
-        try {
-            # Get storage config
-            $config = Get-Content -Path $configPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            $StorageConfig.StorageLocation = $config.storageLocation
-            $StorageConfig.StorageToken = $config.storageToken
-
-            # Get image list from storage location
-            $updateList = $true
-            $fileListPath = Join-Path $Common.AzureFilesPath "_fileList.json"
-            $fileListLocation = "$($StorageConfig.StorageLocation)/_fileList.json"
-
-            # See if image list needs to be updated
-            if (Test-Path $fileListPath) {
-                $Common.ImageList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-                $updateList = $Common.ImageList.UpdateFromStorage
-            }
-
-            if ($updateList) {
-                Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent
-                $Common.ImageList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            }
-        }
-        catch {
-            $Common.FatalError = "Get-StorageConfig: Storage Config found, but storage access failed. $_"
-        }
-    }
-    else {
+    if (-not (Test-Path $configPath)) {
         $Common.FatalError = "Get-StorageConfig: Storage Config not found. Refer internal documentation."
     }
-}
 
-function Get-LocalAdmin {
+    try {
 
-    # Dont bother, if storage config had failure
-    if ($Common.FatalError) {
-        return
-    }
+        # Disable Progress UI
+        $ProgressPreference = 'SilentlyContinue'
 
-    $username = "vmbuildadmin"
-    $guid = (New-Guid).Guid
-    $destination = Join-Path $Common.AzureFilesPath "$guid.txt"
-    $fileExists = Test-Path $destination
-    $updateFile = $Common.ImageList.UpdateFromStorage
+        # Get storage config
+        $config = Get-Content -Path $configPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $StorageConfig.StorageLocation = $config.storageLocation
+        $StorageConfig.StorageToken = $config.storageToken
 
-    if (-not $fileExists -and -not $updateFile) {
-        $Common.FatalError = "Get-LocalAdmin: $destination not found, and UpdateFromStorage is not allowed."
-        return
-    }
+        # Get image list from storage location
+        $updateList = $true
+        $fileListPath = Join-Path $Common.AzureFilesPath "_fileList.json"
+        $fileListLocation = "$($StorageConfig.StorageLocation)/_fileList.json"
 
-    if ($updateFile) {
-        try {
+        # See if image list needs to be updated
+        if (Test-Path $fileListPath) {
+            $Common.ImageList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $updateList = $Common.ImageList.UpdateFromStorage
+        }
+
+        # Update file list
+        if ($updateList) {
+
+            # Get file list
+            Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent
+            $Common.ImageList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+
+            # Get local admin password
+            $username = "vmbuildadmin"
             $item = $Common.ImageList.Files | Where-Object { $_.id -eq $username }
-            $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)"
-            Get-File -Source $fileUrl -Destination $destination -DisplayName "Obtaining local admin creds" -Action "Downloading" -Silent
-        }
-        catch {
-            $Common.FatalError = "Get-LocalAdmin: $_"
-            return
+            $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)?$($StorageConfig.StorageToken)"
+            $response = Invoke-WebRequest -Uri $fileUrl -ErrorAction Stop
+            $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
+            $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
         }
     }
-
-    if (Test-Path $destination) {
-        $content = Get-Content -Path $destination
-        $s = ConvertTo-SecureString $content.Trim() -AsPlainText -Force
-        $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
-        Remove-Item -Path $destination -Force -ErrorAction SilentlyContinue
+    catch {
+        $Common.FatalError = "Get-StorageConfig: Storage Config found, but storage access failed. $_"
     }
-    else {
-        $Common.FatalError = "Get-LocalAdmin: Storage Config found, but could not create local admin creds."
+    finally {
+        $ProgressPreference = 'Continue'
     }
 }
 
@@ -1035,6 +1011,3 @@ $global:StorageConfig = [PSCustomObject]@{
 
 ### Test Storage config and access
 Get-StorageConfig
-
-### Set Local Admin creds
-Get-LocalAdmin
