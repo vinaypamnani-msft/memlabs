@@ -1,8 +1,8 @@
 . $PSScriptRoot\Common.ps1
 $userName = "admin"
-#$result = Test-Configuration -FilePath "E:\repos\memlabs\vmbuild\config\samples\Standalone.json"
+$result = Test-Configuration -FilePath "E:\repos\memlabs\vmbuild\config\samples\Standalone.json"
 #$result = Test-Configuration -FilePath "E:\repos\memlabs\vmbuild\config\samples\Hierarchy.json"
-$result = Test-Configuration -FilePath "E:\repos\memlabs\vmbuild\config\samples\AddToExisting.json"
+#$result = Test-Configuration -FilePath "E:\repos\memlabs\vmbuild\config\samples\AddToExisting.json"
 if ($result.Valid) {
 $deployConfig = $result.DeployConfig
 }
@@ -99,7 +99,8 @@ function Get-RDCManPassword(){
     
     Import-Module "$($env:temp)\rdcman.dll" |Out-Null
     $EncryptionSettings = New-Object -TypeName RdcMan.EncryptionSettings
-    return [RdcMan.Encryption]::EncryptString($Common.LocalAdmin.Password , $EncryptionSettings)
+    #return [RdcMan.Encryption]::EncryptString($Common.LocalAdmin.Password , $EncryptionSettings)
+    return [RdcMan.Encryption]::EncryptString($Common.LocalAdmin.GetNetworkCredential().Password , $EncryptionSettings)
 }
 
 New-RDCManFile "C:\Tools\new4.rdg"
