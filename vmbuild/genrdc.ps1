@@ -121,5 +121,5 @@ function Get-RDCManPassword(){
     return [RdcMan.Encryption]::EncryptString($Common.LocalAdmin.GetNetworkCredential().Password , $EncryptionSettings)
 }
 $DesktopPath = [Environment]::GetFolderPath("Desktop")
-$savepath = Join-Path $DesktopPath "VMAS.rdg"
+$savepath = Join-Path $DesktopPath "memlabs.rdg"
 New-RDCManFile $savepath
