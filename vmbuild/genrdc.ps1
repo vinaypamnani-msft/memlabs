@@ -7,9 +7,11 @@ if ($result.Valid) {
     $deployConfig = $result.DeployConfig
 }
 
-function New-RDCManFile($rdcmanfile) {
-
-    $template = Get-RDCManTemplate ($rdcmanfile)
+function New-RDCManFile {
+    param(
+        [string]$rdcmanfile
+    )
+    $template = Get-RDCManTemplate $rdcmanfile
 
     #This is the bulk of the data.
     $file = $template.RDCMan.file
@@ -23,9 +25,8 @@ function New-RDCManFile($rdcmanfile) {
     #     <group>
     #     ...
 
-    $domain = $deployConfig.vmOptions.domainName
-    $findGroup = Get-RDCManGroupToModify
-    if ($findGroup -eq $false -or $findGroup -eq $null) {
+    $findGroup = Get-RDCManGroupToModify $group $findGroup
+    if ($findGroup -eq $false -or $null -eq $findGroup) {
         Write-Error "Error in Get-RDCManPassword"
         return
     }
@@ -69,7 +70,12 @@ function Add-RDCManServerToGroup {
 
 #This gets the <Group> section from the template. Either makes a new one, or returns an existing one.
 #If a new one is created, the <server> nodes will not exist.
-function Get-RDCManGroupToModify() {
+function Get-RDCManGroupToModify {
+    param(
+        $group,
+        $findgroup
+    )
+    $domain = $deployConfig.vmOptions.domainName
     Write-Host "Looking for group entry named $domain in current xml... " -NoNewline
     $findGroup = $group | Where-Object { $_.properties.name -eq $domain } | Select-Object -First 1
 
@@ -97,7 +103,10 @@ function Get-RDCManGroupToModify() {
 }
 
 #Gets the blank template, or returns the existing rdg xml if available.
-function Get-RDCManTemplate($rdcmanfile) {
+function Get-RDCManTemplate {
+    param(
+        [string]$rdcmanfile
+    )
     $templatefile = Join-Path $PSScriptRoot "template.rdg"
 
     if ((test-path "$rdcmanfile")) {
@@ -119,8 +128,7 @@ function Get-RDCManPassword() {
 
     if (-not(test-path "$($env:temp)\rdcman.dll")) {
         Write-Error "Rdcman.dll was not copied. "
-        copy-item "$($rdcmanpath)\rdcman.exe" "$($env:temp)\rdcman.dll"
-        unblock-file "$($env:temp)\rdcman.dll"
+        throw
     }
     Write-Host "Importing rdcman.dll"
     Import-Module "$($env:temp)\rdcman.dll"
