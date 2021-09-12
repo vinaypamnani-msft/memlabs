@@ -24,6 +24,11 @@ function New-RDCManFile($rdcmanfile){
 
     $domain = $deployConfig.vmOptions.domainName
     $findGroup = Get-RDCManGroupToModify
+    if ($findGroup -eq $false -or $findGroup -eq $null)
+    {
+        Write-Error "Error in Get-RDCManPassword"
+        return
+    }
     foreach ($vm in $deployConfig.virtualMachines)
     {
         Add-RDCManServerToGroup ($vm.vmName)
@@ -66,7 +71,13 @@ function Get-RDCManGroupToModify(){
         $findGroup = $group.Clone()    
         $findGroup.properties.name = $domain
         $findGroup.logonCredentials.userName = $userName
-        $findGroup.logonCredentials.password = Get-RDCManPassword
+        $password = Get-RDCManPassword
+        if ($null -eq $password)
+        {
+            Write-Error ("Password was not generated correctly.")
+            throw            
+        }
+        $findGroup.logonCredentials.password = $password
         $findGroup.logonCredentials.domain = $domain
         $ChildNodes = $findGroup.SelectNodes('//server')
         foreach($Child in $ChildNodes){
@@ -92,15 +103,23 @@ function Get-RDCManTemplate($rdcmanfile){
 
 function Get-RDCManPassword(){
     $rdcmanpath = "C:\ProgramData\chocolatey\bin"
+    
     if (-not(test-path "$($env:temp)\rdcman.dll")) {
-        copy-item "$($rdcmanpath)\rdcman.exe" "$($env:temp)\rdcman.dll" | Out-Null
-        unblock-file "$($env:temp)\rdcman.dll" | Out-Null
+        Write-Host "Rdcman.dll not found in $($env:temp).  Copying."
+        copy-item "$($rdcmanpath)\rdcman.exe" "$($env:temp)\rdcman.dll"
+        unblock-file "$($env:temp)\rdcman.dll"
      }
     
-    Import-Module "$($env:temp)\rdcman.dll" |Out-Null
+     if (-not(test-path "$($env:temp)\rdcman.dll")) {
+        Write-Error "Rdcman.dll was not copied. "
+        copy-item "$($rdcmanpath)\rdcman.exe" "$($env:temp)\rdcman.dll"
+        unblock-file "$($env:temp)\rdcman.dll"
+     }
+    Write-Host "Importing rdcman.dll"
+    Import-Module "$($env:temp)\rdcman.dll"
     $EncryptionSettings = New-Object -TypeName RdcMan.EncryptionSettings
-    #return [RdcMan.Encryption]::EncryptString($Common.LocalAdmin.Password , $EncryptionSettings)
     return [RdcMan.Encryption]::EncryptString($Common.LocalAdmin.GetNetworkCredential().Password , $EncryptionSettings)
 }
-
-New-RDCManFile "C:\Tools\new4.rdg"
+$DesktopPath = [Environment]::GetFolderPath("Desktop")
+$savepath = Join-Path $DesktopPath "VMAS.rdg"
+New-RDCManFile $savepath
