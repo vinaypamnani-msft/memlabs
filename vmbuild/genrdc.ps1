@@ -41,6 +41,8 @@ function New-RDCManFile {
     [void]$file.AppendChild($findgroup)
 
     #Save to desired filename
+    Get-Process -Name rdcman -ea Ignore | Stop-Process
+    Start-Sleep 1
     Write-Host "Saving resultant XML to $rdcmanfile"
     $template.save($rdcmanfile) | Out-Null
 
