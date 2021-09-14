@@ -184,7 +184,7 @@ $VM_Create = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force } -WhatIf:$WhatIf
 
         # Copy files from DVD
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false } -WhatIf:$WhatIf
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -DisplayName "Copy SQL Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false } -WhatIf:$WhatIf
         if ($result.ScriptBlockFailed) {
             Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
@@ -367,6 +367,7 @@ $VM_Create = {
         Write-Log "PSJOB: $($currentItem.vmName): Configuration did not complete in allotted time ($timeout minutes) for $($currentItem.role)." -OutputStream -Failure
     }
     else {
+        Write-Progress "$($currentItem.role) configuration completed successfully. Elapsed time: $($stopWatch.Elapsed)" -Status $status.ScriptBlockOutput -Completed
         Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
 }
@@ -443,5 +444,5 @@ do {
 
 $timer.Stop()
 Write-Host
-Write-Log "### COMPLETE. Elapsed Time: $($timer.Elapsed)" -Success
+Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
 Write-Host

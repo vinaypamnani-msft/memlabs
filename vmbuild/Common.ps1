@@ -912,11 +912,11 @@ function Test-Configuration {
     $containsDC = $configJson.virtualMachines.role.Contains("DC")
     $containsCAS = $configJson.virtualMachines.role.Contains("CS")
 
-    # config must contain DC role, or existingDCName
+    # config must contain DC role, or existingDCNameWithPrefix
     if (-not $containsDC) {
-        $existingDC = $configJson.vmOptions.existingDCName
+        $existingDC = $configJson.vmOptions.existingDCNameWithPrefix
         if (-not $existingDC) {
-            $return.Message = "DC role not specified in the configuration file and vmOptions.existingDCName not present."
+            $return.Message = "DC role not specified in the configuration file and vmOptions.existingDCNameWithPrefix not present."
             return $return
         }
     }

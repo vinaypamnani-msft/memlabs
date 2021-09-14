@@ -1,185 +1,180 @@
-Param($ConfigFilePath, $LogFolder)
+param(
+    [string]$ConfigFilePath,
+    [string]$LogPath
+)
 
-#Param($DomainFullName,$CM,$CMUser,$DPMPName,$ClientName,$Config,$CurrentRole,$LogFolder,$CSName,$PSName)
-#ScriptArgument = "$DomainName $CM $DName\admin $DPMPName $Clients $Configuration $CurrentRole $LogFolder $CSName $PSName"
+$global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
+$global:StatusLog = "C:\staging\DSC\InstallCM.log"
 
 function Write-DscStatusSetup {
     $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
-    $StatusFile = "C:\staging\DSC\DSC_Status.txt"
-    $StatusPrefix | Out-File $StatusFile -Force
+    $StatusPrefix | Out-File $global:StatusFile -Force
+    "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $StatusPrefix" | Out-File -Append $global:StatusLog
 }
 
 function Write-DscStatus {
-    param($status)
-    $StatusPrefix = "Setting up ConfigMgr."
-    $StatusFile = "C:\staging\DSC\DSC_Status.txt"
-    "$StatusPrefix Current Status: $status" | Out-File $StatusFile -Force
+    param($status, [switch]$NoLog, [switch]$NoStatus)
+
+    if (-not $NoStatus.IsPresent) {
+        $StatusPrefix = "Setting up ConfigMgr."
+        "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
+    }
+
+    if (-not $NoLog.IsPresent) {
+        "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $status" | Out-File -Append $global:StatusLog
+    }
 }
 
+# Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $Config = $deployConfig.parameters.Scenario
 $CurrentRole = $deployConfig.parameters.ThisMachineRole
 
-$ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
-
-if ($ThisVM.siteCode) {
-    $SiteCode = $ThisVM.siteCode
-}
-else {
-    Write-DscStatus "SiteCode not found."
-    return
-}
-
+# Provision Tool path, RegisterTaskScheduler copies files here
 $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
-if(!(Test-Path $ProvisionToolPath))
-{
+if (!(Test-Path $ProvisionToolPath)) {
     New-Item $ProvisionToolPath -ItemType directory | Out-Null
 }
 
-$ConfigurationFile = Join-Path -Path $ProvisionToolPath -ChildPath "$SiteCode.json"
+# Script Workflow json file
+$ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 
-if (Test-Path -Path $ConfigurationFile)
-{
+if (Test-Path -Path $ConfigurationFile) {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 }
-else
-{
-    if($Config -eq "Standalone")
-    {
+else {
+    if ($Config -eq "Standalone") {
         [hashtable]$Actions = @{
-            InstallSCCM = @{
-                Status = 'NotStart'
+            InstallSCCM    = @{
+                Status    = 'NotStart'
                 StartTime = ''
-                EndTime = ''
+                EndTime   = ''
             }
-            UpgradeSCCM = @{
-                Status = 'NotStart'
+            UpgradeSCCM    = @{
+                Status    = 'NotStart'
                 StartTime = ''
-                EndTime = ''
+                EndTime   = ''
             }
-            InstallDP = @{
-                Status = 'NotStart'
+            InstallDP      = @{
+                Status    = 'NotStart'
                 StartTime = ''
-                EndTime = ''
+                EndTime   = ''
             }
-            InstallMP = @{
-                Status = 'NotStart'
+            InstallMP      = @{
+                Status    = 'NotStart'
                 StartTime = ''
-                EndTime = ''
+                EndTime   = ''
             }
-            InstallClient = @{
-                Status = 'NotStart'
+            InstallClient  = @{
+                Status    = 'NotStart'
                 StartTime = ''
-                EndTime = ''
+                EndTime   = ''
+            }
+            ScriptWorkflow = @{
+                Status    = 'NotStart'
+                StartTime = ''
+                EndTime   = ''
             }
         }
     }
-    else
-    {
-        if($CurrentRole -eq "CS")
-        {
+    else {
+        if ($CurrentRole -eq "CS") {
             [hashtable]$Actions = @{
-                InstallSCCM = @{
-                    Status = 'NotStart'
+                InstallSCCM    = @{
+                    Status    = 'NotStart'
                     StartTime = ''
-                    EndTime = ''
+                    EndTime   = ''
                 }
-                UpgradeSCCM = @{
-                    Status = 'NotStart'
+                UpgradeSCCM    = @{
+                    Status    = 'NotStart'
                     StartTime = ''
-                    EndTime = ''
+                    EndTime   = ''
                 }
-                PSReadytoUse = @{
-                    Status = 'NotStart'
+                PSReadytoUse   = @{
+                    Status    = 'NotStart'
                     StartTime = ''
-                    EndTime = ''
+                    EndTime   = ''
+                }
+                ScriptWorkflow = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
                 }
             }
         }
-        elseif($CurrentRole -eq "PS")
-        {
+        elseif ($CurrentRole -eq "PS") {
             [hashtable]$Actions = @{
                 WaitingForCASFinsihedInstall = @{
-                    Status = 'NotStart'
+                    Status    = 'NotStart'
                     StartTime = ''
-                    EndTime = ''
+                    EndTime   = ''
                 }
-                InstallSCCM = @{
-                    Status = 'NotStart'
+                InstallSCCM                  = @{
+                    Status    = 'NotStart'
                     StartTime = ''
-                    EndTime = ''
+                    EndTime   = ''
                 }
-                InstallDP = @{
-                    Status = 'NotStart'
+                InstallDP                    = @{
+                    Status    = 'NotStart'
                     StartTime = ''
-                    EndTime = ''
+                    EndTime   = ''
                 }
-                InstallMP = @{
-                    Status = 'NotStart'
+                InstallMP                    = @{
+                    Status    = 'NotStart'
                     StartTime = ''
-                    EndTime = ''
+                    EndTime   = ''
                 }
-                InstallClient = @{
-                    Status = 'NotStart'
+                InstallClient                = @{
+                    Status    = 'NotStart'
                     StartTime = ''
-                    EndTime = ''
+                    EndTime   = ''
+                }
+                ScriptWorkflow               = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
                 }
             }
         }
     }
     $Configuration = New-Object -TypeName psobject -Property $Actions
+    $Configuration.ScriptWorkflow.Status = "Running"
+    $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
 
-if($Config -eq "Standalone")
-{
+if ($Config -eq "Standalone") {
     #Install CM and Config
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
-    . $ScriptFile $ConfigFilePath $ProvisionToolPath
+    . $ScriptFile $ConfigFilePath $LogPath
 
-    #Install DP
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDP.ps1"
-    . $ScriptFile $ConfigFilePath $ProvisionToolPath
-
-    #Install MP
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallMP.ps1"
-    . $ScriptFile $ConfigFilePath $ProvisionToolPath
-
-    #Install Client
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallClient.ps1"
-    . $ScriptFile $ConfigFilePath $ProvisionToolPath
+    #Install DP/MP/Client
+    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
+    . $ScriptFile $ConfigFilePath $LogPath
 
 }
 else {
-    if($CurrentRole -eq "CS")
-    {
+    if ($CurrentRole -eq "CS") {
         #Install CM and Config
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallCSForHierarchy.ps1"
-        . $ScriptFile $DomainFullName $CM $CMUser $SiteCode $ProvisionToolPath $LogFolder $PSName $PSRole
+        . $ScriptFile $ConfigFilePath $LogPath
 
     }
-    elseif($CurrentRole -eq "PS")
-    {
+    elseif ($CurrentRole -eq "PS") {
         #Install CM and Config
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPSForHierarchy.ps1"
-        . $ScriptFile $DomainFullName $CM $CMUser $SiteCode $ProvisionToolPath $CSName $CSRole $LogFolder
+        . $ScriptFile $ConfigFilePath $LogPath
 
-        #Install DP
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDP.ps1"
-        . $ScriptFile $DomainFullName $DPMPName $SiteCode $ProvisionToolPath
-
-        #Install MP
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallMP.ps1"
-        . $ScriptFile $DomainFullName $DPMPName $SiteCode $ProvisionToolPath
-
-        if ($PushClients) {
-            #Install Client
-            $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallClient.ps1"
-            . $ScriptFile $DomainFullName $CMUser $ClientName $DPMPName $SiteCode $ProvisionToolPath
-        }
+        #Install DP/MP/Client
+        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
+        . $ScriptFile $ConfigFilePath $LogPath
     }
 }
 
 Write-DscStatus "Finished setting up ConfigMgr."
-"Finished!" | Out-File "C:\staging\DSC\ScriptWorkflow.txt" -Force
+
+# Mark ScriptWorkflow completed for DSC to move on.
+$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+$Configuration.ScriptWorkflow.Status = "Completed"
+$Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force

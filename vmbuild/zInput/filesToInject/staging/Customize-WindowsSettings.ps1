@@ -1,6 +1,6 @@
 ﻿#
 # Customize Windows Settings optimal for the VM
-# 
+#
 
 param(
     [switch]$RunSysprep,
@@ -17,7 +17,7 @@ function Update-Log {
     )
 
     if ($null -eq $Text) {
-        Write-Host 
+        Write-Host
         return
     }
 
@@ -42,7 +42,7 @@ Write-Host
 
 # Server Only
 # ===========
-if ($server) {    
+if ($server) {
     Update-Log "Disable Server Manager at startup"
     Set-ItemProperty -Path HKCU:\Software\Microsoft\ServerManager -Name DoNotopenServerManagerAtLogon -Value 1
 
@@ -57,9 +57,12 @@ if ($server) {
 
         Update-Log "Installing Windows Features: IIS"
         Install-WindowsFeature Web-Server -IncludeManagementTools
-        Install-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net 
+        Install-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net
         Install-WindowsFeature Web-Mgmt-Console,Web-Lgcy-Mgmt-Console,Web-Lgcy-Scripting,Web-WMI,Web-Mgmt-Service,Web-Mgmt-Tools,Web-Scripting-Tools
     }
+
+    Update-Log "Disable Windows Ink Workspace button"
+    New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsInkWorkspace' -Force | New-ItemProperty -Name AllowWindowsInkWorkspace -Value 0 -Force | Out-Null
 
     #Update-Log "Disable Windows Update"
     #New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | New-ItemProperty -Name NoAutoUpdate -Value 1 -Force | Out-Null
@@ -141,7 +144,7 @@ if ($RunOptional.IsPresent) {
     } else {
         Update-Log "Add BGInfo startup shortcut for CLIENT"
         Copy-Item -Path "C:\staging\bginfo\bginfo_CLIENT.lnk" -Destination "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -Force -ErrorAction SilentlyContinue
-    }    
+    }
 }
 
 # Completion
@@ -149,13 +152,13 @@ if ($RunOptional.IsPresent) {
 
 # Create C:\staging, if not present
 if (-not (Test-Path "C:\staging")) {
-    New-Item -Path "C:\staging" -ItemType Directory -Force | Out-Null    
+    New-Item -Path "C:\staging" -ItemType Directory -Force | Out-Null
 }
 
 # Move uanttend file to avoid future use, since C:\unattend.xml is one of the defautl locations windows looks for
 Move-Item -Path "C:\Unattend.xml" -Destination "C:\staging\Unattend.xml" -Force -ErrorAction SilentlyContinue
 
-Write-Host 
+Write-Host
 Update-Log "Done! A reboot is required for settings to take effect. "
 
 # Write log to disk to signal "completion"
@@ -166,7 +169,7 @@ $sb.ToString() | Out-File "C:\staging\Customization.txt" -Force
 
 if ($RunSysprep.IsPresent) {
     # Run Sysprep to generalize the OS
-    Write-Host 
+    Write-Host
     Write-Host "Waiting for 30 seconds before starting sysprep..."
     Start-Sleep -Seconds 30 # Buffer to make sure sysprep GUI has appeared
 
@@ -175,7 +178,7 @@ if ($RunSysprep.IsPresent) {
         & $env:windir\system32\sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:"C:\staging\Unattend.xml"
     }
     else {
-        # File move must have failed, fallback to the default location 
+        # File move must have failed, fallback to the default location
         & $env:windir\system32\sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:"C:\Unattend.xml"
     }
 }

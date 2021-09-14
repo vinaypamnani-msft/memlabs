@@ -329,6 +329,9 @@ class WaitForConfigurationFile {
     [string] $ReadNode
 
     [DscProperty(Mandatory)]
+    [string] $ReadNodeValue
+
+    [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
     [DscProperty(NotConfigurable)]
@@ -340,20 +343,33 @@ class WaitForConfigurationFile {
         $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
 
         while (!(Test-Path $ConfigurationFile)) {
-            Write-Verbose "Wait for configuration file exist on $($this.MachineName), will try 60 seconds later..."
+            Write-Verbose "Wait for configuration file to exist on $($this.MachineName), will try 60 seconds later..."
             Start-Sleep -Seconds 60
             $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
         }
+
         $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-        while ($Configuration.$($this.ReadNode).Status -ne "Passed") {
-            Write-Verbose "Wait for step : [$($this.ReadNode)] finsihed on $($this.MachineName), will try 60 seconds later..."
+        while ($Configuration.$($this.ReadNode).Status -ne $this.ReadNodeValue) {
+            Write-Verbose "Wait for step: [$($this.ReadNode)] to finish on $($this.MachineName), will try 60 seconds later..."
             Start-Sleep -Seconds 60
             $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
         }
     }
 
     [bool] Test() {
+        $_Role = $this.Role
+        $_FilePath = "\\$($this.MachineName)\$($this.LogFolder)"
+        $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
+
+        if (!(Test-Path $ConfigurationFile)) { return $false }
+
+        $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+        if ($Configuration.$($this.ReadNode).Status -eq $this.ReadNodeValue) {
+            return $true
+        }
+
         return $false
+
     }
 
     [WaitForConfigurationFile] Get() {
@@ -525,8 +541,14 @@ class DownloadSCCM {
         $cmpath = "c:\temp\$_CM.exe"
         $cmsourcepath = "c:\$_CM"
 
-        Write-Verbose "Downloading SCCM installation source..."
-        $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
+        Write-Verbose "Downloading $_CM installation source..."
+        if ($_CM -eq "CMTP") {
+            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2077212&clcid=0x409"
+        }
+        else {
+            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
+        }
+
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
         if (!(Test-Path $cmsourcepath)) {
             Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
@@ -1175,11 +1197,13 @@ class InitializeDisks {
         $label = "DATA"
         foreach ($disk in $_Disks.psobject.properties) {
             $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $disk.Value }
-            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $disk.Name | Format-Volume -FileSystem NTFS -NewFileSystemLabel "$label.$count" -Confirm:$false -Force
+            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $disk.Name | Format-Volume -FileSystem NTFS -NewFileSystemLabel "$label`_$count" -Confirm:$false -Force
             Write-Verbose "Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)"
             $count++
         }
 
+        # Create NO_SMS_ON_DRIVE.SMS
+        New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
     }
 
     [bool] Test() {
@@ -1636,8 +1660,9 @@ class InstallFeatureForSCCM {
         if ($_Role -contains "Site Server") {
             Install-WindowsFeature Net-Framework-Core
             Install-WindowsFeature NET-Framework-45-Core
-            Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net
-            Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
+            Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
+            Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
+            Install-WindowsFeature BITS, BITS-IIS-Ext
         }
         if ($_Role -contains "Application Catalog website point") {
             #IIS

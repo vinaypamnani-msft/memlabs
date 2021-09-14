@@ -20,6 +20,23 @@
     $DCName = $deployConfig.parameters.DCName
     $IsDPMP = $deployConfig.parameters.ThisMachineRole -eq "DPMP"
 
+    # Set DC name ot existing DC
+    if (-not $DCName) {
+        $DCName = $deployConfig.vmOptions.existingDCNameWithPrefix
+    }
+
+    # SQL Setup
+    $installSQL = $false
+    $DName = $DomainName.Split(".")[0]
+    $cm_admin = "$DNAME\admin"
+    if ($ThisVM.sqlVersion) {
+        $installSQL = $true
+        $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
+        if ($ThisVM.sqlInstanceDir) {
+            $SQLInstanceDir = $ThisVM.sqlInstanceDir
+        }
+    }
+
     # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
@@ -114,16 +131,67 @@
             DependsOn = "[JoinDomain]JoinDomain"
         }
 
-        WriteStatus AddLocalAdmin {
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
-            Status    = "Adding cm_svc domain account to Local Administrators group"
+        if ($installSQL) {
+
+            WriteStatus InstallSQL {
+                DependsOn = '[OpenFirewallPortForSCCM]OpenFirewall'
+                Status    = "Installing SQL Server (default instance)"
+            }
+
+            SqlSetup InstallSQL {
+                InstanceName        = 'MSSQLSERVER'
+                InstanceDir         = $SQLInstanceDir
+                SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
+                Features            = 'SQLENGINE,CONN,BC'
+                SourcePath          = 'C:\temp\SQL'
+                UpdateEnabled       = 'True'
+                UpdateSource        = "C:\temp\SQL_CU"
+                SQLSysAdminAccounts = @('Administrators', $cm_admin)
+                TcpEnabled          = $true
+                UseEnglish          = $true
+                DependsOn           = '[OpenFirewallPortForSCCM]OpenFirewall'
+            }
+
+            SqlMemory SetSqlMemory {
+                DependsOn    = '[SqlSetup]InstallSQL'
+                Ensure       = 'Present'
+                DynamicAlloc = $false
+                MinMemory    = 2048
+                MaxMemory    = 8192
+                InstanceName = 'MSSQLSERVER'
+            }
+
+            WriteStatus SSMS {
+                DependsOn = '[SqlMemory]SetSqlMemory'
+                Status    = "Downloading and installing SQL Management Studio"
+            }
+
+            InstallSSMS SSMS {
+                DownloadUrl = "https://aka.ms/ssmsfullsetup"
+                Ensure      = "Present"
+                DependsOn   = '[SqlMemory]SetSqlMemory'
+            }
+
+            WriteStatus AddLocalAdmin {
+                DependsOn = "[InstallSSMS]SSMS"
+                Status    = "Adding cm_svc domain account to Local Administrators group"
+            }
+
+        }
+        else {
+
+            WriteStatus AddLocalAdmin {
+                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                Status    = "Adding cm_svc domain account to Local Administrators group"
+            }
+
         }
 
         File ShareFolder {
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = "[OpenFirewallPortForSCCM]OpenFirewall"
+            DependsOn       = "[WriteStatus]AddLocalAdmin"
         }
 
         FileReadAccessShare DomainSMBShare {

@@ -223,6 +223,16 @@
             HashAlgorithm = "SHA256"
         }
 
+        if (-not $PSName) {
+
+            WriteStatus Complete {
+                DependsOn = "[InstallCA]InstallCA"
+                Status    = "Complete!"
+            }
+
+            return
+        }
+
         WriteStatus WaitDomainJoin {
             DependsOn = "[InstallCA]InstallCA"
             Status    = "Waiting for computers to join the domain"

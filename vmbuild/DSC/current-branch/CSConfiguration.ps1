@@ -95,6 +95,7 @@
             MachineName = $DCName
             LogFolder   = $LogFolder
             ReadNode    = "PSJoinDomain"
+            ReadNodeValue = "Passed"
             Ensure      = "Present"
             DependsOn   = "[File]ShareFolder"
         }
@@ -116,6 +117,7 @@
             MachineName = $DCName
             LogFolder   = $LogFolder
             ReadNode    = "DelegateControl"
+            ReadNodeValue = "Passed"
             Ensure      = "Present"
             DependsOn   = "[OpenFirewallPortForSCCM]OpenFirewall"
         }

@@ -16,16 +16,13 @@
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
+    $DName = $DomainName.Split(".")[0]
+    $cm_admin = "$DNAME\admin"
     $DCName = $deployConfig.parameters.DCName
-    $CurrentRole = $deployConfig.parameters.ThisMachineRole
-    $Clients = $deployConfig.parameters.DomainMembers
     $Configuration = $deployConfig.parameters.Scenario
 
     # CM Options
     $InstallConfigMgr = $deployConfig.cmOptions.install
-
-    # Netbios domain name
-    $DName = $DomainName.Split(".")[0]
 
     # SQL Instance Location
     $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
@@ -139,23 +136,35 @@
         SqlSetup InstallSQL {
             InstanceName        = 'MSSQLSERVER'
             InstanceDir         = $SQLInstanceDir
+            SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
             Features            = 'SQLENGINE,CONN,BC'
             SourcePath          = 'C:\temp\SQL'
             UpdateEnabled       = 'True'
             UpdateSource        = "C:\temp\SQL_CU"
-            SQLSysAdminAccounts = @('Administrators')
+            SQLSysAdminAccounts = @('Administrators', $cm_admin)
+            TcpEnabled          = $true
+            UseEnglish          = $true
             DependsOn           = '[InstallADK]ADKInstall'
         }
 
+        SqlMemory SetSqlMemory {
+            DependsOn    = '[SqlSetup]InstallSQL'
+            Ensure       = 'Present'
+            DynamicAlloc = $false
+            MinMemory    = 2048
+            MaxMemory    = 8192
+            InstanceName = 'MSSQLSERVER'
+        }
+
         WriteStatus SSMS {
-            DependsOn = '[SqlSetup]InstallSQL'
+            DependsOn = '[SqlMemory]SetSqlMemory'
             Status    = "Downloading and installing SQL Management Studio"
         }
 
         InstallSSMS SSMS {
             DownloadUrl = "https://aka.ms/ssmsfullsetup"
             Ensure      = "Present"
-            DependsOn   = '[SqlSetup]InstallSQL'
+            DependsOn   = '[SqlMemory]SetSqlMemory'
         }
 
         File ShareFolder {
@@ -200,12 +209,13 @@
             }
 
             WaitForConfigurationFile WaitCSJoinDomain {
-                Role        = "DC"
-                MachineName = $DCName
-                LogFolder   = $LogFolder
-                ReadNode    = "CSJoinDomain"
-                Ensure      = "Present"
-                DependsOn   = "[File]ShareFolder"
+                Role          = "DC"
+                MachineName   = $DCName
+                LogFolder     = $LogFolder
+                ReadNode      = "CSJoinDomain"
+                ReadNodeValue = "Passed"
+                Ensure        = "Present"
+                DependsOn     = "[File]ShareFolder"
             }
 
             FileReadAccessShare DomainSMBShare {
@@ -222,12 +232,13 @@
         }
 
         WaitForConfigurationFile DelegateControl {
-            Role        = "DC"
-            MachineName = $DCName
-            LogFolder   = $LogFolder
-            ReadNode    = "DelegateControl"
-            Ensure      = "Present"
-            DependsOn   = "[FileReadAccessShare]DomainSMBShare"
+            Role          = "DC"
+            MachineName   = $DCName
+            LogFolder     = $LogFolder
+            ReadNode      = "DelegateControl"
+            ReadNodeValue = "Passed"
+            Ensure        = "Present"
+            DependsOn     = "[FileReadAccessShare]DomainSMBShare"
         }
 
         AddBuiltinPermission AddSQLPermission {
@@ -258,18 +269,23 @@
                 TaskName       = "ScriptWorkFlow"
                 ScriptName     = "ScriptWorkFlow.ps1"
                 ScriptPath     = $PSScriptRoot
-                ScriptArgument = "$ConfigFilePath $LogFolder"
+                ScriptArgument = "$ConfigFilePath $LogPath"
                 Ensure         = "Present"
                 DependsOn      = "[WriteFileOnce]CMSvc"
             }
 
-            WaitForFileToExist WorkflowComplete {
-                FilePath  = "$LogPath\ScriptWorkflow.txt"
-                DependsOn = "[RegisterTaskScheduler]InstallAndUpdateSCCM"
+            WaitForConfigurationFile WorkflowComplete {
+                Role          = "ScriptWorkflow"
+                MachineName   = $ThisMachineName
+                LogFolder     = $LogFolder
+                ReadNode      = "ScriptWorkflow"
+                ReadNodeValue = "Completed"
+                Ensure        = "Present"
+                DependsOn     = "[RegisterTaskScheduler]InstallAndUpdateSCCM"
             }
 
             WriteStatus Complete {
-                DependsOn = "[WaitForFileToExist]WorkflowComplete"
+                DependsOn = "[WaitForConfigurationFile]WorkflowComplete"
                 Status    = "Complete!"
             }
 
