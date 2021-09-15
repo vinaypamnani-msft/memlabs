@@ -160,6 +160,11 @@ if (-not (Test-Path "C:\staging")) {
     New-Item -Path "C:\staging" -ItemType Directory -Force | Out-Null
 }
 
+# Create C:\temp, if not present
+if (-not (Test-Path "C:\temp")) {
+    New-Item -Path "C:\temp" -ItemType Directory -Force | Out-Null
+}
+
 # Move uanttend file to avoid future use, since C:\unattend.xml is one of the defautl locations windows looks for
 Move-Item -Path "C:\Unattend.xml" -Destination "C:\staging\Unattend.xml" -Force -ErrorAction SilentlyContinue
 
