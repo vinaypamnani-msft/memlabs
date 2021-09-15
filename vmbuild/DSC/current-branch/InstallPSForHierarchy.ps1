@@ -169,6 +169,7 @@ Write-DscStatusSetup
 Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
 
 Write-DscStatus "Installation finished."
+Start-Sleep -Seconds 5
 
 # Delete ini file?
 # Remove-Item $CMINIPath

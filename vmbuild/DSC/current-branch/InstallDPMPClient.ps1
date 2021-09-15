@@ -8,10 +8,10 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
-$DName = $DomainName.Split(".")[0]
+$DomainName = $DomainFullName.Split(".")[0]
 $DPMPName = $deployConfig.parameters.DPMPName
 $ClientNames = $deployConfig.parameters.DomainMembers
-$cm_svc = "$DNAME\cm_svc"
+$cm_svc = "$DomainName\cm_svc"
 $installDPMPRoles = $deployConfig.cmOptions.installDPMPRoles
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 $networkSubnet = $deployConfig.vmOptions.network
@@ -166,7 +166,6 @@ if (-not $pushClients) {
 
 # Setup System Discovery
 Write-DscStatus "Setting AD system discovery"
-$DomainName = $DomainFullName.split('.')[0]
 $lastdomainname = $DomainFullName.Split(".")[-1]
 while (((Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }).value1.ToLower() -ne "active") {
     Start-Sleep -Seconds 20
