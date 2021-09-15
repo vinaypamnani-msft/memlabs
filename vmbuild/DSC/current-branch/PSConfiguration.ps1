@@ -260,37 +260,20 @@
                 Status    = "Setting up ConfigMgr. Waiting for installation to begin."
             }
 
-            if ($Configuration -eq "Standalone") {
-
-                WriteFileOnce CMSvc {
-                    FilePath  = "$LogPath\cm_svc.txt"
-                    Content   = $Admincreds.GetNetworkCredential().Password
-                    DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-                }
-
-                RegisterTaskScheduler InstallAndUpdateSCCM {
-                    TaskName       = "ScriptWorkFlow"
-                    ScriptName     = "ScriptWorkFlow.ps1"
-                    ScriptPath     = $PSScriptRoot
-                    ScriptArgument = "$ConfigFilePath $LogPath"
-                    AdminCreds     = $CMAdmin
-                    Ensure         = "Present"
-                    DependsOn      = "[WriteFileOnce]CMSvc"
-                }
-
+            WriteFileOnce CMSvc {
+                FilePath  = "$LogPath\cm_svc.txt"
+                Content   = $Admincreds.GetNetworkCredential().Password
+                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
             }
-            else {
 
-                RegisterTaskScheduler InstallAndUpdateSCCM {
-                    TaskName       = "ScriptWorkFlow"
-                    ScriptName     = "ScriptWorkFlow.ps1"
-                    ScriptPath     = $PSScriptRoot
-                    ScriptArgument = "$ConfigFilePath $LogPath"
-                    AdminCreds     = $CMAdmin
-                    Ensure         = "Present"
-                    DependsOn      = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-                }
-
+            RegisterTaskScheduler InstallAndUpdateSCCM {
+                TaskName       = "ScriptWorkFlow"
+                ScriptName     = "ScriptWorkFlow.ps1"
+                ScriptPath     = $PSScriptRoot
+                ScriptArgument = "$ConfigFilePath $LogPath"
+                AdminCreds     = $CMAdmin
+                Ensure         = "Present"
+                DependsOn      = "[WriteFileOnce]CMSvc"
             }
 
             WaitForConfigurationFile WorkflowComplete {

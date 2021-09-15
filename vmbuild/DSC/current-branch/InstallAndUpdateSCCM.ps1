@@ -10,11 +10,8 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $Config = $deployConfig.parameters.Scenario
 $CurrentRole = $deployConfig.parameters.ThisMachineRole
 $DomainFullName = $deployConfig.parameters.domainName
-$DName = $DomainFullName.Split(".")[0]
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-$CMUser = "$DName\admin"
 $PSName = $deployConfig.parameters.PSName
-$PSComputerAccount = "$DName\$PSName$"
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
@@ -176,29 +173,6 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 
 # Set the current location to be the site code.
 Set-Location "$($SiteCode):\" @initParams
-
-#Add domain user as CM administrative user
-# Write-DscStatus "Adding $CMUser as CM a Full Administrator."
-# Start-Sleep -Seconds 5
-# New-CMAdministrativeUser -Name $CMUser -RoleName "Full Administrator" -SecurityScopeName "All", "All Systems", "All Users and User Groups" | Out-File $global:StatusLog -Append
-
-# if ($installAction -eq "InstallCAS") {
-
-#     $PSComputerAccount = "$DName\$PSName$"
-
-#     #Add PS computer account as CM administrative user
-#     Write-DscStatus "Setting $PSComputerAccount as CM Administrative User"
-#     Start-Sleep -Seconds 5
-#     New-CMAdministrativeUser -Name $PSComputerAccount  -RoleName "Full Administrator" -SecurityScopeName "All", "All Systems", "All Users and User Groups" | Out-File $global:StatusLog -Append
-
-#     # Set permissions for PS computer account
-#     Write-DscStatus "Setting permissions for Primary site computer account $PSComputerAccount"
-#     Start-Sleep -Seconds 5
-#     $Acl = Get-Acl $SMSInstallDir
-#     $NewAccessRule = New-Object system.security.accesscontrol.filesystemaccessrule($PSComputerAccount, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-#     $Acl.SetAccessRule($NewAccessRule)
-#     Set-Acl $SMSInstallDir $Acl | Out-File $global:StatusLog -Append
-# }
 
 # Enable EHTTP
 Write-DscStatus "Enabling e-HTTP."
@@ -540,7 +514,6 @@ if ($UpdateToLatest) {
         }
     }
     else {
-        Write-DscStatus "Updating to '$($updatepack.Name)'. Current State: $($state[$updatepack.State])"
         $Configuration.UpgradeSCCM.Status = 'Completed'
     }
 }

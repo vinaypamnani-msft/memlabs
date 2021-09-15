@@ -251,12 +251,6 @@
                 Status    = "Setting up ConfigMgr. Waiting for installation to begin."
             }
 
-            WriteFileOnce CMSvc {
-                FilePath  = "$LogPath\cm_svc.txt"
-                Content   = $Admincreds.GetNetworkCredential().Password
-                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-            }
-
             RegisterTaskScheduler InstallAndUpdateSCCM {
                 TaskName       = "ScriptWorkFlow"
                 ScriptName     = "ScriptWorkFlow.ps1"
@@ -264,7 +258,7 @@
                 ScriptArgument = "$ConfigFilePath $LogPath"
                 AdminCreds     = $CMAdmin
                 Ensure         = "Present"
-                DependsOn      = "[WriteFileOnce]CMSvc"
+                DependsOn      = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
             }
 
             WaitForConfigurationFile WorkflowComplete {
