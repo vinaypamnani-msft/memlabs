@@ -107,7 +107,7 @@ $VM_Create = {
     $network = $deployConfig.vmOptions.network
 
     # Determine which OS image file to use for the VM
-    $imageFile = $Common.ImageList.Files | Where-Object { $_.id -eq $currentItem.operatingSystem }
+    $imageFile = $Common.AzureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
     $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
 
     # Set base VM path
@@ -164,7 +164,7 @@ $VM_Create = {
         Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Activity "Working" -Completed
 
         # Determine which SQL version files should be used
-        $sqlFiles = $Common.ImageList.Files | Where-Object { $_.id -eq $currentItem.sqlVersion }
+        $sqlFiles = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
 
         # SQL Iso Path
         $sqlIso = $sqlFiles | Where-Object { $_.filename.EndsWith(".iso") }

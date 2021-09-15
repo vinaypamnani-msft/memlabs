@@ -169,6 +169,77 @@ function Get-File {
     }
 }
 
+function Get-ToolsForBaseImage
+{
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "Force redownloading and copying/extracting tools.")]
+        [switch]$ForceTools
+    )
+
+    # Purge all items inside existing tools folder
+    $toolsPath = Join-Path $Common.StagingInjectPath "tools"
+    if ((Test-Path $toolsPath) -and $ForceTools.IsPresent) {
+        Write-Log "ForceTools switch is present, and '$toolsPath' exists. Purging items inside the folder." -Warning
+        Remove-Item -Path $toolsPath\* -Force -Recurse -WhatIf:$WhatIf | Out-Null
+    }
+
+    foreach ($item in $Common.AzureFileList.Tools) {
+
+
+        $name = $item.Name
+        $url = $item.URL
+        $fileTargetRelative = $item.Target
+        $fileName = Split-Path $url -Leaf
+        $downloadPath = Join-Path $Common.AzureToolsPath $fileName
+
+        Write-Host
+        Write-Log "Obtaining '$name'" -Success
+
+        if (-not $item.IsPublic) {
+            $url = "$($StorageConfig.StorageLocation)/$url"
+        }
+
+        $download = $true
+
+        if (Test-Path $downloadPath) {
+            Write-Log "Get-ToolsForBaseImage: Found $fileName in $($Common.TempPath)."
+            if ($ForceTools.IsPresent) {
+                Write-Log "Get-ToolsForBaseImage: ForceTools switch present. Removing pre-existing $fileName file..." -Warning
+                Remove-Item -Path $downloadPath -Force -WhatIf:$WhatIf | Out-Null
+            }
+            else {
+                # Write-Log "Get-ToolsForBaseImage: ForceTools switch not present. Skip downloading/recopying '$fileName'." -Warning
+                $download = $false
+                continue
+            }
+        }
+
+        if ($download) {
+            Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$name' to $downloadPath..." -Action "Downloading" -WhatIf:$WhatIf
+
+            # Create final destination directory, if not present
+
+            $fileDestination = Join-Path $Common.StagingInjectPath $fileTargetRelative
+            if (-not (Test-Path $fileDestination)) {
+                New-Item -Path $fileDestination -ItemType Directory -Force | Out-Null
+            }
+
+            # File downloaded
+            $extractIfZip = $item.ExtractFolderIfZip
+            if (Test-Path $downloadPath) {
+                if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
+                    Write-Log "Get-ToolsForBaseImage: Extracting $fileName to $fileDestination."
+                    Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                }
+                else {
+                    Write-Log "Get-ToolsForBaseImage: Copying $fileName to $fileDestination."
+                    Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                }
+            }
+        }
+    }
+}
+
 function New-Directory {
     param(
         $DirectoryPath
@@ -247,7 +318,7 @@ function Import-WimFromIso {
     # Move the imported WIM to the wim folder
     try {
         Write-Log "Import-WimFromIso: Moving $WimName to wim folder..."
-        Move-Item -Path "$($Common.TempPath)\install.wim" -Destination "$($Common.WimagePath)\$WimName" -ErrorAction Stop | Out-Null
+        Move-Item -Path "$($Common.TempPath)\install.wim" -Destination "$($Common.StagingWimPath)\$WimName" -ErrorAction Stop | Out-Null
     }
     catch {
         Write-Log "Import-WimFromIso: Couldn't move the new WIM to the staging folder." -Failure
@@ -256,7 +327,7 @@ function Import-WimFromIso {
     }
 
     Write-Log "Import-WimFromIso: WIM import complete." -Success
-    return (Join-Path $Common.WimagePath $WimName)
+    return (Join-Path $Common.StagingWimPath $WimName)
 }
 
 function Invoke-RemoveISOmount ($inputObject) {
@@ -283,7 +354,7 @@ function New-VhdxFile {
         return $true
     }
 
-    $wimPath = Join-Path $Common.WimagePath $WimName
+    $wimPath = Join-Path $Common.StagingWimPath $WimName
 
     try {
         Write-Log "New-VhdxFile: Obtaining image from $wimPath."
@@ -311,10 +382,10 @@ function New-VhdxFile {
     Import-Module WindowsImageTools
 
     $unattendFile = $WimName -replace ".wim", ".xml"
-    $unattendPath = Join-Path $Common.AnswerFilePath $unattendFile
+    $unattendPath = Join-Path $Common.StagingAnswerFilePath $unattendFile
 
     Write-Log "New-VhdxFile: Will inject $unattendPath"
-    Write-Log "New-VhdxFile: Will inject directories inside $($Common.InjectPath)"
+    Write-Log "New-VhdxFile: Will inject directories inside $($Common.StagingInjectPath)"
     Write-Log "New-VhdxFile: Will use ImageIndex $($selectedImage.ImageIndex) for $($selectedImage.ImageName)"
 
     if (-not (Test-Path $unattendPath)) {
@@ -326,7 +397,7 @@ function New-VhdxFile {
 
     # Prepare filesToInject
     $filesToInject = @()
-    $items = Get-ChildItem -Directory -Path $Common.InjectPath -ErrorAction SilentlyContinue
+    $items = Get-ChildItem -Directory -Path $Common.StagingInjectPath -ErrorAction SilentlyContinue
     foreach ($item in $items) {
         $filesToInject += $item.FullName
     }
@@ -867,8 +938,8 @@ function Get-StorageConfig {
 
         # See if image list needs to be updated
         if (Test-Path $fileListPath) {
-            $Common.ImageList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            $updateList = $Common.ImageList.UpdateFromStorage
+            $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $updateList = $Common.AzureFileList.UpdateFromStorage
         }
 
         # Update file list
@@ -876,11 +947,11 @@ function Get-StorageConfig {
 
             # Get file list
             Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent
-            $Common.ImageList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 
             # Get local admin password
             $username = "vmbuildadmin"
-            $item = $Common.ImageList.Files | Where-Object { $_.id -eq $username }
+            $item = $Common.AzureFileList.OS | Where-Object { $_.id -eq $username }
             $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)?$($StorageConfig.StorageToken)"
             $response = Invoke-WebRequest -Uri $fileUrl -ErrorAction Stop
             $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
@@ -982,26 +1053,26 @@ function Test-Configuration {
 ### Required Directories ###
 ############################
 
-$staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "zStaging")                        # Path where staged files go
-$inPath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "zInput")                          # Path where input files are found
-$storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")                 # Path for downloaded files
+$staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
+$storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
 
 $global:Common = [PSCustomObject]@{
-    TempPath       = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "zTemp")            # Path for temporary files
-    ConfigPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
-    AzureFilesPath = $storagePath                                                              # Path for downloaded files
-    GoldImagePath  = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
-    IsoPath        = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
-    AnswerFilePath = New-Directory -DirectoryPath (Join-Path $inPath "unattend")               # Path for Answer files
-    InjectPath     = New-Directory -DirectoryPath (Join-Path $inPath "filesToInject")          # Path to files to inject in VHDX
-    WimagePath     = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
-    BaseImagePath  = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
-    StagingVMPath  = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
-    LogPath        = Join-Path $PSScriptRoot "vmbuild.log"
-    VerboseLog     = $false
-    FatalError     = $null
-    ImageList      = $null
-    LocalAdmin     = $null
+    TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
+    ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
+    AzureFilesPath        = $storagePath                                                              # Path for downloaded files
+    AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
+    AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
+    AzureToolsPath        = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
+    StagingAnswerFilePath = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
+    StagingInjectPath     = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX
+    StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
+    StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
+    StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
+    LogPath               = Join-Path $PSScriptRoot "vmbuild.log"                                     # Log File
+    AzureFileList         = $null
+    LocalAdmin            = $null
+    VerboseLog            = $false
+    FatalError            = $null
 }
 
 $global:StorageConfig = [PSCustomObject]@{

@@ -1,21 +1,25 @@
 param (
-    [Parameter(Mandatory=$false, HelpMessage="ISO File to extract install.wim from.")]
+    [Parameter(Mandatory = $false, HelpMessage = "ISO File to extract install.wim from.")]
     [string]$IsoPath,
-    [Parameter(Mandatory=$true, HelpMessage="New Name of the WIM File.")]
+    [Parameter(Mandatory = $true, HelpMessage = "New Name of the WIM File.")]
     [string]$WimFileName,
-    [Parameter(Mandatory=$false, HelpMessage="Force reimporting WIM, if WIM already exists.")]
+    [Parameter(Mandatory = $true, HelpMessage = "Hyper-V Switch to use for the VM. Must have Internet access for Server OS.")]
+    [string]$SwitchName,
+    [Parameter(Mandatory = $false, HelpMessage = "Force reimporting WIM, if WIM already exists.")]
     [switch]$ForceNewWim,
-    [Parameter(Mandatory=$false, HelpMessage="Force recreating VHDX, if VHDX already exists.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Force recreating VHDX, if VHDX already exists.")]
     [switch]$ForceNewVhdx,
-    [Parameter(Mandatory=$false, HelpMessage="Force recreating VM, if VM already exists.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Force recreating VM, if VM already exists.")]
     [switch]$ForceNewVm,
-    [Parameter(Mandatory=$false, HelpMessage="Force recreating golden image, if it already exists.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Force recreating golden image, if it already exists.")]
     [switch]$ForceNewGoldImage,
-    [Parameter(Mandatory=$false, HelpMessage="Indicate if existing VM should be re-used. Not recommended. Use only for test/dev to save time.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Indicate if existing VM should be re-used. Not recommended. Use only for test/dev to save time.")]
     [switch]$UseExistingVm,
-    [Parameter(Mandatory=$false, HelpMessage="Indicate if the script should continue, without bginfo in the filesToInject\staging\bginfo directory")]
+    [Parameter(Mandatory = $false, HelpMessage = "Force re-download of tools to inject in the image.")]
+    [switch]$ForceTools,
+    [Parameter(Mandatory = $false, HelpMessage = "Indicate if the script should continue, without bginfo in the filesToInject\staging\bginfo directory")]
     [switch]$IgnoreBginfo,
-    [Parameter(Mandatory=$false, HelpMessage="Dry Run.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
     [switch]$WhatIf
 )
 
@@ -28,20 +32,24 @@ if ($Common.FatalError) {
     return
 }
 
-# Validate bginfo.exe is present
-if (-not (Test-Path "$($Common.InjectPath)\staging\bginfo\bginfo.exe") -and -not $IgnoreBginfo.IsPresent) {
-    Write-Log "Main: $($Common.InjectPath)\staging\bginfo\bginfo.exe not found. Use IgnoreBginfo switch if you don't care about this." -Warning    
-    return
+# Validate/Download bginfo.exe
+$bgInfoPath = "$($Common.StagingInjectPath)\staging\bginfo\bginfo.exe"
+if (-not (Test-Path $bgInfoPath)) {
+    Get-File -Source "https://live.sysinternals.com/bginfo.exe" -Destination $bgInfoPath -DisplayName "Downloading bginfo.exe" -Action "Downloading" -Silent
+    if (-not (Test-Path $bgInfoPath) -and -not $IgnoreBginfo.IsPresent) {
+        Write-Log "Main: $bgInfoPath not found, and download failed. Use IgnoreBginfo switch if you don't care about this." -Warning
+        return
+    }
 }
 
 Clear-Host
 Write-Host
-Write-Host 
-Write-Host 
-Write-Host 
-Write-Host 
-Write-Host 
-Write-Host 
+Write-Host
+Write-Host
+Write-Host
+Write-Host
+Write-Host
+Write-Host
 
 # Timer
 Write-Log "### START." -Success
@@ -63,9 +71,9 @@ $vhdxFile = $WimFileName -replace ".wim", ".vhdx"
 
 # Check if gold image exists
 $purgeGoldImage = $false
-$goldImagePath = Join-Path $Common.GoldImagePath $vhdxFile
+$goldImagePath = Join-Path $Common.AzureImagePath $vhdxFile
 if (-not $WhatIf -and (Test-Path $goldImagePath)) {
-    Write-Log "Main: Found $vhdxFile in $($Common.GoldImagePath)."
+    Write-Log "Main: Found $vhdxFile in $($Common.AzureImagePath)."
     if ($ForceNewGoldImage.IsPresent) {
         Write-Log "Main: ForceNewGoldImage switch present. Will remove $goldImagePath..." -Warning
         $purgeGoldImage = $true
@@ -84,10 +92,10 @@ Write-Log "Main: Obtaining $WimFileName." -Activity
 
 # Check if WIM exists
 $importWim = $true
-$wimPath = Join-Path $Common.WimagePath $WimFileName
+$wimPath = Join-Path $Common.StagingWimPath $WimFileName
 
 if (Test-Path $wimPath) {
-    Write-Log "Main: Found $WimFileName in $($Common.WimagePath)."
+    Write-Log "Main: Found $WimFileName in $($Common.StagingWimPath)."
     if ($ForceNewWim.IsPresent) {
         Write-Log "Main: ForceNewWim switch present. Removing existing $WimFileName..." -Warning
         if (-not $WhatIf) {
@@ -95,7 +103,7 @@ if (Test-Path $wimPath) {
         }
     }
     else {
-        Write-Log "Main: ForceNewWim switch not present. Re-using existing $WimFileName file..." -Warning        
+        Write-Log "Main: ForceNewWim switch not present. Re-using existing $WimFileName file..." -Warning
         $importWim = $false
     }
 }
@@ -118,20 +126,30 @@ if ($null -eq $wimPath -and -not $WhatIf) {
     return
 }
 
+################
+### GET TOOLS
+################
+if ($Common.AzureFileList.Tools) {
+
+    Write-Log "Main: Obtaining Tools to inject in the image." -Activity
+    Get-ToolsForBaseImage -ForceTools:$ForceTools
+
+}
+
 ##############
 ### GET VHDX
 ##############
 
 Write-Log "Main: Using WIM $WimFileName to create a VHDX file." -Activity
-$vhdxPath = Join-Path $Common.BaseImagePath $vhdxFile
+$vhdxPath = Join-Path $Common.StagingImagePath $vhdxFile
 
 # Check if VHDX exists
 $createVhdx = $true
 if (-not $WhatIf -and (Test-Path $vhdxPath)) {
-    Write-Log "Main: Found $vhdxFile in $($Common.BaseImagePath)."
+    Write-Log "Main: Found $vhdxFile in $($Common.StagingImagePath)."
     if ($ForceNewVhdx.IsPresent) {
         Write-Log "Main: ForceNewVhdx switch present. Removing pre-existing $vhdxFile..." -Warning
-        Remove-Item -Path $vhdxPath -Force | Out-Null        
+        Remove-Item -Path $vhdxPath -Force | Out-Null
     }
     else {
         Write-Log "Main: ForceNewVhdx switch not present. Re-using existing $vhdxFile file..." -Warning
@@ -140,7 +158,7 @@ if (-not $WhatIf -and (Test-Path $vhdxPath)) {
 }
 
 # Create the VHDX
-if ($createVhdx) {    
+if ($createVhdx) {
     $worked = New-VhdxFile -WimName $WimFileName -VhdxPath $vhdxPath -WhatIf:$WhatIf
     if (-not $worked) {
         Write-Log "Main: Valid $vhdxFile was not found. Exiting!" -Failure
@@ -185,9 +203,9 @@ if ($vmTest) {
 }
 
 if ($createVm) {
-    $response = Read-Host -Prompt "For Server OS, please make sure the switch used for creating VM has Internet. Continue? [y/N]"
-    if ($response -ne 'Y' -or $response -ne 'y') { return }
-    $worked = New-VirtualMachine -VmName $vmName -VmPath $Common.StagingVMPath -SourceDiskPath $vhdxPath -Memory "8GB" -Generation 2 -Processors 8 -SwitchName "External" -ForceNew:$ForceNewVm -WhatIf:$WhatIf
+    # $response = Read-Host -Prompt "For Server OS, please make sure the switch used for creating VM has Internet. Continue? [y/N]"
+    # if ($response -ne 'Y' -or $response -ne 'y') { return }
+    $worked = New-VirtualMachine -VmName $vmName -VmPath $Common.StagingVMPath -SourceDiskPath $vhdxPath -Memory "8GB" -Generation 2 -Processors 8 -SwitchName $SwitchName -ForceNew:$ForceNewVm -WhatIf:$WhatIf
     if (-not $worked) {
         Write-Log "Main: VM not created. Exiting!" -Failure
         return
@@ -244,7 +262,7 @@ Write-Log "Main: Capturing the golden image from $vmName..." -Activity
 Write-Log "Main: Obtaining OS disk path of $vmName..."
 if (-not $WhatIf) {
     $f = Get-VM -Name $vmName | Get-VMFirmware
-    $f_hd = $f.BootOrder | Where-Object{$_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive]}
+    $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
     $osDiskPath = $f_hd.Device.Path
 
     if (-not $osDiskPath) {
@@ -264,16 +282,16 @@ if ($purgeGoldImage) {
 
 Write-Log "Main: Copying the 'golden' image..."
 
-Get-File -Source $osDiskPath -Destination $goldImagePath -DisplayName "Copying the 'golden' image to $($Common.GoldImagePath)" -Action "Copying" -WhatIf:$WhatIf
-Write-Host 
+Get-File -Source $osDiskPath -Destination $goldImagePath -DisplayName "Copying the 'golden' image to $($Common.AzureImagePath)" -Action "Copying" -WhatIf:$WhatIf
+Write-Host
 if (-not $WhatIf -and -not (Test-Path $osDiskPath)) {
-    Write-Log "### Something went wrong copying the 'golden' image $osDiskPath to $($Common.GoldImagePath). Please copy manually." -Warning
+    Write-Log "### Something went wrong copying the 'golden' image $osDiskPath to $($Common.AzureImagePath). Please copy manually." -Warning
 }
 else {
-    Write-Log "### Success! The 'golden' image $vhdxFile was copied to $($Common.GoldImagePath)..." -Success
+    Write-Log "### Success! The 'golden' image $vhdxFile was copied to $($Common.AzureImagePath)..." -Success
 }
 
 $timer.Stop()
-Write-Host 
+Write-Host
 Write-Log "### COMPLETE. Elapsed Time: $($timer.Elapsed)" -Success
-Write-Host 
+Write-Host
