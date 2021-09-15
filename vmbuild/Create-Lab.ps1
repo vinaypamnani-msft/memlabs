@@ -51,7 +51,6 @@ Write-Host
 Write-Host
 Write-Host
 
-
 Write-Log "### START." -Success
 Write-Log "Main: Creating virtual machines for specified configuration: $Configuration" -Activity
 
@@ -77,8 +76,8 @@ else {
     Write-Log "Main: $configPath will be used for creating the lab environment."
 }
 
+# Load configuration
 try {
-    # Load configuration
     $result = Test-Configuration -FilePath $configPath
     if ($result.Valid) {
         $deployConfig = $result.DeployConfig
@@ -333,17 +332,26 @@ $VM_Create = {
         Start-Sleep -Seconds 3
 
         if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {
+
+            $currentStatus = $status.ScriptBlockOutput | Out-String
+
             # Write to log if status changed
-            if ($status.ScriptBlockOutput -ne $previousStatus) {
-                Write-Log "PSJOB: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $($status.ScriptBlockOutput)"
-                $previousStatus = $status.ScriptBlockOutput
+            if ($currentStatus -ne $previousStatus) {
+                # Trim status for logging
+                if ($currentStatus.Contains("; checking again in ")) {
+                    $currentStatusTrimmed = $currentStatus.Substring(0, $currentStatus.IndexOf("; checking again in "))
+                }
+                else {
+                    $currentStatusTrimmed = $currentStatus
+                }
+                Write-Log "PSJOB: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
+                $previousStatus = $currentStatus
             }
 
             # Special case to write log ConfigMgrSetup.log entries in progress
             $skipProgress = $false
-            $outString = $status.ScriptBlockOutput | Out-String
             $setupPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
-            if ($outString.StartsWith($setupPrefix)) {
+            if ($currentStatus.StartsWith($setupPrefix)) {
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content "C:\ConfigMgrSetup.log" -tail 1 } -SuppressLog -WhatIf:$WhatIf
                 if (-not $result.ScriptBlockFailed) {
                     $logEntry = $result.ScriptBlockOutput

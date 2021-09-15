@@ -1,11 +1,17 @@
 param(
-    $role = "PS",
     $vmName,
+    $configPath,
+    [System.Management.Automation.PSCredential]$creds,
     [switch]$force
 )
 
 if (-not $vmName) {
-    Write-Host "Specify VMName param. "
+    Write-Host "Specify VMName."
+    return
+}
+
+if (-not $configPath) {
+    Write-Host "Specify configPath."
     return
 }
 
@@ -48,6 +54,19 @@ foreach ($module in $modules) {
     }
 }
 
+# Create dummy file so config doesn't fail
+. "..\Common.ps1"
+$result = Test-Configuration -FilePath $ConfigPath
+$ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
+$result.DeployConfig.parameters.ThisMachineName = $ThisVM.vmName
+$result.DeployConfig.parameters.ThisMachineRole = $ThisVM.role
+$role  = $ThisVM.role
+
+# Dump config to file, for debugging
+#$result.DeployConfig | ConvertTo-Json | Set-Clipboard
+$filePath = "C:\temp\deployConfig.json"
+$result.DeployConfig | ConvertTo-Json -Depth 3 | Out-File $filePath -Force
+
 # Create local compressed file and inject appropriate appropriate TemplateHelpDSC
 Write-Host "Creating DSC.zip for $version.."
 Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$version\DSC.zip -Force
@@ -61,7 +80,9 @@ Copy-Item .\$version\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules
 # Create test config, for testing if the config definition is good.
 $role = if ($role -eq "DPMP") { "DomainMember" } else { $role }
 Write-Host "Creating a test config for $role in C:\Temp"
-$adminCreds = Get-Credential
+
+if ($creds) { $adminCreds = $creds }
+else { $adminCreds = Get-Credential }
 . ".\$version\$($role)Configuration.ps1"
 
 # Configuration Data
@@ -74,13 +95,5 @@ $cd = @{
         }
     )
 }
-
-# Create dummy file so config doesn't fail
-. "..\Common.ps1"
-$result = Test-Configuration -FilePath "E:\repos\memlabs\vmbuild\config\samples\Standalone.json"
-$filePath = "C:\temp\deployConfig.json"
-$result.DeployConfig.parameters.ThisMachineName = $vmName
-$result.DeployConfig | ConvertTo-Json | Set-Clipboard
-$result.DeployConfig | ConvertTo-Json -Depth 3| Out-File $filePath -Force
 
 & "$($role)Configuration" -ConfigFilePath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config"

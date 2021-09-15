@@ -1066,15 +1066,20 @@ class RegisterTaskScheduler {
     [string] $ScriptArgument
 
     [DscProperty(Mandatory)]
+    [System.Management.Automation.PSCredential] $AdminCreds
+
+    [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
+        $_TaskName = $this.TaskName
         $_ScriptName = $this.ScriptName
         $_ScriptPath = $this.ScriptPath
         $_ScriptArgument = $this.ScriptArgument
+        $_AdminCreds = $this.AdminCreds
 
         $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
         if (!(Test-Path $ProvisionToolPath)) {
@@ -1086,9 +1091,8 @@ class RegisterTaskScheduler {
 
         Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
 
-        $_TaskName = $this.TaskName
-        $TaskDescription = "Azure template task"
-        $TaskCommand = "c:\windows\system32\WindowsPowerShell\v1.0\powershell.exe"
+        $TaskDescription = "vmbuild task"
+        $TaskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
         $TaskScript = "$ProvisionToolPath\$_ScriptName"
 
         Write-Verbose "Task script full path is : $TaskScript "
@@ -1097,25 +1101,36 @@ class RegisterTaskScheduler {
 
         Write-Verbose "command is : $TaskArg"
 
+        $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
+
         $TaskStartTime = [datetime]::Now.AddMinutes(2)
-        $service = new-object -ComObject("Schedule.Service")
-        $service.Connect()
-        $rootFolder = $service.GetFolder("\")
-        $TaskDefinition = $service.NewTask(0)
-        $TaskDefinition.RegistrationInfo.Description = "$TaskDescription"
-        $TaskDefinition.Settings.Enabled = $true
-        $TaskDefinition.Settings.AllowDemandStart = $true
-        $triggers = $TaskDefinition.Triggers
-        #http://msdn.microsoft.com/en-us/library/windows/desktop/aa383915(v=vs.85).aspx
-        $trigger = $triggers.Create(1)
-        $trigger.StartBoundary = $TaskStartTime.ToString("yyyy-MM-dd'T'HH:mm:ss")
-        $trigger.Enabled = $true
-        #http://msdn.microsoft.com/en-us/library/windows/desktop/aa381841(v=vs.85).aspx
-        $Action = $TaskDefinition.Actions.Create(0)
-        $action.Path = "$TaskCommand"
-        $action.Arguments = "$TaskArg"
-        #http://msdn.microsoft.com/en-us/library/windows/desktop/aa381365(v=vs.85).aspx
-        $rootFolder.RegisterTaskDefinition("$_TaskName", $TaskDefinition, 6, "System", $null, 5)
+        $Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
+
+        $Principal = New-ScheduledTaskPrincipal -UserId $_AdminCreds.UserName -RunLevel Highest
+        $Password = $_AdminCreds.GetNetworkCredential().Password
+
+        $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
+        $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password
+
+        # $TaskStartTime = [datetime]::Now.AddMinutes(2)
+        # $service = new-object -ComObject("Schedule.Service")
+        # $service.Connect()
+        # $rootFolder = $service.GetFolder("\")
+        # $TaskDefinition = $service.NewTask(0)
+        # $TaskDefinition.RegistrationInfo.Description = "$TaskDescription"
+        # $TaskDefinition.Settings.Enabled = $true
+        # $TaskDefinition.Settings.AllowDemandStart = $true
+        # $triggers = $TaskDefinition.Triggers
+        # #http://msdn.microsoft.com/en-us/library/windows/desktop/aa383915(v=vs.85).aspx
+        # $trigger = $triggers.Create(1)
+        # $trigger.StartBoundary = $TaskStartTime.ToString("yyyy-MM-dd'T'HH:mm:ss")
+        # $trigger.Enabled = $true
+        # #http://msdn.microsoft.com/en-us/library/windows/desktop/aa381841(v=vs.85).aspx
+        # $Action = $TaskDefinition.Actions.Create(0)
+        # $action.Path = "$TaskCommand"
+        # $action.Arguments = "$TaskArg"
+        # #http://msdn.microsoft.com/en-us/library/windows/desktop/aa381365(v=vs.85).aspx
+        # $rootFolder.RegisterTaskDefinition("$_TaskName", $TaskDefinition, 6, "System", $null, 5)
     }
 
     [bool] Test() {
@@ -1848,7 +1863,7 @@ class SetupDomain {
                     return $true
                 }
                 catch {
-                    Write-Verbose "Waitting for Domain ready..."
+                    Write-Verbose "Waiting for Domain ready..."
                     Start-Sleep -Seconds 30
                 }
             }

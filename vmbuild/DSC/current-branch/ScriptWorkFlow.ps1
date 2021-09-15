@@ -13,7 +13,11 @@ function Write-DscStatusSetup {
 }
 
 function Write-DscStatus {
-    param($status, [switch]$NoLog, [switch]$NoStatus)
+    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds)
+
+    if ($RetrySeconds) {
+        $status = "$status; checking again in $RetrySeconds seconds"
+    }
 
     if (-not $NoStatus.IsPresent) {
         $StatusPrefix = "Setting up ConfigMgr."
@@ -144,6 +148,7 @@ else {
 }
 
 if ($Config -eq "Standalone") {
+
     #Install CM and Config
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
@@ -155,12 +160,14 @@ if ($Config -eq "Standalone") {
 }
 else {
     if ($CurrentRole -eq "CS") {
+
         #Install CM and Config
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallCSForHierarchy.ps1"
+        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
 
     }
     elseif ($CurrentRole -eq "PS") {
+
         #Install CM and Config
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPSForHierarchy.ps1"
         . $ScriptFile $ConfigFilePath $LogPath

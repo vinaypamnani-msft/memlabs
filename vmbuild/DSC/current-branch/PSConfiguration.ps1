@@ -37,6 +37,7 @@
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\admin", $Admincreds.Password)
 
     Node LOCALHOST
     {
@@ -259,19 +260,37 @@
                 Status    = "Setting up ConfigMgr. Waiting for installation to begin."
             }
 
-            WriteFileOnce CMSvc {
-                FilePath  = "$LogPath\cm_svc.txt"
-                Content   = $Admincreds.GetNetworkCredential().Password
-                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-            }
+            if ($Configuration -eq "Standalone") {
 
-            RegisterTaskScheduler InstallAndUpdateSCCM {
-                TaskName       = "ScriptWorkFlow"
-                ScriptName     = "ScriptWorkFlow.ps1"
-                ScriptPath     = $PSScriptRoot
-                ScriptArgument = "$ConfigFilePath $LogPath"
-                Ensure         = "Present"
-                DependsOn      = "[WriteFileOnce]CMSvc"
+                WriteFileOnce CMSvc {
+                    FilePath  = "$LogPath\cm_svc.txt"
+                    Content   = $Admincreds.GetNetworkCredential().Password
+                    DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+                }
+
+                RegisterTaskScheduler InstallAndUpdateSCCM {
+                    TaskName       = "ScriptWorkFlow"
+                    ScriptName     = "ScriptWorkFlow.ps1"
+                    ScriptPath     = $PSScriptRoot
+                    ScriptArgument = "$ConfigFilePath $LogPath"
+                    AdminCreds     = $CMAdmin
+                    Ensure         = "Present"
+                    DependsOn      = "[WriteFileOnce]CMSvc"
+                }
+
+            }
+            else {
+
+                RegisterTaskScheduler InstallAndUpdateSCCM {
+                    TaskName       = "ScriptWorkFlow"
+                    ScriptName     = "ScriptWorkFlow.ps1"
+                    ScriptPath     = $PSScriptRoot
+                    ScriptArgument = "$ConfigFilePath $LogPath"
+                    AdminCreds     = $CMAdmin
+                    Ensure         = "Present"
+                    DependsOn      = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+                }
+
             }
 
             WaitForConfigurationFile WorkflowComplete {

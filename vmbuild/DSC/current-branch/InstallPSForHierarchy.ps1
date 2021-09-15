@@ -1,42 +1,89 @@
-Param($DomainFullName,$CM,$CMUser,$Role,$ProvisionToolPath,$CSName,$CSRole,$LogFolder)
+param(
+    [string]$ConfigFilePath,
+    [string]$LogPath
+)
 
-$SMSInstallDir="C:\Program Files\Microsoft Configuration Manager"
+# Read config json
+$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
+$DomainFullName = $deployConfig.parameters.domainName
+$CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+$UpdateToLatest = $deployConfig.cmOptions.updateToLatest
+$CSName = $deployConfig.parameters.CSName
+$CSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $CSName }
+$CSSiteCode = $CSVM.siteCode
 
-$logpath = $ProvisionToolPath+"\InstallSCCMlog.txt"
-$ConfigurationFile = Join-Path -Path $ProvisionToolPath -ChildPath "$Role.json"
+# Set Install Dir
+$SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
+if ($ThisVM.cmInstallDir) {
+    $SMSInstallDir = $ThisVM.cmInstallDir
+}
+
+# Set Site Code
+if ($ThisVM.siteCode) {
+    $SiteCode = $ThisVM.siteCode
+}
+
+# Read Actions file
+$ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
+# Set Install action as Running
 $Configuration.WaitingForCASFinsihedInstall.Status = 'Running'
 $Configuration.WaitingForCASFinsihedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
+# Read Actions file on CS
+$LogFolder = Split-Path $LogPath -Leaf
+$CSFilePath = "\\$CSName\$LogFolder"
+$CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.json"
 
-$_Role = $CSRole
-$_FilePath = "\\$CSName\$LogFolder"
-$CSConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
-
+# Wait for ScriptWorkflow.json to exist on CS
+Write-DscStatus "Waiting for $CSName to begin installation"
 while(!(Test-Path $CSConfigurationFile))
 {
-    "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Wait for configuration file exist on $CSName, will try 60 seconds later..." | Out-File -Append $logpath
+    Write-DscStatus "Waiting for $CSName to begin installation" -NoLog -RetrySeconds 60
     Start-Sleep -Seconds 60
-    $CSConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
 }
+
+# Read CS actions file, wait for install to finish
+Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr"
 $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-while($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed")
+while($CSConfiguration.$("InstallSCCM").Status -ne "Completed")
 {
-    "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Wait for step : [UpgradeSCCM] finished running on $CSName, will try 60 seconds later..." | Out-File -Append $logpath
+    Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr" -NoLog -RetrySeconds 60
     Start-Sleep -Seconds 60
     $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
 }
 
+if ($UpdateToLatest) {
+    # Read CS actions file, wait for upgrade to finish
+    Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr"
+    $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+    while($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed")
+    {
+        Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 60
+        Start-Sleep -Seconds 60
+        $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    }
+}
+
+# Write actions file, wait finished
 $Configuration.WaitingForCASFinsihedInstall.Status = 'Completed'
 $Configuration.WaitingForCASFinsihedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-$cmsourcepath = "\\$CSName\SMS_$CSRole\cd.latest"
+# Create $CM dir, before creating the ini
+if(!(Test-Path C:\$CM))
+{
+    New-Item C:\$CM -ItemType directory | Out-Null
+}
 
-$CMINIPath = "c:\HierarchyPS.ini"
-"[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Check ini file." | Out-File -Append $logpath
+# Set cource path
+Write-DscStatus "Creating HierarchyPS.ini file"
+
+$CMINIPath = "c:\$CM\HierarchyPS.ini"
 
 $cmini = @'
 [Identification]
@@ -78,27 +125,25 @@ SysCenterId=
 CCARSiteServer=%CASMachineFQDN%
 
 '@
+
+# Get SQL instance info
 $inst = (get-itemproperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server').InstalledInstances[0]
 $p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').$inst
-
 $sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
 
-"[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] ini file exist." | Out-File -Append $logpath
+# Set CM Source Path
+$cmsourcepath = "\\$CSName\SMS_$CSSiteCode\cd.latest"
+
+# Set ini values
 $cmini = $cmini.Replace('%InstallDir%',$SMSInstallDir)
 $cmini = $cmini.Replace('%MachineFQDN%',"$env:computername.$DomainFullName")
 $cmini = $cmini.Replace('%SQLMachineFQDN%',"$env:computername.$DomainFullName")
-$cmini = $cmini.Replace('%Role%',$Role)
+$cmini = $cmini.Replace('%Role%',$SiteCode)
 $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
 $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
-$cmini = $cmini.Replace('%CM%',$CM)
 $cmini = $cmini.Replace('%CASMachineFQDN%',"$CSName.$DomainFullName")
 $cmini = $cmini.Replace('%REdistPath%',"$cmsourcepath\REdist")
 
-if(!(Test-Path C:\$CM\Redist))
-{
-    New-Item C:\$CM\Redist -ItemType directory | Out-Null
-}
-    
 if($inst.ToUpper() -eq "MSSQLSERVER")
 {
     $cmini = $cmini.Replace('%SQLInstance%',"")
@@ -108,20 +153,32 @@ else
     $tinstance = $inst.ToUpper() + "\"
     $cmini = $cmini.Replace('%SQLInstance%',$tinstance)
 }
+
+# Create ini
+$cmini > $CMINIPath
+
+# Set env var to disable open file security warning, otherwise PS hangs in background
+$env:SEE_MASK_NOZONECHECKS = 1
+
+# Install CM
 $CMInstallationFile = "$cmsourcepath\SMSSETUP\BIN\X64\Setup.exe"
-$cmini > $CMINIPath 
-"[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Installing.." | Out-File -Append $logpath
+
+# Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log
+Write-DscStatusSetup
+
 Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
 
-"[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Finished installing CM." | Out-File -Append $logpath
+Write-DscStatus "Installation finished."
 
-Remove-Item $CMINIPath
+# Delete ini file?
+# Remove-Item $CMINIPath
 
-#Waiting for Site ready
+# Wait for Site ready
 $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+Write-DscStatus "Waiting for $CSName to indicate PS is ready to use"
 while($CSConfiguration.$("PSReadytoUse").Status -ne "Completed")
 {
-    Write-Verbose "Wait for step : [PSReadytoUse] finished running on $CSName, will try 60 seconds later..."
+    Write-DscStatus "Waiting for $CSName to indicate PS is ready to use" -NoLog -RetrySeconds 60
     Start-Sleep -Seconds 60
     $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
 }

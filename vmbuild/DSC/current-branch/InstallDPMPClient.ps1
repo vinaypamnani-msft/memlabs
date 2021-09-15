@@ -70,6 +70,21 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 # Set the current location to be the site code.
 Set-Location "$($SiteCode):\" @initParams
 
+# Add cm_svc user as a CM Account
+$cm_svc_file = "$LogPath\cm_svc.txt"
+if (Test-Path $cm_svc_file) {
+    $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
+    Write-DscStatus "Adding cm_svc domain account as CM account"
+    Start-Sleep -Seconds 5
+    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode | Out-File $global:StatusLog -Append
+    Remove-Item -Path $cm_svc_file -Force -Confirm:$false
+}
+
+# Enable EHTTP
+Write-DscStatus "Enabling e-HTTP."
+Start-Sleep -Seconds 5
+Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
+
 # Create Site system Server
 #============
 $DPMPFQDN = $DPMPName + "." + $DomainFullName
@@ -184,10 +199,10 @@ Start-Sleep -Seconds 5
 
 foreach ($client in $ClientNameList) {
 
-    $testClient = Test-NetConnection -ComputerName $client -ErrorAction SilentlyContinue
-    if (-not $testClient.PingSucceeded) {
+    $testClient = Test-NetConnection -ComputerName $client -CommonTCPPort SMB -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+    if (-not $testClient.TcpTestSucceeded) {
         # Don't wait for client to appear in collection if it's not online
-        Write-DscStatus "$client is not online. Skipping."
+        Write-DscStatus "Could not test SMB connection to $client. Skipping."
         continue
     }
 
@@ -195,7 +210,7 @@ foreach ($client in $ClientNameList) {
         Invoke-CMSystemDiscovery
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
-        Write-DscStatus "Waiting for $client to appear in '$CollectionName', checking again in 60 seconds" -NoLog
+        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -NoLog -RetrySeconds 60
         Start-Sleep -Seconds 60
         $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
     }
