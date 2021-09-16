@@ -125,10 +125,15 @@
             Status    = "Open required firewall ports"
         }
 
+        AddNtfsPermissions AddNtfsPerms {
+            Ensure    = "Present"
+            DependsOn = "[JoinDomain]JoinDomain"
+        }
+
         OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
             Name      = "DomainMember"
             Role      = "DomainMember"
-            DependsOn = "[JoinDomain]JoinDomain"
         }
 
         if ($installSQL) {

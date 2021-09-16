@@ -481,6 +481,36 @@ class DelegateControl {
     }
 }
 
+[DscResource()]
+class AddNtfsPermissions {
+    [DscProperty(key)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $testPath = "C:\staging\DSC\NTFS.done"
+        & icacls C:\tools /grant "Users:(M,RX)" /t | Out-File $testPath -Force -ErrorAction SilentlyContinue
+        & icacls C:\temp /grant "Users:F" /t | Out-File $testPath -Append -Force
+        & takeown /F C:\windows\system32\Configuration /A /R | Out-File $testPath -Append -Force
+        & icacls C:\windows\system32\Configuration /grant "Administrators:F" /t | Out-File $testPath -Append -Force
+    }
+
+    [bool] Test() {
+        $testPath = "C:\staging\DSC\NTFS.done"
+        if (Test-Path $testPath) {
+            return $true
+        }
+
+        return $false
+    }
+
+    [AddNtfsPermissions] Get() {
+        return $this
+    }
+}
+
 
 [DscResource()]
 class AddBuiltinPermission {

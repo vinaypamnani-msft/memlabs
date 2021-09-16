@@ -68,8 +68,8 @@ Action=%InstallAction%
 
 [Options]
 ProductID=EVAL
-SiteCode=%Role%
-SiteName=%Role%
+SiteCode=%SiteCode%
+SiteName=%SiteName%
 SMSInstallDir=%InstallDir%
 SDKServer=%MachineFQDN%
 RoleCommunicationProtocol=HTTPorHTTPS
@@ -82,7 +82,7 @@ JoinCEIP=0
 
 [SQLConfigOptions]
 SQLServerName=%SQLMachineFQDN%
-DatabaseName=%SQLInstance%CM_%Role%
+DatabaseName=%SQLInstance%CM_%SiteCode%
 SQLSSBPort=4022
 SQLDataFilePath=%SQLDataFilePath%
 SQLLogFilePath=%SQLLogFilePath%
@@ -106,21 +106,36 @@ $p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance N
 $sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
 
 # Set ini values
-$installAction = if ($Config -eq "Hierarchy" -and $CurrentRole -eq "CS") { "InstallCAS" } else { "InstallPrimarySite" }
+$installAction = if ($CurrentRole -eq "CS") { "InstallCAS" } else { "InstallPrimarySite" }
 $cmini = $cmini.Replace('%InstallAction%', $installAction)
 $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
 $cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")
 $cmini = $cmini.Replace('%SQLMachineFQDN%', "$env:computername.$DomainFullName")
-$cmini = $cmini.Replace('%Role%', $SiteCode)
+$cmini = $cmini.Replace('%SiteCode%', $SiteCode)
 $cmini = $cmini.Replace('%SQLDataFilePath%', $sqlinfo.DefaultData)
 $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
 $cmini = $cmini.Replace('%CM%', $CM)
 
+# Remove items not needed on CAS
 if ($installAction -eq "InstallCAS") {
     $cmini = $cmini.Replace('RoleCommunicationProtocol=HTTPorHTTPS', "")
     $cmini = $cmini.Replace('ClientsUsePKICertificate=0', "")
 }
 
+# Set site name
+if ($CM -eq "CMTP") {
+    $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Tech Preview")
+}
+else {
+    if ($installAction -eq "InstallCAS") {
+        $cmini = $cmini.Replace('%SiteName%', "ConfigMgr CAS")
+    }
+    else {
+        $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+    }
+}
+
+# Set sql instance
 if ($inst.ToUpper() -eq "MSSQLSERVER") {
     $cmini = $cmini.Replace('%SQLInstance%', "")
 }
@@ -173,11 +188,6 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 
 # Set the current location to be the site code.
 Set-Location "$($SiteCode):\" @initParams
-
-# Enable EHTTP
-Write-DscStatus "Enabling e-HTTP."
-Start-Sleep -Seconds 5
-Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
 
 # Write action completed
 $Configuration.InstallSCCM.Status = 'Completed'
@@ -560,7 +570,7 @@ else {
     $replicationStatus = Get-CMDatabaseReplicationStatus
     Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'"
     while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-        Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'" -NoLog -RetrySeconds 60
+        Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'" -RetrySeconds 60
         Start-Sleep -Seconds 60
         $replicationStatus = Get-CMDatabaseReplicationStatus
     }

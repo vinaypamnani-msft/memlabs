@@ -460,7 +460,7 @@ function New-VhdxFile {
     }
     finally {
         if (Test-Path $unattendPathToInject) {
-            # Remove-Item -Path $unattendPathToInject -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $unattendPathToInject -Force -ErrorAction SilentlyContinue
         }
     }
 }

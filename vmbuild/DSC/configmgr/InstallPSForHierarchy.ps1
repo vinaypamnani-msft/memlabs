@@ -43,7 +43,7 @@ $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.js
 Write-DscStatus "Waiting for $CSName to begin installation"
 while(!(Test-Path $CSConfigurationFile))
 {
-    Write-DscStatus "Waiting for $CSName to begin installation" -NoLog -RetrySeconds 60
+    Write-DscStatus "Waiting for $CSName to begin installation" -RetrySeconds 60
     Start-Sleep -Seconds 60
 }
 
@@ -92,8 +92,8 @@ CDLatest=1
 
 [Options]
 ProductID=EVAL
-SiteCode=%Role%
-SiteName=%Role%
+SiteCode=%SiteCode%
+SiteName=%SiteName%
 SMSInstallDir=%InstallDir%
 SDKServer=%MachineFQDN%
 RoleCommunicationProtocol=HTTPorHTTPS
@@ -106,7 +106,7 @@ JoinCEIP=0
 
 [SQLConfigOptions]
 SQLServerName=%SQLMachineFQDN%
-DatabaseName=%SQLInstance%CM_%Role%
+DatabaseName=%SQLInstance%CM_%SiteCode%
 SQLSSBPort=4022
 SQLDataFilePath=%SQLDataFilePath%
 SQLLogFilePath=%SQLLogFilePath%
@@ -138,7 +138,8 @@ $cmsourcepath = "\\$CSName\SMS_$CSSiteCode\cd.latest"
 $cmini = $cmini.Replace('%InstallDir%',$SMSInstallDir)
 $cmini = $cmini.Replace('%MachineFQDN%',"$env:computername.$DomainFullName")
 $cmini = $cmini.Replace('%SQLMachineFQDN%',"$env:computername.$DomainFullName")
-$cmini = $cmini.Replace('%Role%',$SiteCode)
+$cmini = $cmini.Replace('%SiteCode%',$SiteCode)
+$cmini = $cmini.Replace('%SiteName%',"ConfigMgr Primary Site")
 $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
 $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
 $cmini = $cmini.Replace('%CASMachineFQDN%',"$CSName.$DomainFullName")

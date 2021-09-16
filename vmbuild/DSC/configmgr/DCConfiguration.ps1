@@ -151,6 +151,17 @@
             DependsOn   = "[ADReplicationSite]ADSite"
         }
 
+        AddNtfsPermissions AddNtfsPerms {
+            Ensure    = "Present"
+            DependsOn = "[ADReplicationSubnet]ADSubnet"
+        }
+
+        OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
+            Name      = "DC"
+            Role      = "DC"
+        }
+
         WriteStatus NetworkDNS {
             DependsOn = "[SetupDomain]FirstDS"
             Status    = "Setting Primary DNS, Default Gateway and configuring DNS Forwarders"

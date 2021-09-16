@@ -111,8 +111,13 @@
             Status    = "Open required firewall ports"
         }
 
-        OpenFirewallPortForSCCM OpenFirewall {
+        AddNtfsPermissions AddNtfsPerms {
+            Ensure    = "Present"
             DependsOn = "[JoinDomain]JoinDomain"
+        }
+
+        OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
             Name      = "PS"
             Role      = "Site Server"
         }

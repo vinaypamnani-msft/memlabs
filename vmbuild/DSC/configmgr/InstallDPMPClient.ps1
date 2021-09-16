@@ -22,6 +22,7 @@ if ($pushClients) {
     $installDPMPRoles = $true
 }
 
+# No DPMP specified, install on PS site server
 if (-not $DPMPName -and $installDPMPRoles) {
     $DPMPName = $deployConfig.parameters.ThisMachineName
     Write-DscStatus "installDPMPRoles is true but no DPMP specified. Installing roles on $DPMPName."
@@ -30,16 +31,6 @@ if (-not $DPMPName -and $installDPMPRoles) {
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-
-# exit if nothing to do
-if (-not $installDPMPRoles -and -not $pushClients) {
-    Write-DscStatus "Skipping DPMP and Client setup. installDPMPRoles and pushClientToDomainMembers options are set to false."
-    $Configuration.InstallClient.Status = 'NotRequested'
-    $Configuration.InstallDP.Status = 'NotRequested'
-    $Configuration.InstallMP.Status = 'NotRequested'
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    return
-}
 
 # Read Site Code from registry
 Write-DscStatus "Setting PS Drive for ConfigMgr"
@@ -80,10 +71,46 @@ if (Test-Path $cm_svc_file) {
     Remove-Item -Path $cm_svc_file -Force -Confirm:$false
 }
 
-# Enable EHTTP
-Write-DscStatus "Enabling e-HTTP."
+# Set client push account
+Write-DscStatus "Setting the Client Push Account"
+Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
 Start-Sleep -Seconds 5
-Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
+
+# Enable EHTTP
+if ($installAction -eq "InstallPrimarySite") {
+    Write-DscStatus "Enabling e-HTTP"
+    $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
+    $timeSpan = New-TimeSpan -Minutes 30
+    $stopWatch.Start()
+    $enabled = $false
+    do {
+        Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
+        Start-Sleep 30
+        $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object {$_.PropertyName -eq "IISSSLState" }
+        $enabled = ($prop.Value -band 1024) -eq 1024
+        Write-DscStatus "e-HTTP state is: $enabled" -RetrySeconds 30
+
+    } until ($enabled -or ($stopWatch.Elapsed -ge $timeSpan))
+
+    $stopWatch.Stop()
+
+    if (-not $enabled) {
+        Write-DscStatus "e-HTTP not enabled after waiting for 30 minutes, skip."
+    }
+    else {
+        Write-DscStatus "e-HTTP was enabled"
+    }
+}
+
+# exit if nothing to do
+if (-not $installDPMPRoles -and -not $pushClients) {
+    Write-DscStatus "Skipping DPMP and Client setup. installDPMPRoles and pushClientToDomainMembers options are set to false."
+    $Configuration.InstallClient.Status = 'NotRequested'
+    $Configuration.InstallDP.Status = 'NotRequested'
+    $Configuration.InstallMP.Status = 'NotRequested'
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
 
 # Create Site system Server
 #============
@@ -91,7 +118,7 @@ $DPMPFQDN = $DPMPName + "." + $DomainFullName
 $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
 if (!$SystemServer) {
     Write-DscStatus "Creating new CM Site System server on $DPMPFQDN"
-    New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN -AccountName $cm_svc
+    New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN -AccountName $cm_svc | Out-File $global:StatusLog -Append
     Start-Sleep -Seconds 5
     $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
 }
@@ -105,7 +132,7 @@ $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 if ((Get-CMDistributionPoint -SiteSystemServerName $DPMPFQDN).count -ne 1) {
     Write-DscStatus "Adding Distribution Point role on $DPMPFQDN"
     $Date = [DateTime]::Now.AddYears(30)
-    Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date
+    Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
     Start-Sleep -Seconds 5
 
     if ((Get-CMDistributionPoint -SiteSystemServerName $DPMPFQDN).count -eq 1) {
@@ -135,7 +162,7 @@ $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 if ((Get-CMManagementPoint -SiteSystemServerName $DPMPFQDN).count -ne 1) {
 
     Write-DscStatus "Adding Management Point role on $DPMPFQDN"
-    Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http
+    Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
     Start-Sleep -Seconds 5
 
     if ((Get-CMManagementPoint -SiteSystemServerName $DPMPFQDN).count -eq 1) {
@@ -164,6 +191,13 @@ if (-not $pushClients) {
     return
 }
 
+# Create Boundry Group
+Write-DscStatus "Creating Boundary and Boundary Group"
+New-CMBoundaryGroup -Name $SiteCode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $DPMPFQDN
+New-CMBoundary -Type IPSubnet -Name $networkSubnet -Value "$networkSubnet/24"
+Add-CMBoundaryToGroup -BoundaryName $networkSubnet -BoundaryGroupName $SiteCode
+Start-Sleep -Seconds 5
+
 # Setup System Discovery
 Write-DscStatus "Setting AD system discovery"
 $lastdomainname = $DomainFullName.Split(".")[-1]
@@ -172,21 +206,14 @@ while (((Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_D
     Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://DC=$DomainName,DC=$lastdomainname" -Recursive
 }
 
+# Restart services to make sure push account is acknowledged by CCM
+Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
+
 # Run discovery
 Write-DscStatus "Invoking AD system discovery"
+Start-Sleep -Seconds 5
 Invoke-CMSystemDiscovery
-Start-Sleep -Seconds 5
-
-# Create Boundry Group
-Write-DscStatus "Creating Boundary and Boundary Group"
-New-CMBoundaryGroup -Name $SiteCode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $DPMPFQDN
-New-CMBoundary -Type IPSubnet -Name $networkSubnet -Value "$networkSubnet/24"
-Add-CMBoundaryToGroup -BoundaryName $networkSubnet -BoundaryGroupName $SiteCode
-Start-Sleep -Seconds 5
-
-# Set client push account
-Write-DscStatus "Setting the Client Push Account"
-Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
 Start-Sleep -Seconds 5
 
 # Wait for collection to populate
@@ -209,13 +236,13 @@ foreach ($client in $ClientNameList) {
         Invoke-CMSystemDiscovery
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
-        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -NoLog -RetrySeconds 60
+        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 60
         Start-Sleep -Seconds 60
         $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
     }
 
     Write-DscStatus "Pushing client to $client."
-    Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true
+    Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true | Out-File $global:StatusLog -Append
     Start-Sleep -Seconds 5
 }
 

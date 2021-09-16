@@ -15,9 +15,6 @@ if (-not $configPath) {
     return
 }
 
-# To remove later
-$version = "current-branch"
-
 # Prepare DSC ZIP files
 Set-Location $PSScriptRoot
 
@@ -39,6 +36,7 @@ $modules = @(
     'xDhcpServer',
     'NetworkingDsc'
 )
+
 foreach ($module in $modules) {
     if (Get-Module -ListAvailable -Name $module) {
         if ($force) {
@@ -67,15 +65,18 @@ $role  = $ThisVM.role
 $filePath = "C:\temp\deployConfig.json"
 $result.DeployConfig | ConvertTo-Json -Depth 3 | Out-File $filePath -Force
 
-# Create local compressed file and inject appropriate appropriate TemplateHelpDSC
-Write-Host "Creating DSC.zip for $version.."
-Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$version\DSC.zip -Force
-Write-Host "Adding $version TemplateHelpDSC to DSC.ZIP.."
-Compress-Archive -Path .\$version\TemplateHelpDSC -Update -DestinationPath .\$version\DSC.zip
+# DSC folder name
+$dscFolder = "configmgr"
 
-# install templatehelpdsc module on this machine for specified version
-Write-Host "Installing $version TemlateHelpDSC on this machine.."
-Copy-Item .\$version\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
+# Create local compressed file and inject appropriate appropriate TemplateHelpDSC
+Write-Host "Creating DSC.zip for $dscFolder.."
+Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$dscFolder\DSC.zip -Force
+Write-Host "Adding $dscFolder TemplateHelpDSC to DSC.ZIP.."
+Compress-Archive -Path .\$dscFolder\TemplateHelpDSC -Update -DestinationPath .\$dscFolder\DSC.zip
+
+# install templatehelpdsc module on this machine
+Write-Host "Installing $dscFolder TemlateHelpDSC on this machine.."
+Copy-Item .\$dscFolder\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
 
 # Create test config, for testing if the config definition is good.
 $role = if ($role -eq "DPMP") { "DomainMember" } else { $role }
@@ -83,7 +84,7 @@ Write-Host "Creating a test config for $role in C:\Temp"
 
 if ($creds) { $adminCreds = $creds }
 else { $adminCreds = Get-Credential }
-. ".\$version\$($role)Configuration.ps1"
+. ".\$dscFolder\$($role)Configuration.ps1"
 
 # Configuration Data
 $cd = @{
