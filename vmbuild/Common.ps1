@@ -409,11 +409,13 @@ function New-VhdxFile {
     Write-Log "New-VhdxFile: Preparing answer file"
     $unattendContent = Get-Content $unattendPath -Force
 
-    if ($unattendContent -match "%vmbuildpassword%") {
+    if ($unattendContent -match "%vmbuildpassword%" -and $unattendContent -match "%vmbuilduser%") {
+        $vmbuilduser = $Common.LocalAdmin.UserName
         $vmbuildpass = Get-EncodedPassword -Text $Common.LocalAdmin.GetNetworkCredential().Password
         $adminpass = Get-EncodedPassword -Text $Common.LocalAdmin.GetNetworkCredential().Password -AdminPassword
-        $unattendContent = $unattendContent.Replace("%adminpassword%", $adminpass)
+        $unattendContent = $unattendContent.Replace("%vmbuilduser%", $vmbuilduser)
         $unattendContent = $unattendContent.Replace("%vmbuildpassword%", $vmbuildpass)
+        $unattendContent = $unattendContent.Replace("%adminpassword%", $adminpass)
         $unattendContent | Out-File $unattendPathToInject -Force -Encoding utf8
     }
     else {
