@@ -62,7 +62,7 @@
     "windowsAdminCenterPort": "6516",
     "dscScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/DSC/Host.zip",
     "dscFunction": "Host.ps1\\Host",
-    "rrasScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/scripts/configureRRAS.ps1"
+    "hostScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/scripts/configureHost.ps1"
   },
   "resources": [
     {
@@ -354,11 +354,30 @@
     },
     {
       "type": "Microsoft.Compute/virtualMachines/extensions",
-      "apiVersion": "2020-12-01",
-      "name": "[concat( parameters('virtualMachineName'), '/configureRRAS' )]",
+      "apiVersion": "2019-12-01",
+      "name": "[concat( parameters('virtualMachineName'), '/configureHyperV' )]",
       "location": "[variables('location')]",
       "dependsOn": [
         "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Powershell",
+        "type": "DSC",
+        "typeHandlerVersion": "2.21",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "modulesUrl": "[variables('dscScript')]",
+          "configurationFunction": "[variables('dscFunction')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2020-12-01",
+      "name": "[concat( parameters('virtualMachineName'), '/configureHost' )]",
+      "location": "[variables('location')]",
+      "dependsOn": [
+          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/configureHyperV' )]"
       ],
       "properties": {
           "publisher": "Microsoft.Compute",
@@ -366,8 +385,8 @@
           "typeHandlerVersion": "1.7",
           "autoUpgradeMinorVersion":true,
           "settings": {
-            "fileUris": ["[variables('rrasScript')]"],
-            "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -File configureRRAS.ps1"
+            "fileUris": ["[variables('hostScript')]"],
+            "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -File configureHost.ps1"
           }
       }
     }
