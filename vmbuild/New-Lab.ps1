@@ -99,7 +99,7 @@ $VM_Create = {
     . $using:PSScriptRoot\Common.ps1
 
     # Get required variables from parent scope
-    $cmVersion = $using:cmVersion
+    $cmDscFolder = $using:cmDscFolder
     $currentItem = $using:currentItem
     $deployConfig = $using:deployConfig
     $forceNew = $using:ForceNew
@@ -148,10 +148,10 @@ $VM_Create = {
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to copy required PS modules to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
     }
-    Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC\$cmVersion" -Destination "C:\staging\DSC" -Recurse -Container -Force
+    Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC\$cmDscFolder" -Destination "C:\staging\DSC" -Recurse -Container -Force
 
     # Extract DSC modules
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { Expand-Archive -Path "C:\staging\DSC\$using:cmVersion\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmVersion\modules" } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -200,7 +200,7 @@ $VM_Create = {
     $DSC_InstallModules = {
 
         # Get required variables from parent scope
-        $cmVersion = $using:cmVersion
+        $cmDscFolder = $using:cmDscFolder
 
         # Create init log
         $log = "C:\staging\DSC\DSC_Init.txt"
@@ -209,7 +209,7 @@ $VM_Create = {
 
         # Install modules
         "Installing modules" | Out-File $log -Append
-        $modules = Get-ChildItem -Path "C:\staging\DSC\$cmVersion\modules" -Directory
+        $modules = Get-ChildItem -Path "C:\staging\DSC\$cmDscFolder\modules" -Directory
         foreach ($folder in $modules) {
             Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
             Import-Module $folder.Name -Force;
@@ -219,7 +219,7 @@ $VM_Create = {
     $DSC_CreateConfig = {
 
         # Get required variables from parent scope
-        $cmVersion = $using:cmVersion
+        $cmDscFolder = $using:cmDscFolder
         $currentItem = $using:currentItem
         $adminCreds = $using:Common.LocalAdmin
         $deployConfig = $using:deployConfig
@@ -228,8 +228,8 @@ $VM_Create = {
         $dscRole = if ($currentItem.role -eq "DPMP") { "DomainMember" } else { $currentItem.role }
 
         # Define DSC variables
-        $dscConfigScript = "C:\staging\DSC\$cmVersion\$($dscRole)Configuration.ps1"
-        $dscConfigPath = "C:\staging\DSC\$cmVersion\DSCConfiguration"
+        $dscConfigScript = "C:\staging\DSC\$cmDscFolder\$($dscRole)Configuration.ps1"
+        $dscConfigPath = "C:\staging\DSC\$cmDscFolder\DSCConfiguration"
 
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
@@ -270,10 +270,10 @@ $VM_Create = {
     $DSC_StartConfig = {
 
         # Get required variables from parent scope
-        $cmVersion = $using:cmVersion
+        $cmDscFolder = $using:cmDscFolder
 
         # Define DSC variables
-        $dscConfigPath = "C:\staging\DSC\$cmVersion\DSCConfiguration"
+        $dscConfigPath = "C:\staging\DSC\$cmDscFolder\DSCConfiguration"
 
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
@@ -389,7 +389,7 @@ if (-not $switch) {
 }
 
 # CM Version
-$cmVersion = $deployConfig.cmOptions.version
+$cmDscFolder = "configmgr"
 
 # Remove existing jobs
 $existingJobs = Get-Job
