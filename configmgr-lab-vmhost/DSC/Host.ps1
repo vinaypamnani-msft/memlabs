@@ -123,7 +123,10 @@ Configuration Host {
                 Start-Transcript -Path $env:windir\temp\RepoClone.txt -Append -Force
 
                 "Downloading and installing chocolatey"
-                Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+                Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+                "Reloading PATH"
+                $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
                 "Installing git via choco"
                 & choco install git -y
@@ -132,7 +135,7 @@ Configuration Host {
                 & choco install sysinternals -y
 
                 "Cloning the repository"
-                $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
                 $destination = "E:\$using:repoName"
                 git clone $using:repoUrl $destination --quiet
 
