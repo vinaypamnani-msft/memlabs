@@ -33,10 +33,20 @@ function New-RDCManFile {
     }
     #This is the bulk of the data.
     $file = $existing.RDCMan.file
+    if ($null -eq $file){
+        Write-Host "Could not load File section from $rdcmanfile"
+        return
+    }
     $group = $file.group
-
+    if ($null -eq $group){
+        Write-Host "Could not load group section from $rdcmanfile"
+        return
+    }
     $groupFromTemplate = $template.RDCMan.file.group
-
+    if ($null -eq $groupFromTemplate){
+        Write-Host "Could not load group section from $templatefile"
+        return
+    }
     # <RDCMan>
     #   <file>
     #     <group>
@@ -110,7 +120,9 @@ function Add-RDCManServerToGroup {
 function Get-RDCManGroupToModify {
     param(
         $group,
-        $groupFromTemplate
+        $findGroup,
+        $groupFromTemplate,
+        $existing
     )
     $domain = $deployConfig.vmOptions.domainName
     Write-Host "Looking for group entry named $domain in current xml... " -NoNewline
