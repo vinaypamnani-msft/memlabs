@@ -15,16 +15,15 @@ Set-Location $PSScriptRoot
 Write-Host "Importing Modules.."
 $modules = @(
     'xHyper-V',
-    'xDscDiagnostics',
-    'xNetworking'    
+    'xDscDiagnostics'
 )
 
 foreach($module in $modules)
 {
-    if (Get-Module -ListAvailable -Name $module) {        
+    if (Get-Module -ListAvailable -Name $module) {
         if ($force) {
             Write-Host "Module exists: $module. Updating..."
-            Update-Module $module -Force    
+            Update-Module $module -Force
         }
         else {
             Write-Host "Module exists: $module "

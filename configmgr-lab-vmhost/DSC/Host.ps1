@@ -1,6 +1,6 @@
 Configuration Host {
 
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xNetworking', 'xDscDiagnostics'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xDscDiagnostics'
 
     $phsyicalNic = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
     $phsyicalInterface = $phsyicalNic.Name
