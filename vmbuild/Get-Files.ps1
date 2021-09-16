@@ -30,7 +30,7 @@ $timer = New-Object -TypeName System.Diagnostics.Stopwatch
 $timer.Start()
 
 Write-Host
-Write-Log "Main: Downloading required files to $($Common.AzureFilesPath)..." -Success
+Write-Log "Main: Downloading required files to $($Common.AzureFilesPath)..." -Activity
 
 foreach ($item in $Common.AzureFileList.OS) {
     $imageName = $item.id
@@ -40,7 +40,7 @@ foreach ($item in $Common.AzureFileList.OS) {
 
     if ($imageName -eq "vmbuildadmin") { continue }
 
-    Write-Log "Main: Downloading '$imageName' file from Azure storage, saving as $imageFileName" -Activity
+    Write-Log "Main: Downloading '$imageName' file from Azure storage, saving as $imageFileName" -SubActivity
     $localImagePath = Join-Path $Common.AzureFilesPath $imageFileRelative
 
     $download = $true

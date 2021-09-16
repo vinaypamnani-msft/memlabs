@@ -130,6 +130,16 @@ New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' -Force | New-I
 Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name ShowTaskViewButton -Value 0 # Hide TaskView
 Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name ShowCortanaButton -Value 0 # Hide Cortana
 
+# Create directories, if not present
+# ===================================
+if (-not (Test-Path "C:\temp")) {
+    New-Item -Path "C:\temp" -ItemType Directory -Force | Out-Null
+}
+
+# Create C:\staging, if not present
+if (-not (Test-Path "C:\staging")) {
+    New-Item -Path "C:\staging" -ItemType Directory -Force | Out-Null
+}
 
 # Optional Preferences
 # =====================
@@ -154,16 +164,6 @@ if ($RunOptional.IsPresent) {
 
 # Completion
 # ============
-
-# Create C:\staging, if not present
-if (-not (Test-Path "C:\staging")) {
-    New-Item -Path "C:\staging" -ItemType Directory -Force | Out-Null
-}
-
-# Create C:\temp, if not present
-if (-not (Test-Path "C:\temp")) {
-    New-Item -Path "C:\temp" -ItemType Directory -Force | Out-Null
-}
 
 # Move uanttend file to avoid future use, since C:\unattend.xml is one of the defautl locations windows looks for
 Move-Item -Path "C:\Unattend.xml" -Destination "C:\staging\Unattend.xml" -Force -ErrorAction SilentlyContinue

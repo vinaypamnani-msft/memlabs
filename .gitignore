@@ -31,7 +31,7 @@ _fileList.json
 !/vmbuild/baseimagestaging/filestoInject/
 /vmbuild/baseimagestaging/filestoInject/*
 !/vmbuild/baseimagestaging/filestoInject/staging/
-#!/vmbuild/baseimagestaging/unattend/
+!/vmbuild/baseimagestaging/unattend/
 
 # Ignore bginfo.exe since it's not redistributable
 bginfo.exe

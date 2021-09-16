@@ -436,7 +436,7 @@ do {
 
     $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
     foreach ($job in $completedJobs) {
-        Write-Host "`n$($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Green
+        Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
         $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
         Write-JobProgress($job)
         #$job | Remove-Job -Force -Confirm:$false

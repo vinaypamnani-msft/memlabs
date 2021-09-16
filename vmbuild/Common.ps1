@@ -16,6 +16,8 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         [switch]$Activity,
         [Parameter(Mandatory = $false)]
+        [switch]$SubActivity,
+        [Parameter(Mandatory = $false)]
         [switch]$VerboseOnly,
         [Parameter(Mandatory = $false)]
         [switch]$LogOnly,
@@ -38,7 +40,14 @@ function Write-Log {
     If ($Activity.IsPresent) {
         $info = $false
         Write-Host
-        $Text = "ACTIVITY: $Text"
+        $Text = "=== ACTIVITY: $Text"
+        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
+    }
+
+    If ($SubActivity.IsPresent) {
+        $info = $false
+        Write-Host
+        $Text = "====== SUB-ACTIVITY: $Text"
         $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Magenta)
     }
 
@@ -60,6 +69,7 @@ function Write-Log {
     }
 
     if ($info) {
+        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::White)
         $Text = "INFO: $Text"
     }
 
@@ -169,8 +179,7 @@ function Get-File {
     }
 }
 
-function Get-ToolsForBaseImage
-{
+function Get-ToolsForBaseImage {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Force redownloading and copying/extracting tools.")]
         [switch]$ForceTools
@@ -185,15 +194,13 @@ function Get-ToolsForBaseImage
 
     foreach ($item in $Common.AzureFileList.Tools) {
 
-
         $name = $item.Name
         $url = $item.URL
         $fileTargetRelative = $item.Target
         $fileName = Split-Path $url -Leaf
         $downloadPath = Join-Path $Common.AzureToolsPath $fileName
 
-        Write-Host
-        Write-Log "Obtaining '$name'" -Success
+        Write-Log "Obtaining '$name'" -SubActivity
 
         if (-not $item.IsPublic) {
             $url = "$($StorageConfig.StorageLocation)/$url"
@@ -204,7 +211,7 @@ function Get-ToolsForBaseImage
         if (Test-Path $downloadPath) {
             Write-Log "Get-ToolsForBaseImage: Found $fileName in $($Common.TempPath)."
             if ($ForceTools.IsPresent) {
-                Write-Log "Get-ToolsForBaseImage: ForceTools switch present. Removing pre-existing $fileName file..." -Warning
+                Write-Log "Get-ToolsForBaseImage: ForceTools switch present. Removing pre-existing $fileName file..." -Warning -Verbose
                 Remove-Item -Path $downloadPath -Force -WhatIf:$WhatIf | Out-Null
             }
             else {
@@ -363,7 +370,12 @@ function New-VhdxFile {
         if ($WimName -like "SERVER-*") {
             $selectedImage = $windowsImage | Where-Object { $_.ImageName -like "*DATACENTER*Desktop*" }
         }
-        else {
+
+        if ($WimName -like "W10-*") {
+            $selectedImage = $windowsImage | Where-Object { $_.ImageName -eq "Windows 10 Enterprise" }
+        }
+
+        if (-not $selectedImage) {
             $selectedImage = $windowsImage | Out-GridView -Title "Select Image for creating a VHDX file." -OutputMode Single
         }
     }
@@ -383,6 +395,7 @@ function New-VhdxFile {
 
     $unattendFile = $WimName -replace ".wim", ".xml"
     $unattendPath = Join-Path $Common.StagingAnswerFilePath $unattendFile
+    $unattendPathToInject = Join-Path $Common.TempPath $unattendFile
 
     Write-Log "New-VhdxFile: Will inject $unattendPath"
     Write-Log "New-VhdxFile: Will inject directories inside $($Common.StagingInjectPath)"
@@ -390,6 +403,26 @@ function New-VhdxFile {
 
     if (-not (Test-Path $unattendPath)) {
         Write-Log "New-VhdxFile: $unattendFile not found." -Failure
+        return $false
+    }
+
+    Write-Log "New-VhdxFile: Preparing answer file"
+    $unattendContent = Get-Content $unattendPath -Force
+
+    if ($unattendContent -match "%vmbuildpassword%") {
+        $vmbuildpass = Get-EncodedPassword -Text $Common.LocalAdmin.GetNetworkCredential().Password
+        $adminpass = Get-EncodedPassword -Text $Common.LocalAdmin.GetNetworkCredential().Password -AdminPassword
+        $unattendContent = $unattendContent.Replace("%adminpassword%", $adminpass)
+        $unattendContent = $unattendContent.Replace("%vmbuildpassword%", $vmbuildpass)
+        $unattendContent | Out-File $unattendPathToInject -Force -Encoding utf8
+    }
+    else {
+        Write-Log "New-VhdxFile: Answer file doesn't contain '%vmbuildpassword%' placeholder." -Failure
+        return $false
+    }
+
+    if (-not (Test-Path $unattendPathToInject)) {
+        Write-Log "New-VhdxFile: Answer file preparation failed." -Failure
         return $false
     }
 
@@ -411,7 +444,7 @@ function New-VhdxFile {
             -Size 127GB `
             -DiskLayout UEFI `
             -Dynamic `
-            -Unattend $unattendPath `
+            -Unattend $unattendPathToInject `
             -filesToInject $filesToInject `
             -Confirm:$False
 
@@ -423,6 +456,28 @@ function New-VhdxFile {
         Write-Log "New-VhdxFile: Failed to Convert WIM to VHDX. $($_)" -Failure
         return $false
     }
+    finally {
+        if (Test-Path $unattendPathToInject) {
+            # Remove-Item -Path $unattendPathToInject -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-EncodedPassword {
+    param(
+        [string]$Text,
+        [switch]$AdminPassword
+    )
+
+    if ($AdminPassword.IsPresent) {
+        $textToEncode = $Text + "AdministratorPassword"
+    }
+    else {
+        $textToEncode = $Text + "Password"
+    }
+    $bytes = [System.Text.Encoding]::Unicode.GetBytes($textToEncode)
+    $encodedPassword = [Convert]::ToBase64String($bytes)
+    return $encodedPassword
 }
 
 function Test-NetworkSwitch {

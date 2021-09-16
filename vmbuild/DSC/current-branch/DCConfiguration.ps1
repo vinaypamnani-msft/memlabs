@@ -18,13 +18,23 @@
     $DomainName = $deployConfig.parameters.domainName
     $PSName = $deployConfig.parameters.PSName
     $CSName = $deployConfig.parameters.CSName
-    $DPMPName = $deployConfig.parameters.DPMPName
+
     $DHCP_DNSAddress = $deployConfig.parameters.DHCPDNSAddress
     $DHCP_DefaultGateway = $deployConfig.parameters.DHCPDefaultGateway
     $DHCP_ScopeId = $deployConfig.parameters.DHCPScopeId
     $DHCP_ScopeStart = $deployConfig.parameters.DHCPScopeStart
     $DHCP_ScopeEnd = $deployConfig.parameters.DHCPScopeEnd
     $Configuration = $deployConfig.parameters.Scenario
+
+    # AD Site Name
+    if ($PSName) {
+        $PSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PSName }
+        if ($PSVM) { $ADSiteName = $PSVM.siteCode }
+    }
+
+    if (-not $ADSiteName) {
+        $ADSiteName = "vmbuild"
+    }
 
     # Define log share
     $LogFolder = "DSC"
@@ -125,6 +135,20 @@
             GroupName        = "Schema Admins"
             MembersToInclude = @("admin")
             DependsOn        = "[ADUser]Admin"
+        }
+
+        ADReplicationSite ADSite {
+            Ensure    = 'Present'
+            Name      = $ADSiteName
+            DependsOn = "[ADGroup]AddToSchemaAdmin"
+        }
+
+        ADReplicationSubnet ADSubnet {
+            Name        = "$DHCP_ScopeId/24"
+            Site        = $ADSiteName
+            Location    = $ADSiteName
+            Description = 'Created by vmbuild'
+            DependsOn   = "[ADReplicationSite]ADSite"
         }
 
         WriteStatus NetworkDNS {
@@ -284,7 +308,8 @@
             }
 
         }
-        else { # Hierarchy
+        else {
+            # Hierarchy
 
             VerifyComputerJoinDomain WaitForCS {
                 ComputerName = $CSName
