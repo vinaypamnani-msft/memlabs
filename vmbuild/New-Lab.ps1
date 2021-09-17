@@ -4,7 +4,7 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Force recreation of virtual machines, if already present.")]
     [switch]$ForceNew,
     [Parameter(Mandatory = $false, HelpMessage = "Timeout in minutes for VM Configuration.")]
-    [int]$RoleConfigTimeoutMinutes,
+    [int]$RoleConfigTimeoutMinutes = 300,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
     [switch]$WhatIf
 )
@@ -60,17 +60,9 @@ $timer.Start()
 
 # Get deployment configuration
 $configPath = Join-Path $Common.ConfigPath "$Configuration.json"
-$samplePath = Join-Path $Common.ConfigPath "samples\$Configuration.json"
 if (-not (Test-Path $configPath)) {
-    if (Test-Path $samplePath) {
-        # TODO: Prompt user for confirmation after dispaying current config???
-        Write-Log "Main: Making a copy of sample config $Configuration.json to $($Common.ConfigPath)"
-        Copy-Item -Path $samplePath -Destination $configPath -Force -Confirm:$false
-    }
-    else {
-        Write-Log "Main: $configPath not found for specified configuration. Please create the config, and try again." -Failure
-        return
-    }
+    Write-Log "Main: $configPath not found for specified configuration. Please create the config, and try again." -Failure
+    return
 }
 else {
     Write-Log "Main: $configPath will be used for creating the lab environment."
@@ -321,7 +313,7 @@ $VM_Create = {
     # Write-Log "PSJOB: $($currentItem.vmName): Waiting for $($currentItem.role) role configuration via DSC." -OutputStream
 
     $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
-    $timeout = if ($using:RoleConfigTimeoutMinutes) { $using:RoleConfigTimeoutMinutes } else { 300 }
+    $timeout = $using:RoleConfigTimeoutMinutes
     $timeSpan = New-TimeSpan -Minutes $timeout
     $stopWatch.Start()
 
@@ -388,7 +380,7 @@ if (-not $switch) {
     return
 }
 
-# CM Version
+# DSC Folder
 $cmDscFolder = "configmgr"
 
 # Remove existing jobs
@@ -402,6 +394,10 @@ if ($existingJobs) {
     }
 }
 
+Write-Log "Main: Creating RDCMan file for specified config" -Activity
+$desktopPath = [Environment]::GetFolderPath("Desktop")
+$rdcManFilePath = Join-Path $DesktopPath "memlabs.rdg"
+New-RDCManFile $deployConfig $rdcManFilePath
 
 Write-Log "Main: Creating Virtual Machines." -Activity
 

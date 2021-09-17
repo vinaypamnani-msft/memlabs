@@ -76,30 +76,25 @@ Write-DscStatus "Setting the Client Push Account"
 Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
 Start-Sleep -Seconds 5
 
-# Enable EHTTP
-if ($installAction -eq "InstallPrimarySite") {
-    Write-DscStatus "Enabling e-HTTP"
-    $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
-    $timeSpan = New-TimeSpan -Minutes 30
-    $stopWatch.Start()
-    $enabled = $false
-    do {
-        Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
-        Start-Sleep 30
-        $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object {$_.PropertyName -eq "IISSSLState" }
-        $enabled = ($prop.Value -band 1024) -eq 1024
-        Write-DscStatus "e-HTTP state is: $enabled" -RetrySeconds 30
+# Enable EHTTP, some components are still installing and they reset it to Disabled.
+# Keep setting it every 30 seconds, 10 times and bail...
+$attempts = 0
+$enabled = $false
+Write-DscStatus "Enabling e-HTTP"
+do {
+    $attempts++
+    Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
+    Start-Sleep 30
+    $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
+    $enabled = ($prop.Value -band 1024) -eq 1024
+    Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled" -RetrySeconds 30
+} until ($attempts -ge 10)
 
-    } until ($enabled -or ($stopWatch.Elapsed -ge $timeSpan))
-
-    $stopWatch.Stop()
-
-    if (-not $enabled) {
-        Write-DscStatus "e-HTTP not enabled after waiting for 30 minutes, skip."
-    }
-    else {
-        Write-DscStatus "e-HTTP was enabled"
-    }
+if (-not $enabled) {
+    Write-DscStatus "e-HTTP not enabled after trying $attempts times, skip."
+}
+else {
+    Write-DscStatus "e-HTTP was enabled."
 }
 
 # exit if nothing to do
@@ -154,7 +149,6 @@ else {
 
 # Install MP
 #============
-Start-Sleep -Seconds 5
 $Configuration.InstallMP.Status = 'Running'
 $Configuration.InstallMP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force

@@ -490,7 +490,7 @@ class AddNtfsPermissions {
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
-        $testPath = "C:\staging\DSC\NTFS.done"
+        $testPath = "C:\staging\DSC\AddNtfsPermissions.txt"
         & icacls C:\tools /grant "Users:(M,RX)" /t | Out-File $testPath -Force -ErrorAction SilentlyContinue
         & icacls C:\temp /grant "Users:F" /t | Out-File $testPath -Append -Force
         & takeown /F C:\windows\system32\Configuration /A /R | Out-File $testPath -Append -Force
@@ -498,7 +498,7 @@ class AddNtfsPermissions {
     }
 
     [bool] Test() {
-        $testPath = "C:\staging\DSC\NTFS.done"
+        $testPath = "C:\staging\DSC\AddNtfsPermissions.txt"
         if (Test-Path $testPath) {
             return $true
         }

@@ -4,7 +4,7 @@ param(
 )
 
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
-$global:StatusLog = "C:\staging\DSC\InstallCM.log"
+$global:StatusLog = "C:\staging\DSC\InstallCMLog.txt"
 
 function Write-DscStatusSetup {
     $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
