@@ -910,66 +910,6 @@ function Get-VmSession {
     return $ps
 }
 
-
-function Get-VmSession2 {
-    param (
-        [Parameter(Mandatory = $true, ParameterSetName = "LocalCreds", HelpMessage = "VM Name")]
-        [Parameter(Mandatory = $true, ParameterSetName = "DomainCreds", HelpMessage = "VM Name")]
-        [string]$VmName,
-        [Parameter(Mandatory = $true, ParameterSetName = "DomainCreds", HelpMessage = "Domain Name for creating creds.")]
-        [string]$DomainName,
-        [Parameter(Mandatory = $false, ParameterSetName = "DomainCreds", HelpMessage = "If domain creds failed, return local creds.")]
-        [switch]$FallbackLocal
-    )
-
-    $key = if ($DomainName) { "$VmName-Domain" } else { "$VmName-Local" }
-
-    if ($global:ps_cache.ContainsKey($key)) {
-        $ps = $global:ps_cache[$key]
-        if ($ps.Availability -eq "Available") {
-            Write-Log "Get-VmSession: $VmName`: Returning $key session from cache." -Warning
-            return $ps
-        }
-    }
-
-    # Domain
-    if ($DomainName) {
-        $username = "$DomainName\$($Common.LocalAdmin.UserName)"
-        $domainCreds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
-        $ps_domain = New-PSSession -VMName $VmName -Credential $domainCreds -ErrorVariable Err0 -ErrorAction SilentlyContinue
-        if ($Err0.Count -ne 0) {
-            Write-Log "Get-VmSession: $VmName`: Failed to establish a session using domain creds. Error: $Err0" -Failure
-            if (-not $FallbackLocal.IsPresent) {
-                return $null
-            }
-            else {
-                if ($global:ps_cache.ContainsKey($key.Replace("-Domain", "-Local"))) {
-                    $ps = $global:ps_cache[$key]
-                    if ($ps.Availability -eq "Available") {
-                        Write-Log "Get-VmSession: $VmName`: Returning $key session from cache after falling back to local creds." -Warning
-                        return $ps
-                    }
-                }
-            }
-        }
-        else {
-            $global:ps_cache["$VmName-Domain"] = $ps_domain
-            return $ps_domain
-        }
-    }
-
-    # Local
-    $ps_local = New-PSSession -VMName $VmName -Credential $Common.LocalAdmin -ErrorVariable Err1 -ErrorAction SilentlyContinue
-    if ($Err1.Count -ne 0) {
-        Write-Log "Get-VmSession: $VmName`: Failed to establish a session using local creds. Error: $Err1" -Failure
-        return $null
-    }
-    else {
-        $global:ps_cache["$VmName-Local"] = $ps_local
-        return $ps_local
-    }
-}
-
 function Get-StorageConfig {
 
     $configPath = Join-Path $Common.ConfigPath "_storageConfig.json"
@@ -1025,8 +965,10 @@ function Get-StorageConfig {
 
 function Test-Configuration {
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Configuration File")]
-        [string]$FilePath
+        [Parameter(Mandatory = $true, ParameterSetName ="ConfigFile", HelpMessage = "Configuration File")]
+        [string]$FilePath,
+        [Parameter(Mandatory = $true, ParameterSetName ="ConfigObject", HelpMessage = "Configuration File")]
+        [object]$InputObject
     )
 
     $return = [PSCustomObject]@{
@@ -1035,14 +977,20 @@ function Test-Configuration {
         Message      = $null
     }
 
-    $configJson = Get-Content $FilePath -Force | ConvertFrom-Json
+    if ($FilePath) {
+        $configObject = Get-Content $FilePath -Force | ConvertFrom-Json
+    }
 
-    $containsDC = $configJson.virtualMachines.role.Contains("DC")
-    $containsCAS = $configJson.virtualMachines.role.Contains("CS")
+    if ($InputObject) {
+        $configObject = $InputObject
+    }
+
+    $containsDC = $configObject.virtualMachines.role.Contains("DC")
+    $containsCAS = $configObject.virtualMachines.role.Contains("CS")
 
     # config must contain DC role, or existingDCNameWithPrefix
     if (-not $containsDC) {
-        $existingDC = $configJson.vmOptions.existingDCNameWithPrefix
+        $existingDC = $configObject.vmOptions.existingDCNameWithPrefix
         if (-not $existingDC) {
             $return.Message = "DC role not specified in the configuration file and vmOptions.existingDCNameWithPrefix not present."
             return $return
@@ -1050,7 +998,7 @@ function Test-Configuration {
     }
 
     # tech preview and CAS
-    if ($containsCAS -and $configJson.cmOptions.version -eq "tech-preview") {
+    if ($containsCAS -and $configObject.cmOptions.version -eq "tech-preview") {
         $return.Message = "Tech-Preview specified in configuration along with CAS Role; Tech Preview doesn't support CAS."
         return $return
     }
@@ -1070,21 +1018,21 @@ function Test-Configuration {
     # everything is good, create deployJson
 
     # add prefix to vm names
-    $virtualMachines = $configJson.virtualMachines
-    $virtualMachines | foreach-object { $_.vmName = $configJson.vmOptions.prefix + $_.vmName }
+    $virtualMachines = $configObject.virtualMachines
+    $virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
 
     # create params object
-    $network = $configJson.vmOptions.network.Substring(0, $configJson.vmOptions.network.LastIndexOf("."))
+    $network = $configObject.vmOptions.network.Substring(0, $configObject.vmOptions.network.LastIndexOf("."))
     $clientsCsv = ($virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
     $params = [PSCustomObject]@{
-        DomainName         = $configJson.vmOptions.domainName
+        DomainName         = $configObject.vmOptions.domainName
         DCName             = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
         CSName             = ($virtualMachines | Where-Object { $_.role -eq "CS" }).vmName
         PSName             = ($virtualMachines | Where-Object { $_.role -eq "PS" }).vmName
         DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
         DomainMembers      = $clientsCsv
         Scenario           = $scenario
-        DHCPScopeId        = $configJson.vmOptions.Network
+        DHCPScopeId        = $configObject.vmOptions.Network
         DHCPDNSAddress     = $network + ".1"
         DHCPDefaultGateway = $network + ".200"
         DHCPScopeStart     = $network + ".20"
@@ -1094,8 +1042,8 @@ function Test-Configuration {
     }
 
     $deploy = [PSCustomObject]@{
-        cmOptions       = $configJson.cmOptions
-        vmOptions       = $configJson.vmOptions
+        cmOptions       = $configObject.cmOptions
+        vmOptions       = $configObject.vmOptions
         virtualMachines = $virtualMachines
         parameters      = $params
     }
