@@ -10,6 +10,7 @@
         "prefix": "PS-",
         "basePath": "E:\\VirtualMachines",
         "domainName": "contoso.com",
+        "domainAdminName": "admin",
         "network": "192.168.1.0"
     },
     "virtualMachines": [

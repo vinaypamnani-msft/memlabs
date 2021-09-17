@@ -17,6 +17,7 @@
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
+    $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
     $IsDPMP = $deployConfig.parameters.ThisMachineRole -eq "DPMP"
 
@@ -25,10 +26,12 @@
         $DCName = $deployConfig.vmOptions.existingDCNameWithPrefix
     }
 
+    # Domain Admin Name
+    $DomainAdminName = $deployConfig.vmOptions.domainAdminName
+    $cm_admin = "$DNAME\$DomainAdminName"
+
     # SQL Setup
     $installSQL = $false
-    $DName = $DomainName.Split(".")[0]
-    $cm_admin = "$DNAME\admin"
     if ($ThisVM.sqlVersion) {
         $installSQL = $true
         $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"

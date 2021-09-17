@@ -1163,10 +1163,8 @@ function New-RDCManFile {
     #     <group>
     #     ...
 
-
-
     $domain = $DeployConfig.vmOptions.domainName
-    $username = "admin"
+    $username = $DeployConfig.vmOptions.domainAdminName
     $findGroup = Get-RDCManGroupToModify $domain $username $encryptedPass $group $findGroup $groupFromTemplate $existing
     if ($findGroup -eq $false -or $null -eq $findGroup) {
         Write-Log "New-RDCManFile: Failed to find group to modify" -Failure
@@ -1345,3 +1343,6 @@ $global:StorageConfig = [PSCustomObject]@{
 
 ### Test Storage config and access
 Get-StorageConfig
+
+### Copy sample config
+Copy-SampleConfigs

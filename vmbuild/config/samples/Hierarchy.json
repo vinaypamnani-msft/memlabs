@@ -10,6 +10,7 @@
         "prefix": "CS-",
         "basePath": "E:\\VirtualMachines",
         "domainName": "fabrikam.com",
+        "domainAdminName": "admin",
         "network": "192.168.2.0"
     },
     "virtualMachines": [
@@ -39,6 +40,7 @@
             "role": "PS",
             "siteCode": "PS1",
             "operatingSystem": "Server 2022",
+            "sqlVersion": "SQL Server 2019",
             "cmInstallDir": "E:\\ConfigMgr",
             "sqlInstanceDir": "E:\\SQL",
             "additionalDisks": {

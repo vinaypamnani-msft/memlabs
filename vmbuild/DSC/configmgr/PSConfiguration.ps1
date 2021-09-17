@@ -17,9 +17,13 @@
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
-    $cm_admin = "$DNAME\admin"
+
     $DCName = $deployConfig.parameters.DCName
     $Configuration = $deployConfig.parameters.Scenario
+
+    # Domain Admin User name
+    $DomainAdminName = $deployConfig.vmOptions.domainAdminName
+    $cm_admin = "$DNAME\$DomainAdminName"
 
     # CM Options
     $InstallConfigMgr = $deployConfig.cmOptions.install
@@ -37,7 +41,7 @@
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
-    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\admin", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
     Node LOCALHOST
     {
@@ -262,7 +266,7 @@
 
             WriteStatus InstallAndUpdateSCCM {
                 DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-                Status    = "Setting up ConfigMgr. Waiting for installation to begin."
+                Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
             }
 
             WriteFileOnce CMSvc {

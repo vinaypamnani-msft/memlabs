@@ -36,6 +36,9 @@
         $ADSiteName = "vmbuild"
     }
 
+    # Domain Admin User name
+    $DomainAdminName = $deployConfig.vmOptions.domainAdminName
+
     # Define log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
@@ -103,7 +106,7 @@
 
         ADUser Admin {
             Ensure              = 'Present'
-            UserName            = 'admin'
+            UserName            = $DomainAdminName
             Password            = $DomainCreds
             PasswordNeverResets = $true
             DomainName          = $DomainName
@@ -121,19 +124,19 @@
 
         ADGroup AddToAdmin {
             GroupName        = "Administrators"
-            MembersToInclude = @("admin")
+            MembersToInclude = @($DomainAdminName)
             DependsOn        = "[ADUser]Admin"
         }
 
         ADGroup AddToDomainAdmin {
             GroupName        = "Domain Admins"
-            MembersToInclude = @("admin")
+            MembersToInclude = @($DomainAdminName)
             DependsOn        = @("[ADUser]Admin", "[ADUser]cm-svc")
         }
 
         ADGroup AddToSchemaAdmin {
             GroupName        = "Schema Admins"
-            MembersToInclude = @("admin")
+            MembersToInclude = @($DomainAdminName)
             DependsOn        = "[ADUser]Admin"
         }
 
