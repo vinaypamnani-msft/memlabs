@@ -19,7 +19,7 @@ Write-Host
 Write-Host "=== Available SQL Server versions ===" -ForegroundColor Cyan
 Write-Host
 
-$Common.AzureFileList.ISO.id
+$Common.AzureFileList.ISO.id | Select-Object -Unique
 
 Write-Host
 Write-Host "Use one of these values in the json config file(s) for specifying OS and SQL Versions." -ForegroundColor Green

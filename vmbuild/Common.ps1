@@ -1164,17 +1164,23 @@ function New-RDCManFile {
     #     ...
 
     $domain = $DeployConfig.vmOptions.domainName
-    $username = $DeployConfig.vmOptions.domainAdminName
-    $findGroup = Get-RDCManGroupToModify $domain $username $encryptedPass $group $findGroup $groupFromTemplate $existing
+    $findGroup = Get-RDCManGroupToModify $domain $group $findGroup $groupFromTemplate $existing
     if ($findGroup -eq $false -or $null -eq $findGroup) {
         Write-Log "New-RDCManFile: Failed to find group to modify" -Failure
         return
     }
 
-    $shouldSave = $False
+    # Set user/pass on the group
+    $username = $DeployConfig.vmOptions.domainAdminName
+    $findGroup.logonCredentials.password = $encryptedPass
+    if ($findGroup.logonCredentials.username -ne $username) {
+        $findGroup.logonCredentials.userName = $username
+        $shouldSave = $true
+    }
+
     foreach ($vm in $DeployConfig.virtualMachines) {
         if (Add-RDCManServerToGroup $vm.vmName $findgroup $groupFromTemplate $existing -eq $True) {
-            $shouldSave = $True
+            $shouldSave = $true
         }
     }
 
@@ -1187,7 +1193,7 @@ function New-RDCManFile {
     [void]$file.AppendChild($findgroup)
 
     # Save to desired filename
-    if ($shouldSave -eq $True) {
+    if ($shouldSave) {
         Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success
         Write-Log "RDCMan.exe is located in $rdcmanpath" -Success
         Get-Process -Name rdcman -ea Ignore | Stop-Process
@@ -1232,8 +1238,6 @@ function Add-RDCManServerToGroup {
 function Get-RDCManGroupToModify {
     param(
         $domain,
-        $username,
-        $encrypted,
         $group,
         $findGroup,
         $groupFromTemplate,
@@ -1247,8 +1251,6 @@ function Get-RDCManGroupToModify {
         Write-Host "Not found.  Creating new group"
         $findGroup = $groupFromTemplate.Clone()
         $findGroup.properties.name = $domain
-        $findGroup.logonCredentials.userName = $username
-        $findGroup.logonCredentials.password = $encrypted
         $findGroup.logonCredentials.domain = $domain
         $ChildNodes = $findGroup.SelectNodes('//server')
         foreach ($Child in $ChildNodes) {
