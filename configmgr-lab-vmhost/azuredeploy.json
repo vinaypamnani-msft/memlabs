@@ -56,7 +56,7 @@
     "subnetPrefix": "10.1.0.0/24",
     "dataDisksCount": 24,
     "dataDiskSize": 128,
-    "dataDiskType": "PremiumSSD_LRS",
+    "dataDiskType": "Premium_LRS",
     "location": "[resourceGroup().location]",
     "aadLoginExtensionName": "AADLoginForWindows",
     "windowsAdminCenterPort": "6516",
