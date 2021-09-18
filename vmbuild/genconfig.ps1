@@ -3,6 +3,7 @@
 $configDir = Join-Path $PSScriptRoot "config"
 
 Write-Host "New-Lab Configuration generator:"
+Write-Host "You can use this tool to customize most options.  Press Enter to skip a section"
 Write-Host ""
 
 function Select-Config {
