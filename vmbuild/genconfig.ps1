@@ -38,124 +38,37 @@ function Select-Config {
 }
 
 
-function Select-OSFromList {
+
+function Get-SupportedVersion  {
     [CmdletBinding()]
     param (
         [Parameter()]
         [string]
-        $currentValue
+        $key,    
+        [Parameter()]
+        [string]
+        $currentValue,
+        [Parameter()]
+        [string]
+        $prompt
     )
   
     write-Host
     #  $Common.AzureFileList.ISO.id | Select-Object -Unique
 
     $i = 0
-    foreach ($os in $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" }) {
+    foreach ($Supported in $Common.Supported."$key") {
         $i = $i + 1
-        Write-Host "[$i] - $os"
+        Write-Host "[$i] - $Supported"
     }
-    $response = get-ValidResponse "Select OS [$currentValue]" $i
+    $response = get-ValidResponse "$prompt [$currentValue]" $i
     
     if ([bool]$response) {
         $i = 0
-        foreach ($os in $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" }) {
+        foreach ($Supported in $Common.Supported."$key") {
             $i = $i + 1
             if ($i -eq $response) {
-                return $os
-            }
-        }
-    }
-    else {
-        return $currentValue
-    }
-
-}
-
-function Select-RolesFromList {
-    [CmdletBinding()]
-    param (
-        [Parameter()]
-        [string]
-        $currentValue
-    )
-  
-    write-Host
-    $i = 0
-    foreach ($role in $Common.Supported.Roles) {
-        $i = $i + 1
-        Write-Host "[$i] - $role"
-    }
-    $response = get-ValidResponse "Select Role [$currentValue]" $i
-    
-    if ([bool]$response) {
-        $i = 0
-        foreach ($role in $Common.Supported.Roles) {
-            $i = $i + 1
-            if ($i -eq $response) {
-                return $role
-            }
-        }
-    }
-    else {
-        return $currentValue
-    }
-}
-
-function Select-CMVFromList {
-    [CmdletBinding()]
-    param (
-        [Parameter()]
-        [string]
-        $currentValue
-    )
-  
-    write-Host
-    $i = 0
-    foreach ($cmv in $Common.Supported.CMVersions) {
-        $i = $i + 1
-        Write-Host "[$i] - $cmv"
-    }
-    $response = get-ValidResponse "Select CM Version [$currentValue]" $i
-    
-    if ([bool]$response) {
-        $i = 0
-        foreach ($cmv in $Common.Supported.CMVersions) {
-            $i = $i + 1
-            if ($i -eq $response) {
-                return $cmv
-            }
-        }
-    }
-    else {
-        return $currentValue
-    }
-
-}
-
-function Select-SQLFromList {
-    [CmdletBinding()]
-    param (
-        [Parameter()]
-        [string]
-        $currentValue
-    )
-  
-    write-Host
-    #  $Common.AzureFileList.ISO.id | Select-Object -Unique
-
-    $i = 0
-    foreach ($sql in $Common.AzureFileList.ISO.id | Select-Object -Unique) {
-        $i = $i + 1
-        Write-Host "[$i] - $sql"
-    }
-    $response = get-ValidResponse "Select SQL Version [$currentValue]" $i
-    
-    if ([bool]$response) {
-        $i = 0
-        foreach ($sql in $Common.AzureFileList.ISO.id | Select-Object -Unique) {
-            $i = $i + 1
-            if ($i -eq $response) {
-                return $sql
+                return $Supported
             }
         }
     }
@@ -232,19 +145,20 @@ function Select-Options {
                     $name = $($_.Name)
                     switch ($name) {
                         "operatingSystem" {
-                            $property."$name" = Select-OsFromList $value
+                            $property."$name" = Get-SupportedVersion "OperatingSystems" $value "Select OS Version"
+                            #Select-OsFromList $value
                             return
                         }  
                         "sqlVersion" {
-                            $property."$name" = Select-SQLFromList $value
+                            $property."$name" = Get-SupportedVersion "SqlVersions" $value "Select SQL Version"
                             return
                         }
                         "role" {
-                            $property."$name" = Select-RolesFromList $value
+                            $property."$name" = Get-SupportedVersion "Roles" $value "Select Role"
                             return
                         }
                         "version" {
-                            $property."$name" = Select-CMVFromList $value
+                            $property."$name" = Get-SupportedVersion "CmVersions" $value "Select ConfigMgr Version"
                             return
                         }
                     }                   
