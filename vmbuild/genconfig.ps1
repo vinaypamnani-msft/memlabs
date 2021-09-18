@@ -13,7 +13,8 @@ Write-Host -ForegroundColor Cyan " - Can not add/remove VMs"
 Write-Host -ForegroundColor Cyan " - Can not add/remove Disks"
 Write-Host -ForegroundColor Cyan ""
 function Select-Config {
-    $files = Get-ChildItem $configDir\*.json -Exclude "_*"
+    $files = Get-ChildItem $configDir\*.json -Include "Hierarchy.json", "Standalone.json", "AddToExisting.json" | Sort-Object -Property Name -Descending
+    $files += Get-ChildItem $configDir\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json"
     $i = 0
     foreach ($file in $files) {
         $i = $i + 1
@@ -237,12 +238,17 @@ if ($($Global:configfile.Name).StartsWith("xGen")) {
 else {
     $filename = Join-Path $configDir "xGen-$date-$($Global:configfile.Name)"
 }
-$response = Read-Host -Prompt "Save Filename [$filename]"
+$splitpath = Split-Path -Path $fileName -Leaf
+$response = Read-Host -Prompt "Save Filename [$splitpath]"
 if ([bool]$response) {
-    $filename = $response
+    if (!$response.EndsWith("json")){
+        $response+=".json"
+    }
+    $filename = Join-Path $configDir $response
 }
 $config | ConvertTo-Json -Depth 3 | Out-File $filename
-
+Write-Host "Saved to $filename"
+Write-Host
 $response = Read-Host -Prompt "Deploy Now? (y/N)"
 if ([bool]$response) {
     if ($response.ToLowerInvariant() -eq "y") {
