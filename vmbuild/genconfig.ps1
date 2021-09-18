@@ -58,7 +58,7 @@ function Read-Host2 {
         Write-Host -ForegroundColor yellow $currentValue -NoNewline
         Write-Host "]" -NoNewline
     }
-    Write-Host ":" -NoNewline
+    Write-Host " : " -NoNewline
     $response = Read-Host
     return $response
 }
@@ -160,7 +160,7 @@ function Select-Options {
             $value = $property."$($_.Name)"
             Write-Host [$i] $_.Name = $value
         }
-        $response = get-ValidResponse $prompt $i $value
+        $response = get-ValidResponse $prompt $i $null
         if ([bool]$response) {
             $i = 0
             $property | Get-Member -MemberType NoteProperty | ForEach-Object {
