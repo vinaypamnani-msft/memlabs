@@ -1,8 +1,12 @@
 param (
-    [Parameter(Mandatory = $true, HelpMessage = "Lab Configuration: Standalone, Hierarchy, SingleMachine.")]
+    [Parameter(Mandatory = $true, ParameterSetName="NewLab", HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
     [string]$Configuration,
-    [Parameter(Mandatory = $false, HelpMessage = "Force recreation of virtual machines, if already present.")]
+    [Parameter(Mandatory = $false, ParameterSetName="DownloadFiles", HelpMessage = "Download all files required by the specified config without deploying any VMs.")]
+    [switch]$DownloadFilesOnly,
+    [Parameter(Mandatory = $false, ParameterSetName="NewLab", HelpMessage = "Force recreation of virtual machines, if already present.")]
     [switch]$ForceNew,
+    [Parameter(Mandatory = $false, ParameterSetName="DownloadFiles", HelpMessage = "Force redownload of required files, if already present.")]
+    [switch]$ForceDownloadFiles,
     [Parameter(Mandatory = $false, HelpMessage = "Timeout in minutes for VM Configuration.")]
     [int]$RoleConfigTimeoutMinutes = 300,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
@@ -50,39 +54,6 @@ Write-Host
 Write-Host
 Write-Host
 Write-Host
-
-Write-Log "### START." -Success
-Write-Log "Main: Creating virtual machines for specified configuration: $Configuration" -Activity
-
-# Timer
-$timer = New-Object -TypeName System.Diagnostics.Stopwatch
-$timer.Start()
-
-# Get deployment configuration
-$configPath = Join-Path $Common.ConfigPath "$Configuration.json"
-if (-not (Test-Path $configPath)) {
-    Write-Log "Main: $configPath not found for specified configuration. Please create the config, and try again." -Failure
-    return
-}
-else {
-    Write-Log "Main: $configPath will be used for creating the lab environment."
-}
-
-# Load configuration
-try {
-    $result = Test-Configuration -FilePath $configPath
-    if ($result.Valid) {
-        $deployConfig = $result.DeployConfig
-    }
-    else {
-        Write-Log "Main: Config validation failed. $(result.Message)"
-        return
-    }
-}
-catch {
-    Write-Log "Main: Failed to load $Configuration.json file. $_" -Failure
-    return
-}
 
 # Create VM script block
 $VM_Create = {
@@ -370,6 +341,43 @@ $VM_Create = {
         Write-Progress "$($currentItem.role) configuration completed successfully. Elapsed time: $($stopWatch.Elapsed)" -Status $status.ScriptBlockOutput -Completed
         Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
+}
+
+Write-Log "### START." -Success
+Write-Log "Main: Creating virtual machines for specified configuration: $Configuration" -Activity
+
+# Timer
+$timer = New-Object -TypeName System.Diagnostics.Stopwatch
+$timer.Start()
+
+# Get user configuration
+$userConfig = Get-UserConfiguration -Configuration $Configuration
+
+# Load configuration
+try {
+    $result = Test-Configuration -InputObject $userConfig
+    if ($result.Valid) {
+        $deployConfig = $result.DeployConfig
+    }
+    else {
+        Write-Log "Main: Config validation failed. $(result.Message)"
+        return
+    }
+}
+catch {
+    Write-Log "Main: Failed to load $Configuration.json file. $_" -Failure
+    return
+}
+
+# Download required files
+Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
+
+if ($DownloadFilesOnly.IsPresent) {
+    $timer.Stop()
+    Write-Host
+    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
+    Write-Host
+    return
 }
 
 # Test if hyper-v switch exists, if not create it

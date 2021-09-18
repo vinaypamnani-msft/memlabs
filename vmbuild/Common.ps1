@@ -963,11 +963,123 @@ function Get-StorageConfig {
     }
 }
 
+function Get-UserConfiguration {
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "Configuration Name")]
+        [string]$Configuration
+    )
+
+    # Get deployment configuration
+    $configPath = Join-Path $Common.ConfigPath "$Configuration.json"
+    if (-not (Test-Path $configPath)) {
+        Write-Log "Get-UserConfiguration: $Configuration`: $configPath not found for specified configuration. Please create the config, and try again." -Failure
+        return
+    }
+    else {
+        Write-Log "Get-UserConfiguration: $Configuration`: Loading $configPath."
+    }
+
+    try {
+        $config = Get-Content $configPath -Force | ConvertFrom-Json
+        return $config
+    }
+    catch {
+        Write-Log "Get-UserConfiguration: $Configuration`: Failed to load $configPath. $_"
+        return $null
+    }
+    
+}
+
+function Get-FilesForConfiguration {
+    param (
+        [Parameter(Mandatory = $false, ParameterSetName = "ConfigFile", HelpMessage = "Configuration Name for which to download the files.")]
+        [string]$Configuration,
+        [Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Configuration Object for which to download the files.")]
+        [object]$InputObject,
+        [Parameter(Mandatory = $false, ParameterSetName = "All", HelpMessage = "Get all files.")]
+        [switch]$DownloadAll,
+        [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
+        [switch]$ForceDownloadFiles,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    # Load config file
+    if ($Configuration -and -not $DownloadAll) {
+        $config = Get-UserConfiguration -Configuration $Configuration
+    }
+    
+    # Config object
+    if ($InputObject) {
+        $config = $InputObject
+    }
+
+    # Get unique items from config
+    if ($config) {
+        $operatingSystemsToGet = $config.virtualMachines.operatingSystem | Select-Object -Unique
+        $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
+    }
+
+    Write-Log "Get-FilesForConfiguration: Downloading/Verifying Files required by specified config..." -Activity
+
+    foreach ($file in $Common.AzureFileList.OS) {
+
+        if ($file.id -eq "vmbuildadmin") { continue }
+        if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file.id) { continue }
+        Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
+    }
+
+    foreach ($file in $Common.AzureFileList.ISO) {
+        if (-not $DownloadAll -and $sqlVersionsToGet -notcontains $file.id) { continue }    
+        Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
+
+    }
+}
+
+function Get-FileFromStorage {
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "Storage File to download.")]
+        [object]$File,
+        [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
+        [switch]$ForceDownloadFiles,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    $imageName = $File.id
+    $imageUrl = "$($StorageConfig.StorageLocation)/$($File.filename)"
+    $imageFileRelative = $File.filename
+    $imageFileName = Split-Path $File.filename -Leaf
+
+    Write-Log "Get-FileFromStorage: Downloading/Verifying '$imageName'" -SubActivity
+    $localImagePath = Join-Path $Common.AzureFilesPath $imageFileRelative
+
+    $download = $true
+
+    if (Test-Path $localImagePath) {
+        Write-Log "Get-FileFromStorage: Found $imageFileRelative in $($Common.AzureFilesPath)."
+        if ($Force.IsPresent) {
+            Write-Log "Main: ForceDownloadFiles switch present. Removing pre-existing $imageFileName file..." -Warning
+            Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+        }
+        else {
+            Write-Log "Get-FileFromStorage: ForceDownloadFiles switch not present. Skip downloading '$imageFileName'." -Warning
+            $download = $false
+            continue
+        }
+    }
+
+    if ($download) {
+        # Write-Log "Get-FileFromStorage: Downloading '$imageName' image..."
+        Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
+    }
+}
+
 function Test-Configuration {
     param (
-        [Parameter(Mandatory = $true, ParameterSetName ="ConfigFile", HelpMessage = "Configuration File")]
+        [Parameter(Mandatory = $true, ParameterSetName = "ConfigFile", HelpMessage = "Configuration File")]
         [string]$FilePath,
-        [Parameter(Mandatory = $true, ParameterSetName ="ConfigObject", HelpMessage = "Configuration File")]
+        [Parameter(Mandatory = $true, ParameterSetName = "ConfigObject", HelpMessage = "Configuration File")]
         [object]$InputObject
     )
 
@@ -1239,8 +1351,8 @@ function Copy-SampleConfigs {
     $realConfigPath = $Common.ConfigPath
     $sampleConfigPath = Join-Path $Common.ConfigPath "samples"
 
-    Write-Log "Copy-SampleConfigs: Checking if any sample configs need to be copied to config directory" -LogOnly
-    foreach($item in Get-ChildItem $sampleConfigPath -File -Filter *.json) {
+    Write-Log "Copy-SampleConfigs: Checking if any sample configs need to be copied to config directory" -LogOnly -VerboseOnly
+    foreach ($item in Get-ChildItem $sampleConfigPath -File -Filter *.json) {
         $copyFile = $true
         $sampleFile = $item.FullName
         $fileName = Split-Path -Path $sampleFile -Leaf
@@ -1249,25 +1361,47 @@ function Copy-SampleConfigs {
             $sampleFileHash = Get-FileHash $sampleFile
             $configFileHash = Get-FileHash $configFile
             if ($configFileHash -ne $sampleFileHash) {
-                Write-Log "Copy-SampleConfigs: Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly
+                Write-Log "Copy-SampleConfigs: Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -VerboseOnly
                 $copyFile = $false
             }
         }
 
         if ($copyFile) {
-            Write-Log "Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly
+            Write-Log "Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly -VerboseOnly
             Copy-Item -Path $sampleFile -Destination $configFile -Force
         }
     }
 }
 
 ############################
-### Required Directories ###
+### Common Object        ###
 ############################
 
+# Supported Roles
+
+$roles = @(
+    "DC",
+    "PS",
+    "CS",
+    "DPMP",
+    "DomainMember"
+)
+
+$cmVersions = @(
+    "current-branch",
+    "tech-preview"
+)
+
+$supported = [PSCustomObject]@{
+    Roles      = $roles
+    CMVersions = $cmVersions
+}
+
+# Paths
 $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
 $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
 
+# Common global props
 $global:Common = [PSCustomObject]@{
     TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
     ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
@@ -1281,12 +1415,14 @@ $global:Common = [PSCustomObject]@{
     StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
     StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
     LogPath               = Join-Path $PSScriptRoot "vmbuild.log"                                     # Log File
+    Supported             = $supported
     AzureFileList         = $null
     LocalAdmin            = $null
     VerboseLog            = $false
     FatalError            = $null
 }
 
+# Storage config
 $global:StorageConfig = [PSCustomObject]@{
     StorageLocation = $null
     StorageToken    = $null
