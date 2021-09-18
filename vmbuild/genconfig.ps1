@@ -182,6 +182,7 @@ function Select-Options2 {
                         Select-Options2 $value "Select data to modify"
                     }
                     else {
+                        Write-Host
                         $response = Read-Host -Prompt "Select new Value for $($_.Name) [$value]"
                         if ([bool]$response) {
                             if ($property."$($_.Name)" -is [Int]) {
