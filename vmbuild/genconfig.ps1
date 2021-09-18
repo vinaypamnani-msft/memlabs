@@ -49,7 +49,7 @@ function Select-OSFromList {
         $currentValue
     )
   
-    
+    write-Host
     #  $Common.AzureFileList.ISO.id | Select-Object -Unique
 
     $i = 0
@@ -82,7 +82,7 @@ function Select-SQLFromList {
         $currentValue
     )
   
-    
+    write-Host
     #  $Common.AzureFileList.ISO.id | Select-Object -Unique
 
     $i = 0
