@@ -23,7 +23,7 @@ function Select-Config {
     $responseValid = $false
     while ($responseValid -eq $false) {
         Write-Host
-        $response = Read-Host -Prompt "Which config do you want to deploy"
+        $response = Read-Host2 -Prompt "Which config do you want to deploy"
         try {
             if ([int]$response -is [int]) {
                 if ($response -le $i -and $response -gt 0 ) {
@@ -38,7 +38,28 @@ function Select-Config {
     return $config
 }
 
+function Read-Host2 {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $prompt,
+        [Parameter()]
+        [string]
+        $currentValue        
+    )
 
+    Write-Host -ForegroundColor Cyan $prompt -NoNewline
+    if ([bool]$currentValue)
+    {
+        Write-Host " [" -NoNewline
+        Write-Host -ForegroundColor yellow $currentValue -NoNewline
+        Write-Host "]" -NoNewline
+    }
+    Write-Host ":" -NoNewline
+    $response = Read-Host
+    return $response
+}
 
 function Get-SupportedVersion  {
     [CmdletBinding()]
@@ -87,14 +108,17 @@ function get-ValidResponse {
         $Prompt,
         [Parameter()]
         [int]
-        $max
+        $max,
+        [Parameter()]
+        [string]
+        $currentValue
     )
 
     $responseValid = $false
     while ($responseValid -eq $false) {
         #   Write-Host "Not Returning: $response out of $max"
         Write-Host
-        $response = Read-Host -Prompt $prompt
+        $response = Read-Host2 -Prompt $prompt $currentValue
         try {
             if (![bool]$response) {
                 $responseValid = $true
@@ -134,7 +158,7 @@ function Select-Options {
             $value = $property."$($_.Name)"
             Write-Host [$i] $_.Name = $value
         }
-        $response = get-ValidResponse $prompt $i
+        $response = get-ValidResponse $prompt $i $value
         if ([bool]$response) {
             $i = 0
             $property | Get-Member -MemberType NoteProperty | ForEach-Object {
@@ -168,7 +192,7 @@ function Select-Options {
                     }
                     else {
                         Write-Host
-                        $response = Read-Host -Prompt "Select new Value for $($_.Name) [$value]"
+                        $response = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
                         if ([bool]$response) {
                             if ($property."$($_.Name)" -is [Int]) {
                                 $property."$($_.Name)" = [Int]$response
@@ -195,7 +219,7 @@ function Select-VirtualMachines {
             $i = $i + 1
             write-Host "[$i] - $($virtualMachine)"
         }
-        $response = get-ValidResponse "Which VM do you want to modify" $i
+        $response = get-ValidResponse "Which VM do you want to modify" $i $null
         
         if ([bool]$response) {
             $i = 0
@@ -239,7 +263,7 @@ else {
     $filename = Join-Path $configDir "xGen-$date-$($Global:configfile.Name)"
 }
 $splitpath = Split-Path -Path $fileName -Leaf
-$response = Read-Host -Prompt "Save Filename [$splitpath]"
+$response = Read-Host2 -Prompt "Save Filename" $splitpath
 if ([bool]$response) {
     if (!$response.EndsWith("json")){
         $response+=".json"
@@ -249,10 +273,10 @@ if ([bool]$response) {
 $config | ConvertTo-Json -Depth 3 | Out-File $filename
 Write-Host "Saved to $filename"
 Write-Host
-$response = Read-Host -Prompt "Deploy Now? (y/N)"
+$response = Read-Host2 -Prompt "Deploy Now? (y/N)" $null
 if ([bool]$response) {
     if ($response.ToLowerInvariant() -eq "y") {
-        $response = Read-Host -Prompt "Delete old VMs? (y/N)"
+        $response = Read-Host2 -Prompt "Delete old VMs? (y/N)"
         if ([bool]$response) {
             if ($response.ToLowerInvariant() -eq "y") {
                 Write-Host "Starting new-lab with delete VM options"
