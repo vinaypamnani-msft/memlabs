@@ -1373,29 +1373,39 @@ function Copy-SampleConfigs {
     }
 }
 
+function Set-SupportedOptions {
+
+    $roles = @(
+        "DC",
+        "PS",
+        "CS",
+        "DPMP",
+        "DomainMember"
+    )
+
+    $cmVersions = @(
+        "current-branch",
+        "tech-preview"
+    )
+
+    $operatingSystems = $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" }
+
+    $sqlVersions = $Common.AzureFileList.ISO.id | Select-Object -Unique
+
+    $supported = [PSCustomObject]@{
+        Roles            = $roles
+        OperatingSystems = $operatingSystems
+        SqlVersions      = $sqlVersions
+        CMVersions       = $cmVersions
+    }
+
+    $Common.Supported = $supported
+
+}
+
 ############################
 ### Common Object        ###
 ############################
-
-# Supported Roles
-
-$roles = @(
-    "DC",
-    "PS",
-    "CS",
-    "DPMP",
-    "DomainMember"
-)
-
-$cmVersions = @(
-    "current-branch",
-    "tech-preview"
-)
-
-$supported = [PSCustomObject]@{
-    Roles      = $roles
-    CMVersions = $cmVersions
-}
 
 # Paths
 $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
@@ -1415,7 +1425,7 @@ $global:Common = [PSCustomObject]@{
     StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
     StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
     LogPath               = Join-Path $PSScriptRoot "vmbuild.log"                                     # Log File
-    Supported             = $supported
+    Supported             = $null                                                                     # Supported Configs
     AzureFileList         = $null
     LocalAdmin            = $null
     VerboseLog            = $false
@@ -1430,6 +1440,9 @@ $global:StorageConfig = [PSCustomObject]@{
 
 ### Test Storage config and access
 Get-StorageConfig
+
+### Set supported options
+Set-SupportedOptions
 
 ### Copy sample config
 Copy-SampleConfigs
