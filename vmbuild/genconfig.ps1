@@ -113,7 +113,7 @@ function get-ValidResponse {
 
     $responseValid = $false
     while ($responseValid -eq $false) {
-     #   Write-Host "Not Returning: $response out of $max"
+        #   Write-Host "Not Returning: $response out of $max"
         Write-Host
         $response = Read-Host -Prompt $prompt
         try {
@@ -132,7 +132,7 @@ function get-ValidResponse {
     return $response
 }
 
-function Select-Options2 {   
+function Select-Options {   
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -146,7 +146,10 @@ function Select-Options2 {
     while ($true) {
         Write-Host ""
         $i = 0
-     #   Write-Host "Trying to get $property"
+        #   Write-Host "Trying to get $property"
+        if ($null -eq $property) {
+            return
+        }
         $property | Get-Member -MemberType NoteProperty | ForEach-Object {
             $i = $i + 1
             $value = $property."$($_.Name)"
@@ -173,7 +176,7 @@ function Select-Options2 {
                         }
                     }                   
                     if ($value -is [System.Management.Automation.PSCustomObject]) {
-                        Select-Options2 $value "Select data to modify"
+                        Select-Options $value "Select data to modify"
                     }
                     else {
                         Write-Host
@@ -211,7 +214,7 @@ function Select-VirtualMachines {
             foreach ($virtualMachine in $Config.virtualMachines) {
                 $i = $i + 1
                 if ($i -eq $response) {
-                    Select-Options2 $virtualMachine "Which VM property to modify"
+                    Select-Options $virtualMachine "Which VM property to modify"
                 }
             }            
         }
@@ -221,8 +224,8 @@ function Select-VirtualMachines {
 
 $Global:Config = Select-Config
 
-Select-Options2 $($config.vmOptions) "Select Global Property to modify"
-Select-Options2 $($config.cmOptions) "Select ConfigMgr Property to modify"
+Select-Options $($config.vmOptions) "Select Global Property to modify"
+Select-Options $($config.cmOptions) "Select ConfigMgr Property to modify"
 Select-VirtualMachines
 #$config | ConvertTo-Json -Depth 3 | Out-File $configDir
 $c = Test-Configuration -InputObject $Config
@@ -269,7 +272,13 @@ if ([bool]$response) {
             Write-Host "Starting new-lab without delete VM options"
         }
     }
+    else {
+        Write-Host "Not Deploying."
+    }
 
+}
+else {
+    Write-Host "Not Deploying."
 }
 
 
