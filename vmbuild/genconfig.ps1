@@ -267,7 +267,8 @@ function Select-VirtualMachines {
 }
 
 $Global:Config = Select-Config
-
+$valid = $false
+while ($valid -eq $false){
 Select-Options $($config.vmOptions) "Select Global Property to modify"
 Select-Options $($config.cmOptions) "Select ConfigMgr Property to modify"
 Select-VirtualMachines
@@ -277,12 +278,13 @@ Write-Host
 Write-Host "-----------------------------------------------------------------------------"
 Write-Host
 if ($c.Valid) {       
-    
+    $valid = $true    
     Write-Host -ForegroundColor Green "Config is valid"
 }
 else {
-    Write-Host -ForegroundColor Red "Config file is not valid: $($c.Message)"
-    return
+    Write-Host -ForegroundColor Red "Config file is not valid: $($c.Message)" 
+    Write-Host -ForegroundColor Red "Starting over. Please fix the mistake, or hit ctrl-c to exit."     
+}
 }
 # $($file.Name)
 Write-Host
