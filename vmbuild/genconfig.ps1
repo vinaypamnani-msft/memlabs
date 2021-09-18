@@ -130,6 +130,19 @@ function get-ValidResponse {
                     $responseValid = $true
                 }
             }
+            if ([bool]$currentValue){
+                if ($currentValue.ToLowerInvariant() -eq "true" -or $currentValue.ToLowerInvariant() -eq "false"){
+                    if ($response.ToLowerInvariant() -eq "true") {
+                        $response = "True"
+                        return $response
+                    }
+                    if ($response.ToLowerInvariant() -eq "false") {
+                        $response = "False"
+                        return $response
+                    }
+                    $responseValid = $false
+                }
+            }
         }
         catch {}      
     }
@@ -194,12 +207,29 @@ function Select-Options {
                     }
                     else {
                         Write-Host
-                        $response = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
-                        if ([bool]$response) {
+                        $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
+                        if ([bool]$response2) {
                             if ($property."$($_.Name)" -is [Int]) {
-                                $property."$($_.Name)" = [Int]$response
+                                $property."$($_.Name)" = [Int]$response2
+                                return
                             }
-                            $property."$($_.Name)" = $response
+                            if ([bool]$value){
+                                if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false"){
+                                    if ($response2.ToLowerInvariant() -eq "true") {
+                                        $response2 = "True"
+                                    }else{
+                                        if ($response2.ToLowerInvariant() -eq "false") {
+                                            $response2 = "False"
+                                        }
+                                        else{
+                                            $response2 = $value
+                                            }
+                                    }
+                                    
+                                }
+                            }
+                            $property."$($_.Name)" = $response2
+                            return
                         }
                     }
                     
