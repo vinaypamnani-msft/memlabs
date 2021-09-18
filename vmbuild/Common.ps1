@@ -982,7 +982,8 @@ function Test-Configuration {
     }
 
     if ($InputObject) {
-        $configObject = $InputObject
+        # Convert to Json and back to make a copy of the object, so the original is not modified
+        $configObject = $InputObject | ConvertTo-Json -Depth 3 | ConvertFrom-Json
     }
 
     $containsDC = $configObject.virtualMachines.role.Contains("DC")
