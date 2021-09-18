@@ -2,9 +2,11 @@
 
 $configDir = Join-Path $PSScriptRoot "config"
 
-Write-Host "New-Lab Configuration generator:"
-Write-Host "You can use this tool to customize most options.  Press Enter to skip a section"
-Write-Host ""
+Write-Host -ForegroundColor Cyan ""
+Write-Host -ForegroundColor Cyan "New-Lab Configuration generator:"
+Write-Host -ForegroundColor Cyan "You can use this tool to customize most options.  Press Enter to skip a section"
+Write-Host -ForegroundColor Cyan "Press Ctrl-C to exit without saving."
+Write-Host -ForegroundColor Cyan ""
 
 function Select-Config {
     $files = Get-ChildItem $configDir\*.json -Exclude "_*"
@@ -27,16 +29,7 @@ function Select-Config {
         catch {}  
     }
     $Global:configfile = $files[[int]$response - 1]
-    $config = Get-Content $Global:configfile -Force | ConvertFrom-Json
-    #$config = Test-Configuration -FilePath $files[[int]$response - 1]
-    #if ($config.Valid) {
-    #    $Config = $config.Config
-    #    #Write-Host "Config is valid"
-    #}
-    #else {
-    #    Write-Host "Config file is not valid"
-    #    return
-    #}
+    $config = Get-Content $Global:configfile -Force | ConvertFrom-Json    
     return $config
 }
 
@@ -233,11 +226,15 @@ Select-Options2 $($config.cmOptions) "Select ConfigMgr Property to modify"
 Select-VirtualMachines
 #$config | ConvertTo-Json -Depth 3 | Out-File $configDir
 $c = Test-Configuration -InputObject $Config
+Write-Host
+Write-Host "-----------------------------------------------------------------------------"
+Write-Host
 if ($c.Valid) {       
-    Write-Host "Config is valid"
+    
+    Write-Host -ForegroundColor Green "Config is valid"
 }
 else {
-    Write-Host "Config file is not valid: $($c.Message)"
+    Write-Host -ForegroundColor Red "Config file is not valid: $($c.Message)"
     return
 }
 # $($file.Name)
