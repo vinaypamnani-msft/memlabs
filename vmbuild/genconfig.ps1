@@ -13,8 +13,10 @@ Write-Host -ForegroundColor Cyan " - Can not add/remove VMs"
 Write-Host -ForegroundColor Cyan " - Can not add/remove Disks"
 Write-Host -ForegroundColor Cyan ""
 function Select-Config {
-    $files = Get-ChildItem $configDir\*.json -Include "Hierarchy.json", "Standalone.json", "AddToExisting.json" | Sort-Object -Property Name -Descending
-    $files += Get-ChildItem $configDir\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json"
+    $files = Get-ChildItem $configDir\*.json -Include "Standalone.json", "Hierarchy.json"| Sort-Object -Property Name -Descending
+    $files += Get-ChildItem $configDir\*.json -Include "TechPreview.json"
+    $files += Get-ChildItem $configDir\*.json -Include "AddToExisting.json"
+    $files += Get-ChildItem $configDir\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json"
     $i = 0
     foreach ($file in $files) {
         $i = $i + 1
