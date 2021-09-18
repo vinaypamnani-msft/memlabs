@@ -7,7 +7,11 @@ Write-Host -ForegroundColor Cyan "New-Lab Configuration generator:"
 Write-Host -ForegroundColor Cyan "You can use this tool to customize most options.  Press Enter to skip a section"
 Write-Host -ForegroundColor Cyan "Press Ctrl-C to exit without saving."
 Write-Host -ForegroundColor Cyan ""
-
+Write-Host -ForegroundColor Cyan "Known Limitations: (must be done via manual json editing)"
+Write-Host -ForegroundColor Cyan " - Can not remove a prefix"
+Write-Host -ForegroundColor Cyan " - Can not add/remove VMs"
+Write-Host -ForegroundColor Cyan " - Can not add/remove Disks"
+Write-Host -ForegroundColor Cyan ""
 function Select-Config {
     $files = Get-ChildItem $configDir\*.json -Exclude "_*"
     $i = 0
@@ -58,6 +62,67 @@ function Select-OSFromList {
             $i = $i + 1
             if ($i -eq $response) {
                 return $os
+            }
+        }
+    }
+    else {
+        return $currentValue
+    }
+
+}
+
+function Select-RolesFromList {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $currentValue
+    )
+  
+    write-Host
+    $i = 0
+    foreach ($role in $Common.Supported.Roles) {
+        $i = $i + 1
+        Write-Host "[$i] - $role"
+    }
+    $response = get-ValidResponse "Select Role [$currentValue]" $i
+    
+    if ([bool]$response) {
+        $i = 0
+        foreach ($role in $Common.Supported.Roles) {
+            $i = $i + 1
+            if ($i -eq $response) {
+                return $role
+            }
+        }
+    }
+    else {
+        return $currentValue
+    }
+}
+
+function Select-CMVFromList {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $currentValue
+    )
+  
+    write-Host
+    $i = 0
+    foreach ($cmv in $Common.Supported.CMVersions) {
+        $i = $i + 1
+        Write-Host "[$i] - $cmv"
+    }
+    $response = get-ValidResponse "Select CM Version [$currentValue]" $i
+    
+    if ([bool]$response) {
+        $i = 0
+        foreach ($cmv in $Common.Supported.CMVersions) {
+            $i = $i + 1
+            if ($i -eq $response) {
+                return $cmv
             }
         }
     }
@@ -172,6 +237,14 @@ function Select-Options {
                         }  
                         "sqlVersion" {
                             $property."$name" = Select-SQLFromList $value
+                            return
+                        }
+                        "role" {
+                            $property."$name" = Select-RolesFromList $value
+                            return
+                        }
+                        "version" {
+                            $property."$name" = Select-CMVFromList $value
                             return
                         }
                     }                   
