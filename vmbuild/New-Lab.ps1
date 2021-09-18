@@ -1,11 +1,11 @@
 param (
-    [Parameter(Mandatory = $true, ParameterSetName="NewLab", HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
+    [Parameter(Mandatory = $true, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
     [string]$Configuration,
-    [Parameter(Mandatory = $false, ParameterSetName="DownloadFiles", HelpMessage = "Download all files required by the specified config without deploying any VMs.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Download all files required by the specified config without deploying any VMs.")]
     [switch]$DownloadFilesOnly,
-    [Parameter(Mandatory = $false, ParameterSetName="NewLab", HelpMessage = "Force recreation of virtual machines, if already present.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Force recreation of virtual machines, if already present.")]
     [switch]$ForceNew,
-    [Parameter(Mandatory = $false, ParameterSetName="DownloadFiles", HelpMessage = "Force redownload of required files, if already present.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Force redownload of required files, if already present.")]
     [switch]$ForceDownloadFiles,
     [Parameter(Mandatory = $false, HelpMessage = "Timeout in minutes for VM Configuration.")]
     [int]$RoleConfigTimeoutMinutes = 300,
