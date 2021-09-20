@@ -987,7 +987,7 @@ function Get-UserConfiguration {
         Write-Log "Get-UserConfiguration: $Configuration`: Failed to load $configPath. $_"
         return $null
     }
-    
+
 }
 
 function Get-FilesForConfiguration {
@@ -1008,7 +1008,7 @@ function Get-FilesForConfiguration {
     if ($Configuration -and -not $DownloadAll) {
         $config = Get-UserConfiguration -Configuration $Configuration
     }
-    
+
     # Config object
     if ($InputObject) {
         $config = $InputObject
@@ -1030,7 +1030,7 @@ function Get-FilesForConfiguration {
     }
 
     foreach ($file in $Common.AzureFileList.ISO) {
-        if (-not $DownloadAll -and $sqlVersionsToGet -notcontains $file.id) { continue }    
+        if (-not $DownloadAll -and $sqlVersionsToGet -notcontains $file.id) { continue }
         Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
 
     }
@@ -1050,8 +1050,8 @@ function Get-FileFromStorage {
     Write-Log "Get-FileFromStorage: Downloading/Verifying '$imageName'" -SubActivity
 
     foreach ($filename in $File.filename) {
-        $imageUrl = "$($StorageConfig.StorageLocation)/$($filename)"        
-        $imageFileName = Split-Path $filename -Leaf    
+        $imageUrl = "$($StorageConfig.StorageLocation)/$($filename)"
+        $imageFileName = Split-Path $filename -Leaf
         $localImagePath = Join-Path $Common.AzureFilesPath $filename
 
         $download = $true
@@ -1099,37 +1099,237 @@ function Test-Configuration {
         $configObject = $InputObject | ConvertTo-Json -Depth 3 | ConvertFrom-Json
     }
 
-    $containsDC = $configObject.virtualMachines.role.Contains("DC")
-    $containsCAS = $configObject.virtualMachines.role.Contains("CS")
+    $validationMessage = [System.Text.StringBuilder]::new()
 
-    # config must contain DC role, or existingDCNameWithPrefix
-    if (-not $containsDC) {
+    # Contains roles
+    $containsDC = $configObject.virtualMachines.role.Contains("DC")
+    $containsCS = $configObject.virtualMachines.role.Contains("CS")
+    $containsPS = $configObject.virtualMachines.role.Contains("PS")
+    $containsDPMP = $configObject.virtualMachines.role.Contains("DPMP")
+
+    # VM's
+    $DCVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DC" }
+    $CSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "CS" }
+    $PSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "PS" }
+    $DPMPVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DPMP" }
+
+    # VM Options
+    # ===========
+
+    # basePath
+    if (-not $configObject.vmOptions.basePath) {
+        [void]$validationMessage.AppendLine("VM Options Validation: vmOptions.basePath not present in vmOptions. You must specify the base path where the Virtual Machines will be created.")
+    }
+
+    # domainAdminName
+    if (-not $configObject.vmOptions.domainName) {
+        [void]$validationMessage.AppendLine("VM Options Validation: vmOptions.domainName not present in vmOptions. You must specify the Domain name.")
+    }
+
+    # domainAdminName
+    if (-not $configObject.vmOptions.domainAdminName) {
+        [void]$validationMessage.AppendLine("VM Options Validation: vmOptions.domainAdminName not present in vmOptions. You must specify the Domain Admin user name that will be created.")
+    }
+
+    # network
+    if (-not $configObject.vmOptions.network) {
+        [void]$validationMessage.AppendLine("VM Options Validation: vmOptions.network not present in vmOptions. You must specify the Network subnet for the environment.")
+    }
+
+    # CM Options
+    # ===========
+
+    # CM Version
+    if ($Common.Supported.CMVersions -notcontains $configObject.cmOptions.version) {
+        [void]$validationMessage.AppendLine("CM Options Validation: cmOptions contains invalid CM Version. Must be either 'current-branch' or 'tech-preview'.")
+    }
+
+    # install
+    if ($configObject.cmOptions.install -isnot [bool]) {
+        [void]$validationMessage.AppendLine("CM Options Validation: cmOptions.install has an invalid value. Value must be either 'true' or 'false' without any quotes.")
+    }
+
+    # updateToLatest
+    if ($configObject.cmOptions.updateToLatest -isnot [bool]) {
+        [void]$validationMessage.AppendLine("CM Options Validation: cmOptions.updateToLatest has an invalid value. Value must be either 'true' or 'false' without any quotes.")
+    }
+
+    # installDPMPRoles
+    if ($configObject.cmOptions.installDPMPRoles -isnot [bool]) {
+        [void]$validationMessage.AppendLine("CM Options Validation: cmOptions.installDPMPRoles has an invalid value. Value must be either 'true' or 'false' without any quotes.")
+    }
+
+    # pushClientToDomainMembers
+    if ($configObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
+        [void]$validationMessage.AppendLine("CM Options Validation: cmOptions.pushClientToDomainMembers has an invalid value. Value must be either 'true' or 'false' without any quotes.")
+    }
+
+    # Role Conflicts
+    # ==============
+
+    # CS/PS must include DC
+    if (($containsCS -or $containsPS) -and -not $containsDC) {
+        [void]$validationMessage.AppendLine("Role Conflict: CS or PS role specified in the configuration file without DC; PS/CS roles require a DC to be present in the config file. Adding CS/PS to existing environment is not currently supported.")
+    }
+
+    # DC Validation
+    # ==============
+    if ($containsDC) {
+
+        # OS Version
+        if ($DCVM.operatingSystem -notlike "*Server*") {
+            [void]$validationMessage.AppendLine("DC Validation: Domain Controller (DC Role) specified in configuration without a Server Operating System.")
+        }
+
+    }
+    else {
+
         $existingDC = $configObject.vmOptions.existingDCNameWithPrefix
+
+        # Existing Scenario, without existing DC Name
         if (-not $existingDC) {
-            $return.Message = "DC role not specified in the configuration file and vmOptions.existingDCNameWithPrefix not present."
-            return $return
+            [void]$validationMessage.AppendLine("DC Validation: DC role not specified in the configuration file and vmOptions.existingDCNameWithPrefix not present.")
+        }
+
+        if ($existingDC) {
+
+            # Check VM
+            $vm = Get-VM -Name $existingDC
+            if (-not $vm) {
+                [void]$validationMessage.AppendLine("DC Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM with the same name was not found in Hyper-V.")
+            }
+
+            # Check network
+            $vmnet = Get-VM -Name $existingDC | Get-VMNetworkAdapter
+            if ($vmnet.SwitchName -ne $configObject.vmOptions.network) {
+                [void]$validationMessage.AppendLine("DC Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM Switch doesn't match specified network [$($configObject.vmOptions.network)].")
+            }
+
         }
     }
 
-    # tech preview and CAS
-    if ($containsCAS -and $configObject.cmOptions.version -eq "tech-preview") {
-        $return.Message = "Tech-Preview specified in configuration along with CAS Role; Tech Preview doesn't support CAS."
+    # CS Validations
+    # ==============
+    if ($containsCS) {
+
+        $csName = $CSVM.vmName
+
+        # tech preview and CAS
+        if ($configObject.cmOptions.version -eq "tech-preview") {
+            [void]$validationMessage.AppendLine("CS Validation: CAS (CS Role) specified in configuration for VM [$csName] along with Tech-Preview version; Tech Preview doesn't support CAS.")
+        }
+
+        # CAS without Primary
+        if (-not $containsPS) {
+            [void]$validationMessage.AppendLine("CS Validation: CAS (CS Role) specified in configuration for VM [$csName] without a Primary Site (PS Role); When deploying CS Role, you must specify a PS Role as well.")
+        }
+
+        # CS must contain SQL
+        if (-not $CSVM.sqlVersion) {
+            [void]$validationMessage.AppendLine("CS Validation: CAS (CS Role) specified in configuration for VM [$csName] without specifying sqlVersion; When deploying CS Role, you must specify the SQL Version.")
+        }
+
+        # OS Version
+        if ($CSVM.operatingSystem -notlike "*Server*") {
+            [void]$validationMessage.AppendLine("CS Validation: CAS (CS Role) specified in configuration for VM [$csName] without a Server Operating System.")
+        }
+
+        # Site Code
+        if ($CSVM.siteCode.Length -ne 3) {
+            [void]$validationMessage.AppendLine("CS Validation: CAS (CS Role) specified in configuration for VM [$csName] with invalid Site Code [$($CSVM.siteCode)].")
+        }
+
+    }
+
+    # PS Validations
+    # ==============
+    if ($containsPS) {
+
+        $psName = $PSVM.vmName
+
+        # PS must contain SQL
+        if (-not $PSVM.sqlVersion) {
+            [void]$validationMessage.AppendLine("PS Validation: Primary (PS Role) specified in configuration for VM [$psName] without specifying sqlVersion; When deploying PS Role, you must specify the SQL Version.")
+        }
+
+        # OS Version
+        if ($PSVM.operatingSystem -notlike "*Server*") {
+            [void]$validationMessage.AppendLine("PS Validation: Primary (PS Role) specified in configuration for VM [$psName] without a Server Operating System.")
+        }
+
+        # Site Code
+        if ($PSVM.siteCode.Length -ne 3) {
+            [void]$validationMessage.AppendLine("PS Validation: Primary (PS Role) specified in configuration for VM [$psName] with invalid Site Code [$($PSVM.siteCode)].")
+        }
+
+    }
+
+    # DPMP Validations
+    # =================
+    if ($containsDPMP) {
+
+        # DPMP VM count -eq 1
+        if ($DPMPVM -is [object[]] -and $DPMPVM.Count -ne 1) {
+            [void]$validationMessage.AppendLine("DPMP Validation: Multiple DPMP virtual Machines (DPMP Role) specified in configuration. Only single DPMP role is currently supported.")
+        }
+    }
+
+    # VM Validations
+    # ==============
+    foreach ($vm in $configObject.virtualMachines) {
+
+        # Supported DSC Role
+        if ($Common.Supported.Roles -notcontains $vm.role) {
+            [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] does not contain a supported role [$($vm.role)]. Supported values are: DC, CS, PS, DPMP and DomainMember")
+        }
+
+        # Supported OS
+        if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
+            [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] does not contain a supported operatingSystem [$($vm.operatingSystem)]. Run Get-AvailableFiles.ps1.")
+        }
+
+        # Supported SQL
+        if ($vm.sqlVersion -and $Common.Supported.SqlVersions -notcontains $vm.sqlVersion) {
+            [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]. Run Get-AvailableFiles.ps1.")
+        }
+
+        # Memory
+        if (-not $vm.memory -or $vm.memory -isnot [string]) {
+            [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] does not contain memory value [$($vm.memory)]. Specify desired memory in quotes; For example: ""4GB""")
+        }
+
+        # virtualProcs
+        if (-not $vm.virtualProcs -or $vm.virtualProcs -isnot [int]) {
+            [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] does not contain virtualProcs value [$($vm.virtualProcs)]. Specify desired virtualProcs without quotes; For example: 2")
+        }
+
+        # Additional Disks
+        if ($vm.additionalDisks) {
+            $validLetters = 69..89 | ForEach-Object { [char]$_ }    # Letters E-Y
+            $vm.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                if ($_.Name.Length -ne 1 -or $validLetters -notcontains $_.Name) {
+                    [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] contains invalid additional disks [$($vm.additionalDisks)]; Disks must have a single drive letter between E and Y.")
+                }
+            }
+        }
+
+    }
+
+    # Return if validation failed
+    if ($validationMessage.Length -ne 0) {
+        $return.Message = $validationMessage.ToString()
         return $return
     }
 
-    # hierarchy
-    if ($containsCAS) {
+    # everything is good, create deployJson
+
+    # Scenario
+    if ($containsCS) {
         $scenario = "Hierarchy"
     }
     else {
         $scenario = "Standalone"
     }
-
-    # standalone primary
-    # TODO: Ensure PS/CS config has SQL config values...
-    # TODO: Validate additionalDisk contains a single letter between E-Y
-
-    # everything is good, create deployJson
 
     # add prefix to vm names
     $virtualMachines = $configObject.virtualMachines
