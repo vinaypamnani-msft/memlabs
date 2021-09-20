@@ -193,12 +193,16 @@ Add-CMBoundaryToGroup -BoundaryName $networkSubnet -BoundaryGroupName $SiteCode
 Start-Sleep -Seconds 5
 
 # Setup System Discovery
-Write-DscStatus "Setting AD system discovery"
+Write-DscStatus "Enabling AD system discovery"
 $lastdomainname = $DomainFullName.Split(".")[-1]
-while (((Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }).value1.ToLower() -ne "active") {
-    Start-Sleep -Seconds 20
-    Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://DC=$DomainName,DC=$lastdomainname" -Recursive
-}
+do {
+    $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
+    Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
+    Start-Sleep -Seconds 30
+    if ($adiscovery.Value1.ToLower() -ne "active") {
+        Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://DC=$DomainName,DC=$lastdomainname" -Recursive
+    }
+} until ($adiscovery.Value1.ToLower() -eq "active")
 
 # Restart services to make sure push account is acknowledged by CCM
 Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
