@@ -216,10 +216,10 @@ function Select-Options {
                             if ([bool]$value){
                                 if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false"){
                                     if ($response2.ToLowerInvariant() -eq "true") {
-                                        $response2 = "True"
+                                        $response2 = $true
                                     }else{
                                         if ($response2.ToLowerInvariant() -eq "false") {
-                                            $response2 = "False"
+                                            $response2 = $false
                                         }
                                         else{
                                             $response2 = $value
