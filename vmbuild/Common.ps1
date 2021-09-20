@@ -1047,31 +1047,32 @@ function Get-FileFromStorage {
     )
 
     $imageName = $File.id
-    $imageUrl = "$($StorageConfig.StorageLocation)/$($File.filename)"
-    $imageFileRelative = $File.filename
-    $imageFileName = Split-Path $File.filename -Leaf
-
     Write-Log "Get-FileFromStorage: Downloading/Verifying '$imageName'" -SubActivity
-    $localImagePath = Join-Path $Common.AzureFilesPath $imageFileRelative
 
-    $download = $true
+    foreach ($filename in $File.filename) {
+        $imageUrl = "$($StorageConfig.StorageLocation)/$($filename)"        
+        $imageFileName = Split-Path $filename -Leaf    
+        $localImagePath = Join-Path $Common.AzureFilesPath $filename
 
-    if (Test-Path $localImagePath) {
-        Write-Log "Get-FileFromStorage: Found $imageFileRelative in $($Common.AzureFilesPath)."
-        if ($Force.IsPresent) {
-            Write-Log "Main: ForceDownloadFiles switch present. Removing pre-existing $imageFileName file..." -Warning
-            Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+        $download = $true
+
+        if (Test-Path $localImagePath) {
+            Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath)."
+            if ($ForceDownloadFiles.IsPresent) {
+                Write-Log "Get-FileFromStorage: ForceDownloadFiles switch present. Removing pre-existing $imageFileName file..." -Warning
+                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+            }
+            else {
+                Write-Log "Get-FileFromStorage: ForceDownloadFiles switch not present. Skip downloading '$imageFileName'." -LogOnly
+                $download = $false
+                continue
+            }
         }
-        else {
-            Write-Log "Get-FileFromStorage: ForceDownloadFiles switch not present. Skip downloading '$imageFileName'." -Warning
-            $download = $false
-            continue
-        }
-    }
 
-    if ($download) {
-        # Write-Log "Get-FileFromStorage: Downloading '$imageName' image..."
-        Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
+        if ($download) {
+            # Write-Host "Get-FileFromStorage: Downloading '$imageName' to $localImagePath..."
+            Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
+        }
     }
 }
 

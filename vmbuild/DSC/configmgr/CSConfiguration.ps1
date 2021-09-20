@@ -39,6 +39,14 @@
     # CM Files folder/share
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
+    # ConfigMgr Display version
+    if ($CM -eq "CMTP") {
+        $CMDownloadStatus = "Downloading Configuration Manager technical preview"
+    }
+    else {
+        $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
+    }
+
     $CurrentRole = "CS"
 
 
@@ -195,7 +203,7 @@
 
         WriteStatus DownLoadSCCM {
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
-            Status    = "Downloading Configuration Manager current branch (latest baseline version)"
+            Status    = $CMDownloadStatus
         }
 
         DownloadSCCM DownLoadSCCM {

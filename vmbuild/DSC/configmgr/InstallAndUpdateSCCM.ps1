@@ -65,6 +65,7 @@ $CMINIPath = "c:\$CM\$Config.ini"
 $cmini = @'
 [Identification]
 Action=%InstallAction%
+Preview=0
 
 [Options]
 ProductID=EVAL
@@ -125,8 +126,10 @@ if ($installAction -eq "InstallCAS") {
 # Set site name
 if ($CM -eq "CMTP") {
     $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Tech Preview")
+    $cmini = $cmini.Replace('Preview=0', "Preview=1")
 }
 else {
+    $cmini = $cmini.Replace('Preview=0', "")
     if ($installAction -eq "InstallCAS") {
         $cmini = $cmini.Replace('%SiteName%', "ConfigMgr CAS")
     }

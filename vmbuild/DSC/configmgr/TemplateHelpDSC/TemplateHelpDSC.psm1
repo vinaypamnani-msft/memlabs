@@ -105,8 +105,8 @@ class InstallADK {
         $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
         $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\Windows Kits\Installed Roots")
         if ($subKey) {
-            if ($subKey.GetValue('KitsRoot10') -ne $null) {
-                if ($subKey.GetValueNames() | ? { $subkey.GetValue($_) -like "*Deployment Tools*" }) {
+            if ($null -ne $subKey.GetValue('KitsRoot10')) {
+                if ($subKey.GetValueNames() | Where-Object { $subkey.GetValue($_) -like "*Deployment Tools*" }) {
                     return $true
                 }
             }
@@ -199,7 +199,7 @@ class InstallAndConfigWSUS {
         Write-Verbose "Finished installing WSUS..."
 
         Write-Verbose "Starting the postinstall for WSUS..."
-        sl "C:\Program Files\Update Services\Tools"
+        Set-Location "C:\Program Files\Update Services\Tools"
         .\wsusutil.exe postinstall CONTENT_DIR=C:\WSUS
         Write-Verbose "Finished the postinstall for WSUS"
     }
@@ -440,7 +440,7 @@ class DelegateControl {
         catch {
             Write-Verbose "System Management container does not currently exist."
         }
-        if ($ou -eq $null) {
+        if ($null -eq $ou) {
             $ou = New-ADObject -Type Container -name "System Management" -Path "CN=System,$root" -Passthru
         }
         $DomainName = $this.DomainFullName.split('.')[0]
@@ -458,7 +458,7 @@ class DelegateControl {
         $_machinename = $this.Machine
         $root = (Get-ADRootDSE).defaultNamingContext
         try {
-            $ou = Get-ADObject "CN=System Management,CN=System,$root"
+            Get-ADObject "CN=System Management,CN=System,$root"
         }
         catch {
             Write-Verbose "System Management container does not currently exist."
@@ -469,7 +469,7 @@ class DelegateControl {
         $arg1 = "CN=System Management,CN=System,$root"
         $permissioninfo = & $cmd $arg1
 
-        if (($permissioninfo | ? { $_ -like "*$_machinename*" } | ? { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+        if (($permissioninfo | Where-Object { $_ -like "*$_machinename*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
             return $true
         }
 
@@ -587,8 +587,7 @@ class DownloadSCCM {
 
     [bool] Test() {
         $_CM = $this.CM
-        $cmpath = "c:\temp\$_CM.exe"
-        $cmsourcepath = "c:\$_CM"
+        $cmpath = "c:\temp\$_CM.exe"        
         if (!(Test-Path $cmpath)) {
             return $false
         }
@@ -656,12 +655,12 @@ class InstallDP {
 
         # Customizations
         $initParams = @{}
-        if ($ENV:SMS_ADMIN_UI_PATH -eq $null) {
+        if ($null -eq $ENV:SMS_ADMIN_UI_PATH) {
             $ENV:SMS_ADMIN_UI_PATH = "C:\Program Files (x86)\Microsoft Configuration Manager\AdminConsole\bin\i386"
         }
 
         # Import the ConfigurationManager.psd1 module
-        if ((Get-Module ConfigurationManager) -eq $null) {
+        if ($null -eq (Get-Module ConfigurationManager)) {
             Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1" @initParams
         }
 
@@ -669,7 +668,7 @@ class InstallDP {
         Write-Verbose "Setting PS Drive..."
 
         New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-        while ((Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null) {
+        while ($null -eq (Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
             Write-Verbose "Failed ,retry in 10s. Please wait."
             Start-Sleep -Seconds 10
             New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
@@ -679,7 +678,7 @@ class InstallDP {
         Set-Location "$($this.SiteCode):\" @initParams
 
         $DPServerFullName = $this.DPMPName + "." + $this.DomainFullName
-        if ($(Get-CMSiteSystemServer -SiteSystemServerName $DPServerFullName) -eq $null) {
+        if ($null -eq $(Get-CMSiteSystemServer -SiteSystemServerName $DPServerFullName)) {
             New-CMSiteSystemServer -Servername $DPServerFullName -Sitecode $this.SiteCode
         }
 
@@ -717,12 +716,12 @@ class InstallMP {
         $ProviderMachineName = $env:COMPUTERNAME + "." + $this.DomainFullName # SMS Provider machine name
         # Customizations
         $initParams = @{}
-        if ($ENV:SMS_ADMIN_UI_PATH -eq $null) {
+        if ($null -eq $ENV:SMS_ADMIN_UI_PATH) {
             $ENV:SMS_ADMIN_UI_PATH = "C:\Program Files (x86)\Microsoft Configuration Manager\AdminConsole\bin\i386"
         }
 
         # Import the ConfigurationManager.psd1 module
-        if ((Get-Module ConfigurationManager) -eq $null) {
+        if ($null -eq (Get-Module ConfigurationManager)) {
             Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1" @initParams
         }
 
@@ -730,7 +729,7 @@ class InstallMP {
         Write-Verbose "Setting PS Drive..."
 
         New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-        while ((Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null) {
+        while ($null -eq (Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
             Write-Verbose "Failed ,retry in 10s. Please wait."
             Start-Sleep -Seconds 10
             New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
@@ -862,14 +861,14 @@ class SetDNS {
 
     [void] Set() {
         $_DNSIPAddress = $this.DNSIPAddress
-        $dnsset = Get-DnsClientServerAddress | % { $_ | ? { $_.InterfaceAlias.StartsWith("Ethernet") -and $_.AddressFamily -eq 2 } }
+        $dnsset = Get-DnsClientServerAddress | ForEach-Object { $_ | Where-Object { $_.InterfaceAlias.StartsWith("Ethernet") -and $_.AddressFamily -eq 2 } }
         Write-Verbose "Set dns: $_DNSIPAddress for $($dnsset.InterfaceAlias)"
         Set-DnsClientServerAddress -InterfaceIndex $dnsset.InterfaceIndex -ServerAddresses $_DNSIPAddress
     }
 
     [bool] Test() {
         $_DNSIPAddress = $this.DNSIPAddress
-        $dnsset = Get-DnsClientServerAddress | % { $_ | ? { $_.InterfaceAlias.StartsWith("Ethernet") -and $_.AddressFamily -eq 2 } }
+        $dnsset = Get-DnsClientServerAddress | ForEach-Object { $_ | Where-Object { $_.InterfaceAlias.StartsWith("Ethernet") -and $_.AddressFamily -eq 2 } }
         if ($dnsset.ServerAddresses -contains $_DNSIPAddress) {
             return $true
         }
@@ -1017,7 +1016,7 @@ class ChangeSQLServicesAccount {
             #Check if SQLSERVERAGENT is running
             $sqlserveragentflag = 0
             $sqlserveragentservices = Get-WmiObject win32_service -Filter "Name = 'SQLSERVERAGENT'"
-            if ($sqlserveragentservices -ne $null) {
+            if ($null -ne $sqlserveragentservices) {
                 if ($sqlserveragentservices.State -eq 'Running') {
                     Write-Verbose "[$(Get-Date -format HH:mm:ss)] SQLSERVERAGENT need to be stopped first"
                     $Result = $sqlserveragentservices.StopService()
@@ -1064,7 +1063,7 @@ class ChangeSQLServicesAccount {
         $query = "Name = '" + $_SQLInstanceName.ToUpper() + "'"
         $services = Get-WmiObject win32_service -Filter $query
 
-        if ($services -ne $null) {
+        if ($null -ne $services) {
             if ($services.StartName -ne "LocalSystem") {
                 return $false
             }
@@ -1858,7 +1857,7 @@ class SetupDomain {
 
         $ADInstallState = Get-WindowsFeature AD-Domain-Services
         if (!$ADInstallState.Installed) {
-            $Feature = Install-WindowsFeature -Name AD-Domain-Services -IncludeAllSubFeature -IncludeManagementTools
+            Install-WindowsFeature -Name AD-Domain-Services -IncludeAllSubFeature -IncludeManagementTools
         }
 
         $NetBIOSName = $_DomainFullName.split('.')[0]
@@ -1927,7 +1926,7 @@ class FileReadAccessShare {
     [bool] Test() {
         $_Name = $this.Name
 
-        $testfileshare = Get-SMBShare | ? { $_.name -eq $_Name }
+        $testfileshare = Get-SMBShare | Where-Object { $_.name -eq $_Name }
         if (!($testfileshare)) {
             return $false
         }

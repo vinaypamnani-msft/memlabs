@@ -28,6 +28,7 @@ Set-Location $PSScriptRoot
 
 Write-Host "Importing Modules.."
 $modules = @(
+    'Az.Compute',
     'ActiveDirectoryDsc',
     'xDscDiagnostics',
     'ComputerManagementDsc',
@@ -48,6 +49,7 @@ foreach ($module in $modules) {
         }
     }
     else {
+        Write-Host "Import Module: $module "
         Install-Module $module -Force
     }
 }

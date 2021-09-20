@@ -130,12 +130,12 @@ $VM_Create = {
         $sqlFiles = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
 
         # SQL Iso Path
-        $sqlIso = $sqlFiles | Where-Object { $_.filename.EndsWith(".iso") }
-        $sqlIsoPath = Join-Path $using:Common.AzureFilesPath $sqlIso.filename
+        $sqlIso = $sqlFiles.filename | Where-Object { $_.EndsWith(".iso") }
+        $sqlIsoPath = Join-Path $using:Common.AzureFilesPath $sqlIso
 
         # SQL CU Path and FileName
-        $sqlCU = $sqlFiles | Where-Object { $_.filename.EndsWith(".exe") }
-        $sqlCUPath = Join-Path $using:Common.AzureFilesPath $sqlCU.filename
+        $sqlCU = $sqlFiles.filename | Where-Object { $_.EndsWith(".exe") }
+        $sqlCUPath = Join-Path $using:Common.AzureFilesPath $sqlCU
         $sqlCUFileName = Split-Path $sqlCUPath -Leaf
 
         # Add SQL ISO to guest
