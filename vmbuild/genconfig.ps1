@@ -101,6 +101,48 @@ function Get-SupportedVersion {
 
 }
 
+function Get-VMList {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $key,    
+        [Parameter()]
+        [string]
+        $currentValue,
+        [Parameter()]
+        [string]
+        $prompt
+    )
+  
+    write-Host
+    #  $Common.AzureFileList.ISO.id | Select-Object -Unique
+
+    $i = 0
+
+    $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
+
+    foreach ($Supported in $vms) {
+        $i = $i + 1
+        Write-Host "[$i] - $Supported"
+    }
+    $response = get-ValidResponse "$prompt [$currentValue]" $i
+    
+    if ([bool]$response) {
+        $i = 0
+        foreach ($Supported in $vms) {
+            $i = $i + 1
+            if ($i -eq $response) {
+                return $Supported
+            }
+        }
+    }
+    else {
+        return $currentValue
+    }
+
+}
+
 function get-ValidResponse {
     [CmdletBinding()]
     param (
@@ -200,6 +242,10 @@ function Select-Options {
                             $property."$name" = Get-SupportedVersion "CmVersions" $value "Select ConfigMgr Version"
                             return
                         }
+                        "existingDCNameWithPrefix" {
+                            $property."$name" = Get-VMList "ExistingDCs" $value "Select Existing DC"
+                            return
+                        }
                     }                   
                     if ($value -is [System.Management.Automation.PSCustomObject]) {
                         Select-Options $value "Select data to modify"
@@ -239,6 +285,9 @@ function Select-Options {
                                 if ($valid -eq $false) {
                                     Write-Host -ForegroundColor Red $c.Message
                                 }
+                                if ( $c.Failures -eq 0) {
+                                    $valid = $true
+                                }
                             
                             }
                             else {                                
@@ -247,6 +296,9 @@ function Select-Options {
                                 $valid = $c.Valid
                                 if ($valid -eq $false) {
                                     Write-Host -ForegroundColor Red $c.Message
+                                }
+                                if ( $c.Failures -eq 0) {
+                                    $valid = $true
                                 }
                             }                        
                         }
