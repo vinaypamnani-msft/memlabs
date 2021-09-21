@@ -13,7 +13,7 @@ Write-Host -ForegroundColor Cyan " - Can not add/remove VMs"
 Write-Host -ForegroundColor Cyan " - Can not add/remove Disks"
 Write-Host -ForegroundColor Cyan ""
 function Select-Config {
-    $files = Get-ChildItem $configDir\*.json -Include "Standalone.json", "Hierarchy.json"| Sort-Object -Property Name -Descending
+    $files = Get-ChildItem $configDir\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
     $files += Get-ChildItem $configDir\*.json -Include "TechPreview.json"
     $files += Get-ChildItem $configDir\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $configDir\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json"
@@ -52,8 +52,7 @@ function Read-Host2 {
     )
 
     Write-Host -ForegroundColor Cyan $prompt -NoNewline
-    if ([bool]$currentValue)
-    {
+    if ([bool]$currentValue) {
         Write-Host " [" -NoNewline
         Write-Host -ForegroundColor yellow $currentValue -NoNewline
         Write-Host "]" -NoNewline
@@ -63,7 +62,7 @@ function Read-Host2 {
     return $response
 }
 
-function Get-SupportedVersion  {
+function Get-SupportedVersion {
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -130,8 +129,8 @@ function get-ValidResponse {
                     $responseValid = $true
                 }
             }
-            if ([bool]$currentValue){
-                if ($currentValue.ToLowerInvariant() -eq "true" -or $currentValue.ToLowerInvariant() -eq "false"){
+            if ([bool]$currentValue) {
+                if ($currentValue.ToLowerInvariant() -eq "true" -or $currentValue.ToLowerInvariant() -eq "false") {
                     if ($response.ToLowerInvariant() -eq "true") {
                         $response = "True"
                         return $response
@@ -206,30 +205,50 @@ function Select-Options {
                         Select-Options $value "Select data to modify"
                     }
                     else {
+                        $valid = $false
                         Write-Host
-                        $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
-                        if ([bool]$response2) {
-                            if ($property."$($_.Name)" -is [Int]) {
-                                $property."$($_.Name)" = [Int]$response2
-                                return
-                            }
-                            if ([bool]$value){
-                                if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false"){
-                                    if ($response2.ToLowerInvariant() -eq "true") {
-                                        $response2 = $true
-                                    }else{
-                                        if ($response2.ToLowerInvariant() -eq "false") {
-                                            $response2 = $false
-                                        }
-                                        else{
-                                            $response2 = $value
-                                            }
-                                    }
-                                    
+                        while ($valid -eq $false) {
+                            $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
+                            if ([bool]$response2) {                                
+                                if ($property."$($_.Name)" -is [Int]) {
+                                    $property."$($_.Name)" = [Int]$response2                        
                                 }
+                                else {
+                                    if ([bool]$value) {
+                                        if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
+                                            if ($response2.ToLowerInvariant() -eq "true") {
+                                                $response2 = $true
+                                            }
+                                            else {
+                                                if ($response2.ToLowerInvariant() -eq "false") {
+                                                    $response2 = $false
+                                                }
+                                                else {
+                                                    $response2 = $value
+                                                }
+                                            }
+                                    
+                                        }
+                                        else {
+                                            $property."$($_.Name)" = $response2
+                                        }
+                                    }                                                                       
+                                }
+                                $c = Test-Configuration -InputObject $Config
+                                $valid = $c.Valid
+                                if ($valid -eq $false) {
+                                    Write-Host -ForegroundColor Red $c.Message
+                                }
+                            
                             }
-                            $property."$($_.Name)" = $response2
-                            return
+                            else {                                
+                                $property."$($_.Name)" = $value
+                                $c = Test-Configuration -InputObject $Config
+                                $valid = $c.Valid
+                                if ($valid -eq $false) {
+                                    Write-Host -ForegroundColor Red $c.Message
+                                }
+                            }                        
                         }
                     }
                     
@@ -268,23 +287,23 @@ function Select-VirtualMachines {
 
 $Global:Config = Select-Config
 $valid = $false
-while ($valid -eq $false){
-Select-Options $($config.vmOptions) "Select Global Property to modify"
-Select-Options $($config.cmOptions) "Select ConfigMgr Property to modify"
-Select-VirtualMachines
-#$config | ConvertTo-Json -Depth 3 | Out-File $configDir
-$c = Test-Configuration -InputObject $Config
-Write-Host
-Write-Host "-----------------------------------------------------------------------------"
-Write-Host
-if ($c.Valid) {       
-    $valid = $true    
-    Write-Host -ForegroundColor Green "Config is valid"
-}
-else {
-    Write-Host -ForegroundColor Red "Config file is not valid: $($c.Message)" 
-    Write-Host -ForegroundColor Red "Starting over. Please fix the mistake, or hit ctrl-c to exit."     
-}
+while ($valid -eq $false) {
+    Select-Options $($config.vmOptions) "Select Global Property to modify"
+    Select-Options $($config.cmOptions) "Select ConfigMgr Property to modify"
+    Select-VirtualMachines
+    #$config | ConvertTo-Json -Depth 3 | Out-File $configDir
+    $c = Test-Configuration -InputObject $Config
+    Write-Host
+    Write-Host "-----------------------------------------------------------------------------"
+    Write-Host
+    if ($c.Valid) {       
+        $valid = $true    
+        Write-Host -ForegroundColor Green "Config is valid"
+    }
+    else {
+        Write-Host -ForegroundColor Red "Config file is not valid: $($c.Message)" 
+        Write-Host -ForegroundColor Red "Starting over. Please fix the mistake, or hit ctrl-c to exit."     
+    }
 }
 # $($file.Name)
 Write-Host
@@ -299,8 +318,8 @@ else {
 $splitpath = Split-Path -Path $fileName -Leaf
 $response = Read-Host2 -Prompt "Save Filename" $splitpath
 if ([bool]$response) {
-    if (!$response.EndsWith("json")){
-        $response+=".json"
+    if (!$response.EndsWith("json")) {
+        $response += ".json"
     }
     $filename = Join-Path $configDir $response
 }

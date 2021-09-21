@@ -1156,7 +1156,10 @@ function Test-Configuration {
         [void]$validationMessage.AppendLine("VM Options Validation: vmOptions.domainAdminName not present in vmOptions. You must specify the Domain Admin user name that will be created.")
     }
     else {
-        $pattern = "[$([Regex]::Escape('/\[:;|=,+*?<>') + '\]' + '\"')]"
+
+        $questionablestring -match "[$([Regex]::Escape('/\[:;|=,+*?<>') + '\]' + '\"')]"
+
+        $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"')]"
         if ($configObject.vmOptions.domainAdminName -match $pattern) {
             [void]$validationMessage.AppendLine("VM Options Validation: vmOptions.domainAdminName [$($configObject.vmoptions.domainAdminName)] contains invalid characters. You must specify a valid domain username. For example: bob")
         }
