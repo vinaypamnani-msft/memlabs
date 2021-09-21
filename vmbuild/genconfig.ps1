@@ -17,7 +17,7 @@ $configDir = Join-Path $PSScriptRoot "config"
 
 Write-Host -ForegroundColor Cyan ""
 Write-Host -ForegroundColor Cyan "New-Lab Configuration generator:"
-Write-Host -ForegroundColor Cyan "You can use this tool to customize most options.  Press Enter to skip a section"
+Write-Host -ForegroundColor Cyan "You can use this tool to customize most options."
 Write-Host -ForegroundColor Cyan "Press Ctrl-C to exit without saving."
 Write-Host -ForegroundColor Cyan ""
 Write-Host -ForegroundColor Cyan "Known Limitations: (must be done via manual json editing)"
@@ -25,6 +25,16 @@ Write-Host -ForegroundColor Cyan " - Can not remove a prefix"
 Write-Host -ForegroundColor Cyan " - Can not add/remove VMs"
 Write-Host -ForegroundColor Cyan " - Can not add/remove Disks"
 Write-Host -ForegroundColor Cyan ""
+
+function write-help {
+    $color = [System.ConsoleColor]::Green
+    Write-Host -ForegroundColor $color "Press " -NoNewline
+    Write-Host -ForegroundColor Yellow "[Enter]" -NoNewline
+    Write-Host -ForegroundColor $color " to skip a section Press " -NoNewline
+    Write-Host -ForegroundColor Yellow "[Ctrl-C]" -NoNewline
+    Write-Host -ForegroundColor $color " to exit without saving."
+}
+
 function Select-Config {
     $files = Get-ChildItem $configDir\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
     $files += Get-ChildItem $configDir\*.json -Include "TechPreview.json"
@@ -63,7 +73,7 @@ function Read-Host2 {
         [string]
         $currentValue        
     )
-
+    write-help
     Write-Host -ForegroundColor Cyan $prompt -NoNewline
     if ([bool]$currentValue) {
         Write-Host " [" -NoNewline
@@ -217,6 +227,7 @@ function Select-Options {
     )
     while ($true) {
         Write-Host ""
+        
         $i = 0
         #   Write-Host "Trying to get $property"
         if ($null -eq $property) {
@@ -353,7 +364,7 @@ function Select-VirtualMachines {
 $Global:Config = Select-Config
 $valid = $false
 while ($valid -eq $false) {
-    Select-Options $($config.vmOptions) "Select Global Property to modify"
+    Select-Options $($config.vmOptions) "Select Global Property to modify"    
     Select-Options $($config.cmOptions) "Select ConfigMgr Property to modify"
     Select-VirtualMachines
     #$config | ConvertTo-Json -Depth 3 | Out-File $configDir
