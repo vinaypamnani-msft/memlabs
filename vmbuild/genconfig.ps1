@@ -51,7 +51,7 @@ function Select-Config {
         $response = Read-Host2 -Prompt "Which config do you want to deploy"
         try {
             if ([int]$response -is [int]) {
-                if ($response -le $i -and $response -gt 0 ) {
+                if ([int]$response -le [int]$i -and [int]$response -gt 0 ) {
                     $responseValid = $true
                 }
             }
@@ -73,7 +73,7 @@ function Read-Host2 {
         [string]
         $currentValue        
     )
-    write-help
+    #write-help
     Write-Host -ForegroundColor Cyan $prompt -NoNewline
     if ([bool]$currentValue) {
         Write-Host " [" -NoNewline
@@ -190,7 +190,7 @@ function get-ValidResponse {
                 $responseValid = $true
             }
             if ([int]$response -is [int]) {
-                if ([int]$response -le [int]$max -and $response -gt 0 ) {
+                if ([int]$response -le [int]$max -and [int]$response -gt 0 ) {
                     $responseValid = $true
                 }
             }
@@ -374,7 +374,6 @@ while ($valid -eq $false) {
     Write-Host
     if ($c.Valid) {       
         $valid = $true    
-        Write-Host -ForegroundColor Green "Config is valid"
     }
     else {
         Write-Host -ForegroundColor Red "Config file is not valid: $($c.Message)" 
