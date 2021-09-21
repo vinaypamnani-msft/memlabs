@@ -1248,6 +1248,18 @@ function Test-Configuration {
             if ($vm.memory -is [string] -and -not ($vm.memory.EndsWith("MB") -or $vm.memory.EndsWith("GB"))) {
                 [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] memory value [$($vm.memory)] is invalid. Specify desired memory in quotes with MB/GB; For example: ""4GB""")
             }
+
+            if ($vm.memory.EndsWith("MB") -and $([int]$vm.memory.Replace("MB", "")) -lt 512 )
+            {
+                [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] memory value [$($vm.memory)] is invalid. Should have more than 512MB")
+            }
+
+            if ($vm.memory.EndsWith("GB") -and $([int]$vm.memory.Replace("GB", "")) -gt 64 )
+            {
+                [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] memory value [$($vm.memory)] is invalid. Should have less than 64GB")
+            }
+
+
         }
 
         # virtualProcs
@@ -1266,6 +1278,17 @@ function Test-Configuration {
             $vm.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
                 if ($_.Name.Length -ne 1 -or $validLetters -notcontains $_.Name) {
                     [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] contains invalid additional disks [$($vm.additionalDisks)]; Disks must have a single drive letter between E and Y.")
+                }
+
+                $size = $($vm.additionalDisks."$($_.Name)")
+                if (-not $size.EndsWith("GB")) {
+                    [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] contains invalid additional disks [$($vm.additionalDisks)]; Specify desired size in quotes with GB; For example: ""200GB""")
+                }
+                if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -lt 10 ){
+                    [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] contains invalid additional disks [$($vm.additionalDisks)]; Disks must be larger than 10GB")
+                }
+                if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -gt 1000 ){
+                    [void]$validationMessage.AppendLine("VM Validation: [$($vm.vmName)] contains invalid additional disks [$($vm.additionalDisks)]; Disks must be less than 1000GB")
                 }
             }
         }
