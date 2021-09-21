@@ -1,3 +1,16 @@
+[CmdletBinding()]
+param (
+    [Parameter()]
+    [Switch]
+    $InternalUseOnly    
+)
+
+$return = [PSCustomObject]@{
+    ConfigFileName = $null
+    DeployNow      = $false
+    ForceNew       = $false
+}
+
 . $PSScriptRoot\Common.ps1
 
 $configDir = Join-Path $PSScriptRoot "config"
@@ -376,32 +389,42 @@ if ([bool]$response) {
     $filename = Join-Path $configDir $response
 }
 $config | ConvertTo-Json -Depth 3 | Out-File $filename
+$return.ConfigFileName = Split-Path -Path $fileName -Leaf
 Write-Host "Saved to $filename"
 Write-Host
-$response = Read-Host2 -Prompt "Deploy Now? (y/N)" $null
-if ([bool]$response) {
-    if ($response.ToLowerInvariant() -eq "y") {
-        $response = Read-Host2 -Prompt "Delete old VMs? (y/N)"
-        if ([bool]$response) {
-            if ($response.ToLowerInvariant() -eq "y") {
-                Write-Host "Starting new-lab with delete VM options"
+
+
+
+#================================= NEW LAB SCENERIO ============================================
+if ($InternalUseOnly.IsPresent) { 
+    $response = Read-Host2 -Prompt "Deploy Now? (y/N)" $null
+    if ([bool]$response) {
+        if ($response.ToLowerInvariant() -eq "y") {
+            $response = Read-Host2 -Prompt "Delete old VMs? (y/N)"
+            if ([bool]$response) {
+                if ($response.ToLowerInvariant() -eq "y") {
+                    $return.ForceNew = $true
+                    $return.DeployNow = $true                
+                    Write-Host "Starting new-lab with delete VM options"
+                }
+                else {
+                    $return.DeployNow = $true
+                    Write-Host "Starting new-lab without delete VM options"
+                }
             }
             else {
+                $return.DeployNow = $true
                 Write-Host "Starting new-lab without delete VM options"
             }
         }
         else {
-            Write-Host "Starting new-lab without delete VM options"
+            Write-Host "Not Deploying."
         }
+
     }
     else {
         Write-Host "Not Deploying."
     }
-
-}
-else {
-    Write-Host "Not Deploying."
+    return $return
 }
 
-
-#$Config.virtualMachines | ft
