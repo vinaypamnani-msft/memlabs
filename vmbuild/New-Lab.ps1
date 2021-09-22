@@ -338,13 +338,24 @@ Clear-Host
 
 if ($Configuration) {
     # Get user configuration
-    $userConfig = Get-UserConfiguration -Configuration $Configuration
-    Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
-    Write-Log "### START." -Success
-    Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+    $configResult = Get-UserConfiguration -Configuration $Configuration
+    if ($configResult.Loaded) {
+        $userConfig = $configResult.Config
+        Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
+        Write-Log "### START." -Success
+        Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+    }
+    else {
+        Write-Log "### START." -Success
+        Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+        Write-Log $configResult.Message -Failure
+        Write-Host
+        return
+    }
 
 }
 else {
+    Write-Log "### START." -Success
     Write-Log "Main: No Configuration specified. Calling genconfig."
     $result = .\genconfig.ps1 -InternalUseOnly
 
@@ -356,13 +367,23 @@ else {
         $ForceNew = $true
     }
 
-    $userConfig = Get-UserConfiguration -Configuration $result.ConfigFileName
+    $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
 
-    Clear-Host
-    Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) +3))
-    Write-Log "### START." -Success
-    Write-Log "Main: Using $($result.ConfigFileName) provided by genconfig" -Activity
-    Write-Log "Main: genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
+    if ($result2.Loaded) {
+        $userConfig = $configResult.Config
+        Clear-Host
+        Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
+        Write-Log "### START." -Success
+        Write-Log "Main: Using $($result.ConfigFileName) provided by genconfig" -Activity
+        Write-Log "Main: genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
+    }
+    else {
+        Write-Log "### START." -Success
+        Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+        Write-Log $configResult.Message -Failure
+        Write-Host
+        return
+    }
 
 }
 
