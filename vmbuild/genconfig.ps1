@@ -223,7 +223,7 @@ function get-ValidResponse {
     while ($responseValid -eq $false) {
         #   Write-Host "Not Returning: $response out of $max"
         Write-Host
-        $response = Read-Host2 -Prompt $prompt $currentValue
+        $response = Read-Host2 -Prompt $prompt $currentValue        
         try {
             if (![bool]$response) {
                 $responseValid = $true
@@ -237,7 +237,7 @@ function get-ValidResponse {
                     }
                 }
                 catch {}
-            }
+            }            
             if ($responseValid -eq $false -and $null -ne $alternatevalues) {             
                 if ($response.ToLowerInvariant() -eq $alternatevalues.ToLowerInvariant()) {
                     $responseValid = $true                    
@@ -328,11 +328,13 @@ function Select-Options {
                         Write-Host
                         while ($valid -eq $false) {
                             $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
+                            Write-Host "read $response2"
                             if ([bool]$response2) {
                                 if ($property."$($_.Name)" -is [Int]) {
                                     $property."$($_.Name)" = [Int]$response2
                                 }
                                 else {
+                                    Write-Host "read2 $response2 $value"
                                     if ([bool]$value) {
                                         if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
                                             if ($response2.ToLowerInvariant() -eq "true") {
@@ -348,9 +350,9 @@ function Select-Options {
                                             }
 
                                         }
-                                        else {
-                                            $property."$($_.Name)" = $response2
-                                        }
+                                        
+                                        $property."$($_.Name)" = $response2
+                                        
                                     }
                                 }
                                 $c = Test-Configuration -InputObject $Config
