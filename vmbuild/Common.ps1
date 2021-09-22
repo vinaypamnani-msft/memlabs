@@ -1666,9 +1666,9 @@ function Add-RDCManServerToGroup {
     )
 
     $findserver = $findgroup.server | Where-Object { $_.properties.name -eq $serverName } | Select-Object -First 1
-    Write-Host "INFO: Add-RDCManServerToGroup: Adding $serverName to RDG Group ... " -NoNewline
+
     if ($null -eq $findserver) {
-        Write-Host "added"
+        Write-Log "Add-RDCManServerToGroup: Added $serverName to RDG Group" -LogOnly
         $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
         $newserver = $server.clone()
         $newserver.properties.name = $serverName
@@ -1677,7 +1677,7 @@ function Add-RDCManServerToGroup {
         return $True
     }
     else {
-        Write-Host "already exists in group. Skipping"
+        Write-Log "Add-RDCManServerToGroup: $serverName already exists in group. Skipped" -LogOnly
         return $False
     }
     return $False
@@ -1694,11 +1694,10 @@ function Get-RDCManGroupToModify {
         $existing
     )
 
-    Write-Host "INFO: Get-RDCManGroupToModify: Looking for group entry named $domain in current xml... " -NoNewline
     $findGroup = $group | Where-Object { $_.properties.name -eq $domain } | Select-Object -First 1
 
     if ($null -eq $findGroup) {
-        Write-Host "Not found.  Creating new group"
+        Write-Log "Get-RDCManGroupToModify: Group entry named $domain not found in current xml. Creating new group." -LogOnly
         $findGroup = $groupFromTemplate.Clone()
         $findGroup.properties.name = $domain
         $findGroup.logonCredentials.domain = $domain
@@ -1709,7 +1708,7 @@ function Get-RDCManGroupToModify {
         $findGroup = $existing.ImportNode($findGroup, $true)
     }
     else {
-        Write-Host "Found!"
+        Write-Log "Get-RDCManGroupToModify: Found existing group entry named $domain in current xml." -LogOnly
     }
     return $findGroup
 }
