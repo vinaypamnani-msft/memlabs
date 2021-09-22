@@ -1567,7 +1567,7 @@ function Test-Configuration {
     return $return
 }
 
-Function Show-Summary{
+Function Show-Summary {
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -1575,49 +1575,49 @@ Function Show-Summary{
         $config
     )
 
-$CHECKMARK = ([char]8730)
+    $CHECKMARK = ([char]8730)
 
-if (-not $null -eq $($config.DeployConfig.cmOptions))
-{
-    if ($config.DeployConfig.cmOptions.install -eq $true){
-        Write-Host "[$CHECKMARK] ConfigMgr $($config.DeployConfig.cmOptions.version) will be installed and " -NoNewline
-        if ($config.DeployConfig.cmOptions.updateToLatest -eq $true) {
-            Write-Host "updated to latest"
+    if (-not $null -eq $($config.DeployConfig.cmOptions)) {
+        if ($config.DeployConfig.cmOptions.install -eq $true) {
+            Write-Host "[$CHECKMARK] ConfigMgr $($config.DeployConfig.cmOptions.version) will be installed and " -NoNewline
+            if ($config.DeployConfig.cmOptions.updateToLatest -eq $true) {
+                Write-Host "updated to latest"
+            }
+            else {
+                Write-Host "NOT updated to latest"
+            }
         }
-        else{
-            Write-Host "NOT updated to latest"
+        else {
+            Write-Host "[x] ConfigMgr will not be installed."
         }
+
+        if ($config.DeployConfig.cmOptions.installDPMPRoles) {
+            Write-Host "[$CHECKMARK] DPMP roles will be pushed from the Configmgr Primary Server"
+        }
+        else {
+            Write-Host "[x] DPMP roles will not be installed"
+        }
+
+        if ($config.DeployConfig.cmOptions.pushClientToDomainMembers) {
+            Write-Host "[$CHECKMARK] ConfigMgr Clients will be installed on domain members"
+        }
+        else {
+            Write-Host "[x] ConfigMgr Clients will NOT be installed on domain members"
+        }
+
     }
-    else{
+    else {
         Write-Host "[x] ConfigMgr will not be installed."
     }
 
-    if ($config.DeployConfig.cmOptions.installDPMPRoles) {
-        Write-Host "[$CHECKMARK] DPMP roles will be pushed from the Configmgr Primary Server"
-    }
-    else{
-        Write-Host "[x] DPMP roles will not be installed"
-    }
+    if (-not $null -eq $($config.DeployConfig.vmOptions)) {
 
-    if ($config.DeployConfig.cmOptions.pushClientToDomainMembers){
-        Write-Host "[$CHECKMARK] ConfigMgr Clients will be installed on domain members"
-    }
-    else{
-        Write-Host "[x] ConfigMgr Clients will NOT be installed on domain members"
+        Write-Host "[$CHECKMARK] Domain: $($config.DeployConfig.vmOptions.domainName) will be created. Admin account: $($config.DeployConfig.vmOptions.domainAdminName)"
+        Write-Host "[$CHECKMARK] Network: $($config.DeployConfig.vmOptions.network)"
+        Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($config.DeployConfig.vmOptions.basePath) on host machine"
     }
 
-}else{
-    Write-Host "[x] ConfigMgr will not be installed."
-}
-
-if (-not $null -eq $($config.DeployConfig.vmOptions)){
-
-    Write-Host "[$CHECKMARK] Domain: $($config.DeployConfig.vmOptions.domainName) will be created. Admin account: $($config.DeployConfig.vmOptions.domainAdminName)"
-    Write-Host "[$CHECKMARK] Network: $($config.DeployConfig.vmOptions.network)"
-    Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($config.DeployConfig.vmOptions.basePath) on host machine"
-}
-
-$config.DeployConfig.virtualMachines | ft | Out-Host
+    $config.DeployConfig.virtualMachines | Format-Table | Out-Host
 }
 
 function New-RDCManFile {
