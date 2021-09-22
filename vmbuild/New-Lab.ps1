@@ -1,5 +1,5 @@
 param (
-    [Parameter(Mandatory = $true, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
     [string]$Configuration,
     [Parameter(Mandatory = $false, HelpMessage = "Download all files required by the specified config without deploying any VMs.")]
     [switch]$DownloadFilesOnly,
@@ -45,15 +45,6 @@ function Write-JobProgress {
         }
     }
 }
-
-#Clear-Host
-Write-Host
-Write-Host
-Write-Host
-Write-Host
-Write-Host
-Write-Host
-Write-Host
 
 # Create VM script block
 $VM_Create = {
@@ -343,29 +334,56 @@ $VM_Create = {
     }
 }
 
-Write-Log "### START." -Success
-Write-Log "Main: Creating virtual machines for specified configuration: $Configuration" -Activity
+Clear-Host
+
+if ($Configuration) {
+    # Get user configuration
+    $userConfig = Get-UserConfiguration -Configuration $Configuration
+    Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
+    Write-Log "### START." -Success
+    Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+
+}
+else {
+    Write-Log "Main: No Configuration specified. Calling genconfig."
+    $result = .\genconfig.ps1 -InternalUseOnly
+
+    if (-not $result.DeployNow) {
+        return
+    }
+
+    if ($result.ForceNew) {
+        $ForceNew = $true
+    }
+
+    $userConfig = Get-UserConfiguration -Configuration $result.ConfigFileName
+
+    Clear-Host
+    Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) +3))
+    Write-Log "### START." -Success
+    Write-Log "Main: Using $($result.ConfigFileName) provided by genconfig" -Activity
+    Write-Log "Main: genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
+
+}
 
 # Timer
 $timer = New-Object -TypeName System.Diagnostics.Stopwatch
 $timer.Start()
-
-# Get user configuration
-$userConfig = Get-UserConfiguration -Configuration $Configuration
 
 # Load configuration
 try {
     $result = Test-Configuration -InputObject $userConfig
     if ($result.Valid) {
         $deployConfig = $result.DeployConfig
+        Write-Log "Main: Config validated successfully." -Success
     }
     else {
-        Write-Log "Main: Config validation failed. $(result.Message)"
+        Write-Log "Main: Config validation failed. `r`n$($result.Message)" -Failure
         return
     }
 }
 catch {
-    Write-Log "Main: Failed to load $Configuration.json file. $_" -Failure
+    Write-Log "Main: Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
     return
 }
 

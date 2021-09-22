@@ -965,18 +965,23 @@ function Get-StorageConfig {
 
 function Get-UserConfiguration {
     param(
-        [Parameter(Mandatory = $true, HelpMessage = "Configuration Name")]
+        [Parameter(Mandatory = $true, HelpMessage = "Configuration Name/File")]
         [string]$Configuration
     )
 
+    # Add extension
+    if (-not $Configuration.EndsWith(".json")) {
+        $Configuration = "$Configuration.json"
+    }
+
     # Get deployment configuration
-    $configPath = Join-Path $Common.ConfigPath "$Configuration.json"
+    $configPath = Join-Path $Common.ConfigPath $Configuration
     if (-not (Test-Path $configPath)) {
-        Write-Log "Get-UserConfiguration: $Configuration`: $configPath not found for specified configuration. Please create the config, and try again." -Failure
+        Write-Log "Get-UserConfiguration: $configPath not found for specified configuration. Please create the config, and try again." -Failure -LogOnly
         return
     }
     else {
-        Write-Log "Get-UserConfiguration: $Configuration`: Loading $configPath."
+        # Write-Log "Get-UserConfiguration: Loading $configPath."
     }
 
     try {
@@ -984,7 +989,7 @@ function Get-UserConfiguration {
         return $config
     }
     catch {
-        Write-Log "Get-UserConfiguration: $Configuration`: Failed to load $configPath. $_"
+        Write-Log "Get-UserConfiguration: Failed to load $configPath. $_" -Failure -LogOnly
         return $null
     }
 

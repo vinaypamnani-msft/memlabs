@@ -2,7 +2,7 @@
 param (
     [Parameter()]
     [Switch]
-    $InternalUseOnly    
+    $InternalUseOnly
 )
 
 $return = [PSCustomObject]@{
@@ -27,7 +27,7 @@ Write-Host -ForegroundColor Cyan " - Can not add/remove Disks"
 Write-Host -ForegroundColor Cyan ""
 
 function write-help {
-    $color = [System.ConsoleColor]::Green
+    $color = [System.ConsoleColor]::DarkGray
     Write-Host -ForegroundColor $color "Press " -NoNewline
     Write-Host -ForegroundColor Yellow "[Enter]" -NoNewline
     Write-Host -ForegroundColor $color " to skip a section Press " -NoNewline
@@ -56,10 +56,10 @@ function Select-Config {
                 }
             }
         }
-        catch {}  
+        catch {}
     }
     $Global:configfile = $files[[int]$response - 1]
-    $config = Get-Content $Global:configfile -Force | ConvertFrom-Json    
+    $config = Get-Content $Global:configfile -Force | ConvertFrom-Json
     return $config
 }
 
@@ -71,9 +71,9 @@ function Read-Host2 {
         $prompt,
         [Parameter()]
         [string]
-        $currentValue        
+        $currentValue
     )
-    #write-help
+    write-help
     Write-Host -ForegroundColor Cyan $prompt -NoNewline
     if ([bool]$currentValue) {
         Write-Host " [" -NoNewline
@@ -90,7 +90,7 @@ function Get-SupportedVersion {
     param (
         [Parameter()]
         [string]
-        $key,    
+        $key,
         [Parameter()]
         [string]
         $currentValue,
@@ -98,7 +98,7 @@ function Get-SupportedVersion {
         [string]
         $prompt
     )
-  
+
     write-Host
     #  $Common.AzureFileList.ISO.id | Select-Object -Unique
 
@@ -108,7 +108,7 @@ function Get-SupportedVersion {
         Write-Host "[$i] - $Supported"
     }
     $response = get-ValidResponse "$prompt [$currentValue]" $i
-    
+
     if ([bool]$response) {
         $i = 0
         foreach ($Supported in $Common.Supported."$key") {
@@ -129,7 +129,7 @@ function Get-VMList {
     param (
         [Parameter()]
         [string]
-        $key,    
+        $key,
         [Parameter()]
         [string]
         $currentValue,
@@ -137,7 +137,7 @@ function Get-VMList {
         [string]
         $prompt
     )
-  
+
     write-Host
     #  $Common.AzureFileList.ISO.id | Select-Object -Unique
 
@@ -150,7 +150,7 @@ function Get-VMList {
         Write-Host "[$i] - $Supported"
     }
     $response = get-ValidResponse "$prompt [$currentValue]" $i
-    
+
     if ([bool]$response) {
         $i = 0
         foreach ($Supported in $vms) {
@@ -208,13 +208,13 @@ function get-ValidResponse {
                 }
             }
         }
-        catch {}      
+        catch {}
     }
     #Write-Host "Returning: $response"
     return $response
 }
 
-function Select-Options {   
+function Select-Options {
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -223,11 +223,11 @@ function Select-Options {
         [Parameter()]
         [string]
         $prompt
- 
+
     )
     while ($true) {
         Write-Host ""
-        
+
         $i = 0
         #   Write-Host "Trying to get $property"
         if ($null -eq $property) {
@@ -244,8 +244,8 @@ function Select-Options {
             $property | Get-Member -MemberType NoteProperty | ForEach-Object {
                 $i = $i + 1
                 $value = $property."$($_.Name)"
-              
-                    
+
+
                 if ($response -eq $i) {
                     $name = $($_.Name)
                     switch ($name) {
@@ -253,7 +253,7 @@ function Select-Options {
                             $property."$name" = Get-SupportedVersion "OperatingSystems" $value "Select OS Version"
                             #Select-OsFromList $value
                             return
-                        }  
+                        }
                         "sqlVersion" {
                             $property."$name" = Get-SupportedVersion "SqlVersions" $value "Select SQL Version"
                             return
@@ -270,7 +270,7 @@ function Select-Options {
                             $property."$name" = Get-VMList "ExistingDCs" $value "Select Existing DC"
                             return
                         }
-                    }                   
+                    }
                     if ($value -is [System.Management.Automation.PSCustomObject]) {
                         Select-Options $value "Select data to modify"
                     }
@@ -279,9 +279,9 @@ function Select-Options {
                         Write-Host
                         while ($valid -eq $false) {
                             $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
-                            if ([bool]$response2) {                                
+                            if ([bool]$response2) {
                                 if ($property."$($_.Name)" -is [Int]) {
-                                    $property."$($_.Name)" = [Int]$response2                        
+                                    $property."$($_.Name)" = [Int]$response2
                                 }
                                 else {
                                     if ([bool]$value) {
@@ -297,12 +297,12 @@ function Select-Options {
                                                     $response2 = $value
                                                 }
                                             }
-                                    
+
                                         }
                                         else {
                                             $property."$($_.Name)" = $response2
                                         }
-                                    }                                                                       
+                                    }
                                 }
                                 $c = Test-Configuration -InputObject $Config
                                 $valid = $c.Valid
@@ -312,9 +312,9 @@ function Select-Options {
                                 if ( $c.Failures -eq 0) {
                                     $valid = $true
                                 }
-                            
+
                             }
-                            else {                                
+                            else {
                                 $property."$($_.Name)" = $value
                                 $c = Test-Configuration -InputObject $Config
                                 $valid = $c.Valid
@@ -324,16 +324,16 @@ function Select-Options {
                                 if ( $c.Failures -eq 0) {
                                     $valid = $true
                                 }
-                            }                        
+                            }
                         }
                     }
-                    
+
                 }
-                    
+
             }
         }
         else { return }
-    }  
+    }
 }
 
 function Select-VirtualMachines {
@@ -347,7 +347,7 @@ function Select-VirtualMachines {
             write-Host "[$i] - $($virtualMachine)"
         }
         $response = get-ValidResponse "Which VM do you want to modify" $i $null
-        
+
         if ([bool]$response) {
             $i = 0
             foreach ($virtualMachine in $Config.virtualMachines) {
@@ -355,7 +355,7 @@ function Select-VirtualMachines {
                 if ($i -eq $response) {
                     Select-Options $virtualMachine "Which VM property to modify"
                 }
-            }            
+            }
         }
         else { return }
     }
@@ -364,24 +364,24 @@ function Select-VirtualMachines {
 $Global:Config = Select-Config
 $valid = $false
 while ($valid -eq $false) {
-    Select-Options $($config.vmOptions) "Select Global Property to modify"    
+    Select-Options $($config.vmOptions) "Select Global Property to modify"
     Select-Options $($config.cmOptions) "Select ConfigMgr Property to modify"
     Select-VirtualMachines
     #$config | ConvertTo-Json -Depth 3 | Out-File $configDir
     $c = Test-Configuration -InputObject $Config
     Write-Host
-    Write-Host "-----------------------------------------------------------------------------"
-    Write-Host
-    if ($c.Valid) {       
-        $valid = $true    
+    # Write-Host "-----------------------------------------------------------------------------"
+    # Write-Host
+    if ($c.Valid) {
+        $valid = $true
     }
     else {
-        Write-Host -ForegroundColor Red "Config file is not valid: $($c.Message)" 
-        Write-Host -ForegroundColor Red "Starting over. Please fix the mistake, or hit ctrl-c to exit."     
+        Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)"
+        Write-Host -ForegroundColor Red "Starting over. Please fix the problem(s), or hit CTRL-C to exit."
     }
 }
 # $($file.Name)
-Write-Host
+#Write-Host
 $date = Get-Date -Format "MM-dd-yyyy"
 if ($($Global:configfile.Name).StartsWith("xGen")) {
     $postfix = $($Global:configfile.Name).SubString(16)
@@ -406,34 +406,35 @@ Write-Host
 
 
 #================================= NEW LAB SCENERIO ============================================
-if ($InternalUseOnly.IsPresent) { 
+if ($InternalUseOnly.IsPresent) {
     $response = Read-Host2 -Prompt "Deploy Now? (y/N)" $null
     if ([bool]$response) {
         if ($response.ToLowerInvariant() -eq "y") {
+            Write-Host
             $response = Read-Host2 -Prompt "Delete old VMs? (y/N)"
             if ([bool]$response) {
                 if ($response.ToLowerInvariant() -eq "y") {
                     $return.ForceNew = $true
-                    $return.DeployNow = $true                
-                    Write-Host "Starting new-lab with delete VM options"
+                    $return.DeployNow = $true
+                    # Write-Host "Starting new-lab with delete VM options"
                 }
                 else {
                     $return.DeployNow = $true
-                    Write-Host "Starting new-lab without delete VM options"
+                    # Write-Host "Starting new-lab without delete VM options"
                 }
             }
             else {
                 $return.DeployNow = $true
-                Write-Host "Starting new-lab without delete VM options"
+                # Write-Host "Starting new-lab without delete VM options"
             }
         }
         else {
-            Write-Host "Not Deploying."
+            # Write-Host "Not Deploying."
         }
 
     }
     else {
-        Write-Host "Not Deploying."
+        # Write-Host "Not Deploying."
     }
     return $return
 }
