@@ -357,7 +357,8 @@ if ($Configuration) {
 else {
     Write-Log "### START." -Success
     Write-Log "Main: No Configuration specified. Calling genconfig."
-    $result = .\genconfig.ps1 -InternalUseOnly
+    cd $PSScriptRoot
+    $result = ./genconfig.ps1 -InternalUseOnly
 
     if (-not $result.DeployNow) {
         return
@@ -369,7 +370,7 @@ else {
 
     $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
 
-    if ($result2.Loaded) {
+    if ($configResult.Loaded) {
         $userConfig = $configResult.Config
         Clear-Host
         Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
