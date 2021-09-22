@@ -18,7 +18,7 @@
         },
         {
             "vmName": "W10-3",
-            "operatingSystem": "Windows 10 21H1 (64-bit)",
+            "operatingSystem": "Windows 10 Latest (64-bit)",
             "role": "DomainMember",
             "memory": "4GB",
             "virtualProcs": 4
