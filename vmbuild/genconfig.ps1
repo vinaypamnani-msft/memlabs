@@ -144,7 +144,7 @@ function Get-SupportedVersion {
         $i = $i + 1
         Write-Host "[$i] - $Supported"
     }
-    $response = get-ValidResponse "$prompt [$currentValue]" $i
+    $response = get-ValidResponse "$prompt [$currentValue]" $i $null
 
     if ([bool]$response) {
         $i = 0
@@ -186,7 +186,7 @@ function Get-VMList {
         $i = $i + 1
         Write-Host "[$i] - $Supported"
     }
-    $response = get-ValidResponse "$prompt [$currentValue]" $i
+    $response = get-ValidResponse "$prompt [$currentValue]" $i $null
 
     if ([bool]$response) {
         $i = 0
@@ -214,7 +214,9 @@ function get-ValidResponse {
         $max,
         [Parameter()]
         [string]
-        $currentValue
+        $currentValue,
+        [string]
+        $alternatevalues
     )
 
     $responseValid = $false
@@ -226,12 +228,22 @@ function get-ValidResponse {
             if (![bool]$response) {
                 $responseValid = $true
             }
-            if ([int]$response -is [int]) {
-                if ([int]$response -le [int]$max -and [int]$response -gt 0 ) {
-                    $responseValid = $true
+            else {
+                try {
+                    if ([int]$response -is [int]) {
+                        if ([int]$response -le [int]$max -and [int]$response -gt 0 ) {
+                            $responseValid = $true
+                        }
+                    }
+                }
+                catch {}
+            }
+            if ($responseValid -eq $false -and $null -ne $alternatevalues) {             
+                if ($response.ToLowerInvariant() -eq $alternatevalues.ToLowerInvariant()) {
+                    $responseValid = $true                    
                 }
             }
-            if ([bool]$currentValue) {
+            if ($responseValid -eq $false -and [bool]$currentValue) {
                 if ($currentValue.ToLowerInvariant() -eq "true" -or $currentValue.ToLowerInvariant() -eq "false") {
                     if ($response.ToLowerInvariant() -eq "true") {
                         $response = $true
@@ -275,7 +287,7 @@ function Select-Options {
             $value = $property."$($_.Name)"
             Write-Host [$i] $_.Name = $value
         }
-        $response = get-ValidResponse $prompt $i $null
+        $response = get-ValidResponse $prompt $i $null $null
         if ([bool]$response) {
             $i = 0
             $property | Get-Member -MemberType NoteProperty | ForEach-Object {
@@ -351,7 +363,7 @@ function Select-Options {
                                 }
 
                             }
-                            else {
+                            else {                                
                                 $property."$($_.Name)" = $value
                                 $c = Test-Configuration -InputObject $Config
                                 $valid = $c.Valid
@@ -361,6 +373,7 @@ function Select-Options {
                                 if ( $c.Failures -eq 0) {
                                     $valid = $true
                                 }
+                                $valid = $true
                             }
                         }
                     }
@@ -381,11 +394,22 @@ function Select-VirtualMachines {
         $i = 0
         foreach ($virtualMachine in $Config.virtualMachines) {
             $i = $i + 1
-            write-Host "[$i] - $($virtualMachine)"
+            write-Host "[$i] - $($virtualMachine)"        
         }
-        $response = get-ValidResponse "Which VM do you want to modify" $i $null
+        write-Host "[n] - New Virtual Machine"
+        $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
 
         if ([bool]$response) {
+            if ($response.ToLowerInvariant() -eq "n") {
+                $Config.VirtualMachines += [PSCustomObject]@{
+                    vmName          = "Member" + $([int]$i + 1)
+                    role            = "DomainMember"                    
+                    operatingSystem = "Windows 10 21H1 (64-bit)"                    
+                    memory          = "4GB"
+                    virtualProcs    = 2
+                }
+                $response = $i + 1
+            }
             $i = 0
             foreach ($virtualMachine in $Config.virtualMachines) {
                 $i = $i + 1
