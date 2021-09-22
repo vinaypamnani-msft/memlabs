@@ -14,6 +14,7 @@ $return = [PSCustomObject]@{
 . $PSScriptRoot\Common.ps1
 
 $configDir = Join-Path $PSScriptRoot "config"
+$sampleDir = Join-Path $PSScriptRoot "config\samples"
 
 Write-Host -ForegroundColor Cyan ""
 Write-Host -ForegroundColor Cyan "New-Lab Configuration generator:"
@@ -36,14 +37,29 @@ function write-help {
 }
 
 function Select-Config {
-    $files = Get-ChildItem $configDir\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
-    $files += Get-ChildItem $configDir\*.json -Include "TechPreview.json"
-    $files += Get-ChildItem $configDir\*.json -Include "AddToExisting.json"
-    $files += Get-ChildItem $configDir\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json"
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $ConfigPath,
+        [Parameter()]
+        [switch]
+        $NoMore
+    )
+    $files = Get-ChildItem $ConfigPath\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
+    $files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
+    $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
+    #$files = Get-ChildItem $configDir\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
+    #$files += Get-ChildItem $configDir\*.json -Include "TechPreview.json"
+    #$files += Get-ChildItem $configDir\*.json -Include "AddToExisting.json"
+    $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json"
     $i = 0
     foreach ($file in $files) {
         $i = $i + 1
         write-Host "[$i] - $($file.Name)"
+    }
+    if (-Not $NoMore.IsPresent) {
+        Write-Host "[M] - Show More (Custom and Previous config files)"
     }
     $responseValid = $false
     while ($responseValid -eq $false) {
@@ -57,6 +73,27 @@ function Select-Config {
             }
         }
         catch {}
+        if (-Not $NoMore.IsPresent) {
+            if ($response.ToLowerInvariant() -eq "m") {
+                $config = Select-Config $configDir -NoMore
+                if (-not $null -eq $config) {
+                    return $config
+                }
+                $i = 0
+                foreach ($file in $files) {
+                    $i = $i + 1
+                    write-Host "[$i] - $($file.Name)"
+                }
+                if (-Not $NoMore.IsPresent) {
+                    Write-Host "[M] - Show More (Custom and Previous config files)"
+                }
+            }
+        }
+        else {
+            if ($response -eq "") {
+                return $null
+            }
+        }
     }
     $Global:configfile = $files[[int]$response - 1]
     $config = Get-Content $Global:configfile -Force | ConvertFrom-Json
@@ -361,7 +398,7 @@ function Select-VirtualMachines {
     }
 }
 
-$Global:Config = Select-Config
+$Global:Config = Select-Config $sampleDir
 $valid = $false
 while ($valid -eq $false) {
     Select-Options $($config.vmOptions) "Select Global Property to modify"
