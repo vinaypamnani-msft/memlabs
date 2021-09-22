@@ -983,14 +983,16 @@ function Get-UserConfiguration {
     # Get deployment configuration
     $configPath = Join-Path $Common.ConfigPath $Configuration
     if (-not (Test-Path $configPath)) {
-        $return.Message = "Get-UserConfiguration: $configPath not found. Please create the config manually or use genconfig.ps1, and try again."
-        return $return
-    }
-    else {
-        # Write-Log "Get-UserConfiguration: Loading $configPath."
+        $sampleConfigPath = Join-Path $Common.ConfigPath "samples\$Configuration"
+        if (-not (Test-Path $sampleConfigPath)) {
+            $return.Message = "Get-UserConfiguration: $Configuration not found in $configPath or $sampleConfigPath. Please create the config manually or use genconfig.ps1, and try again."
+            return $return
+        }
+        $configPath = $sampleConfigPath
     }
 
     try {
+        Write-Log "Get-UserConfiguration: Loading $configPath." -LogOnly
         $config = Get-Content $configPath -Force | ConvertFrom-Json
         $return.Loaded = $true
         $return.Config = $config
