@@ -969,6 +969,12 @@ function Get-UserConfiguration {
         [string]$Configuration
     )
 
+    $return = [PSCustomObject]@{
+        Loaded  = $false
+        Config  = $null
+        Message = $null
+    }
+
     # Add extension
     if (-not $Configuration.EndsWith(".json")) {
         $Configuration = "$Configuration.json"
@@ -977,8 +983,8 @@ function Get-UserConfiguration {
     # Get deployment configuration
     $configPath = Join-Path $Common.ConfigPath $Configuration
     if (-not (Test-Path $configPath)) {
-        Write-Log "Get-UserConfiguration: $configPath not found for specified configuration. Please create the config, and try again." -Failure -LogOnly
-        return
+        $return.Message = "Get-UserConfiguration: $configPath not found. Please create the config manually or use genconfig.ps1, and try again."
+        return $return
     }
     else {
         # Write-Log "Get-UserConfiguration: Loading $configPath."
@@ -986,11 +992,13 @@ function Get-UserConfiguration {
 
     try {
         $config = Get-Content $configPath -Force | ConvertFrom-Json
-        return $config
+        $return.Loaded = $true
+        $return.Config = $config
+        return $return
     }
     catch {
-        Write-Log "Get-UserConfiguration: Failed to load $configPath. $_" -Failure -LogOnly
-        return $null
+        $return.Message = "Get-UserConfiguration: Failed to load $configPath. $_"
+        return $return
     }
 
 }
@@ -1011,7 +1019,10 @@ function Get-FilesForConfiguration {
 
     # Load config file
     if ($Configuration -and -not $DownloadAll) {
-        $config = Get-UserConfiguration -Configuration $Configuration
+        $result = Get-UserConfiguration -Configuration $Configuration
+        if ($result.Loaded) {
+            $config = $result.Config
+        }
     }
 
     # Config object
@@ -1832,5 +1843,5 @@ Get-StorageConfig
 ### Set supported options
 Set-SupportedOptions
 
-### Copy sample config
-Copy-SampleConfigs
+### Copy sample config - not needed now that new-lab calls genconfig, and genconfig displays samples
+# Copy-SampleConfigs
