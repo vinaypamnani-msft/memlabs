@@ -1166,6 +1166,11 @@ function Test-Configuration {
     # VM Options
     # ===========
 
+    # prefix
+    if (-not $configObject.vmOptions.prefix) {
+        Add-ValidationFailure -Message "VM Options Validation: vmOptions.prefix not present in vmOptions. You must specify the prefix that will be added to name of Virtual Machine(s)." -ReturnObject $return -Failure
+    }
+
     # basePath
     if (-not $configObject.vmOptions.basePath) {
         Add-ValidationFailure -Message "VM Options Validation: vmOptions.basePath not present in vmOptions. You must specify the base path where the Virtual Machines will be created." -ReturnObject $return -Failure
@@ -1259,6 +1264,11 @@ function Test-Configuration {
     # ==============
     foreach ($vm in $configObject.virtualMachines) {
 
+        # vmName characters
+        if ($vm.vmName.Length + $configObject.vmOptions.prefix.Length -gt 15) {
+            Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] with prefix [$($configObject.vmOptions.prefix)] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $return -Failure
+        }
+
         # Supported DSC Role
         if ($Common.Supported.Roles -notcontains $vm.role) {
             Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] does not contain a supported role [$($vm.role)]. Supported values are: DC, CS, PS, DPMP and DomainMember" -ReturnObject $return -Failure
@@ -1270,8 +1280,15 @@ function Test-Configuration {
         }
 
         # Supported SQL
-        if ($vm.sqlVersion -and $Common.Supported.SqlVersions -notcontains $vm.sqlVersion) {
-            Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]. Run Get-AvailableFiles.ps1." -ReturnObject $return -Failure
+        if ($vm.sqlVersion) {
+            if ($Common.Supported.SqlVersions -notcontains $vm.sqlVersion) {
+                Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]. Run Get-AvailableFiles.ps1." -ReturnObject $return -Failure
+            }
+
+            if ($vm.operatingSystem -notlike "*Server*") {
+                Add-ValidationFailure -Message "VM Validation: SQL Server specified in configuration without a Server Operating System." -ReturnObject $return -Failure
+            }
+
         }
 
         # Memory
@@ -1839,6 +1856,11 @@ function Set-SupportedOptions {
         "DomainMember"
     )
 
+    $rolesForExisting = @(
+        "DPMP",
+        "DomainMember"
+    )
+
     $cmVersions = @(
         "current-branch",
         "tech-preview"
@@ -1850,6 +1872,7 @@ function Set-SupportedOptions {
 
     $supported = [PSCustomObject]@{
         Roles            = $roles
+        RolesForExisting = $rolesForExisting
         OperatingSystems = $operatingSystems
         SqlVersions      = $sqlVersions
         CMVersions       = $cmVersions
