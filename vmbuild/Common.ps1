@@ -946,14 +946,16 @@ function Get-StorageConfig {
             Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent
             $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 
-            # Get local admin password
-            $username = "vmbuildadmin"
-            $item = $Common.AzureFileList.OS | Where-Object { $_.id -eq $username }
-            $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)?$($StorageConfig.StorageToken)"
-            $response = Invoke-WebRequest -Uri $fileUrl -ErrorAction Stop
-            $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
-            $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
         }
+
+        # Get local admin password, regardless of whether we should update file list
+        $username = "vmbuildadmin"
+        $item = $Common.AzureFileList.OS | Where-Object { $_.id -eq $username }
+        $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)?$($StorageConfig.StorageToken)"
+        $response = Invoke-WebRequest -Uri $fileUrl -ErrorAction Stop
+        $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
+        $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
+
     }
     catch {
         $Common.FatalError = "Get-StorageConfig: Storage Config found, but storage access failed. $_"
