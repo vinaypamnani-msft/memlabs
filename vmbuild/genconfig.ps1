@@ -234,11 +234,11 @@ function get-ValidResponse {
             if ([bool]$currentValue) {
                 if ($currentValue.ToLowerInvariant() -eq "true" -or $currentValue.ToLowerInvariant() -eq "false") {
                     if ($response.ToLowerInvariant() -eq "true") {
-                        $response = "True"
+                        $response = $true
                         return $response
                     }
                     if ($response.ToLowerInvariant() -eq "false") {
-                        $response = "False"
+                        $response = $false
                         return $response
                     }
                     $responseValid = $false
@@ -439,7 +439,12 @@ $config | ConvertTo-Json -Depth 3 | Out-File $filename
 $return.ConfigFileName = Split-Path -Path $fileName -Leaf
 Write-Host "Saved to $filename"
 Write-Host
+Show-Summary ($c)
 
+if (-not $InternalUseOnly.IsPresent) {
+    Write-Host "You can deploy this configuration by running the following command:"
+    Write-Host "$($PSScriptRoot)\New-Lab.ps1 -Configuration $($return.ConfigFileName)"
+}
 
 
 #================================= NEW LAB SCENERIO ============================================
