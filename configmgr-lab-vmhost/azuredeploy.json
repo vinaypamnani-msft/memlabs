@@ -96,8 +96,7 @@
         }
       },
       "tags": {
-        "CSSLAB": "[variables('tagName')]",
-        "Automation": "Ignore"
+        "CSSLAB": "[variables('tagName')]"
       }
     },
     {
@@ -123,8 +122,7 @@
         ]
       },
       "tags": {
-        "CSSLAB": "[variables('tagName')]",
-        "Automation": "Ignore"
+        "CSSLAB": "[variables('tagName')]"
       }
     },
     {
@@ -154,8 +152,7 @@
         ]
       },
       "tags": {
-        "CSSLAB": "[variables('tagName')]",
-        "Automation": "Ignore"
+        "CSSLAB": "[variables('tagName')]"
       }
     },
     {
@@ -172,8 +169,7 @@
         "tier": "Regional"
       },
       "tags": {
-        "CSSLAB": "[variables('tagName')]",
-        "Automation": "Ignore"
+        "CSSLAB": "[variables('tagName')]"
       }
     },
     {
