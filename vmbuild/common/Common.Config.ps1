@@ -125,7 +125,7 @@ function Get-FilesForConfiguration {
     }
 }
 
-function Add-ValidationFailure {
+function Add-ValidationMessage {
     param (
         [string]$Message,
         [object]$ReturnObject,
@@ -133,6 +133,7 @@ function Add-ValidationFailure {
         [switch]$Warning
     )
 
+    Write-Host $Message
     $ReturnObject.Problems += 1
     [void]$ReturnObject.Message.AppendLine($Message)
 
@@ -143,6 +144,464 @@ function Add-ValidationFailure {
     if ($Warning.IsPresent) {
         $ReturnObject.Warnings += 1
     }
+}
+
+function Test-ValidVmOptions {
+    param (
+        [object]
+        $ConfigObject,
+        [object]
+        $ReturnObject
+    )
+
+    # prefix
+    if (-not $ConfigObject.vmOptions.prefix) {
+        Add-ValidationMessage -Message "VM Options Validation: vmOptions.prefix not present in vmOptions. You must specify the prefix that will be added to name of Virtual Machine(s)." -ReturnObject $ReturnObject -Failure
+    }
+
+    # basePath
+    if (-not $ConfigObject.vmOptions.basePath) {
+        Add-ValidationMessage -Message "VM Options Validation: vmOptions.basePath not present in vmOptions. You must specify the base path where the Virtual Machines will be created." -ReturnObject $ReturnObject -Failure
+    }
+    else {
+        if (-not $ConfigObject.vmOptions.basepath.Contains(":\")) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.basePath value [$($ConfigObject.vmOptions.basePath)] is invalid. You must specify the full path. For example: E:\VirtualMachines" -ReturnObject $ReturnObject -Failure
+        }
+        else {
+            $driveLetter = $ConfigObject.vmOptions.basepath.Substring(0, 1)
+            if (-not (Test-Path "$driveLetter`:\")) {
+                Add-ValidationMessage -Message "VM Options Validation: vmOptions.basePath value [$($ConfigObject.vmOptions.basePath)] is invalid. You must specify a valid path. For example: E:\VirtualMachines" -ReturnObject $ReturnObject -Failure
+            }
+
+            if ($driveLetter -in "C", "D", "Z") {
+                Add-ValidationMessage -Message "VM Options Validation: vmOptions.basePath value [$($ConfigObject.vmOptions.basePath)] is invalid. You must specify a drive letter other than C/D/Z. For example: E:\VirtualMachines" -ReturnObject $ReturnObject -Failure
+            }
+        }
+    }
+
+    # domainName
+    if (-not $ConfigObject.vmOptions.domainName) {
+        Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName not present in vmOptions. You must specify the Domain name." -ReturnObject $ReturnObject -Failure
+    }
+    else {
+
+        # contains .
+        if (-not $ConfigObject.vmOptions.domainName.Contains(".")) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName value [$($ConfigObject.vmOptions.domainName)] is invalid. You must specify the Full Domain name. For example: contoso.com" -ReturnObject $ReturnObject -Failure
+        }
+
+        # valid domain name
+        $pattern = "^((?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,6}$"
+        if (-not ($ConfigObject.vmOptions.domainName -match $pattern)) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName value [$($ConfigObject.vmOptions.domainName)] contains invalid characters. You must specify a valid Domain name. For example: contoso.com." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+    # domainAdminName
+    if (-not $ConfigObject.vmOptions.domainAdminName) {
+        Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName not present in vmOptions. You must specify the Domain Admin user name that will be created." -ReturnObject $ReturnObject -Failure
+    }
+    else {
+
+        $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"')]"
+        if ($ConfigObject.vmOptions.domainAdminName -match $pattern) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+    # network
+    if (-not $ConfigObject.vmOptions.network) {
+        Add-ValidationMessage -Message "VM Options Validation: vmOptions.network not present in vmOptions. You must specify the Network subnet for the environment." -ReturnObject $ReturnObject -Failure
+    }
+    else {
+        $pattern = "^(192.168)(.([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]).0)$"
+        if (-not ($ConfigObject.vmOptions.network -match $pattern)) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
+        }
+    }
+}
+
+function Test-ValidCmOptions {
+    param (
+        [object]
+        $ConfigObject,
+        [object]
+        $ReturnObject
+    )
+
+    # version
+    if ($Common.Supported.CMVersions -notcontains $ConfigObject.cmOptions.version) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions contains invalid CM Version [$($ConfigObject.cmOptions.version)]. Must be either 'current-branch' or 'tech-preview'." -ReturnObject $ReturnObject -Failure
+    }
+
+    # install
+    if ($ConfigObject.cmOptions.install -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.install has an invalid value [$($ConfigObject.cmOptions.install)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    }
+
+    # updateToLatest
+    if ($ConfigObject.cmOptions.updateToLatest -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.updateToLatest has an invalid value [$($ConfigObject.cmOptions.updateToLatest)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    }
+
+    # installDPMPRoles
+    if ($ConfigObject.cmOptions.installDPMPRoles -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.installDPMPRoles has an invalid value [$($ConfigObject.cmOptions.installDPMPRoles)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    }
+
+    # pushClientToDomainMembers
+    if ($ConfigObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.pushClientToDomainMembers has an invalid value [$($ConfigObject.cmOptions.pushClientToDomainMembers)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    }
+
+}
+
+function Test-ValidVmSupported {
+    param (
+        [object]
+        $VM,
+        [object]
+        $ConfigObject,
+        [object]
+        $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+
+    # vmName characters
+    if ($vm.vmName.Length + $ConfigObject.vmOptions.prefix.Length -gt 15) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] with prefix [$($ConfigObject.vmOptions.prefix)] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Failure
+    }
+
+    # Supported OS
+    if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+    }
+
+    # Supported DSC Roles for Existing scenario
+    if ($configObject.vmOptions.existingDCNameWithPrefix) {
+        # Supported DSC Roles for Existing Scenario
+        if ($Common.Supported.RolesForExisting -notcontains $vm.role) {
+            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported role [$($vm.role)]. Supported values are: DC, CS, PS, DPMP and DomainMember" -ReturnObject $ReturnObject -Failure
+        }
+    }
+    else {
+        # Supported DSC Roles
+        if ($Common.Supported.Roles -notcontains $vm.role) {
+            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported role [$($vm.role)]. Supported values are: DC, CS, PS, DPMP and DomainMember" -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+}
+
+function Test-ValidVmMemory {
+    param (
+        [object]
+        $VM,
+        [object]
+        $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
+
+    # Memory
+    if (-not $VM.memory) {
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] does not contain memory value []. Specify desired memory in quotes; For example: ""4GB""" -ReturnObject $ReturnObject -Failure
+    }
+    else {
+
+        $vmMemory = $VM.memory
+
+        # not string
+        if ($vmMemory -isnot [string]) {
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory in quotes; For example: ""4GB""" -ReturnObject $ReturnObject -Failure
+        }
+
+        # memory doesn't contain MB/GB
+        if ($vmMemory -is [string] -and -not ($vmMemory.EndsWith("MB") -or $vmMemory.EndsWith("GB"))) {
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory in quotes with MB/GB; For example: ""4GB""" -ReturnObject $ReturnObject -Failure
+        }
+
+        # memory less than 512MB
+        if ($vmMemory.EndsWith("MB") -and $([int]$vmMemory.Replace("MB", "")) -lt 512 ) {
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should have more than 512MB" -ReturnObject $ReturnObject -Failure
+        }
+
+        # memory greater than 64GB
+        if ($vmMemory.EndsWith("GB") -and $([int]$vmMemory.Replace("GB", "")) -gt 64 ) {
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should have less than 64GB" -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+}
+
+function Test-ValidVmDisks {
+    param (
+        [object]
+        $VM,
+        [object]
+        $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
+
+    # Additional Disks
+    if ($VM.additionalDisks) {
+        $validLetters = 69..89 | ForEach-Object { [char]$_ }    # Letters E-Y
+        $disks = $VM.additionalDisks
+        $disks | Get-Member -MemberType NoteProperty | ForEach-Object {
+
+            # valid drive letter
+            if ($_.Name.Length -ne 1 -or $validLetters -notcontains $_.Name) {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must have a single drive letter between E and Y." -ReturnObject $ReturnObject -Failure
+            }
+
+            $size = $($vm.additionalDisks."$($_.Name)")
+
+            if (-not $size.EndsWith("GB")) {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Specify desired size in quotes with GB; For example: ""200GB""" -ReturnObject $ReturnObject -Failure
+            }
+
+            if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -lt 10 ) {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must be larger than 10GB" -ReturnObject $ReturnObject -Failure
+            }
+
+            if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -gt 1000 ) {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must be less than 1000GB" -ReturnObject $ReturnObject -Failure
+            }
+        }
+    }
+
+}
+
+function Test-ValidVmProcs {
+    param (
+        [object]
+        $VM,
+        [object]
+        $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
+
+    if (-not $VM.virtualProcs -or $VM.virtualProcs -isnot [int]) {
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid virtualProcs [$($vm.virtualProcs)]. Specify desired virtualProcs without quotes; For example: 2" -ReturnObject $ReturnObject -Failure
+    }
+    else {
+        $virtualProcs = $VM.virtualProcs
+        if ($virtualProcs -gt 16 -or $virtualProcs -lt 1) {
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] virtualProcs value [$virtualProcs] is invalid. Specify a value from 1-16." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+}
+
+function Test-ValidVmServerOS {
+    param (
+        [object]
+        $VM,
+        [object]
+        $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
+
+    if ($VM.operatingSystem -notlike "*Server*") {
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server Operating System." -ReturnObject $ReturnObject -Failure
+    }
+
+}
+
+function Test-ValidVmPath {
+    param (
+        [object]
+        $VM,
+        [string]
+        $PathProperty,
+        [string]
+        $ValidPathExample,
+        [object]
+        $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    if (-not $VM.$PathProperty) {
+        return
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
+
+    # path
+    if (-not $VM.$PathProperty.Contains(":\") -or $VM.$PathProperty.EndsWith(":") -or $VM.$PathProperty.EndsWith("\")) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid $PathProperty [$($VM.$PathProperty)]. Value must be a valid path; For example: ""$ValidPathExample""." -ReturnObject $ReturnObject -Failure
+    }
+    else {
+
+        # valid drive
+        $installDrive = $VM.$PathProperty.Substring(0, 1)
+
+        if ($installDrive -in "A", "B", "D", "Z") {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. A/B/D/Z drive letters are not allowed." -ReturnObject $ReturnObject -Failure
+        }
+
+        if ($installDrive -ne "C" -and -not $VM.additionalDisks) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Failure
+        }
+
+        if ($installDrive -ne "C" -and $VM.additionalDisks) {
+            $defined = $VM.additionalDisks | Get-Member -Name $installDrive
+            if (-not $defined) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Failure
+            }
+        }
+
+    }
+}
+
+function Test-ValidRoleDC {
+    param (
+        [object]
+        $ConfigObject,
+        [object]
+        $ReturnObject
+    )
+
+    $DCVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DC" }
+    $vmRole = "DC"
+
+    $containsDC = $configObject.virtualMachines.role.Contains("DC")
+    $existingDC = $configObject.vmOptions.existingDCNameWithPrefix
+
+    if ($containsDC) {
+
+        if ($existingDC) {
+            Add-ValidationMessage -Message "$vmRole Validation: Domain Controller (DC Role) specified in configuration with vmOptions.existingDCNameWithPrefix. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Failure
+        }
+
+        if (Test-SingleRole -VM $DCVM -ReturnObject $ReturnObject) {
+            # Server OS
+            Test-ValidVmServerOS -VM $DCVM -ReturnObject $ReturnObject
+        }
+    }
+    else {
+
+        # Existing Scenario, without existing DC Name
+        if (-not $existingDC) {
+            Add-ValidationMessage -Message "$vmRole Validation: DC role not specified in the configuration file and vmOptions.existingDCNameWithPrefix not present." -ReturnObject $ReturnObject -Failure
+        }
+
+        if ($existingDC) {
+
+            # Check VM exists in Hyper-V
+            $vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
+            if (-not $vm) {
+                Add-ValidationMessage -Message "$vmRole Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM with the same name was not found in Hyper-V." -ReturnObject $ReturnObject -Warning
+            }
+            else {
+                if ($vm.State -eq "Running") {
+                    # Check network in Hyper-V
+                    $vmnet = Get-VM -Name $existingDC -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+                    if ($vmnet.SwitchName -ne $configObject.vmOptions.network) {
+                        Add-ValidationMessage -Message "$vmRole Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM Switch [$($vmnet.SwitchName)] doesn't match specified network [$($configObject.vmOptions.network)]." -ReturnObject $ReturnObject -Warning
+                    }
+                }
+                else {
+                    # VM Not running, cannot validate network
+                    Add-ValidationMessage -Message "$vmRole Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM is not Running." -ReturnObject $ReturnObject -Warning
+                }
+            }
+        }
+    }
+}
+
+function Test-ValidRoleCSPS {
+    param (
+        [object]
+        $VM,
+        [object]
+        $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
+
+    # Single CS/PS
+    if (-not (Test-SingleRole -VM $VM -ReturnObject $ReturnObject)) {
+        return
+    }
+
+    # PS/CS must contain SQL
+    if (-not $VM.sqlVersion) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Failure
+    }
+
+    # Site Code
+    if ($PSVM.siteCode.Length -ne 3) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code [$($VM.siteCode)]." -ReturnObject $ReturnObject -Failure
+    }
+
+    # Server OS
+    Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
+
+    # install dir
+    Test-ValidVmPath -VM $PSVM -PathProperty "cmInstallDir" -ValidPathExample "E:\ConfigMgr" -ReturnObject $ReturnObject
+
+}
+
+function Test-SingleRole {
+    param (
+        [object]
+        $VM,
+        [object]
+        $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmRole = $VM.role
+
+    # Single Role
+    if ($VM -is [object[]] -and $VM.Count -ne 1) {
+        $vmRole = $VM.role | Select-Object -Unique
+        Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is currently supported." -ReturnObject $ReturnObject -Failure
+        return $false
+    }
+
+    return $true
 }
 
 function Test-Configuration {
@@ -186,99 +645,16 @@ function Test-Configuration {
     $containsDPMP = $configObject.virtualMachines.role.Contains("DPMP")
     $needCMOptions = $containsCS -or $containsPS
 
-    # VM's
-    $DCVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DC" }
-    $CSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "CS" }
-    $PSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "PS" }
-    $DPMPVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DPMP" }
-
     # VM Options
     # ===========
-
-    # prefix
-    if (-not $configObject.vmOptions.prefix) {
-        Add-ValidationFailure -Message "VM Options Validation: vmOptions.prefix not present in vmOptions. You must specify the prefix that will be added to name of Virtual Machine(s)." -ReturnObject $return -Failure
-    }
-
-    # basePath
-    if (-not $configObject.vmOptions.basePath) {
-        Add-ValidationFailure -Message "VM Options Validation: vmOptions.basePath not present in vmOptions. You must specify the base path where the Virtual Machines will be created." -ReturnObject $return -Failure
-    }
-    else {
-        if (-not $configObject.vmOptions.basepath.Contains(":\")) {
-            Add-ValidationFailure -Message "VM Options Validation: vmOptions.basePath value [$($configObject.vmOptions.basePath)] is invalid. You must specify the full path. For example: E:\VirtualMachines" -ReturnObject $return -Failure
-        }
-    }
-
-    # domainName
-    if (-not $configObject.vmOptions.domainName) {
-        Add-ValidationFailure -Message "VM Options Validation: vmOptions.domainName not present in vmOptions. You must specify the Domain name." -ReturnObject $return -Failure
-    }
-    else {
-
-        # contains .
-        if (-not $configObject.vmOptions.domainName.Contains(".")) {
-            Add-ValidationFailure -Message "VM Options Validation: vmOptions.domainName value [$($configObject.vmOptions.domainName)] is invalid. You must specify the Full Domain name. For example: contoso.com" -ReturnObject $return -Failure
-        }
-
-        # valid domain name
-        $pattern = "^((?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,6}$"
-        if (-not ($configObject.vmOptions.domainName -match $pattern)) {
-            Add-ValidationFailure -Message "VM Options Validation: vmOptions.domainName value [$($configObject.vmOptions.domainName)] is invalid. You must specify a valid Domain name. For example: contoso.com." -ReturnObject $return -Failure
-        }
-    }
-
-    # domainAdminName
-    if (-not $configObject.vmOptions.domainAdminName) {
-        Add-ValidationFailure -Message "VM Options Validation: vmOptions.domainAdminName not present in vmOptions. You must specify the Domain Admin user name that will be created." -ReturnObject $return -Failure
-    }
-    else {
-
-        $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"')]"
-        if ($configObject.vmOptions.domainAdminName -match $pattern) {
-            Add-ValidationFailure -Message "VM Options Validation: vmOptions.domainAdminName [$($configObject.vmoptions.domainAdminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $return -Failure
-        }
-    }
-
-    # network
-    if (-not $configObject.vmOptions.network) {
-        Add-ValidationFailure -Message "VM Options Validation: vmOptions.network not present in vmOptions. You must specify the Network subnet for the environment." -ReturnObject $return -Failure
-    }
-    else {
-        $pattern = "^(192.168)(.([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]).0)$"
-        if (-not ($configObject.vmOptions.network -match $pattern)) {
-            Add-ValidationFailure -Message "VM Options Validation: vmOptions.network [$($configObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $return -Failure
-        }
-    }
+    Test-ValidVmOptions -ConfigObject $configObject -ReturnObject $return
 
     # CM Options
     # ===========
 
     # CM Version
     if ($needCMOptions) {
-        if ($Common.Supported.CMVersions -notcontains $configObject.cmOptions.version) {
-            Add-ValidationFailure -Message "CM Options Validation: cmOptions contains invalid CM Version [$($configObject.cmOptions.version)]. Must be either 'current-branch' or 'tech-preview'." -ReturnObject $return -Failure
-        }
-
-        # install
-        if ($configObject.cmOptions.install -isnot [bool]) {
-            Add-ValidationFailure -Message "CM Options Validation: cmOptions.install has an invalid value [$($configObject.cmOptions.install)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $return -Failure
-        }
-
-        # updateToLatest
-        if ($configObject.cmOptions.updateToLatest -isnot [bool]) {
-            Add-ValidationFailure -Message "CM Options Validation: cmOptions.updateToLatest has an invalid value [$($configObject.cmOptions.updateToLatest)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $return -Failure
-        }
-
-        # installDPMPRoles
-        if ($configObject.cmOptions.installDPMPRoles -isnot [bool]) {
-            Add-ValidationFailure -Message "CM Options Validation: cmOptions.installDPMPRoles has an invalid value [$($configObject.cmOptions.installDPMPRoles)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $return -Failure
-        }
-
-        # pushClientToDomainMembers
-        if ($configObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
-            Add-ValidationFailure -Message "CM Options Validation: cmOptions.pushClientToDomainMembers has an invalid value [$($configObject.cmOptions.pushClientToDomainMembers)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $return -Failure
-        }
+        Test-ValidCmOptions -ConfigObject $configObject -ReturnObject $return
     }
 
     # Role Conflicts
@@ -286,280 +662,85 @@ function Test-Configuration {
 
     # CS/PS must include DC
     if (($containsCS -or $containsPS) -and -not $containsDC) {
-        Add-ValidationFailure -Message "Role Conflict: CS or PS role specified in the configuration file without DC; PS/CS roles require a DC to be present in the config file. Adding CS/PS to existing environment is not currently supported." -ReturnObject $return -Failure
+        Add-ValidationMessage -Message "Role Conflict: CS or PS role specified in the configuration file without DC; PS/CS roles require a DC to be present in the config file. Adding CS/PS to existing environment is not currently supported." -ReturnObject $return -Failure
     }
 
     # VM Validations
     # ==============
     foreach ($vm in $configObject.virtualMachines) {
 
-        # vmName characters
-        if ($vm.vmName.Length + $configObject.vmOptions.prefix.Length -gt 15) {
-            Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] with prefix [$($configObject.vmOptions.prefix)] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $return -Failure
-        }
+        # Supported values
+        Test-ValidVmSupported -VM $vm -ConfigObject $configObject -ReturnObject $return
 
-        # Supported DSC Role
-        if ($Common.Supported.Roles -notcontains $vm.role) {
-            Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] does not contain a supported role [$($vm.role)]. Supported values are: DC, CS, PS, DPMP and DomainMember" -ReturnObject $return -Failure
-        }
-
-        # Supported OS
-        if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
-            Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] does not contain a supported operatingSystem [$($vm.operatingSystem)]. Run Get-AvailableFiles.ps1." -ReturnObject $return -Failure
-        }
-
-        # Supported SQL
-        if ($vm.sqlVersion) {
-            if ($Common.Supported.SqlVersions -notcontains $vm.sqlVersion) {
-                Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]. Run Get-AvailableFiles.ps1." -ReturnObject $return -Failure
-            }
-
-            if ($vm.operatingSystem -notlike "*Server*") {
-                Add-ValidationFailure -Message "VM Validation: SQL Server specified in configuration without a Server Operating System." -ReturnObject $return -Failure
-            }
-
-        }
-
-        # Memory
-        if (-not $vm.memory) {
-            Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] does not contain memory value [$($vm.memory)]. Specify desired memory in quotes; For example: ""4GB""" -ReturnObject $return -Failure
-        }
-        else {
-
-            # not string
-            if ($vm.memory -isnot [string]) {
-                Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] memory value [$($vm.memory)] is invalid. Specify desired memory in quotes; For example: ""4GB""" -ReturnObject $return -Failure
-            }
-
-            # memory doesn't contain MB/GB
-            if ($vm.memory -is [string] -and -not ($vm.memory.EndsWith("MB") -or $vm.memory.EndsWith("GB"))) {
-                Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] memory value [$($vm.memory)] is invalid. Specify desired memory in quotes with MB/GB; For example: ""4GB""" -ReturnObject $return -Failure
-            }
-
-            # memory less than 512MB
-            if ($vm.memory.EndsWith("MB") -and $([int]$vm.memory.Replace("MB", "")) -lt 512 ) {
-                Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] memory value [$($vm.memory)] is invalid. Should have more than 512MB" -ReturnObject $return -Failure
-            }
-
-            # memory greater than 64GB
-            if ($vm.memory.EndsWith("GB") -and $([int]$vm.memory.Replace("GB", "")) -gt 64 ) {
-                Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] memory value [$($vm.memory)] is invalid. Should have less than 64GB" -ReturnObject $return -Failure
-            }
-
-
-        }
+        # Valid Memory
+        Test-ValidVmMemory -VM $vm -ReturnObject $return
 
         # virtualProcs
-        if (-not $vm.virtualProcs -or $vm.virtualProcs -isnot [int]) {
-            Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] does not contain valid virtualProcs value [$($vm.virtualProcs)]. Specify desired virtualProcs without quotes; For example: 2" -ReturnObject $return -Failure
-        }
-        else {
-            if ($vm.virtualProcs -gt 16) {
-                Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] virtualProcs value [$($vm.virtualProcs)] is invalid. Specify a value from 1-16." -ReturnObject $return -Failure
-            }
-        }
+        Test-ValidVmProcs -VM $vm -ReturnObject $return
 
-        # Additional Disks
-        if ($vm.additionalDisks) {
-            $validLetters = 69..89 | ForEach-Object { [char]$_ }    # Letters E-Y
+        # Valid additionalDisks
+        Test-ValidVmDisks -VM $vm -ReturnObject $return
 
-            $vm.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-
-                # valid drive letter
-                if ($_.Name.Length -ne 1 -or $validLetters -notcontains $_.Name) {
-                    Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] contains invalid additional disks [$($vm.additionalDisks)]; Disks must have a single drive letter between E and Y." -ReturnObject $return -Failure
-                }
-
-                $size = $($vm.additionalDisks."$($_.Name)")
-                if (-not $size.EndsWith("GB")) {
-                    Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] contains invalid additional disks [$($vm.additionalDisks)]; Specify desired size in quotes with GB; For example: ""200GB""" -ReturnObject $return -Failure
-                }
-                if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -lt 10 ) {
-                    Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] contains invalid additional disks [$($vm.additionalDisks)]; Disks must be larger than 10GB" -ReturnObject $return -Failure
-                }
-                if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -gt 1000 ) {
-                    Add-ValidationFailure -Message "VM Validation: [$($vm.vmName)] contains invalid additional disks [$($vm.additionalDisks)]; Disks must be less than 1000GB" -ReturnObject $return -Failure
-                }
-            }
-        }
-
-        # sqlInstance dir
-        if ($vm.sqlInstanceDir) {
-
-            # path
-            if (-not $vm.sqlInstanceDir.Contains(":\")) {
-                Add-ValidationFailure -Message "VM Validation: VM [$($vm.vmName)] contains invalid sqlInstanceDir [$($vm.sqlInstanceDir)]. Value must be a valid path; For example: ""F:\SQL""." -ReturnObject $return -Failure
+        if ($vm.sqlVersion) {
+            # Supported SQL
+            if ($Common.Supported.SqlVersions -notcontains $vm.sqlVersion) {
+                Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]. Run Get-AvailableFiles.ps1." -ReturnObject $return -Failure
             }
 
-            # valid drive
-            $installDrive = $vm.sqlInstanceDir.Substring(0, 1)
-            if ($installDrive -ne "C") {
-                $defined = $vm.additionalDisks | Get-Member -Name $installDrive
-                if (-not $defined) {
-                    Add-ValidationFailure -Message "VM Validation: VM [$($vm.vmName)] contains invalid sqlInstanceDir [$($vm.sqlInstanceDir)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $return -Failure
-                }
-            }
+            # Server OS
+            Test-ValidVmServerOS -VM $vm -ReturnObject $return
+
+            # sqlInstance dir
+            Test-ValidVmPath -VM $vm -PathProperty "sqlInstanceDir" -ValidPathExample "F:\SQL" -ReturnObject $return
         }
 
     }
 
     # DC Validation
     # ==============
-    $existingDC = $configObject.vmOptions.existingDCNameWithPrefix
-    if ($containsDC) {
-
-        # OS Version
-        if ($DCVM.operatingSystem -notlike "*Server*") {
-            Add-ValidationFailure -Message "DC Validation: Domain Controller (DC Role) specified in configuration without a Server Operating System." -ReturnObject $return -Failure
-        }
-
-        if ($existingDC) {
-            Add-ValidationFailure -Message "DC Validation: Domain Controller (DC Role) specified in configuration with vmOptions.existingDCNameWithPrefix. Adding a DC to existing environment is not supported." -ReturnObject $return -Failure
-        }
-
-        # DC VM count -eq 1
-        if ($DCVM -is [object[]] -and $DCVM.Count -ne 1) {
-            Add-ValidationFailure -Message "DC Validation: Multiple DC virtual Machines (DC Role) specified in configuration. Only single DC role is supported." -ReturnObject $return -Failure
-        }
-
-    }
-    else {
-
-        # Existing Scenario, without existing DC Name
-        if (-not $existingDC) {
-            Add-ValidationFailure -Message "DC Validation: DC role not specified in the configuration file and vmOptions.existingDCNameWithPrefix not present." -ReturnObject $return -Failure
-        }
-
-        if ($existingDC) {
-
-            # Check VM
-            $vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
-            if (-not $vm) {
-                Add-ValidationFailure -Message "DC Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM with the same name was not found in Hyper-V." -ReturnObject $return -Warning
-            }
-
-            # Check network
-            $vmnet = Get-VM -Name $existingDC -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
-            if ($vmnet.SwitchName -ne $configObject.vmOptions.network) {
-                Add-ValidationFailure -Message "DC Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM Switch [$($vmnet.SwitchName)] doesn't match specified network [$($configObject.vmOptions.network)]." -ReturnObject $return -Warning
-            }
-        }
-    }
+    Test-ValidRoleDC -ConfigObject $configObject -ReturnObject $return
 
     # CS Validations
     # ==============
     if ($containsCS) {
 
-        $csName = $CSVM.vmName
+        $CSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "CS" }
+        $vmName = $CSVM.vmName
+        $vmRole = $CSVM.role
 
         # tech preview and CAS
         if ($configObject.cmOptions.version -eq "tech-preview") {
-            Add-ValidationFailure -Message "CS Validation: CAS (CS Role) VM [$csName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Failure
         }
 
         # CAS without Primary
         if (-not $containsPS) {
-            Add-ValidationFailure -Message "CS Validation: CAS (CS Role) VM [$csName] specified without Primary Site (PS Role); When deploying CS Role, you must specify a PS Role as well." -ReturnObject $return -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site (PS Role); When deploying CS Role, you must specify a PS Role as well." -ReturnObject $return -Failure
         }
 
-        # CS must contain SQL
-        if (-not $CSVM.sqlVersion) {
-            Add-ValidationFailure -Message "CS Validation: CAS (CS Role) VM [$csName] defined without specifying sqlVersion; When deploying CS Role, you must specify the SQL Version." -ReturnObject $return -Failure
-        }
-
-        # OS Version
-        if ($CSVM.operatingSystem -notlike "*Server*") {
-            Add-ValidationFailure -Message "CS Validation: CAS (CS Role) VM [$csName] specified without a Server Operating System." -ReturnObject $return -Failure
-        }
-
-        # Site Code
-        if ($CSVM.siteCode.Length -ne 3) {
-            Add-ValidationFailure -Message "CS Validation: CAS (CS Role) VM [$csName] contains invalid Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Failure
-        }
-
-        # install dir
-        if ($CSVM.cmInstallDir) {
-
-            # valid drive
-            $installDrive = $CSVM.cmInstallDir.Substring(0, 1)
-            if ($installDrive -ne "C") {
-                $defined = $CSVM.additionalDisks | Get-Member -Name $installDrive
-                if (-not $defined) {
-                    Add-ValidationFailure -Message "CS Validation: CAS (CS Role) VM [$csName] contains invalid cmInstallDir [$($CSVM.cmInstallDir)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $return -Failure
-                }
-            }
-
-            # path
-            if (-not $CSVM.cmInstallDir.Contains(":\")) {
-                Add-ValidationFailure -Message "CS Validation: CAS (CS Role) VM [$csName] contains invalid cmInstallDir [$($CSVM.cmInstallDir)]. Value must be a valid path; For example: ""E:\ConfigMgr""." -ReturnObject $return -Failure
-            }
-        }
-
-        # CS VM count -eq 1
-        if ($CSVM -is [object[]] -and $CSVM.Count -ne 1) {
-            Add-ValidationFailure -Message "CS Validation: Multiple CS virtual Machines (CS Role) specified in configuration. Only single CS role is supported." -ReturnObject $return -Failure
-        }
+        # Validate CS role
+        Test-ValidRoleCSPS -VM $CSVM -ReturnObject $return
 
     }
 
     # PS Validations
     # ==============
     if ($containsPS) {
-
-        $psName = $PSVM.vmName
-
-        # PS must contain SQL
-        if (-not $PSVM.sqlVersion) {
-            Add-ValidationFailure -Message "PS Validation: Primary (PS Role) VM [$psName] specified without specifying sqlVersion; When deploying PS Role, you must specify the SQL Version." -ReturnObject $return -Failure
-        }
-
-        # OS Version
-        if ($PSVM.operatingSystem -notlike "*Server*") {
-            Add-ValidationFailure -Message "PS Validation: Primary (PS Role) VM [$psName] specified without a Server Operating System." -ReturnObject $return -Failure
-        }
-
-        # Site Code
-        if ($PSVM.siteCode.Length -ne 3) {
-            Add-ValidationFailure -Message "PS Validation: Primary (PS Role) VM [$psName] contains invalid Site Code [$($PSVM.siteCode)]." -ReturnObject $return -Failure
-        }
-
-        # install dir
-        if ($PSVM.cmInstallDir) {
-
-            # valid path
-            $installDrive = $PSVM.cmInstallDir.Substring(0, 1)
-            if ($installDrive -ne "C") {
-                $defined = $PSVM.additionalDisks | Get-Member -Name $installDrive
-                if (-not $defined) {
-                    Add-ValidationFailure -Message "PS Validation: Primary (PS Role) VM [$psName] contains invalid cmInstallDir [$($PSVM.cmInstallDir)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $return -Failure
-                }
-            }
-
-            # path
-            if (-not $PSVM.cmInstallDir.Contains(":\")) {
-                Add-ValidationFailure -Message "VM Validation: Primary (PS Role) VM [$psName] contains invalid cmInstallDir [$($PSVM.cmInstallDir)]. Value must be a valid path; For example: ""E:\ConfigMgr""." -ReturnObject $return -Failure
-            }
-        }
-
-        # PS VM count -eq 1
-        if ($PSVM -is [object[]] -and $PSVM.Count -ne 1) {
-            Add-ValidationFailure -Message "PS Validation: Multiple PS virtual Machines (PS Role) specified in configuration. Only single PS role is currently supported." -ReturnObject $return -Failure
-        }
-
+        # Validate PS role
+        $PSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "PS" }
+        Test-ValidRoleCSPS -VM $PSVM -ReturnObject $return
     }
 
     # DPMP Validations
     # =================
     if ($containsDPMP) {
 
-        # DPMP VM count -eq 1
-        if ($DPMPVM -is [object[]] -and $DPMPVM.Count -ne 1) {
-            Add-ValidationFailure -Message "DPMP Validation: Multiple DPMP virtual Machines (DPMP Role) specified in configuration. Only single DPMP role is currently supported." -ReturnObject $return -Failure
-        }
+        $DPMPVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DPMP" }
 
-        # OS Version
-        if ($DPMPVM.operatingSystem -notlike "*Server*") {
-            Add-ValidationFailure -Message "DPMP Validation: VM [$($DPMPVM.vmName)] has DPMP Role specified without a Server Operating System." -ReturnObject $return -Failure
+        # DPMP VM count -eq 1
+        if (Test-SingleRole -VM $DPMPVM -ReturnObject $return) {
+            # Server OS
+            Test-ValidVmServerOS -VM $DPMPVM -ReturnObject $return
         }
 
     }
