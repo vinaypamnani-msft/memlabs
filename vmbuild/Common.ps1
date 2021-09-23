@@ -690,6 +690,8 @@ function Get-FileFromStorage {
     $imageName = $File.id
     Write-Log "Get-FileFromStorage: Downloading/Verifying '$imageName'" -SubActivity
 
+    $success = $true
+
     foreach ($filename in $File.filename) {
         $imageUrl = "$($StorageConfig.StorageLocation)/$($filename)"
         $imageFileName = Split-Path $filename -Leaf
@@ -706,7 +708,7 @@ function Get-FileFromStorage {
             $i++
             if ($i -gt 10) {
                 Write-Log "Get-FileFromStorage: Timed out while waiting to download '$imageFileName'." -LogOnly
-                return $false
+                $success = $false
             }
         }
 
@@ -729,19 +731,18 @@ function Get-FileFromStorage {
 
             # What if returns success
             if ($WhatIf) {
-                return $true
+                $success = $true
             }
 
             # Check if path exists
             if (-not (Test-Path -Path $localImagePath)) {
-                return $false
+                $success = $false
             }
 
-            return $true
         }
-
-        return $true
     }
+
+    return $success
 }
 
 function Set-SupportedOptions {
