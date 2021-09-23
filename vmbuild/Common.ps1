@@ -753,9 +753,9 @@ function Set-SupportedOptions {
 ####################
 ### DOT SOURCING ###
 ####################
-. $PSScriptRoot\Common.BaseImage.ps1
-. $PSScriptRoot\Common.Config.ps1
-. $PSScriptRoot\Common.RdcMan.ps1
+. $PSScriptRoot\common\Common.BaseImage.ps1
+. $PSScriptRoot\common\Common.Config.ps1
+. $PSScriptRoot\common\Common.RdcMan.ps1
 
 ############################
 ### Common Object        ###
