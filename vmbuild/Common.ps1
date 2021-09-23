@@ -18,8 +18,6 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         [switch]$SubActivity,
         [Parameter(Mandatory = $false)]
-        [switch]$VerboseOnly,
-        [Parameter(Mandatory = $false)]
         [switch]$LogOnly,
         [Parameter(Mandatory = $false)]
         [switch]$OutputStream,
@@ -28,8 +26,13 @@ function Write-Log {
     )
 
     $HashArguments = @{}
-
     $info = $true
+
+    # Is Verbose?
+    $IsVerbose = $false
+    if ($MyInvocation.BoundParameters["Verbose"].IsPresent) {
+        $IsVerbose = $true
+    }
 
     If ($Success.IsPresent) {
         $info = $false
@@ -63,7 +66,7 @@ function Write-Log {
         $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Red)
     }
 
-    If ($VerboseOnly.IsPresent) {
+    If ($IsVerbose) {
         $info = $false
         $Text = "VERBOSE: $Text"
     }
@@ -84,7 +87,7 @@ function Write-Log {
     }
 
     # Write to console, if not logOnly and not OutputStream and not verbose
-    If (-not $LogOnly.IsPresent -and -not $OutputStream.IsPresent -and -not $VerboseOnly.IsPresent) {
+    If (-not $LogOnly.IsPresent -and -not $OutputStream.IsPresent -and -not $IsVerbose) {
         Write-Host $Text @HashArguments
     }
 
@@ -92,7 +95,7 @@ function Write-Log {
     $Text = "$time $Text"
 
     # Write to log, non verbose entries
-    if (-not $HostOnly.IsPresent -and -not $VerboseOnly.IsPresent) {
+    if (-not $HostOnly.IsPresent -and -not $IsVerbose) {
         try {
             $Text | Out-File $Common.LogPath -Append
         }
@@ -103,7 +106,7 @@ function Write-Log {
     }
 
     # Write verbose entries, if verbose logging enabled
-    if ($VerboseOnly.IsPresent -and $Common.VerboseLog) {
+    if ($IsVerbose -and $Common.VerboseEnabled) {
         try {
             $Text | Out-File $Common.LogPath -Append
         }
@@ -531,7 +534,7 @@ function Invoke-VmCommand {
 
     # Log entry
     if (-not $SuppressLog) {
-        Write-Log "Invoke-VmCommand: $VmName`: Running '$DisplayName'" -VerboseOnly
+        Write-Log "Invoke-VmCommand: $VmName`: Running '$DisplayName'" -Verbose
     }
 
     # Create return object
@@ -573,7 +576,7 @@ function Invoke-VmCommand {
     if (-not $failed) {
         $return.CommandResult = $true
         if (-not $SuppressLog) {
-            Write-Log "Invoke-VmCommand: $VmName`: Successfully ran '$DisplayName'" -LogOnly -VerboseOnly
+            Write-Log "Invoke-VmCommand: $VmName`: Successfully ran '$DisplayName'" -LogOnly -Verbose
         }
     }
 
@@ -597,7 +600,7 @@ function Get-VmSession {
     if ($global:ps_cache.ContainsKey($VmName)) {
         $ps = $global:ps_cache[$VmName]
         if ($ps.Availability -eq "Available") {
-            # Write-Log "Get-VmSession: $VmName`: Returning session from cache." -LogOnly -VerboseOnly
+            # Write-Log "Get-VmSession: $VmName`: Returning session from cache." -LogOnly -Verbose
             return $ps
         }
     }
@@ -609,12 +612,12 @@ function Get-VmSession {
 
     $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
-        Write-Log "Get-VmSession: $VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -VerboseOnly
+        Write-Log "Get-VmSession: $VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
         return $null
     }
 
     # Cache & return session
-    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username." -Success -VerboseOnly
+    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username." -Success -Verbose
     $global:ps_cache[$VmName] = $ps
     return $ps
 }
@@ -693,6 +696,19 @@ function Get-FileFromStorage {
         $localImagePath = Join-Path $Common.AzureFilesPath $filename
 
         $download = $true
+        $destinationDirectory = Split-Path $localImagePath -Leaf
+
+        $i = 0
+        while (Test-Path "$destinationDirectory\\BIT*.tmp") {
+            Write-Log "Get-FileFromStorage: Download for '$imageFileName' waiting on an existing download. Checking again in 2 minutes..." -LogOnly
+            Start-Sleep -Seconds 120
+
+            $i++
+            if ($i -gt 10) {
+                Write-Log "Get-FileFromStorage: Timed out while waiting to download '$imageFileName'." -LogOnly
+                return $false
+            }
+        }
 
         if (Test-Path $localImagePath) {
             Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath)."
@@ -708,8 +724,20 @@ function Get-FileFromStorage {
         }
 
         if ($download) {
-            # Write-Host "Get-FileFromStorage: Downloading '$imageName' to $localImagePath..."
+
             Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
+
+            # What if returns success
+            if ($WhatIf) {
+                return $true
+            }
+
+            # Check if path exists
+            if (-not (Test-Path -Path $localImagePath)) {
+                return $false
+            }
+
+            return $true
         }
     }
 }
@@ -763,6 +791,7 @@ function Set-SupportedOptions {
 
 if (-not $Common.Initialized) {
 
+
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
@@ -782,20 +811,20 @@ if (-not $Common.Initialized) {
         StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
         StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
         LogPath               = Join-Path $PSScriptRoot "vmbuild.log"                                     # Log File
+        VerboseEnabled        = $false                                                                    # Verbose Logging
         Supported             = $null                                                                     # Supported Configs
         AzureFileList         = $null
         LocalAdmin            = $null
-        VerboseLog            = $false
         FatalError            = $null
     }
+
+    Write-Log "Common: Initializing common..." -LogOnly
 
     # Storage config
     $global:StorageConfig = [PSCustomObject]@{
         StorageLocation = $null
         StorageToken    = $null
     }
-
-    Write-Log "Common: Initializing common..." -LogOnly
 
     ### Test Storage config and access
     Get-StorageConfig

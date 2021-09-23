@@ -44,37 +44,37 @@ function Get-UserConfiguration {
 
 }
 
-function Get-Files {
+# function Get-Files {
 
-    param (
-        [Parameter(Mandatory = $false, ParameterSetName = "ConfigFile", HelpMessage = "Configuration Name for which to download the files.")]
-        [string]$Configuration,
-        [Parameter(Mandatory = $false, ParameterSetName = "GetAll", HelpMessage = "Get all files.")]
-        [switch]$DownloadAll,
-        [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
-        [switch]$Force,
-        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
-        [switch]$WhatIf
-    )
+#     param (
+#         [Parameter(Mandatory = $false, ParameterSetName = "ConfigFile", HelpMessage = "Configuration Name for which to download the files.")]
+#         [string]$Configuration,
+#         [Parameter(Mandatory = $false, ParameterSetName = "GetAll", HelpMessage = "Get all files.")]
+#         [switch]$DownloadAll,
+#         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
+#         [switch]$Force,
+#         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+#         [switch]$WhatIf
+#     )
 
-    # Validate token exists
-    if ($Common.FatalError) {
-        Write-Log "Main: Critical Failure! $($Common.FatalError)" -Failure
-        return
-    }
+#     # Validate token exists
+#     if ($Common.FatalError) {
+#         Write-Log "Main: Critical Failure! $($Common.FatalError)" -Failure
+#         return
+#     }
 
-    Write-Host
+#     Write-Host
 
-    if ($Configuration) {
-        Get-FilesForConfiguration -Configuration $Configuration -Force:$Force -WhatIf:$WhatIf
-    }
+#     if ($Configuration) {
+#         $success = Get-FilesForConfiguration -Configuration $Configuration -Force:$Force -WhatIf:$WhatIf
+#     }
 
-    if ($DownloadAll) {
-        Get-FilesForConfiguration -DownloadAll -Force:$Force -WhatIf:$WhatIf
-    }
+#     if ($DownloadAll) {
+#         $success = Get-FilesForConfiguration -DownloadAll -Force:$Force -WhatIf:$WhatIf
+#     }
 
-    Write-Host
-}
+#     return $success
+# }
 
 function Get-FilesForConfiguration {
     param (
@@ -111,18 +111,27 @@ function Get-FilesForConfiguration {
 
     Write-Log "Get-FilesForConfiguration: Downloading/Verifying Files required by specified config..." -Activity
 
+    $allSuccess = $true
+
     foreach ($file in $Common.AzureFileList.OS) {
 
         if ($file.id -eq "vmbuildadmin") { continue }
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file.id) { continue }
-        Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
+        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
+        if (-not $worked) {
+            $allSuccess = $false
+        }
     }
 
     foreach ($file in $Common.AzureFileList.ISO) {
         if (-not $DownloadAll -and $sqlVersionsToGet -notcontains $file.id) { continue }
-        Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
-
+        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
+        if (-not $worked) {
+            $allSuccess = $false
+        }
     }
+
+    return $allSuccess
 }
 
 function Add-ValidationMessage {
@@ -133,7 +142,6 @@ function Add-ValidationMessage {
         [switch]$Warning
     )
 
-    Write-Host $Message
     $ReturnObject.Problems += 1
     [void]$ReturnObject.Message.AppendLine($Message)
 
@@ -568,7 +576,7 @@ function Test-ValidRoleCSPS {
     }
 
     # Site Code
-    if ($PSVM.siteCode.Length -ne 3) {
+    if ($VM.siteCode.Length -ne 3) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code [$($VM.siteCode)]." -ReturnObject $ReturnObject -Failure
     }
 
@@ -576,7 +584,7 @@ function Test-ValidRoleCSPS {
     Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
 
     # install dir
-    Test-ValidVmPath -VM $PSVM -PathProperty "cmInstallDir" -ValidPathExample "E:\ConfigMgr" -ReturnObject $ReturnObject
+    Test-ValidVmPath -VM $VM -PathProperty "cmInstallDir" -ValidPathExample "E:\ConfigMgr" -ReturnObject $ReturnObject
 
 }
 
@@ -862,7 +870,7 @@ function Copy-SampleConfigs {
     $realConfigPath = $Common.ConfigPath
     $sampleConfigPath = Join-Path $Common.ConfigPath "samples"
 
-    Write-Log "Copy-SampleConfigs: Checking if any sample configs need to be copied to config directory" -LogOnly -VerboseOnly
+    Write-Log "Copy-SampleConfigs: Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
     foreach ($item in Get-ChildItem $sampleConfigPath -File -Filter *.json) {
         $copyFile = $true
         $sampleFile = $item.FullName
@@ -872,13 +880,13 @@ function Copy-SampleConfigs {
             $sampleFileHash = Get-FileHash $sampleFile
             $configFileHash = Get-FileHash $configFile
             if ($configFileHash -ne $sampleFileHash) {
-                Write-Log "Copy-SampleConfigs: Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -VerboseOnly
+                Write-Log "Copy-SampleConfigs: Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
                 $copyFile = $false
             }
         }
 
         if ($copyFile) {
-            Write-Log "Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly -VerboseOnly
+            Write-Log "Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly -Verbose
             Copy-Item -Path $sampleFile -Destination $configFile -Force
         }
     }

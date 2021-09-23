@@ -26,6 +26,14 @@ param (
 # Dot source common
 . $PSScriptRoot\Common.ps1
 
+# Set Verbose
+if ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent) {
+    $Common.VerboseEnabled = $true
+}
+else {
+    $Common.VerboseEnabled = $false
+}
+
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Main: Critical Failure! $($Common.FatalError)" -Failure
