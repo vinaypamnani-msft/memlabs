@@ -355,9 +355,8 @@ if ($Configuration) {
 
 }
 else {
-    Write-Log "### START." -Success
-    Write-Log "Main: No Configuration specified. Calling genconfig."
-    cd $PSScriptRoot
+    Write-Log "Main: No Configuration specified. Calling genconfig." -Activity
+    Set-Location $PSScriptRoot
     $result = ./genconfig.ps1 -InternalUseOnly
 
     if (-not $result.DeployNow) {

@@ -1683,9 +1683,33 @@ function New-RDCManFile {
 
     # ARM template installs sysinternal tools via choco
     $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
-    $encryptedPass = Get-RDCManPassword $rdcmanpath
-    if ($null -eq $encryptedPass) {
-        Write-Log "Get-RDCManPassword: Password was not generated correctly." -Failure
+    $newrdcmanpath = "C:\tools"
+    $rdcmanexe = "RDCMan.exe"
+
+    # create C:\tools if not present
+    if (-not (Test-Path $newrdcmanpath)) {
+        New-Item -Path $newrdcmanpath -ItemType Directory -Force -ErrorAction SilentlyContinue
+    }
+
+    # Download rdcman, if not present
+    if (-not (Test-Path "$rdcmanapath\$rdcmanexe")) {
+        $ProgressPreference = 'SilentlyContinue'
+        Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination "$newrdcmanpath\$rdcmanexe" -ErrorAction SilentlyContinue
+        $ProgressPreference = 'Continue'
+    }
+    else {
+        Copy-Item -Path "$rdcmanpath\$rdcmanexe" -Destination "$newrdcmanpath\$rdcmanexe" -Force -ErrorAction SilentlyContinue
+    }
+
+    if (Test-Path "$newrdcmanpath\$rdcmanexe") {
+        $encryptedPass = Get-RDCManPassword $newrdcmanpath
+        if ($null -eq $encryptedPass) {
+            Write-Log "New-RDCManFile: Password was not generated correctly." -Failure
+            return
+        }
+    }
+    else {
+        Write-Log "New-RDCManFile: Cound not located $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
         return
     }
 
@@ -1730,14 +1754,14 @@ function New-RDCManFile {
     # Save to desired filename
     if ($shouldSave) {
         Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success
-        Write-Log "RDCMan.exe is located in $rdcmanpath" -Success
+        Write-Log "RDCMan.exe is located in $newrdcmanpath" -Success
         Get-Process -Name rdcman -ea Ignore | Stop-Process
         Start-Sleep 1
         $existing.save($rdcmanfile) | Out-Null
     }
     else {
         Write-Log "New-RDCManFile: No Changes. Not Saving resultant XML to $rdcmanfile" -Success
-        Write-Log "RDCMan.exe is located in $rdcmanpath" -Success
+        Write-Log "RDCMan.exe is located in $newrdcmanpath" -Success
     }
 }
 
@@ -1804,16 +1828,17 @@ function Get-RDCManPassword {
     )
 
     if (-not(test-path "$($env:temp)\rdcman.dll")) {
-        Write-Log "Get-RDCManPassword: Rdcman.dll not found in $($env:temp). Copying."
+        # Write-Log "Get-RDCManPassword: Rdcman.dll not found in $($env:temp). Copying."
         copy-item "$($rdcmanpath)\rdcman.exe" "$($env:temp)\rdcman.dll" -Force
         unblock-file "$($env:temp)\rdcman.dll"
     }
 
     if (-not(test-path "$($env:temp)\rdcman.dll")) {
         Write-Log "Get-RDCManPassword: Rdcman.dll was not copied." -Failure
-        throw
+        return $null
     }
-    Write-Host "Get-RDCManPassword: Importing rdcman.dll"
+
+    #Write-Host "Get-RDCManPassword: Importing rdcman.dll"
     Import-Module "$($env:temp)\rdcman.dll"
     $EncryptionSettings = New-Object -TypeName RdcMan.EncryptionSettings
     return [RdcMan.Encryption]::EncryptString($Common.LocalAdmin.GetNetworkCredential().Password , $EncryptionSettings)
