@@ -29,9 +29,6 @@ else {
     $Common.VerboseEnabled = $false
 }
 
-Write-Log "This is ERROR" -Failure
-return
-
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Main: Critical Failure! $($Common.FatalError)" -Failure
