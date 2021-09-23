@@ -22,8 +22,6 @@ Write-Host -ForegroundColor Cyan "You can use this tool to customize most option
 Write-Host -ForegroundColor Cyan "Press Ctrl-C to exit without saving."
 Write-Host -ForegroundColor Cyan ""
 Write-Host -ForegroundColor Cyan "Known Limitations: (must be done via manual json editing)"
-Write-Host -ForegroundColor Cyan " - Can not remove a prefix"
-Write-Host -ForegroundColor Cyan " - Can not add/remove VMs"
 Write-Host -ForegroundColor Cyan " - Can not add/remove Disks"
 Write-Host -ForegroundColor Cyan ""
 
@@ -49,9 +47,6 @@ function Select-Config {
     $files = Get-ChildItem $ConfigPath\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
     $files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
-    #$files = Get-ChildItem $configDir\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
-    #$files += Get-ChildItem $configDir\*.json -Include "TechPreview.json"
-    #$files += Get-ChildItem $configDir\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json"
     $i = 0
     foreach ($file in $files) {
@@ -137,7 +132,6 @@ function Get-SupportedVersion {
     )
 
     write-Host
-    #  $Common.AzureFileList.ISO.id | Select-Object -Unique
 
     $i = 0
     foreach ($Supported in $Common.Supported."$key") {
@@ -176,7 +170,6 @@ function Get-VMList {
     )
 
     write-Host
-    #  $Common.AzureFileList.ISO.id | Select-Object -Unique
 
     $i = 0
 
@@ -215,13 +208,13 @@ function get-ValidResponse {
         [Parameter()]
         [string]
         $currentValue,
-        [string]
+        [object]
         $alternatevalues
     )
 
     $responseValid = $false
     while ($responseValid -eq $false) {
-        #   Write-Host "Not Returning: $response out of $max"
+        #Write-Host "Not Returning: $response out of $max $alternatevalues"
         Write-Host
         $response = Read-Host2 -Prompt $prompt $currentValue        
         try {
@@ -238,9 +231,18 @@ function get-ValidResponse {
                 }
                 catch {}
             }            
-            if ($responseValid -eq $false -and $null -ne $alternatevalues) {             
-                if ($response.ToLowerInvariant() -eq $alternatevalues.ToLowerInvariant()) {
-                    $responseValid = $true                    
+            if ($responseValid -eq $false -and $null -ne $alternatevalues) {     
+                try {
+                    if ($response.ToLowerInvariant() -eq $alternatevalues.ToLowerInvariant()) {
+                        $responseValid = $true                    
+                    }
+                }
+                catch {}
+   
+                foreach ($i in $($alternatevalues.keys)) {
+                    if ($response.ToLowerInvariant() -eq $i.ToLowerInvariant()) {
+                        $responseValid = $true                    
+                    }
                 }
             }
             if ($responseValid -eq $false -and [bool]$currentValue) {
@@ -271,24 +273,51 @@ function Select-Options {
         $property,
         [Parameter()]
         [string]
-        $prompt
+        $prompt,
+        [Parameter(Mandatory = $false)]
+        [PSCustomObject]        
+        $additionalOptions
 
     )
+   
     while ($true) {
-        Write-Host ""
-
+        Write-Host ""       
         $i = 0
         #   Write-Host "Trying to get $property"
         if ($null -eq $property) {
-            return
+            return $null
         }
         $property | Get-Member -MemberType NoteProperty | ForEach-Object {
             $i = $i + 1
             $value = $property."$($_.Name)"
             Write-Host [$i] $_.Name = $value
         }
-        $response = get-ValidResponse $prompt $i $null $null
+        
+
+        if ($null -ne $additionalOptions) {
+            $additionalOptions.keys | ForEach-Object { 
+                $value = $additionalOptions."$($_)"                 
+                Write-Host [$_] $value
+                #$additional = $_
+            }
+        }
+    
+
+        $response = get-ValidResponse $prompt $i $null $additionalOptions
         if ([bool]$response) {
+            $return = $null
+            if ($null -ne $additionalOptions) {
+                #write-Host "Returning $response"
+                $additionalOptions.keys | ForEach-Object { 
+                    if ($response.ToLowerInvariant() -eq $_.ToLowerInvariant()) {
+                        $return = $_
+                        
+                    }
+                }
+            }
+            if ($null -ne $return) {
+                return $return
+            }
             $i = 0
             $property | Get-Member -MemberType NoteProperty | ForEach-Object {
                 $i = $i + 1
@@ -301,23 +330,23 @@ function Select-Options {
                         "operatingSystem" {
                             $property."$name" = Get-SupportedVersion "OperatingSystems" $value "Select OS Version"
                             #Select-OsFromList $value
-                            return
+                            return $null
                         }
                         "sqlVersion" {
                             $property."$name" = Get-SupportedVersion "SqlVersions" $value "Select SQL Version"
-                            return
+                            return $null
                         }
                         "role" {
                             $property."$name" = Get-SupportedVersion "Roles" $value "Select Role"
-                            return
+                            return $null
                         }
                         "version" {
                             $property."$name" = Get-SupportedVersion "CmVersions" $value "Select ConfigMgr Version"
-                            return
+                            return $null
                         }
                         "existingDCNameWithPrefix" {
                             $property."$name" = Get-VMList "ExistingDCs" $value "Select Existing DC"
-                            return
+                            return $null
                         }
                     }
                     if ($value -is [System.Management.Automation.PSCustomObject]) {
@@ -327,14 +356,12 @@ function Select-Options {
                         $valid = $false
                         Write-Host
                         while ($valid -eq $false) {
-                            $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
-                            Write-Host "read $response2"
+                            $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value                           
                             if ([bool]$response2) {
                                 if ($property."$($_.Name)" -is [Int]) {
                                     $property."$($_.Name)" = [Int]$response2
                                 }
-                                else {
-                                    Write-Host "read2 $response2 $value"
+                                else {                                   
                                     if ([bool]$value) {
                                         if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
                                             if ($response2.ToLowerInvariant() -eq "true") {
@@ -384,7 +411,7 @@ function Select-Options {
 
             }
         }
-        else { return }
+        else { return $null }
     }
 }
 
@@ -398,7 +425,7 @@ function Select-VirtualMachines {
             $i = $i + 1
             write-Host "[$i] - $($virtualMachine)"        
         }
-        write-Host "[n] - New Virtual Machine"
+        write-Host "[N] - New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
 
         if ([bool]$response) {
@@ -416,9 +443,81 @@ function Select-VirtualMachines {
             foreach ($virtualMachine in $Config.virtualMachines) {
                 $i = $i + 1
                 if ($i -eq $response) {
-                    Select-Options $virtualMachine "Which VM property to modify"
-                }
+                    $customOptions = @{ "D" = "Delete this VM" }
+                    if ($null -eq $virtualMachine.additionalDisks) {
+                        $customOptions["A"] = "Add Additional Disk"
+                    }
+                    else {
+                        $customOptions["A"] = "Add Additional Disk"
+                        $customOptions["R"] = "Remove Last Additional Disk"
+                    }
+                    if ($null -eq $virtualMachine.sqlVersion) {
+                        $customOptions["S"] = "Add SQL"
+                    }
+                    else {
+                        $customOptions["X"] = "Remove SQL"
+                    }
+                    $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
+                    if ($newValue -eq "S") {
+                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+                    }
+                    if ($newValue -eq "X") {
+                        $virtualMachine.psobject.properties.remove('sqlversion')
+                        $virtualMachine.psobject.properties.remove('sqlInstanceDir')
+                    }
+                    if ($newValue -eq "A") {
+                        if ($null -eq $virtualMachine.additionalDisks) {
+                            $disk = [PSCustomObject]@{"E" = "100GB" }
+                            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                        }
+                        else{
+                            $letters = 69
+                            $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                $letters++
+                            }
+                            $letter = $([char]$letters).ToString()
+                            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
+                        }
+                    }
+                    if ($newValue -eq "R") {
+                        $diskscount = 0
+                        #$savedDisks = $virtualMachine.additionalDisks | ConvertTo-Json | ConvertFrom-Json
+                        $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                            $diskscount++
+                        }
+                        if ($diskscount -eq 1) {
+                            $virtualMachine.psobject.properties.remove('additionalDisks')
+                        }
+                        else {                            
+                            $i = 0
+                            $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                $i = $i + 1
+                                if ($i -eq $diskscount) {              
+                                    $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
+                                }                
+                            }                                          
+                        }
+                        if ($diskscount -eq 1) {
+                            $virtualMachine.psobject.properties.remove('additionalDisks')
+                        }
+                    }
+                }                
             }
+            if ($newValue -eq "D") {
+                $newvm = $Config.virtualMachines | ConvertTo-Json | ConvertFrom-Json
+                $Config.virtualMachines = @()
+                $i = 0
+                foreach ($virtualMachine in $newvm) {
+                    $i = $i + 1
+                    if ($i -ne $response) {              
+                        $Config.virtualMachines += $virtualMachine
+                    }                
+                }                
+            }
+            
+
+
         }
         else { return }
     }
@@ -445,6 +544,7 @@ while ($valid -eq $false) {
 }
 # $($file.Name)
 #Write-Host
+Show-Summary ($c)
 $date = Get-Date -Format "MM-dd-yyyy"
 if ($($Global:configfile.Name).StartsWith("xGen")) {
     $postfix = $($Global:configfile.Name).SubString(16)
@@ -465,7 +565,6 @@ $config | ConvertTo-Json -Depth 3 | Out-File $filename
 $return.ConfigFileName = Split-Path -Path $fileName -Leaf
 Write-Host "Saved to $filename"
 Write-Host
-Show-Summary ($c)
 
 if (-not $InternalUseOnly.IsPresent) {
     Write-Host "You can deploy this configuration by running the following command:"
