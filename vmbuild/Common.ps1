@@ -739,6 +739,8 @@ function Get-FileFromStorage {
 
             return $true
         }
+
+        return $true
     }
 }
 
