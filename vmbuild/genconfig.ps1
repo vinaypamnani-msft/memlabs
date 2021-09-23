@@ -337,7 +337,12 @@ function Select-Options {
                             return $null
                         }
                         "role" {
-                            $property."$name" = Get-SupportedVersion "Roles" $value "Select Role"
+                            if ($Global:AddToExisting -eq $true) {
+                                $property."$name" = Get-SupportedVersion "RolesForExisting" $value "Select Role"
+                            }
+                            else {
+                                $property."$name" = Get-SupportedVersion "Roles" $value "Select Role"
+                            }
                             return $null
                         }
                         "version" {
@@ -361,8 +366,10 @@ function Select-Options {
                                 if ($property."$($_.Name)" -is [Int]) {
                                     $property."$($_.Name)" = [Int]$response2
                                 }
-                                else {                                   
-                                    if ([bool]$value) {
+                                else {  
+                                    write-host "1 $value = $response2"                                 
+                                    if ($value -is [bool]) {
+                                        write-host "$value = $response2"
                                         if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
                                             if ($response2.ToLowerInvariant() -eq "true") {
                                                 $response2 = $true
@@ -377,10 +384,12 @@ function Select-Options {
                                             }
 
                                         }
-                                        
-                                        $property."$($_.Name)" = $response2
-                                        
+
                                     }
+                                    write-host "Setting to $response2"
+                                    $property."$($_.Name)" = $response2
+                                        
+                                    
                                 }
                                 $c = Test-Configuration -InputObject $Config
                                 $valid = $c.Valid
@@ -444,68 +453,71 @@ function Select-VirtualMachines {
                 $i = $i + 1
                 if ($i -eq $response) {
                     $newValue = "Start"
-                    while ($null -ne $newValue -and $newValue -ne "D"){
-                    $customOptions = @{ "D" = "Delete this VM" }
-                    if ($null -eq $virtualMachine.additionalDisks) {
-                        $customOptions["A"] = "Add Additional Disk"
-                    }
-                    else {
-                        $customOptions["A"] = "Add Additional Disk"
-                        $customOptions["R"] = "Remove Last Additional Disk"
-                    }
-                    if ($null -eq $virtualMachine.sqlVersion) {
-                        $customOptions["S"] = "Add SQL"
-                    }
-                    else {
-                        $customOptions["X"] = "Remove SQL"
-                    }
-                    $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
-                    if ($newValue -eq "S") {
-                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
-                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
-                    }
-                    if ($newValue -eq "X") {
-                        $virtualMachine.psobject.properties.remove('sqlversion')
-                        $virtualMachine.psobject.properties.remove('sqlInstanceDir')
-                    }
-                    if ($newValue -eq "A") {
+                    while ($null -ne $newValue -and $newValue -ne "D") {
+                        $customOptions = @{ "A" = "Add Additional Disk" }
                         if ($null -eq $virtualMachine.additionalDisks) {
-                            $disk = [PSCustomObject]@{"E" = "100GB" }
-                            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                            #$customOptions["A"] = "Add Additional Disk"
                         }
-                        else{
-                            $letters = 69
-                            $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                $letters++
+                        else {
+                            #$customOptions["A"] = "Add Additional Disk"
+                            $customOptions["R"] = "Remove Last Additional Disk"
+                        }
+                        if ($null -eq $virtualMachine.sqlVersion) {
+                            $customOptions["S"] = "Add SQL"
+                        }
+                        else {
+                            $customOptions["X"] = "Remove SQL"
+                        }
+                        $customOptions["D"] = "Delete this VM"
+                        $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
+                        if ($newValue -eq "S") {
+                            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+                            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+                        }
+                        if ($newValue -eq "X") {
+                            $virtualMachine.psobject.properties.remove('sqlversion')
+                            $virtualMachine.psobject.properties.remove('sqlInstanceDir')
+                        }
+                        if ($newValue -eq "A") {
+                            if ($null -eq $virtualMachine.additionalDisks) {
+                                $disk = [PSCustomObject]@{"E" = "100GB" }
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
                             }
-                            $letter = $([char]$letters).ToString()
-                            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
+                            else {
+                                $letters = 69
+                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                    $letters++
+                                }
+                                if ($letters -lt 90) {
+                                    $letter = $([char]$letters).ToString()
+                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
+                                }
+                            }
                         }
-                    }
-                    if ($newValue -eq "R") {
-                        $diskscount = 0
-                        #$savedDisks = $virtualMachine.additionalDisks | ConvertTo-Json | ConvertFrom-Json
-                        $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                            $diskscount++
-                        }
-                        if ($diskscount -eq 1) {
-                            $virtualMachine.psobject.properties.remove('additionalDisks')
-                        }
-                        else {                            
-                            $i = 0
+                        if ($newValue -eq "R") {
+                            $diskscount = 0
+                            #$savedDisks = $virtualMachine.additionalDisks | ConvertTo-Json | ConvertFrom-Json
                             $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                $i = $i + 1
-                                if ($i -eq $diskscount) {              
-                                    $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
-                                }                
-                            }                                          
+                                $diskscount++
+                            }
+                            if ($diskscount -eq 1) {
+                                $virtualMachine.psobject.properties.remove('additionalDisks')
+                            }
+                            else {                            
+                                $i = 0
+                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                    $i = $i + 1
+                                    if ($i -eq $diskscount) {              
+                                        $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
+                                    }                
+                                }                                          
+                            }
+                            if ($diskscount -eq 1) {
+                                $virtualMachine.psobject.properties.remove('additionalDisks')
+                            }
                         }
-                        if ($diskscount -eq 1) {
-                            $virtualMachine.psobject.properties.remove('additionalDisks')
-                        }
-                    }
-                }                
-            }
+                    }                
+                }
             }
             if ($newValue -eq "D") {
                 $newvm = $Config.virtualMachines | ConvertTo-Json | ConvertFrom-Json
@@ -527,6 +539,10 @@ function Select-VirtualMachines {
 }
 
 $Global:Config = Select-Config $sampleDir
+$Global:AddToExisting = $false
+if ($($null -ne $config.vmOptions.existingDCNameWithPrefix)) {
+    $Global:AddToExisting = $true
+}
 $valid = $false
 while ($valid -eq $false) {
     Select-Options $($config.vmOptions) "Select Global Property to modify"
