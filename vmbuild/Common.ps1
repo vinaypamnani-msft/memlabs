@@ -1911,42 +1911,48 @@ function Set-SupportedOptions {
 ### Common Object        ###
 ############################
 
-# Paths
-$staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
-$storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
+if (-not $Common.Initialized) {
 
-# Common global props
-$global:Common = [PSCustomObject]@{
-    TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
-    ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
-    AzureFilesPath        = $storagePath                                                              # Path for downloaded files
-    AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
-    AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
-    AzureToolsPath        = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
-    StagingAnswerFilePath = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
-    StagingInjectPath     = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX
-    StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
-    StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
-    StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
-    LogPath               = Join-Path $PSScriptRoot "vmbuild.log"                                     # Log File
-    Supported             = $null                                                                     # Supported Configs
-    AzureFileList         = $null
-    LocalAdmin            = $null
-    VerboseLog            = $false
-    FatalError            = $null
+    # Paths
+    $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
+    $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
+
+    # Common global props
+    $global:Common = [PSCustomObject]@{
+        Initialized           = $true
+        TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
+        ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
+        AzureFilesPath        = $storagePath                                                              # Path for downloaded files
+        AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
+        AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
+        AzureToolsPath        = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
+        StagingAnswerFilePath = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
+        StagingInjectPath     = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX
+        StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
+        StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
+        StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
+        LogPath               = Join-Path $PSScriptRoot "vmbuild.log"                                     # Log File
+        Supported             = $null                                                                     # Supported Configs
+        AzureFileList         = $null
+        LocalAdmin            = $null
+        VerboseLog            = $false
+        FatalError            = $null
+    }
+
+    # Storage config
+    $global:StorageConfig = [PSCustomObject]@{
+        StorageLocation = $null
+        StorageToken    = $null
+    }
+
+    Write-Log "Common: Initializing common..." -LogOnly
+
+    ### Test Storage config and access
+    Get-StorageConfig
+
+    ### Set supported options
+    Set-SupportedOptions
+
+    ### Copy sample config - not needed now that new-lab calls genconfig, and genconfig displays samples
+    # Copy-SampleConfigs
 }
-
-# Storage config
-$global:StorageConfig = [PSCustomObject]@{
-    StorageLocation = $null
-    StorageToken    = $null
-}
-
-### Test Storage config and access
-Get-StorageConfig
-
-### Set supported options
-Set-SupportedOptions
-
-### Copy sample config - not needed now that new-lab calls genconfig, and genconfig displays samples
-# Copy-SampleConfigs
