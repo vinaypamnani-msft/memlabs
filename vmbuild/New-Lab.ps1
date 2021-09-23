@@ -13,8 +13,24 @@ param (
     [switch]$WhatIf
 )
 
+# Tell common to re-init
+if ($Common.Initialized) {
+    $Common.Initialized = $false
+}
+
 # Dot source common
 . $PSScriptRoot\Common.ps1
+
+# Set Verbose
+if ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent) {
+    $Common.VerboseEnabled = $true
+}
+else {
+    $Common.VerboseEnabled = $false
+}
+
+Write-Log "This is ERROR" -Failure
+return
 
 # Validate token exists
 if ($Common.FatalError) {
@@ -409,7 +425,17 @@ catch {
 }
 
 # Download required files
-Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
+$success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
+if (-not $success) {
+    Write-Log "Main: Failed to download all required files for specified configuration. Retrying in 2 minutes... " -Warning
+    Start-Sleep -Seconds 120
+    $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
+    if (-not $success) {
+        $timer.Stop()
+        Write-Log "Main: Failed to download all required files for specified configuration. Exiting." -Failure
+        return
+    }
+}
 
 if ($DownloadFilesOnly.IsPresent) {
     $timer.Stop()

@@ -587,7 +587,7 @@ class DownloadSCCM {
 
     [bool] Test() {
         $_CM = $this.CM
-        $cmpath = "c:\temp\$_CM.exe"        
+        $cmpath = "c:\temp\$_CM.exe"
         if (!(Test-Path $cmpath)) {
             return $false
         }
@@ -1243,6 +1243,7 @@ class InitializeDisks {
             $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $disk.Value }
             $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $disk.Name | Format-Volume -FileSystem NTFS -NewFileSystemLabel "$label`_$count" -Confirm:$false -Force
             Write-Verbose "Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)"
+            Start-Sleep -Seconds 15
             $count++
         }
 
