@@ -843,11 +843,17 @@ Function Show-Summary {
 
     if (-not $null -eq $($config.DeployConfig.vmOptions)) {
 
-        Write-Host "[$CHECKMARK] Domain: $($config.DeployConfig.vmOptions.domainName) will be created. Admin account: $($config.DeployConfig.vmOptions.domainAdminName)"
+        if ($null -eq $config.DeployConfig.vmOptions.existingDCNameWithPrefix) {
+            Write-Host "[$CHECKMARK] Domain: $($config.DeployConfig.vmOptions.domainName) will be created."
+        }
+        else {
+            Write-Host "[$CHECKMARK] Domain: $($config.DeployConfig.vmOptions.domainName) will be joined."
+        }
+
         Write-Host "[$CHECKMARK] Network: $($config.DeployConfig.vmOptions.network)"
         Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($config.DeployConfig.vmOptions.basePath) on host machine"
     }
-
+    Write-Host "[$CHECKMARK] Admin account: $($config.DeployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
     $config.DeployConfig.virtualMachines | Format-Table | Out-Host
 }
 

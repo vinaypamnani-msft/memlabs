@@ -366,10 +366,8 @@ function Select-Options {
                                 if ($property."$($_.Name)" -is [Int]) {
                                     $property."$($_.Name)" = [Int]$response2
                                 }
-                                else {  
-                                    write-host "1 $value = $response2"                                 
+                                else {                             
                                     if ($value -is [bool]) {
-                                        write-host "$value = $response2"
                                         if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
                                             if ($response2.ToLowerInvariant() -eq "true") {
                                                 $response2 = $true
@@ -386,7 +384,6 @@ function Select-Options {
                                         }
 
                                     }
-                                    write-host "Setting to $response2"
                                     $property."$($_.Name)" = $response2
                                         
                                     
@@ -436,14 +433,14 @@ function Select-VirtualMachines {
         }
         write-Host "[N] - New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
-
+        Write-Log -HostOnly -Verbose "response = $response"
         if ([bool]$response) {
             if ($response.ToLowerInvariant() -eq "n") {
                 $Config.VirtualMachines += [PSCustomObject]@{
                     vmName          = "Member" + $([int]$i + 1)
                     role            = "DomainMember"                    
-                    operatingSystem = "Windows 10 21H1 (64-bit)"                    
-                    memory          = "4GB"
+                    operatingSystem = "Windows 10 Latest (64-bit)"                    
+                    memory          = "2GB"
                     virtualProcs    = 2
                 }
                 $response = $i + 1
@@ -453,7 +450,8 @@ function Select-VirtualMachines {
                 $i = $i + 1
                 if ($i -eq $response) {
                     $newValue = "Start"
-                    while ($null -ne $newValue -and $newValue -ne "D") {
+                    while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
+                        Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
                         $customOptions = @{ "A" = "Add Additional Disk" }
                         if ($null -eq $virtualMachine.additionalDisks) {
                             #$customOptions["A"] = "Add Additional Disk"
@@ -470,6 +468,9 @@ function Select-VirtualMachines {
                         }
                         $customOptions["D"] = "Delete this VM"
                         $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
+                        if (([string]::IsNullOrEmpty($newValue))){
+                            break
+                        }
                         if ($newValue -eq "S") {
                             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
                             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
@@ -558,7 +559,7 @@ while ($valid -eq $false) {
     }
     else {
         Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)"
-        Write-Host -ForegroundColor Red "Starting over. Please fix the problem(s), or hit CTRL-C to exit."
+        Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
     }
 }
 # $($file.Name)
