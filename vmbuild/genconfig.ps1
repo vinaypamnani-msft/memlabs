@@ -443,6 +443,8 @@ function Select-VirtualMachines {
             foreach ($virtualMachine in $Config.virtualMachines) {
                 $i = $i + 1
                 if ($i -eq $response) {
+                    $newValue = "Start"
+                    while ($null -ne $newValue -and $newValue -ne "D"){
                     $customOptions = @{ "D" = "Delete this VM" }
                     if ($null -eq $virtualMachine.additionalDisks) {
                         $customOptions["A"] = "Add Additional Disk"
@@ -503,6 +505,7 @@ function Select-VirtualMachines {
                         }
                     }
                 }                
+            }
             }
             if ($newValue -eq "D") {
                 $newvm = $Config.virtualMachines | ConvertTo-Json | ConvertFrom-Json
