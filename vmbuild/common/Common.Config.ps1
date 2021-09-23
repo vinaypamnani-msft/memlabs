@@ -567,7 +567,7 @@ function Test-ValidRoleCSPS {
     }
 
     # Site Code
-    if ($PSVM.siteCode.Length -ne 3) {
+    if ($VM.siteCode.Length -ne 3) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code [$($VM.siteCode)]." -ReturnObject $ReturnObject -Failure
     }
 
@@ -575,7 +575,7 @@ function Test-ValidRoleCSPS {
     Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
 
     # install dir
-    Test-ValidVmPath -VM $PSVM -PathProperty "cmInstallDir" -ValidPathExample "E:\ConfigMgr" -ReturnObject $ReturnObject
+    Test-ValidVmPath -VM $VM -PathProperty "cmInstallDir" -ValidPathExample "E:\ConfigMgr" -ReturnObject $ReturnObject
 
 }
 
