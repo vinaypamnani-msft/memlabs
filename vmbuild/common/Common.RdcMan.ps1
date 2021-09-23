@@ -112,6 +112,10 @@ function New-RDCManFile {
     # Add new group
     [void]$file.AppendChild($findgroup)
 
+    # set file associations
+    & cmd /c assoc .rdg=rdcman | Out-Null
+    & cmd /c ftype rdcman=$newrdcmanpath\$rdcmanexe | Out-Null
+
     # Save to desired filename
     if ($shouldSave) {
         Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success
