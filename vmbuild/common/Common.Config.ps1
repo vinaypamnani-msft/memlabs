@@ -133,7 +133,6 @@ function Add-ValidationMessage {
         [switch]$Warning
     )
 
-    Write-Host $Message
     $ReturnObject.Problems += 1
     [void]$ReturnObject.Message.AppendLine($Message)
 
