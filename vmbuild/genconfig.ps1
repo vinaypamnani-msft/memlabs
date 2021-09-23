@@ -366,8 +366,10 @@ function Select-Options {
                                 if ($property."$($_.Name)" -is [Int]) {
                                     $property."$($_.Name)" = [Int]$response2
                                 }
-                                else {                                   
-                                    if ([bool]$value) {
+                                else {  
+                                    write-host "1 $value = $response2"                                 
+                                    if ($value -is [bool]) {
+                                        write-host "$value = $response2"
                                         if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
                                             if ($response2.ToLowerInvariant() -eq "true") {
                                                 $response2 = $true
@@ -382,10 +384,12 @@ function Select-Options {
                                             }
 
                                         }
-                                        
-                                        $property."$($_.Name)" = $response2
-                                        
+
                                     }
+                                    write-host "Setting to $response2"
+                                    $property."$($_.Name)" = $response2
+                                        
+                                    
                                 }
                                 $c = Test-Configuration -InputObject $Config
                                 $valid = $c.Valid
