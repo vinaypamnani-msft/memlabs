@@ -18,7 +18,7 @@
             "vmName": "DC1",
             "role": "DC",
             "operatingSystem": "Server 2022",
-            "memory": "4GB",
+            "memory": "2GB",
             "virtualProcs": 4
         },
         {
@@ -33,7 +33,7 @@
                 "E": "250GB",
                 "F": "100GB"
             },
-            "memory": "16GB",
+            "memory": "12GB",
             "virtualProcs": 8
         },
         {
@@ -43,21 +43,21 @@
             "additionalDisks": {
                 "E": "250GB"
             },
-            "memory": "4GB",
+            "memory": "3GB",
             "virtualProcs": 4
         },
         {
             "vmName": "W10-1",
             "role": "DomainMember",
             "operatingSystem": "Windows 10 Latest (64-bit)",
-            "memory": "4GB",
+            "memory": "2GB",
             "virtualProcs": 4
         },
         {
             "vmName": "W10-2",
             "role": "DomainMember",
             "operatingSystem": "Windows 10 Latest (64-bit)",
-            "memory": "4GB",
+            "memory": "2GB",
             "virtualProcs": 4
         }
     ]
