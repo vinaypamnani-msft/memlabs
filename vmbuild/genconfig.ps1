@@ -542,6 +542,7 @@ function Select-VirtualMachines {
                                 $virtualMachine.psobject.properties.remove('additionalDisks')
                             }
                         }
+                        Get-TestResult -SuccessOnError
                     }
                 }
             }
