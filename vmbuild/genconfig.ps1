@@ -50,10 +50,10 @@ function Select-Config {
     $i = 0
     foreach ($file in $files) {
         $i = $i + 1
-        write-Host "[$i] - $($file.Name)"
+        write-Host "[$i] $($file.Name)"
     }
     if (-Not $NoMore.IsPresent) {
-        Write-Host "[M] - Show More (Custom and Previous config files)"
+        Write-Host "[M] Show More (Custom and Previous config files)"
     }
     $responseValid = $false
     while ($responseValid -eq $false) {
@@ -76,7 +76,7 @@ function Select-Config {
                 $i = 0
                 foreach ($file in $files) {
                     $i = $i + 1
-                    write-Host "[$i] - $($file.Name)"
+                    write-Host "[$i] $($file.Name)"
                 }
                 if (-Not $NoMore.IsPresent) {
                     Write-Host "[M] - Show More (Custom and Previous config files)"
