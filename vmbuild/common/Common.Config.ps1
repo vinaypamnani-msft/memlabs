@@ -294,13 +294,15 @@ function Test-ValidVmSupported {
     if ($configObject.vmOptions.existingDCNameWithPrefix) {
         # Supported DSC Roles for Existing Scenario
         if ($Common.Supported.RolesForExisting -notcontains $vm.role) {
-            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported role [$($vm.role)]. Supported values are: DC, CS, PS, DPMP and DomainMember" -ReturnObject $ReturnObject -Failure
+            $supportedRoles = $Common.Supported.RolesForExisting -join ", "
+            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported role [$($vm.role)]. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
         }
     }
     else {
         # Supported DSC Roles
         if ($Common.Supported.Roles -notcontains $vm.role) {
-            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported role [$($vm.role)]. Supported values are: DC, CS, PS, DPMP and DomainMember" -ReturnObject $ReturnObject -Failure
+            $supportedRoles = $Common.Supported.Roles -join ", "
+            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported role [$($vm.role)]. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -565,12 +567,12 @@ function Test-ValidRoleCSPS {
     $vmName = $VM.vmName
     $vmRole = $VM.role
 
-    # Single CS/PS
+    # Single CAS/Primary
     if (-not (Test-SingleRole -VM $VM -ReturnObject $ReturnObject)) {
         return
     }
 
-    # PS/CS must contain SQL
+    # Primary/CAS must contain SQL
     if (-not $VM.sqlVersion) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Failure
     }
@@ -648,8 +650,8 @@ function Test-Configuration {
 
     # Contains roles
     $containsDC = $configObject.virtualMachines.role.Contains("DC")
-    $containsCS = $configObject.virtualMachines.role.Contains("CS")
-    $containsPS = $configObject.virtualMachines.role.Contains("PS")
+    $containsCS = $configObject.virtualMachines.role.Contains("CAS")
+    $containsPS = $configObject.virtualMachines.role.Contains("Primary")
     $containsDPMP = $configObject.virtualMachines.role.Contains("DPMP")
     $needCMOptions = $containsCS -or $containsPS
 
@@ -668,9 +670,9 @@ function Test-Configuration {
     # Role Conflicts
     # ==============
 
-    # CS/PS must include DC
+    # CAS/Primary must include DC
     if (($containsCS -or $containsPS) -and -not $containsDC) {
-        Add-ValidationMessage -Message "Role Conflict: CS or PS role specified in the configuration file without DC; PS/CS roles require a DC to be present in the config file. Adding CS/PS to existing environment is not currently supported." -ReturnObject $return -Failure
+        Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not currently supported." -ReturnObject $return -Failure
     }
 
     # VM Validations
@@ -708,11 +710,11 @@ function Test-Configuration {
     # ==============
     Test-ValidRoleDC -ConfigObject $configObject -ReturnObject $return
 
-    # CS Validations
+    # CAS Validations
     # ==============
     if ($containsCS) {
 
-        $CSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "CS" }
+        $CSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "CAS" }
         $vmName = $CSVM.vmName
         $vmRole = $CSVM.role
 
@@ -723,19 +725,19 @@ function Test-Configuration {
 
         # CAS without Primary
         if (-not $containsPS) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site (PS Role); When deploying CS Role, you must specify a PS Role as well." -ReturnObject $return -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Failure
         }
 
-        # Validate CS role
+        # Validate CAS role
         Test-ValidRoleCSPS -VM $CSVM -ReturnObject $return
 
     }
 
-    # PS Validations
+    # Primary Validations
     # ==============
     if ($containsPS) {
-        # Validate PS role
-        $PSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "PS" }
+        # Validate Primary role
+        $PSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "Primary" }
         Test-ValidRoleCSPS -VM $PSVM -ReturnObject $return
     }
 
@@ -779,8 +781,8 @@ function Test-Configuration {
     $params = [PSCustomObject]@{
         DomainName         = $configObject.vmOptions.domainName
         DCName             = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
-        CSName             = ($virtualMachines | Where-Object { $_.role -eq "CS" }).vmName
-        PSName             = ($virtualMachines | Where-Object { $_.role -eq "PS" }).vmName
+        CSName             = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
+        PSName             = ($virtualMachines | Where-Object { $_.role -eq "Primary" }).vmName
         DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
         DomainMembers      = $clientsCsv
         Scenario           = $scenario

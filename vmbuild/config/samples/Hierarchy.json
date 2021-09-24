@@ -23,7 +23,7 @@
         },
         {
             "vmName": "CS1",
-            "role": "CS",
+            "role": "CAS",
             "siteCode": "CS1",
             "operatingSystem": "Server 2022",
             "sqlVersion": "SQL Server 2019",
@@ -37,7 +37,7 @@
         },
         {
             "vmName": "PS1",
-            "role": "PS",
+            "role": "Primary",
             "siteCode": "PS1",
             "operatingSystem": "Server 2022",
             "sqlVersion": "SQL Server 2019",

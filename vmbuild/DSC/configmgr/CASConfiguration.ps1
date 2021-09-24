@@ -1,4 +1,4 @@
-﻿configuration CSConfiguration
+﻿configuration CASConfiguration
 {
     param
     (
@@ -47,7 +47,7 @@
         $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
     }
 
-    $CurrentRole = "CS"
+    $CurrentRole = "CAS"
 
 
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
