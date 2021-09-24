@@ -300,30 +300,56 @@ function Select-Options {
                     $name = $($_.Name)
                     switch ($name) {
                         "operatingSystem" {
-                            $property."$name" = Get-Menu "Select OS Version" $($Common.Supported.OperatingSystems) $value
-                            return $null
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                $property."$name" = Get-Menu "Select OS Version" $($Common.Supported.OperatingSystems) $value
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return $null
+                                }
+                            }
+                            
                         }
                         "sqlVersion" {
-                            $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $value
-                            return $null
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $value
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return $null
+                                }
+                            }
                         }
                         "role" {
-                            if ($Global:AddToExisting -eq $true) {
-                                $property."$name" = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                if ($Global:AddToExisting -eq $true) {
+                                    $property."$name" = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
+                                }
+                                else {
+                                    $property."$name" = Get-Menu "Select Role" $($Common.Supported.Roles) $value
+                                }
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return $null
+                                }
                             }
-                            else {
-                                $property."$name" = Get-Menu "Select Role" $($Common.Supported.Roles) $value
-                            }
-                            return $null
                         }
                         "version" {
-                            $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
-                            return $null
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return $null
+                                }
+                            }
                         }
                         "existingDCNameWithPrefix" {
-                            $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
-                            $property."$name" = Get-Menu "Select Existing DC" $vms $value
-                            return $null
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
+                                $property."$name" = Get-Menu "Select Existing DC" $vms $value
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return $null
+                                }
+                            }
                         }
                     }
                     if ($value -is [System.Management.Automation.PSCustomObject]) {
