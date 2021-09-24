@@ -577,10 +577,10 @@ function Save-Config {
     elseif (-not $config.cmOptions) {        
         $file += "-NOSCCM"        
     }
-    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "CS" }) {
+    elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "cas" }) {
         $file += "-CAS-$($config.cmOptions.version)-"
     }
-    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "PS" }) {
+    elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "primary" }) {
         $file += "-PRI-$($config.cmOptions.version)-"
     }
     
