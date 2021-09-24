@@ -516,7 +516,8 @@ function Select-VirtualMachines {
                                 }
                                 if ($letters -lt 90) {
                                     $letter = $([char]$letters).ToString()
-                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
+                                    $size = [string]$($letters+31)+"GB"
+                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value $size
                                 }
                             }
                         }
@@ -542,7 +543,7 @@ function Select-VirtualMachines {
                                 $virtualMachine.psobject.properties.remove('additionalDisks')
                             }
                         }
-                        Get-TestResult -SuccessOnError
+                        Get-TestResult -SuccessOnError | out-null
                     }
                 }
             }
