@@ -33,13 +33,15 @@ function write-help {
     Write-Host -ForegroundColor Yellow "[Ctrl-C]" -NoNewline
     Write-Host -ForegroundColor $color " to exit without saving."
 }
-
+# Gets the json files from the config\samples directory, and offers them up for selection.
+# if 'M' is selected, shows the json files from the config directory.
 function Select-Config {
     [CmdletBinding()]
     param (
         [Parameter()]
         [string]
         $ConfigPath,
+        # -NoMore switch will hide the [M] More options when we go into the submenu
         [Parameter()]
         [switch]
         $NoMore
@@ -95,6 +97,7 @@ function Select-Config {
     return $config
 }
 
+# Replacement for Read-Host that offers a colorized prompt
 function Read-Host2 {
     [CmdletBinding()]
     param (
@@ -117,81 +120,43 @@ function Read-Host2 {
     return $response
 }
 
-function Get-SupportedVersion {
+
+# Offers a menu for any array passed in.
+# This is used for Sql Versions, Roles, Etc
+function Get-Menu {
     [CmdletBinding()]
     param (
         [Parameter()]
         [string]
-        $key,
+        $Prompt,
+        [Parameter()]
+        [object]
+        $OptionArray,
         [Parameter()]
         [string]
-        $currentValue,
-        [Parameter()]
-        [string]
-        $prompt
+        $CurrentValue
     )
-
-    write-Host
-
-    $i = 0
-    foreach ($Supported in $Common.Supported."$key") {
-        $i = $i + 1
-        Write-Host "[$i] - $Supported"
-    }
-    $response = get-ValidResponse "$prompt [$currentValue]" $i $null
-
-    if ([bool]$response) {
-        $i = 0
-        foreach ($Supported in $Common.Supported."$key") {
-            $i = $i + 1
-            if ($i -eq $response) {
-                return $Supported
-            }
-        }
-    }
-    else {
-        return $currentValue
-    }
-
-}
-
-function Get-VMList {
-    [CmdletBinding()]
-    param (
-        [Parameter()]
-        [string]
-        $key,
-        [Parameter()]
-        [string]
-        $currentValue,
-        [Parameter()]
-        [string]
-        $prompt
-    )
-
     write-Host
 
     $i = 0
 
-    $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
-
-    foreach ($Supported in $vms) {
+    foreach ($option in $OptionArray) {
         $i = $i + 1
-        Write-Host "[$i] - $Supported"
+        Write-Host "[$i] - $option"
     }
-    $response = get-ValidResponse "$prompt [$currentValue]" $i $null
+    $response = get-ValidResponse $Prompt $i $CurrentValue
 
     if ([bool]$response) {
         $i = 0
-        foreach ($Supported in $vms) {
+        foreach ($option in $OptionArray) {
             $i = $i + 1
             if ($i -eq $response) {
-                return $Supported
+                return $option
             }
         }
     }
     else {
-        return $currentValue
+        return $CurrentValue
     }
 
 }
@@ -328,29 +293,36 @@ function Select-Options {
                     $name = $($_.Name)
                     switch ($name) {
                         "operatingSystem" {
-                            $property."$name" = Get-SupportedVersion "OperatingSystems" $value "Select OS Version"
+                            $property."$name" = Get-Menu "Select OS Version" $($Common.Supported.OperatingSystems) $value
+                            #$property."$name" = Get-Menu "OperatingSystems" $value "Select OS Version"
                             #Select-OsFromList $value
                             return $null
                         }
                         "sqlVersion" {
-                            $property."$name" = Get-SupportedVersion "SqlVersions" $value "Select SQL Version"
+                            $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $value
+                            #Get-SupportedVersion "SqlVersions" $value "Select SQL Version"
                             return $null
                         }
                         "role" {
                             if ($Global:AddToExisting -eq $true) {
-                                $property."$name" = Get-SupportedVersion "RolesForExisting" $value "Select Role"
+                                $property."$name" = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
+                                #$property."$name" = Get-SupportedVersion "RolesForExisting" $value "Select Role"
                             }
                             else {
-                                $property."$name" = Get-SupportedVersion "Roles" $value "Select Role"
+                                $property."$name" = Get-Menu "Select Role" $($Common.Supported.Roles) $value
+                                #$property."$name" = Get-SupportedVersion "Roles" $value "Select Role"
                             }
                             return $null
                         }
                         "version" {
-                            $property."$name" = Get-SupportedVersion "CmVersions" $value "Select ConfigMgr Version"
+                            $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
+                            #$property."$name" = Get-SupportedVersion "CmVersions" $value "Select ConfigMgr Version"
                             return $null
                         }
                         "existingDCNameWithPrefix" {
-                            $property."$name" = Get-VMList "ExistingDCs" $value "Select Existing DC"
+                            $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
+                            $property."$name" = Get-Menu "Select Existing DC" $vms $value
+                            #$property."$name" = Get-VMList "ExistingDCs" $value "Select Existing DC"
                             return $null
                         }
                     }
