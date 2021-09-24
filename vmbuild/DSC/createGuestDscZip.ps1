@@ -54,8 +54,13 @@ foreach ($module in $modules) {
     }
 }
 
-# Create dummy file so config doesn't fail
+# Tell common to re-init
+if ($Common.Initialized) {
+    $Common.Initialized = $false
+}
 . "..\Common.ps1"
+
+# Create dummy file so config doesn't fail
 $result = Test-Configuration -FilePath $ConfigPath
 $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
 $result.DeployConfig.parameters.ThisMachineName = $ThisVM.vmName
