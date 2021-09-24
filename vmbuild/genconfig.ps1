@@ -306,8 +306,13 @@ function Select-Options {
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
                                 }
+                                else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
+                                }
                             }
-                            
+                                                    
                         }
                         "sqlVersion" {
                             $valid = $false
@@ -315,6 +320,11 @@ function Select-Options {
                                 $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $value
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
+                                }
+                                else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
                                 }
                             }
                         }
@@ -329,6 +339,10 @@ function Select-Options {
                                 }
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
+                                } else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
                                 }
                             }
                         }
@@ -338,6 +352,10 @@ function Select-Options {
                                 $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
+                                } else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
                                 }
                             }
                         }
@@ -348,6 +366,10 @@ function Select-Options {
                                 $property."$name" = Get-Menu "Select Existing DC" $vms $value
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
+                                } else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
                                 }
                             }
                         }
@@ -494,7 +516,8 @@ function Select-VirtualMachines {
                                 }
                                 if ($letters -lt 90) {
                                     $letter = $([char]$letters).ToString()
-                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
+                                    $size = [string]$($letters+31)+"GB"
+                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value $size
                                 }
                             }
                         }
@@ -520,6 +543,7 @@ function Select-VirtualMachines {
                                 $virtualMachine.psobject.properties.remove('additionalDisks')
                             }
                         }
+                        Get-TestResult -SuccessOnError | out-null
                     }
                 }
             }
