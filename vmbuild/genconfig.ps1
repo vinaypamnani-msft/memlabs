@@ -484,13 +484,44 @@ Function Get-TestResult {
     return $valid
 }
 
+function get-VMString{
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [object]
+        $virtualMachine
+    )
+
+    $name = "$($Global:Config.vmOptions.Prefix)$($virtualMachine.vmName)`t Role [$($virtualMachine.role)]"
+    if ($virtualMachine.siteCode){
+        $name += "; SiteCode [$($virtualMachine.siteCode)]"
+    }
+    if ($virtualMachine.cmInstallDir)
+    {
+        $name += "; InstallDir [$($virtualMachine.cmInstallDir)]"
+    }
+    $name += "; OS [$($virtualMachine.OperatingSystem)]; Mem [$($virtualMachine.memory)]; Procs [$($virtualMachine.virtualProcs)]"
+    if ($virtualMachine.sqlVersion){
+        $name += "; [$($virtualMachine.sqlVersion)]"
+        if ($virtualMachine.sqlInstanceDir)
+        {
+            $name += "; SqlDir [$($virtualMachine.sqlInstanceDir)]"
+        }
+    }
+    if ($virtualMachine.additionalDisks){
+        $name += "; [$($virtualMachine.additionalDisks.psobject.Properties.Value.count) Extra Disk(s)]"
+    }
+    return $name
+}
+
 function Select-VirtualMachines {
     while ($true) {
         Write-Host ""
         $i = 0
         foreach ($virtualMachine in $Config.virtualMachines) {
             $i = $i + 1
-            write-Option "$i" "$($virtualMachine)"
+            $name = Get-VMString $virtualMachine
+            write-Option "$i" "$($name)"
         }
         write-Option -Color Green -Color2 Green "N" "New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
