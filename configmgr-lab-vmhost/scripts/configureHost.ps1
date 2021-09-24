@@ -111,6 +111,18 @@ if (-not (Test-Path $destination)) {
 }
 else {
     Write-HostLog "$repoName already cloned to $destination. Run git pull instead of trying to clone again."
+
+    # Run Customize-WindowsSettings.ps1 on host VM
+    $scriptPath = Join-Path $destination "vmbuild\baseimagestaging\filesToInject\staging\Customize-WindowsSettings.ps1"
+    if (Test-Path $scriptPath) {
+        if (Test-Path "C:\staging\Customization.txt") {
+            Write-HostLog "SKIPPED executing $scriptPath since it's been executed before. See C:\staging\Customization.txt"
+        }
+        else {
+            Write-HostLog "Executing $scriptPath. See C:\staging\Customization.txt"
+            & $scriptPath
+        }
+    }
 }
 
 # Install RRAS
