@@ -9,8 +9,8 @@ param (
     [switch]$ForceDownloadFiles,
     [Parameter(Mandatory = $false, HelpMessage = "Timeout in minutes for VM Configuration.")]
     [int]$RoleConfigTimeoutMinutes = 300,
-    [Parameter(Mandatory = $false, HelpMessage = "Resize PS window.")]
-    [switch]$ResizeWindow,
+    [Parameter(Mandatory = $false, HelpMessage = "Do not resize PS window.")]
+    [switch]$NoWindowResize,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
     [switch]$WhatIf
 )
@@ -31,14 +31,21 @@ else {
     $Common.VerboseEnabled = $false
 }
 
-if ($ResizeWindow.IsPresent) {
+if (-not $NoWindowResize.IsPresent) {
     try {
+        Add-Type -AssemblyName System.Windows.Forms
+        $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.Primary -eq $true }
+
+        $percent = 0.70
+        $width = $screen.Bounds.Width * $percent
+        $height = $screen.Bounds.Height * $percent
+
         # Set Window
-        Set-Window -ProcessID $PID -X 20 -Y 20 -Width 1700 -Height 950
+        Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
         $parent = (Get-WmiObject win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
         if ($parent) {
             # set parent, cmd -> ps
-            Set-Window -ProcessID $parent -X 20 -Y 20 -Width 1800 -Height 1000
+            Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
         }
 
     }
