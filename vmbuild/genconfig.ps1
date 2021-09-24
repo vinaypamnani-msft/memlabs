@@ -110,7 +110,7 @@ function Read-Host2 {
     )
     write-help
     Write-Host -ForegroundColor Cyan $prompt -NoNewline
-    if ([bool]$currentValue) {
+    if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
         Write-Host " [" -NoNewline
         Write-Host -ForegroundColor yellow $currentValue -NoNewline
         Write-Host "]" -NoNewline
@@ -146,7 +146,7 @@ function Get-Menu {
     }
     $response = get-ValidResponse $Prompt $i $CurrentValue
 
-    if ([bool]$response) {
+    if (-not [String]::IsNullOrWhiteSpace($response)) {
         $i = 0
         foreach ($option in $OptionArray) {
             $i = $i + 1
@@ -161,6 +161,11 @@ function Get-Menu {
 
 }
 
+#Checks if the response from the menu was valid. 
+# Prompt is the prompt to display
+# Max is the max int allowed [1], [2], [3], etc
+# The current value of the option
+# additionalOptions , like [N] New VM, [S] Add SQL, either as a single letter in a string, or keys in a dictionary.
 function get-ValidResponse {
     [CmdletBinding()]
     param (
@@ -174,16 +179,20 @@ function get-ValidResponse {
         [string]
         $currentValue,
         [object]
-        $alternatevalues
+        $additionalOptions,
+        [switch]
+        $AnyString,
+        [switch]
+        $TestBeforeReturn
+
     )
 
     $responseValid = $false
     while ($responseValid -eq $false) {
-        #Write-Host "Not Returning: $response out of $max $alternatevalues"
         Write-Host
         $response = Read-Host2 -Prompt $prompt $currentValue
         try {
-            if (![bool]$response) {
+            if ([String]::IsNullOrWhiteSpace($response)) {
                 $responseValid = $true
             }
             else {
@@ -196,31 +205,31 @@ function get-ValidResponse {
                 }
                 catch {}
             }
-            if ($responseValid -eq $false -and $null -ne $alternatevalues) {
+            if ($responseValid -eq $false -and $null -ne $additionalOptions) {
                 try {
-                    if ($response.ToLowerInvariant() -eq $alternatevalues.ToLowerInvariant()) {
+                    if ($response.ToLowerInvariant() -eq $additionalOptions.ToLowerInvariant()) {
                         $responseValid = $true
                     }
                 }
                 catch {}
 
-                foreach ($i in $($alternatevalues.keys)) {
+                foreach ($i in $($additionalOptions.keys)) {
                     if ($response.ToLowerInvariant() -eq $i.ToLowerInvariant()) {
                         $responseValid = $true
                     }
                 }
             }
-            if ($responseValid -eq $false -and [bool]$currentValue) {
+            if ($responseValid -eq $false -and $currentValue -is [bool]) {
                 if ($currentValue.ToLowerInvariant() -eq "true" -or $currentValue.ToLowerInvariant() -eq "false") {
+                    $responseValid = $false
                     if ($response.ToLowerInvariant() -eq "true") {
                         $response = $true
-                        return $response
+                        $responseValid = $true
                     }
                     if ($response.ToLowerInvariant() -eq "false") {
                         $response = $false
-                        return $response
+                        $responseValid = $true
                     }
-                    $responseValid = $false
                 }
             }
         }
@@ -230,6 +239,9 @@ function get-ValidResponse {
     return $response
 }
 
+
+# Displays a Menu based on a property, offers options in [1], [2],[3] format
+# With additional options passed in via additionalOptions
 function Select-Options {
     [CmdletBinding()]
     param (
@@ -258,28 +270,26 @@ function Select-Options {
             Write-Host [$i] $_.Name = $value
         }
 
-
         if ($null -ne $additionalOptions) {
             $additionalOptions.keys | ForEach-Object {
                 $value = $additionalOptions."$($_)"
                 Write-Host [$_] $value
-                #$additional = $_
             }
         }
 
-
         $response = get-ValidResponse $prompt $i $null $additionalOptions
-        if ([bool]$response) {
+        if (-not [String]::IsNullOrWhiteSpace($response)) {
             $return = $null
             if ($null -ne $additionalOptions) {
-                #write-Host "Returning $response"
                 $additionalOptions.keys | ForEach-Object {
                     if ($response.ToLowerInvariant() -eq $_.ToLowerInvariant()) {
+                        # HACK..  "return $_" doesnt work here.. acts like a continue.. Maybe because of the foreach-object?
                         $return = $_
 
                     }
                 }
             }
+            #Return here instead
             if ($null -ne $return) {
                 return $return
             }
@@ -294,35 +304,28 @@ function Select-Options {
                     switch ($name) {
                         "operatingSystem" {
                             $property."$name" = Get-Menu "Select OS Version" $($Common.Supported.OperatingSystems) $value
-                            #$property."$name" = Get-Menu "OperatingSystems" $value "Select OS Version"
-                            #Select-OsFromList $value
                             return $null
                         }
                         "sqlVersion" {
                             $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $value
-                            #Get-SupportedVersion "SqlVersions" $value "Select SQL Version"
                             return $null
                         }
                         "role" {
                             if ($Global:AddToExisting -eq $true) {
                                 $property."$name" = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
-                                #$property."$name" = Get-SupportedVersion "RolesForExisting" $value "Select Role"
                             }
                             else {
                                 $property."$name" = Get-Menu "Select Role" $($Common.Supported.Roles) $value
-                                #$property."$name" = Get-SupportedVersion "Roles" $value "Select Role"
                             }
                             return $null
                         }
                         "version" {
                             $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
-                            #$property."$name" = Get-SupportedVersion "CmVersions" $value "Select ConfigMgr Version"
                             return $null
                         }
                         "existingDCNameWithPrefix" {
                             $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
                             $property."$name" = Get-Menu "Select Existing DC" $vms $value
-                            #$property."$name" = Get-VMList "ExistingDCs" $value "Select Existing DC"
                             return $null
                         }
                     }
@@ -330,11 +333,12 @@ function Select-Options {
                         Select-Options $value "Select data to modify"
                     }
                     else {
+                        
                         $valid = $false
                         Write-Host
                         while ($valid -eq $false) {
                             $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
-                            if ([bool]$response2) {
+                            if (-not [String]::IsNullOrWhiteSpace($response2)) {
                                 if ($property."$($_.Name)" -is [Int]) {
                                     $property."$($_.Name)" = [Int]$response2
                                 }
@@ -344,43 +348,23 @@ function Select-Options {
                                             if ($response2.ToLowerInvariant() -eq "true") {
                                                 $response2 = $true
                                             }
-                                            else {
-                                                if ($response2.ToLowerInvariant() -eq "false") {
-                                                    $response2 = $false
-                                                }
-                                                else {
-                                                    $response2 = $value
-                                                }
+                                            elseif ($response2.ToLowerInvariant() -eq "false") {
+                                                $response2 = $false
                                             }
-
+                                            else {
+                                                $response2 = $value
+                                            }
                                         }
 
                                     }
                                     $property."$($_.Name)" = $response2
-
-
                                 }
-                                $c = Test-Configuration -InputObject $Config
-                                $valid = $c.Valid
-                                if ($valid -eq $false) {
-                                    Write-Host -ForegroundColor Red $c.Message
-                                }
-                                if ( $c.Failures -eq 0) {
-                                    $valid = $true
-                                }
-
+                                $valid = Get-TestResult -SuccessOnWarning                                
                             }
                             else {
-                                $property."$($_.Name)" = $value
-                                $c = Test-Configuration -InputObject $Config
-                                $valid = $c.Valid
-                                if ($valid -eq $false) {
-                                    Write-Host -ForegroundColor Red $c.Message
-                                }
-                                if ( $c.Failures -eq 0) {
-                                    $valid = $true
-                                }
-                                $valid = $true
+                                # Enter was pressed. Set the Default value, and test, but dont block.
+                                $property."$($_.Name)" = $value                                
+                                $valid = Get-TestResult -SuccessOnError
                             }
                         }
                     }
@@ -391,6 +375,32 @@ function Select-Options {
         }
         else { return $null }
     }
+}
+
+Function Get-TestResult {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [switch]
+        $SuccessOnWarning,
+        [Parameter()]
+        [switch]
+        $SuccessOnError
+    )
+    $c = Test-Configuration -InputObject $Config
+    $valid = $c.Valid
+    if ($valid -eq $false) {
+        Write-Host -ForegroundColor Red $c.Message
+    }
+    if ($SuccessOnWarning.IsPresent) {
+        if ( $c.Failures -eq 0) {
+            $valid = $true
+        }
+    }
+    if ($SuccessOnError.IsPresent) {       
+        $valid = $true        
+    }
+    return $valid
 }
 
 function Select-VirtualMachines {
@@ -406,7 +416,7 @@ function Select-VirtualMachines {
         write-Host "[N] - New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
         Write-Log -HostOnly -Verbose "response = $response"
-        if ([bool]$response) {
+        if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
                 $Config.VirtualMachines += [PSCustomObject]@{
                     vmName          = "Member" + $([int]$i + 1)
@@ -440,7 +450,7 @@ function Select-VirtualMachines {
                         }
                         $customOptions["D"] = "Delete this VM"
                         $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
-                        if (([string]::IsNullOrEmpty($newValue))){
+                        if (([string]::IsNullOrEmpty($newValue))) {
                             break
                         }
                         if ($newValue -eq "S") {
@@ -521,11 +531,9 @@ while ($valid -eq $false) {
     Select-Options $($config.vmOptions) "Select Global Property to modify"
     Select-Options $($config.cmOptions) "Select ConfigMgr Property to modify"
     Select-VirtualMachines
-    #$config | ConvertTo-Json -Depth 3 | Out-File $configDir
     $c = Test-Configuration -InputObject $Config
     Write-Host
-    # Write-Host "-----------------------------------------------------------------------------"
-    # Write-Host
+
     if ($c.Valid) {
         $valid = $true
     }
@@ -534,8 +542,7 @@ while ($valid -eq $false) {
         Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
     }
 }
-# $($file.Name)
-#Write-Host
+
 Show-Summary ($c.DeployConfig)
 Write-Host
 $date = Get-Date -Format "MM-dd-yyyy"
@@ -548,7 +555,7 @@ else {
 }
 $splitpath = Split-Path -Path $fileName -Leaf
 $response = Read-Host2 -Prompt "Save Filename" $splitpath
-if ([bool]$response) {
+if (-not [String]::IsNullOrWhiteSpace($response)) {
     if (!$response.EndsWith("json")) {
         $response += ".json"
     }
@@ -568,11 +575,11 @@ if (-not $InternalUseOnly.IsPresent) {
 #================================= NEW LAB SCENERIO ============================================
 if ($InternalUseOnly.IsPresent) {
     $response = Read-Host2 -Prompt "Deploy Now? (y/N)" $null
-    if ([bool]$response) {
+    if (-not [String]::IsNullOrWhiteSpace($response)) {
         if ($response.ToLowerInvariant() -eq "y") {
             Write-Host
             $response = Read-Host2 -Prompt "Delete old VMs? (y/N)"
-            if ([bool]$response) {
+            if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response.ToLowerInvariant() -eq "y") {
                     $return.ForceNew = $true
                     $return.DeployNow = $true
