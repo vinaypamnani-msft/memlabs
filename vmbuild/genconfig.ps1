@@ -306,13 +306,18 @@ function Select-Options {
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             $return = $null
             if ($null -ne $additionalOptions) {
-                $additionalOptions.keys | ForEach-Object {
-                    if ($response.ToLowerInvariant() -eq $_.ToLowerInvariant()) {
-                        # HACK..  "return $_" doesnt work here.. acts like a continue.. Maybe because of the foreach-object?
-                        $return = $_
-
+                foreach ($item in $($additionalOptions.keys)) {
+                    if ($response.ToLowerInvariant() -eq $item.ToLowerInvariant()) {
+                        $return = $item
                     }
                 }
+                #$additionalOptions.keys | ForEach-Object {
+                #    if ($response.ToLowerInvariant() -eq $_.ToLowerInvariant()) {
+                #        # HACK..  "return $_" doesnt work here.. acts like a continue.. Maybe because of the foreach-object?
+                #        $return = $_
+
+                 #   }
+                #}
             }
             #Return here instead
             if ($null -ne $return) {
@@ -406,7 +411,7 @@ function Select-Options {
                         }
                     }
                     if ($value -is [System.Management.Automation.PSCustomObject]) {
-                        Select-Options $value "Select data to modify"
+                        Select-Options $value "Select data to modify" | out-null
                     }
                     else {
                         
@@ -525,7 +530,9 @@ function Select-VirtualMachines {
                         $customOptions["D"] = "Delete this VM"
                         $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
                         if ($null -ne $newValue) {
-                            $newValue = $newValue.ToLowerInvariant()
+                            $newValue = [string]$newValue.Trim()
+                            Write-Host "NewValue = '$newValue'"
+                            $newValue = [string]$newValue.ToUpper()
                         }
                         if (([string]::IsNullOrEmpty($newValue))) {
                             break
