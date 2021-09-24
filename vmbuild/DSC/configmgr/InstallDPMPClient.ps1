@@ -223,6 +223,10 @@ Start-Sleep -Seconds 5
 
 foreach ($client in $ClientNameList) {
 
+    if ([string]::IsNullOrWhiteSpace($client)) {
+        continue
+    }
+
     $testClient = Test-NetConnection -ComputerName $client -CommonTCPPort SMB -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
     if (-not $testClient.TcpTestSucceeded) {
         # Don't wait for client to appear in collection if it's not online

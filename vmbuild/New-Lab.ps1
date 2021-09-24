@@ -509,7 +509,7 @@ else {
     Write-Log "Main: Created $job_created_yes jobs for VM deployment. Failed to create $job_created_no jobs."
 }
 
-Write-Log "Deployment Summary" -Activity
+Write-Log "Deployment Summary" -Activity -HostOnly
 Write-Host
 Show-Summary -deployConfig $deployConfig
 
