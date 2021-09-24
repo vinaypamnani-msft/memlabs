@@ -306,8 +306,13 @@ function Select-Options {
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
                                 }
+                                else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
+                                }
                             }
-                            
+                                                    
                         }
                         "sqlVersion" {
                             $valid = $false
@@ -315,6 +320,11 @@ function Select-Options {
                                 $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $value
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
+                                }
+                                else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
                                 }
                             }
                         }
@@ -329,6 +339,10 @@ function Select-Options {
                                 }
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
+                                } else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
                                 }
                             }
                         }
@@ -338,6 +352,10 @@ function Select-Options {
                                 $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
+                                } else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
                                 }
                             }
                         }
@@ -348,6 +366,10 @@ function Select-Options {
                                 $property."$name" = Get-Menu "Select Existing DC" $vms $value
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
+                                } else {
+                                    if ($property."$name" -eq $value) {
+                                        return $null
+                                    }
                                 }
                             }
                         }
