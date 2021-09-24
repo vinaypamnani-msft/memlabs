@@ -40,14 +40,19 @@ function Write-Option {
         [string]
         $text,
         [object]
-        $color
+        $color,
+        [object]
+        $color2
     )
 
     if ($null -eq $color) {
         $color = [System.ConsoleColor]::Gray
     }
+    if ($null -eq $color2){
+        $color2 = [System.ConsoleColor]::White
+    }
     write-host "[" -NoNewline
-    Write-Host -ForegroundColor White $option -NoNewline
+    Write-Host -ForegroundColor $color2 $option -NoNewline
     Write-Host "] " -NoNewLine
     Write-Host -ForegroundColor $color "$text"
     
@@ -293,7 +298,7 @@ function Select-Options {
             $additionalOptions.keys | ForEach-Object {
                 $value = $additionalOptions."$($_)"
                 #Write-Host -ForegroundColor DarkGreen [$_] $value
-                Write-Option $_ $value -color DarkGreen
+                Write-Option $_ $value -color DarkGreen -Color2 Green
             }
         }
 
@@ -482,7 +487,7 @@ function Select-VirtualMachines {
             $i = $i + 1
             write-Option "$i" "$($virtualMachine)"
         }
-        write-Option -Color Green "N" "New Virtual Machine"
+        write-Option -Color Green -Color2 Green "N" "New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
