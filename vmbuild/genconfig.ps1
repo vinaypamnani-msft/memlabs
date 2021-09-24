@@ -31,7 +31,7 @@ function write-help {
     Write-Host -ForegroundColor $color " to exit without saving."
 }
 
-function Write-Option{
+function Write-Option {
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -43,7 +43,7 @@ function Write-Option{
         $color
     )
 
-    if ($null -eq $color){
+    if ($null -eq $color) {
         $color = [System.ConsoleColor]::Gray
     }
     write-host "[" -NoNewline
@@ -362,7 +362,8 @@ function Select-Options {
                                 }
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
-                                } else {
+                                }
+                                else {
                                     if ($property."$name" -eq $value) {
                                         return $null
                                     }
@@ -375,7 +376,8 @@ function Select-Options {
                                 $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
-                                } else {
+                                }
+                                else {
                                     if ($property."$name" -eq $value) {
                                         return $null
                                     }
@@ -389,7 +391,8 @@ function Select-Options {
                                 $property."$name" = Get-Menu "Select Existing DC" $vms $value
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return $null
-                                } else {
+                                }
+                                else {
                                     if ($property."$name" -eq $value) {
                                         return $null
                                     }
@@ -516,7 +519,9 @@ function Select-VirtualMachines {
                         }
                         $customOptions["D"] = "Delete this VM"
                         $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
-                        $newValue = $newValue.ToLowerInvariant()
+                        if ($null -ne $newValue) {
+                            $newValue = $newValue.ToLowerInvariant()
+                        }
                         if (([string]::IsNullOrEmpty($newValue))) {
                             break
                         }
@@ -540,7 +545,7 @@ function Select-VirtualMachines {
                                 }
                                 if ($letters -lt 90) {
                                     $letter = $([char]$letters).ToString()
-                                    $size = [string]$($letters+31)+"GB"
+                                    $size = [string]$($letters + 31) + "GB"
                                     $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value $size
                                 }
                             }
