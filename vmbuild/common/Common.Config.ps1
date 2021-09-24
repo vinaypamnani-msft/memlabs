@@ -223,7 +223,7 @@ function Test-ValidVmOptions {
         if ($ConfigObject.vmOptions.domainAdminName -match $pattern) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
         }
-        
+
         if ($ConfigObject.vmOptions.domainAdminName.Length -gt 64) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] is too long. Must be less than 64 chars" -ReturnObject $ReturnObject -Failure
         }
@@ -304,7 +304,7 @@ function Test-ValidVmSupported {
     #prefix + vmName combined name validation
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
     if ($($ConfigObject.vmOptions.prefix + $vm.vmName) -match $pattern) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] with prefix [$($ConfigObject.vmOptions.prefix)] has invalid name." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: [$vmName] with prefix [$($ConfigObject.vmOptions.prefix)] has an invalid name." -ReturnObject $ReturnObject -Failure
     }
 
     # Supported OS
@@ -347,7 +347,7 @@ function Test-ValidVmMemory {
 
     # Memory
     if (-not $VM.memory) {
-        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] does not contain memory value []. Specify desired memory in quotes; For example: ""4GB""" -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] does not contain memory value []. Specify desired memory; For example: 4GB" -ReturnObject $ReturnObject -Failure
     }
     else {
 
@@ -355,22 +355,22 @@ function Test-ValidVmMemory {
 
         # not string
         if ($vmMemory -isnot [string]) {
-            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory in quotes; For example: ""4GB""" -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory; For example: 4GB" -ReturnObject $ReturnObject -Failure
         }
 
         # memory doesn't contain MB/GB
         if ($vmMemory -is [string] -and -not ($vmMemory.EndsWith("MB") -or $vmMemory.EndsWith("GB"))) {
-            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory in quotes with MB/GB; For example: ""4GB""" -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory with MB/GB; For example: 4GB" -ReturnObject $ReturnObject -Failure
         }
 
         # memory less than 512MB
         if ($vmMemory.EndsWith("MB") -and $([int]$vmMemory.Replace("MB", "")) -lt 512 ) {
-            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should have more than 512MB" -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be more than 512MB" -ReturnObject $ReturnObject -Failure
         }
 
         # memory greater than 64GB
         if ($vmMemory.EndsWith("GB") -and $([int]$vmMemory.Replace("GB", "")) -gt 64 ) {
-            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should have less than 64GB" -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be less than 64GB" -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -405,7 +405,7 @@ function Test-ValidVmDisks {
             $size = $($vm.additionalDisks."$($_.Name)")
 
             if (-not $size.EndsWith("GB")) {
-                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Specify desired size in quotes with GB; For example: ""200GB""" -ReturnObject $ReturnObject -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Specify desired size in GB; For example: 200GB" -ReturnObject $ReturnObject -Failure
             }
 
             if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -lt 10 ) {
@@ -436,7 +436,7 @@ function Test-ValidVmProcs {
     $vmRole = $VM.role
 
     if (-not $VM.virtualProcs -or $VM.virtualProcs -isnot [int]) {
-        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid virtualProcs [$($vm.virtualProcs)]. Specify desired virtualProcs without quotes; For example: 2" -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid virtualProcs [$($vm.virtualProcs)]. Specify desired virtualProcs; For example: 2" -ReturnObject $ReturnObject -Failure
     }
     else {
         $virtualProcs = $VM.virtualProcs
@@ -463,7 +463,7 @@ function Test-ValidVmServerOS {
     $vmRole = $VM.role
 
     if ($VM.operatingSystem -notlike "*Server*") {
-        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server Operating System." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server OS for Primary/CAS/DPMP roles, or when SQL is selected." -ReturnObject $ReturnObject -Failure
     }
 
 }
@@ -535,7 +535,7 @@ function Test-ValidRoleDC {
     if ($containsDC) {
 
         if ($existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: Domain Controller (DC Role) specified in configuration with vmOptions.existingDCNameWithPrefix. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration with vmOptions.existingDCNameWithPrefix. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Failure
         }
 
         if (Test-SingleRole -VM $DCVM -ReturnObject $ReturnObject) {
@@ -544,7 +544,7 @@ function Test-ValidRoleDC {
         }
 
         if ($DCVM.sqlVersion) {
-            Add-ValidationMessage -Message "$vmRole Validation: Domain Controller: Can not have SQL Installed" -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: Adding SQL on Domain Controller is not supported." -ReturnObject $ReturnObject -Failure
         }
 
     }
@@ -639,7 +639,7 @@ function Test-SingleRole {
     # Single Role
     if ($VM -is [object[]] -and $VM.Count -ne 1) {
         $vmRole = $VM.role | Select-Object -Unique
-        Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is currently supported." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Failure
         return $false
     }
 
@@ -704,7 +704,7 @@ function Test-Configuration {
 
     # CAS/Primary must include DC
     if (($containsCS -or $containsPS) -and -not $containsDC) {
-        Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not currently supported." -ReturnObject $return -Failure
+        Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not supported." -ReturnObject $return -Failure
     }
 
     # VM Validations
@@ -726,7 +726,7 @@ function Test-Configuration {
         if ($vm.sqlVersion) {
             # Supported SQL
             if ($Common.Supported.SqlVersions -notcontains $vm.sqlVersion) {
-                Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]. Run Get-AvailableFiles.ps1." -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]." -ReturnObject $return -Failure
             }
 
             # Server OS
