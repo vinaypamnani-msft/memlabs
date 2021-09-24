@@ -493,6 +493,7 @@ function Select-VirtualMachines {
                         }
                         $customOptions["D"] = "Delete this VM"
                         $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
+                        $newValue = $newValue.ToLowerInvariant()
                         if (([string]::IsNullOrEmpty($newValue))) {
                             break
                         }
