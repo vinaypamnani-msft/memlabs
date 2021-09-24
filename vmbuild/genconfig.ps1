@@ -30,6 +30,28 @@ function write-help {
     Write-Host -ForegroundColor Yellow "[Ctrl-C]" -NoNewline
     Write-Host -ForegroundColor $color " to exit without saving."
 }
+
+function Write-Option{
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $option,
+        [string]
+        $text,
+        [object]
+        $color
+    )
+
+    if ($null -eq $color){
+        $color = [System.ConsoleColor]::Gray
+    }
+    write-host "[" -NoNewline
+    Write-Host -ForegroundColor White $option -NoNewline
+    Write-Host "] " -NoNewLine
+    Write-Host -ForegroundColor $color "$text"
+    
+}
 # Gets the json files from the config\samples directory, and offers them up for selection.
 # if 'M' is selected, shows the json files from the config directory.
 function Select-Config {
@@ -50,10 +72,10 @@ function Select-Config {
     $i = 0
     foreach ($file in $files) {
         $i = $i + 1
-        write-Host "[$i] $($file.Name)"
+        Write-Option $i $($file.Name)
     }
     if (-Not $NoMore.IsPresent) {
-        Write-Host "[M] Show More (Custom and Previous config files)"
+        Write-Option "M" "Show More (Custom and Previous config files)"
     }
     $responseValid = $false
     while ($responseValid -eq $false) {
@@ -79,7 +101,7 @@ function Select-Config {
                     write-Host "[$i] $($file.Name)"
                 }
                 if (-Not $NoMore.IsPresent) {
-                    Write-Host "[M] - Show More (Custom and Previous config files)"
+                    Write-Option "M" "Show More (Custom and Previous config files)"
                 }
             }
         }
@@ -139,7 +161,7 @@ function Get-Menu {
 
     foreach ($option in $OptionArray) {
         $i = $i + 1
-        Write-Host "[$i] - $option"
+        Write-Option $i $option
     }
     $response = get-ValidResponse $Prompt $i $CurrentValue
 
@@ -264,13 +286,14 @@ function Select-Options {
         $property | Get-Member -MemberType NoteProperty | ForEach-Object {
             $i = $i + 1
             $value = $property."$($_.Name)"
-            Write-Host [$i] $_.Name = $value
+            Write-Option $i "$($_.Name) = $value"
         }
 
         if ($null -ne $additionalOptions) {
             $additionalOptions.keys | ForEach-Object {
                 $value = $additionalOptions."$($_)"
-                Write-Host -ForegroundColor DarkGreen [$_] $value
+                #Write-Host -ForegroundColor DarkGreen [$_] $value
+                Write-Option $_ $value -color DarkGreen
             }
         }
 
@@ -454,9 +477,9 @@ function Select-VirtualMachines {
         $i = 0
         foreach ($virtualMachine in $Config.virtualMachines) {
             $i = $i + 1
-            write-Host "[$i] - $($virtualMachine)"
+            write-Option "$i" "$($virtualMachine)"
         }
-        write-Host -ForegroundColor Green "[N] - New Virtual Machine"
+        write-Option -Color Green "N" "New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
