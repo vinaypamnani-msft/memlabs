@@ -201,7 +201,15 @@ function Test-ValidVmOptions {
         # valid domain name
         $pattern = "^((?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,6}$"
         if (-not ($ConfigObject.vmOptions.domainName -match $pattern)) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName value [$($ConfigObject.vmOptions.domainName)] contains invalid characters. You must specify a valid Domain name. For example: contoso.com." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName value [$($ConfigObject.vmOptions.domainName)] contains invalid characters, is too long, or too short. You must specify a valid Domain name. For example: contoso.com." -ReturnObject $ReturnObject -Failure
+        }
+
+        if ($ConfigObject.vmOptions.domainName.Length -gt 63){
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too long. Must be less than 63 chars" -ReturnObject $ReturnObject -Failure
+        }
+
+       if ($ConfigObject.vmOptions.domainName.Length -lt 5){
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too short. Must be at least 5 chars" -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -214,6 +222,14 @@ function Test-ValidVmOptions {
         $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
         if ($ConfigObject.vmOptions.domainAdminName -match $pattern) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
+        }
+        
+        if ($ConfigObject.vmOptions.domainAdminName.Length -gt 64){
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] is too long. Must be less than 64 chars" -ReturnObject $ReturnObject -Failure
+        }
+
+        if ($ConfigObject.vmOptions.domainAdminName.Length -lt 3){
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] is too short. Must be at least 3 chars" -ReturnObject $ReturnObject -Failure
         }
     }
 
