@@ -211,7 +211,7 @@ function Test-ValidVmOptions {
     }
     else {
 
-        $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"')]"
+        $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
         if ($ConfigObject.vmOptions.domainAdminName -match $pattern) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
         }
@@ -283,6 +283,12 @@ function Test-ValidVmSupported {
     # vmName characters
     if ($vm.vmName.Length + $ConfigObject.vmOptions.prefix.Length -gt 15) {
         Add-ValidationMessage -Message "VM Validation: [$vmName] with prefix [$($ConfigObject.vmOptions.prefix)] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Failure
+    }
+
+    #prefix + vmName combined name validation
+    $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
+    if ($($ConfigObject.vmOptions.prefix + $vm.vmName) -match $pattern) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] with prefix [$($ConfigObject.vmOptions.prefix)] has invalid name." -ReturnObject $ReturnObject -Failure
     }
 
     # Supported OS
@@ -862,7 +868,7 @@ Function Show-Summary {
         Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
     }
     Write-Host "[$CHECKMARK] Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
-    $out = $deployConfig.virtualMachines | Format-table vmName, role, operatingSystem,memory,@{Label="Procs";Expression={$_.virtualProcs}}, @{Label="AddedDisks";Expression={$_.additionalDisks.psobject.Properties.Value.count}}, @{Label="SQL";Expression={if ($null -ne $_.SqlVersion) {"YES"}}}  | Out-String
+    $out = $deployConfig.virtualMachines | Format-table vmName, role, operatingSystem, memory, @{Label = "Procs"; Expression = { $_.virtualProcs } }, @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } }, @{Label = "SQL"; Expression = { if ($null -ne $_.SqlVersion) { "YES" } } }  | Out-String
     Write-Host
     $out.Trim() | Out-Host
 }
