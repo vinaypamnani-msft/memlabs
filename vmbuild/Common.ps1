@@ -130,6 +130,10 @@ function Get-File {
         $Action,
         [Parameter(Mandatory = $false)]
         [switch]$Silent,
+        [Parameter(Mandatory = $false)]
+        [switch]$RemoveIfPresent,
+        [Parameter(Mandatory = $false)]
+        [switch]$ForceDownload,
         [Parameter(Mandatory = $false, ParameterSetName = "WhatIf")]
         [switch]$WhatIf
     )
@@ -146,26 +150,38 @@ function Get-File {
     # What If
     if ($WhatIf -and -not $Silent) {
         Write-Log "Get-File - WhatIf: $Action $sourceDisplay file to $Destination"
-        return
+        return $true
     }
 
     # Not making these mandatory to allow WhatIf to run with null values
     if (-not $Source -and -not $Destination) {
         Write-Log "Get-File: Source and Destination parameters must be specified." -Failure
-        return
+        return $false
     }
+
+    # Not making these mandatory to allow WhatIf to run with null values
+    if (-not $Action) {
+        Write-Log "Get-File: Action must be specified." -Failure
+        return $false
+    }
+
+    $destinationFile = Split-Path $Destination -Leaf
 
     $HashArguments = @{
         Source      = $Source
         Destination = $Destination
+        Description = "$Action $destinationFile using BITS"
     }
 
     if ($DisplayName) { $HashArguments.Add("DisplayName", $DisplayName) }
-    if ($Action) { $HashArguments.Add("Description", "$Action using BITS") }
 
     if (-not $Silent) {
         Write-Log "Get-File: $Action $sourceDisplay using BITS to $Destination... "
         if ($DisplayName) { Write-Log "Get-File: $DisplayName" -LogOnly }
+    }
+
+    if ($RemoveIfPresent.IsPresent -and (Test-Path $Destination)) {
+        Remove-Item -Path $Destination -Force -Confirm:$false -WhatIf:$WhatIf
     }
 
     # Create destination directory if it doesn't exist
@@ -175,10 +191,44 @@ function Get-File {
     }
 
     try {
+        $i = 0
+        $timedOut = $false
+
+        # Wait for existing download to finish, dont bother when action is copying
+        if ($Action -eq "Downloading") {
+            while (Get-BitsTransfer -ErrorAction SilentlyContinue | Where-Object { $_.JobState -eq "Transferring" -and $_.Description -like "*$destinationFile*" }) {
+                Write-Log "Get-File: Download for '$sourceDisplay' waiting on an existing download. Checking again in 1 minute..." -Warning
+                Start-Sleep -Seconds 60
+
+                $i++
+                if ($i -gt 5) {
+                    Write-Log "Get-FileFromStorage: Timed out while waiting to download '$sourceDisplay'." -Failure
+                    $timedOut = $true
+                    break
+                }
+            }
+        }
+
+        if ($timedOut) {
+            return $false
+        }
+
+        # Skip re-download if file already exists, dont bother when action is copying
+        if ($Action -eq "Downloading" -and (Test-Path $Destination) -and -not $ForceDownload.IsPresent) {
+            Write-Log "Get-File: Download skipped. $Destination already exists." -LogOnly
+            return $true
+        }
+
         Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+        if (Test-Path $Destination) {
+            return $true
+        }
+
+        return $false
     }
     catch {
         Write-Log "Get-File: $Action $sourceDisplay failed. Error: $($_.ToString().Trim())" -Failure
+        return $false
     }
 }
 
@@ -322,7 +372,7 @@ function New-VirtualMachine {
     if (Test-Path -Path $VmSubPath) {
         Write-Log "New-VirtualMachine: $VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
         Remove-Item -Path $VmSubPath -Force -Recurse
-        Write-Log "New-VirtualMachine: $VmName`: Purge complete."
+        Write-Log "New-VirtualMachine: $VmName`: Purge complete." -Verbose
     }
 
     # Create new VM
@@ -337,7 +387,11 @@ function New-VirtualMachine {
     # Copy sysprepped image to VM location
     $osDiskName = "$($VmName)_OS.vhdx"
     $osDiskPath = Join-Path $vm.Path $osDiskName
-    Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
+    $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
+    if (-not $worked) {
+        Write-Log "New-VirtualMachine: $VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+        return $false
+    }
 
     Write-Log "New-VirtualMachine: $VmName`: Setting Processor count to $Processors"
     Set-VM -Name $vmName -ProcessorCount $Processors
@@ -377,8 +431,14 @@ function New-VirtualMachine {
         Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net
     }
 
-    Write-Log "New-VirtualMachine: $VmName`: Starting virtual machine"
-    Start-VM -Name $VmName
+    try {
+        Write-Log "New-VirtualMachine: $VmName`: Starting virtual machine"
+        Start-VM -Name $VmName
+    }
+    catch {
+        Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $_"
+        return $false
+    }
 
     return $true
 }
@@ -655,8 +715,13 @@ function Get-StorageConfig {
         if ($updateList) {
 
             # Get file list
-            Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent
-            $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
+            if (-not $worked) {
+                $Common.FatalError = "Get-StorageConfig: Failed to download file list."
+            }
+            else {
+                $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            }
 
         }
 
@@ -690,28 +755,18 @@ function Get-FileFromStorage {
     $imageName = $File.id
     Write-Log "Get-FileFromStorage: Downloading/Verifying '$imageName'" -SubActivity
 
-    $success = $true
+    # What if returns success
+    if ($WhatIf) {
+        return $true
+    }
 
+    $success = $true
     foreach ($filename in $File.filename) {
         $imageUrl = "$($StorageConfig.StorageLocation)/$($filename)"
         $imageFileName = Split-Path $filename -Leaf
         $localImagePath = Join-Path $Common.AzureFilesPath $filename
 
         $download = $true
-        $destinationDirectory = Split-Path $localImagePath -Leaf
-
-        $i = 0
-        while (Test-Path "$destinationDirectory\\BIT*.tmp") {
-            Write-Log "Get-FileFromStorage: Download for '$imageFileName' waiting on an existing download. Checking again in 2 minutes..." -LogOnly
-            Start-Sleep -Seconds 120
-
-            $i++
-            if ($i -gt 10) {
-                Write-Log "Get-FileFromStorage: Timed out while waiting to download '$imageFileName'." -LogOnly
-                $success = $false
-            }
-        }
-
         if (Test-Path $localImagePath) {
             Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath)."
             if ($ForceDownloadFiles.IsPresent) {
@@ -726,19 +781,10 @@ function Get-FileFromStorage {
         }
 
         if ($download) {
-
-            Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
-
-            # What if returns success
-            if ($WhatIf) {
-                $success = $true
-            }
-
-            # Check if path exists
-            if (-not (Test-Path -Path $localImagePath)) {
+            $worked = Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
+            if (-not $worked) {
                 $success = $false
             }
-
         }
     }
 

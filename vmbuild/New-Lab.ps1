@@ -424,12 +424,13 @@ catch {
 # Download required files
 $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
 if (-not $success) {
-    Write-Log "Main: Failed to download all required files for specified configuration. Retrying in 2 minutes... " -Warning
+    Write-Host
+    Write-Log "Main: Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
     Start-Sleep -Seconds 120
     $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
     if (-not $success) {
         $timer.Stop()
-        Write-Log "Main: Failed to download all required files for specified configuration. Exiting." -Failure
+        Write-Log "Main: Failed to download all required files. Exiting." -Failure
         return
     }
 }

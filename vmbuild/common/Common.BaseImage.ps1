@@ -45,10 +45,14 @@ function Get-ToolsForBaseImage {
         }
 
         if ($download) {
-            Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$name' to $downloadPath..." -Action "Downloading" -WhatIf:$WhatIf
+            $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$name' to $downloadPath..." -Action "Downloading" -WhatIf:$WhatIf
+
+            if (-not $worked) {
+                Write-Log "Get-ToolsForBaseImage: Failed to download '$name' to $downloadPath"
+                continue
+            }
 
             # Create final destination directory, if not present
-
             $fileDestination = Join-Path $Common.StagingInjectPath $fileTargetRelative
             if (-not (Test-Path $fileDestination)) {
                 New-Item -Path $fileDestination -ItemType Directory -Force | Out-Null

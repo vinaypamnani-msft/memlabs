@@ -43,8 +43,8 @@ if ($Common.FatalError) {
 # Validate/Download bginfo.exe
 $bgInfoPath = "$($Common.StagingInjectPath)\staging\bginfo\bginfo.exe"
 if (-not (Test-Path $bgInfoPath)) {
-    Get-File -Source "https://live.sysinternals.com/bginfo.exe" -Destination $bgInfoPath -DisplayName "Downloading bginfo.exe" -Action "Downloading" -Silent
-    if (-not (Test-Path $bgInfoPath) -and -not $IgnoreBginfo.IsPresent) {
+    $worked = Get-File -Source "https://live.sysinternals.com/bginfo.exe" -Destination $bgInfoPath -DisplayName "Downloading bginfo.exe" -Action "Downloading" -Silent
+    if (-not $worked -and -not $IgnoreBginfo.IsPresent) {
         Write-Log "Main: $bgInfoPath not found, and download failed. Use IgnoreBginfo switch if you don't care about this." -Warning
         return
     }
@@ -290,9 +290,9 @@ if ($purgeGoldImage) {
 
 Write-Log "Main: Copying the 'golden' image..."
 
-Get-File -Source $osDiskPath -Destination $goldImagePath -DisplayName "Copying the 'golden' image to $($Common.AzureImagePath)" -Action "Copying" -WhatIf:$WhatIf
+$worked = Get-File -Source $osDiskPath -Destination $goldImagePath -DisplayName "Copying the 'golden' image to $($Common.AzureImagePath)" -Action "Copying" -WhatIf:$WhatIf
 Write-Host
-if (-not $WhatIf -and -not (Test-Path $osDiskPath)) {
+if (-not $WhatIf -and -not $worked) {
     Write-Log "### Something went wrong copying the 'golden' image $osDiskPath to $($Common.AzureImagePath). Please copy manually." -Warning
 }
 else {

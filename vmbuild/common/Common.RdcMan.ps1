@@ -54,9 +54,17 @@ function New-RDCManFile {
 
     # Download rdcman, if not present
     if (-not (Test-Path "$rdcmanapath\$rdcmanexe")) {
-        $ProgressPreference = 'SilentlyContinue'
-        Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination "$newrdcmanpath\$rdcmanexe" -ErrorAction SilentlyContinue
-        $ProgressPreference = 'Continue'
+
+        try {
+            $ProgressPreference = 'SilentlyContinue'
+            Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination "$newrdcmanpath\$rdcmanexe" -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-Log "New-RDCManFile: Could not download latest RDCMan.exe. $_" -Warning -LogOnly
+        }
+        finally {
+            $ProgressPreference = 'Continue'
+        }
     }
     else {
         Copy-Item -Path "$rdcmanpath\$rdcmanexe" -Destination "$newrdcmanpath\$rdcmanexe" -Force -ErrorAction SilentlyContinue
