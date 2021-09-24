@@ -9,6 +9,8 @@ param (
     [switch]$ForceDownloadFiles,
     [Parameter(Mandatory = $false, HelpMessage = "Timeout in minutes for VM Configuration.")]
     [int]$RoleConfigTimeoutMinutes = 300,
+    [Parameter(Mandatory = $false, HelpMessage = "Resize PS window.")]
+    [switch]$ResizeWindow,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
     [switch]$WhatIf
 )
@@ -29,18 +31,20 @@ else {
     $Common.VerboseEnabled = $false
 }
 
-try {
-    # Set Window
-    Set-Window -ProcessID $PID -X 20 -Y 20 -Width 1200 -Height 900
-    $parent = (Get-WmiObject win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
-    if ($parent) {
-        # set parent, assuming cmd -> ps
-        Set-Window -ProcessID $parent -X 20 -Y 20 -Width 1350 -Height 950
-    }
+if ($ResizeWindow.IsPresent) {
+    try {
+        # Set Window
+        Set-Window -ProcessID $PID -X 20 -Y 20 -Width 1700 -Height 950
+        $parent = (Get-WmiObject win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
+        if ($parent) {
+            # set parent, cmd -> ps
+            Set-Window -ProcessID $parent -X 20 -Y 20 -Width 1800 -Height 1000
+        }
 
-}
-catch {
-    Write-Log "Main: Failed to set window size. $_" -LogOnly -Warning
+    }
+    catch {
+        Write-Log "Main: Failed to set window size. $_" -LogOnly -Warning
+    }
 }
 
 # Validate token exists
