@@ -291,7 +291,8 @@ function Select-Options {
         $property | Get-Member -MemberType NoteProperty | ForEach-Object {
             $i = $i + 1
             $value = $property."$($_.Name)"
-            Write-Option $i "$($($_.Name).PadRight(26," "")) = $value"
+            $padding = 27 - ($i.ToString().Length)
+            Write-Option $i "$($($_.Name).PadRight($padding," "")) = $value"
         }
 
         if ($null -ne $additionalOptions) {
