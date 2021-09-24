@@ -862,7 +862,7 @@ Function Show-Summary {
         Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
     }
     Write-Host "[$CHECKMARK] Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
-    $out = $deployConfig.virtualMachines | Format-Table | Out-String
+    $out = $deployConfig.virtualMachines | Format-table vmName, role, operatingSystem,memory,@{Label="Procs";Expression={$_.virtualProcs}}, @{Label="AddedDisks";Expression={$_.additionalDisks.psobject.Properties.Value.count}}, @{Label="SQL";Expression={if ($null -ne $_.SqlVersion) {"YES"}}}  | Out-String
     Write-Host
     $out.Trim() | Out-Host
 }
