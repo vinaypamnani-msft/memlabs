@@ -21,9 +21,6 @@ Write-Host -ForegroundColor Cyan "New-Lab Configuration generator:"
 Write-Host -ForegroundColor Cyan "You can use this tool to customize most options."
 Write-Host -ForegroundColor Cyan "Press Ctrl-C to exit without saving."
 Write-Host -ForegroundColor Cyan ""
-Write-Host -ForegroundColor Cyan "Known Limitations: (must be done via manual json editing)"
-Write-Host -ForegroundColor Cyan " - Can not add/remove Disks"
-Write-Host -ForegroundColor Cyan ""
 
 function write-help {
     $color = [System.ConsoleColor]::DarkGray
