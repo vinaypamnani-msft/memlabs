@@ -1,4 +1,4 @@
-﻿configuration PSConfiguration
+﻿configuration PrimaryConfiguration
 {
     param
     (
@@ -90,7 +90,7 @@
         }
 
         InstallFeatureForSCCM InstallFeature {
-            NAME      = "PS"
+            NAME      = "Primary"
             Role      = "Site Server"
             DependsOn = "[SetCustomPagingFile]PagingSettings"
         }
@@ -130,7 +130,7 @@
 
         OpenFirewallPortForSCCM OpenFirewall {
             DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
-            Name      = "PS"
+            Name      = "Primary"
             Role      = "Site Server"
         }
 
@@ -223,7 +223,7 @@
 
             WriteStatus WaitCS {
                 DependsOn = "[File]ShareFolder"
-                Status    = "Waiting for CS Server to join domain"
+                Status    = "Waiting for CAS Server to join domain"
             }
 
             WaitForConfigurationFile WaitCSJoinDomain {

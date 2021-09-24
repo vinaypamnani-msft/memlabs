@@ -107,7 +107,7 @@ $p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance N
 $sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
 
 # Set ini values
-$installAction = if ($CurrentRole -eq "CS") { "InstallCAS" } else { "InstallPrimarySite" }
+$installAction = if ($CurrentRole -eq "CAS") { "InstallCAS" } else { "InstallPrimarySite" }
 $cmini = $cmini.Replace('%InstallAction%', $installAction)
 $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
 $cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")

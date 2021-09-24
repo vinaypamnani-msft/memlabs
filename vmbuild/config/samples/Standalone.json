@@ -23,7 +23,7 @@
         },
         {
             "vmName": "PRI",
-            "role": "PS",
+            "role": "Primary",
             "siteCode": "PRI",
             "operatingSystem": "Server 2022",
             "sqlVersion": "SQL Server 2019",

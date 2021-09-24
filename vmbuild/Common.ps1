@@ -920,8 +920,8 @@ function Set-SupportedOptions {
 
     $roles = @(
         "DC",
-        "PS",
-        "CS",
+        "Primary",
+        "CAS",
         "DPMP",
         "DomainMember"
     )

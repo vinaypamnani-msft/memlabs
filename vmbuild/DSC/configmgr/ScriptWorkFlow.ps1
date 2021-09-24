@@ -82,7 +82,7 @@ else {
         }
     }
     else {
-        if ($CurrentRole -eq "CS") {
+        if ($CurrentRole -eq "CAS") {
             [hashtable]$Actions = @{
                 InstallSCCM    = @{
                     Status    = 'NotStart'
@@ -106,7 +106,7 @@ else {
                 }
             }
         }
-        elseif ($CurrentRole -eq "PS") {
+        elseif ($CurrentRole -eq "Primary") {
             [hashtable]$Actions = @{
                 WaitingForCASFinsihedInstall = @{
                     Status    = 'NotStart'
@@ -159,14 +159,14 @@ if ($Config -eq "Standalone") {
 
 }
 else {
-    if ($CurrentRole -eq "CS") {
+    if ($CurrentRole -eq "CAS") {
 
         #Install CM and Config
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
 
     }
-    elseif ($CurrentRole -eq "PS") {
+    elseif ($CurrentRole -eq "Primary") {
 
         #Install CM and Config
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPSForHierarchy.ps1"
