@@ -270,7 +270,7 @@ function Select-Options {
         if ($null -ne $additionalOptions) {
             $additionalOptions.keys | ForEach-Object {
                 $value = $additionalOptions."$($_)"
-                Write-Host [$_] $value
+                Write-Host -ForegroundColor DarkGreen [$_] $value
             }
         }
 
@@ -401,8 +401,6 @@ Function Get-TestResult {
 }
 
 function Select-VirtualMachines {
-
-
     while ($true) {
         Write-Host ""
         $i = 0
@@ -410,7 +408,7 @@ function Select-VirtualMachines {
             $i = $i + 1
             write-Host "[$i] - $($virtualMachine)"
         }
-        write-Host "[N] - New Virtual Machine"
+        write-Host -ForegroundColor Green "[N] - New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
@@ -518,6 +516,46 @@ function Select-VirtualMachines {
     }
 }
 
+function Save-Config {
+    Write-Host
+
+    $file = "$($config.vmOptions.prefix)$($config.vmOptions.domainName)"
+    if ($config.vmOptions.existingDCNameWithPrefix) {
+        $file += "-ADD"
+    }
+    elseif (-not $config.cmOptions) {        
+        $file += "-NOSCCM"        
+    }
+    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "CS" }) {
+        $file += "-CAS-$($config.cmOptions.version)-"
+    }
+    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "PS" }) {
+        $file += "-PRI-$($config.cmOptions.version)-"
+    }
+    
+    $file += "($($config.virtualMachines.Count)VMs)-"
+    $date = Get-Date -Format "MM-dd-yyyy"
+    $file += $date
+
+    $filename = Join-Path $configDir $file
+
+    $splitpath = Split-Path -Path $fileName -Leaf
+    $response = Read-Host2 -Prompt "Save Filename" $splitpath
+    
+    if (-not [String]::IsNullOrWhiteSpace($response)) {       
+        $filename = Join-Path $configDir $response
+    }
+
+    if (!$filename.EndsWith("json")) {
+        $filename += ".json"
+    }
+
+    $config | ConvertTo-Json -Depth 3 | Out-File $filename
+    $return.ConfigFileName = Split-Path -Path $fileName -Leaf
+    Write-Host "Saved to $filename"
+    Write-Host
+}
+
 $Global:Config = Select-Config $sampleDir
 $Global:AddToExisting = $false
 if ($($null -ne $config.vmOptions.existingDCNameWithPrefix)) {
@@ -541,27 +579,28 @@ while ($valid -eq $false) {
 }
 
 Show-Summary ($c.DeployConfig)
-Write-Host
-$date = Get-Date -Format "MM-dd-yyyy"
-if ($($Global:configfile.Name).StartsWith("xGen")) {
-    $postfix = $($Global:configfile.Name).SubString(16)
-    $filename = Join-Path $configDir "xGen-$date-$postfix"
-}
-else {
-    $filename = Join-Path $configDir "xGen-$date-$($Global:configfile.Name)"
-}
-$splitpath = Split-Path -Path $fileName -Leaf
-$response = Read-Host2 -Prompt "Save Filename" $splitpath
-if (-not [String]::IsNullOrWhiteSpace($response)) {
-    if (!$response.EndsWith("json")) {
-        $response += ".json"
-    }
-    $filename = Join-Path $configDir $response
-}
-$config | ConvertTo-Json -Depth 3 | Out-File $filename
-$return.ConfigFileName = Split-Path -Path $fileName -Leaf
-Write-Host "Saved to $filename"
-Write-Host
+Save-Config
+#Write-Host
+#$date = Get-Date -Format "MM-dd-yyyy"
+#if ($($Global:configfile.Name).StartsWith("xGen")) {
+#    $postfix = $($Global:configfile.Name).SubString(16)
+#    $filename = Join-Path $configDir "xGen-$date-$postfix"
+#}
+#else {
+#    $filename = Join-Path $configDir "xGen-$date-$($Global:configfile.Name)"
+#}
+#$splitpath = Split-Path -Path $fileName -Leaf
+#$response = Read-Host2 -Prompt "Save Filename" $splitpath
+#if (-not [String]::IsNullOrWhiteSpace($response)) {
+#    if (!$response.EndsWith("json")) {
+#        $response += ".json"
+#    }
+#    $filename = Join-Path $configDir $response
+#}
+#$config | ConvertTo-Json -Depth 3 | Out-File $filename
+#$return.ConfigFileName = Split-Path -Path $fileName -Leaf
+#Write-Host "Saved to $filename"
+#Write-Host
 
 if (-not $InternalUseOnly.IsPresent) {
     Write-Host "You can deploy this configuration by running the following command:"
