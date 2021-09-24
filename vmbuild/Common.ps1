@@ -100,8 +100,8 @@ function Write-Log {
             $Text | Out-File $Common.LogPath -Append
         }
         catch {
-            # Retry
-            $Text | Out-File $Common.LogPath -Append
+            # Retry and ignore if failed
+            $Text | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue
         }
     }
 
@@ -111,8 +111,8 @@ function Write-Log {
             $Text | Out-File $Common.LogPath -Append
         }
         catch {
-            # Retry
-            $Text | Out-File $Common.LogPath -Append
+            # Retry and ignore if failed
+            $Text | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue
         }
     }
 }
