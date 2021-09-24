@@ -48,14 +48,14 @@ function Write-Option {
     if ($null -eq $color) {
         $color = [System.ConsoleColor]::Gray
     }
-    if ($null -eq $color2){
+    if ($null -eq $color2) {
         $color2 = [System.ConsoleColor]::White
     }
     write-host "[" -NoNewline
     Write-Host -ForegroundColor $color2 $option -NoNewline
     Write-Host "] " -NoNewLine
     Write-Host -ForegroundColor $color "$text"
-    
+
 }
 # Gets the json files from the config\samples directory, and offers them up for selection.
 # if 'M' is selected, shows the json files from the config directory.
@@ -185,7 +185,7 @@ function Get-Menu {
 
 }
 
-#Checks if the response from the menu was valid. 
+#Checks if the response from the menu was valid.
 # Prompt is the prompt to display
 # Max is the max int allowed [1], [2], [3], etc
 # The current value of the option
@@ -316,7 +316,7 @@ function Select-Options {
                 #        # HACK..  "return $_" doesnt work here.. acts like a continue.. Maybe because of the foreach-object?
                 #        $return = $_
 
-                 #   }
+                #   }
                 #}
             }
             #Return here instead
@@ -345,7 +345,7 @@ function Select-Options {
                                     }
                                 }
                             }
-                                                    
+
                         }
                         "sqlVersion" {
                             $valid = $false
@@ -414,7 +414,7 @@ function Select-Options {
                         Select-Options $value "Select data to modify" | out-null
                     }
                     else {
-                        
+
                         $valid = $false
                         Write-Host
                         while ($valid -eq $false) {
@@ -440,11 +440,11 @@ function Select-Options {
                                     }
                                     $property."$($_.Name)" = $response2
                                 }
-                                $valid = Get-TestResult -SuccessOnWarning                                
+                                $valid = Get-TestResult -SuccessOnWarning
                             }
                             else {
                                 # Enter was pressed. Set the Default value, and test, but dont block.
-                                $property."$($_.Name)" = $value                                
+                                $property."$($_.Name)" = $value
                                 $valid = Get-TestResult -SuccessOnError
                             }
                         }
@@ -478,13 +478,13 @@ Function Get-TestResult {
             $valid = $true
         }
     }
-    if ($SuccessOnError.IsPresent) {       
-        $valid = $true        
+    if ($SuccessOnError.IsPresent) {
+        $valid = $true
     }
     return $valid
 }
 
-function get-VMString{
+function get-VMString {
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -492,25 +492,37 @@ function get-VMString{
         $virtualMachine
     )
 
-    $name = "$($Global:Config.vmOptions.Prefix)$($virtualMachine.vmName)`t Role [$($virtualMachine.role)]"
-    if ($virtualMachine.siteCode){
-        $name += "; SiteCode [$($virtualMachine.siteCode)]"
+    $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(15, " ")
+    $name = "$machineName " + $("["+$($virtualmachine.role)+"]").PadRight(15," ")
+    $mem = $($virtualMachine.memory).PadLEft(4, " ")
+    $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
+    $name += "VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)"
+
+    if ($virtualMachine.additionalDisks) {
+        $name += ", $($virtualMachine.additionalDisks.psobject.Properties.Value.count) Extra Disk(s)]"
     }
-    if ($virtualMachine.cmInstallDir)
-    {
-        $name += "; InstallDir [$($virtualMachine.cmInstallDir)]"
+    else {
+        $name += "]"
     }
-    $name += "; OS [$($virtualMachine.OperatingSystem)]; Mem [$($virtualMachine.memory)]; Procs [$($virtualMachine.virtualProcs)]"
-    if ($virtualMachine.sqlVersion){
-        $name += "; [$($virtualMachine.sqlVersion)]"
-        if ($virtualMachine.sqlInstanceDir)
-        {
-            $name += "; SqlDir [$($virtualMachine.sqlInstanceDir)]"
-        }
+
+    if ($virtualMachine.siteCode -and $virtualMachine.cmInstallDir) {
+        $name += "`tCM [SiteCode $($virtualMachine.siteCode), "
+        $name += "InstallDir $($virtualMachine.cmInstallDir)]"
     }
-    if ($virtualMachine.additionalDisks){
-        $name += "; [$($virtualMachine.additionalDisks.psobject.Properties.Value.count) Extra Disk(s)]"
+
+    if ($virtualMachine.siteCode -and -not $virtualMachine.cmInstallDir) {
+        $name += "`tCM [SiteCode $($virtualMachine.siteCode)]"
     }
+
+    if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
+        $name += "`tSQL [$($virtualMachine.sqlVersion)]"
+    }
+
+    if ($virtualMachine.sqlVersion -and $virtualMachine.sqlInstanceDir) {
+        $name += "`tSQL [$($virtualMachine.sqlVersion), "
+        $name += "SqlDir $($virtualMachine.sqlInstanceDir)]"
+    }
+
     return $name
 }
 
@@ -645,8 +657,8 @@ function Save-Config {
     if ($config.vmOptions.existingDCNameWithPrefix) {
         $file += "-ADD"
     }
-    elseif (-not $config.cmOptions) {        
-        $file += "-NOSCCM"        
+    elseif (-not $config.cmOptions) {
+        $file += "-NOSCCM"
     }
     elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "cas" }) {
         $file += "-CAS-$($config.cmOptions.version)-"
@@ -654,7 +666,7 @@ function Save-Config {
     elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "primary" }) {
         $file += "-PRI-$($config.cmOptions.version)-"
     }
-    
+
     $file += "($($config.virtualMachines.Count)VMs)-"
     $date = Get-Date -Format "MM-dd-yyyy"
     $file += $date
@@ -663,8 +675,8 @@ function Save-Config {
 
     $splitpath = Split-Path -Path $fileName -Leaf
     $response = Read-Host2 -Prompt "Save Filename" $splitpath
-    
-    if (-not [String]::IsNullOrWhiteSpace($response)) {       
+
+    if (-not [String]::IsNullOrWhiteSpace($response)) {
         $filename = Join-Path $configDir $response
     }
 
