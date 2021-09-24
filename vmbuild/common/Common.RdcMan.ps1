@@ -127,14 +127,12 @@ function New-RDCManFile {
     # Save to desired filename
     if ($shouldSave) {
         Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success
-        Write-Log "RDCMan.exe is located in $newrdcmanpath" -Success
         Get-Process -Name rdcman -ea Ignore | Stop-Process
         Start-Sleep 1
         $existing.save($rdcmanfile) | Out-Null
     }
     else {
         Write-Log "New-RDCManFile: No Changes. Not Saving resultant XML to $rdcmanfile" -Success
-        Write-Log "RDCMan.exe is located in $newrdcmanpath" -Success
     }
 }
 

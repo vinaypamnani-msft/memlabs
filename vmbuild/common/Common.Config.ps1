@@ -811,15 +811,15 @@ Function Show-Summary {
     param (
         [Parameter()]
         [PsCustomObject]
-        $config
+        $deployConfig
     )
 
     $CHECKMARK = ([char]8730)
 
-    if (-not $null -eq $($config.DeployConfig.cmOptions)) {
-        if ($config.DeployConfig.cmOptions.install -eq $true) {
-            Write-Host "[$CHECKMARK] ConfigMgr $($config.DeployConfig.cmOptions.version) will be installed and " -NoNewline
-            if ($config.DeployConfig.cmOptions.updateToLatest -eq $true) {
+    if (-not $null -eq $($deployConfig.cmOptions)) {
+        if ($deployConfig.cmOptions.install -eq $true) {
+            Write-Host "[$CHECKMARK] ConfigMgr $($deployConfig.cmOptions.version) will be installed and " -NoNewline
+            if ($deployConfig.cmOptions.updateToLatest -eq $true) {
                 Write-Host "updated to latest"
             }
             else {
@@ -830,14 +830,14 @@ Function Show-Summary {
             Write-Host "[x] ConfigMgr will not be installed."
         }
 
-        if ($config.DeployConfig.cmOptions.installDPMPRoles) {
+        if ($deployConfig.cmOptions.installDPMPRoles) {
             Write-Host "[$CHECKMARK] DPMP roles will be pushed from the Configmgr Primary Server"
         }
         else {
             Write-Host "[x] DPMP roles will not be installed"
         }
 
-        if ($config.DeployConfig.cmOptions.pushClientToDomainMembers) {
+        if ($deployConfig.cmOptions.pushClientToDomainMembers) {
             Write-Host "[$CHECKMARK] ConfigMgr Clients will be installed on domain members"
         }
         else {
@@ -849,20 +849,22 @@ Function Show-Summary {
         Write-Host "[x] ConfigMgr will not be installed."
     }
 
-    if (-not $null -eq $($config.DeployConfig.vmOptions)) {
+    if (-not $null -eq $($deployConfig.vmOptions)) {
 
-        if ($null -eq $config.DeployConfig.vmOptions.existingDCNameWithPrefix) {
-            Write-Host "[$CHECKMARK] Domain: $($config.DeployConfig.vmOptions.domainName) will be created."
+        if ($null -eq $deployConfig.vmOptions.existingDCNameWithPrefix) {
+            Write-Host "[$CHECKMARK] Domain: $($deployConfig.vmOptions.domainName) will be created."
         }
         else {
-            Write-Host "[$CHECKMARK] Domain: $($config.DeployConfig.vmOptions.domainName) will be joined."
+            Write-Host "[$CHECKMARK] Domain: $($deployConfig.vmOptions.domainName) will be joined."
         }
 
-        Write-Host "[$CHECKMARK] Network: $($config.DeployConfig.vmOptions.network)"
-        Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($config.DeployConfig.vmOptions.basePath) on host machine"
+        Write-Host "[$CHECKMARK] Network: $($deployConfig.vmOptions.network)"
+        Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
     }
-    Write-Host "[$CHECKMARK] Admin account: $($config.DeployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
-    $config.DeployConfig.virtualMachines | Format-Table | Out-Host
+    Write-Host "[$CHECKMARK] Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
+    $out = $deployConfig.virtualMachines | Format-Table | Out-String
+    Write-Host
+    $out.Trim() | Out-Host
 }
 
 function Copy-SampleConfigs {

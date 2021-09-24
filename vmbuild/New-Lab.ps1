@@ -80,6 +80,13 @@ $VM_Create = {
     # Set base VM path
     $virtualMachinePath = Join-Path $deployConfig.vmOptions.basePath $deployConfig.vmOptions.domainName
 
+    # Check if VM already exists
+    $exists = Get-VM $currentItem.vmName -ErrorAction SilentlyContinue
+    if ($exists -and -not $ForceNew.IsPresent) {
+        Write-Log "PSJOB: $($currentItem.vmName): VM already exists. ForceNew switch is NOT present. Exiting." -Failure -OutputStream -HostOnly
+        return
+    }
+
     # Create VM
     $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -WhatIf:$using:WhatIf
     if (-not $created) {
@@ -406,13 +413,13 @@ $timer.Start()
 
 # Load configuration
 try {
-    $result = Test-Configuration -InputObject $userConfig
-    if ($result.Valid) {
-        $deployConfig = $result.DeployConfig
+    $testConfigResult = Test-Configuration -InputObject $userConfig
+    if ($testConfigResult.Valid) {
+        $deployConfig = $testConfigResult.DeployConfig
         Write-Log "Main: Config validated successfully." -Success
     }
     else {
-        Write-Log "Main: Config validation failed. `r`n$($result.Message)" -Failure
+        Write-Log "Main: Config validation failed. `r`n$($testConfigResult.Message)" -Failure
         return
     }
 }
@@ -457,9 +464,9 @@ $cmDscFolder = "configmgr"
 # Remove existing jobs
 $existingJobs = Get-Job
 if ($existingJobs) {
-    Write-Log "Main: Stopping and removing existing jobs." -Activity
+    Write-Log "Main: Stopping and removing existing jobs." -Verbose -LogOnly
     foreach ($job in $existingJobs) {
-        Write-Log "Main: Removing job $($job.Id) with name $($job.Name)"
+        Write-Log "Main: Removing job $($job.Id) with name $($job.Name)" -Verbose -LogOnly
         $job | Stop-Job -ErrorAction SilentlyContinue
         $job | Remove-Job -ErrorAction SilentlyContinue
     }
@@ -470,11 +477,12 @@ $desktopPath = [Environment]::GetFolderPath("Desktop")
 $rdcManFilePath = Join-Path $DesktopPath "memlabs.rdg"
 New-RDCManFile $deployConfig $rdcManFilePath
 
-Write-Log "Main: Creating Virtual Machines." -Activity
+Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
 # Array to store PS jobs
 [System.Collections.ArrayList]$jobs = @()
-
+$job_created_yes = 0
+$job_created_no = 0
 foreach ($currentItem in $deployConfig.virtualMachines) {
 
     if ($WhatIf) {
@@ -486,12 +494,24 @@ foreach ($currentItem in $deployConfig.virtualMachines) {
 
     if ($Err.Count -ne 0) {
         Write-Log "Main: Failed to start job to create VM $($currentItem.vmName). $Err" -Failure
+        $job_created_no++
     }
     else {
-        Write-Log "Main: Created job $($job.Id) to create VM $($currentItem.vmName)"
+        Write-Log "Main: Created job $($job.Id) to create VM $($currentItem.vmName)" -LogOnly
         $jobs += $job
+        $job_created_yes++
     }
 }
+if ($job_created_no -eq 0) {
+    Write-Log "Main: Created $job_created_yes jobs for VM deployment."
+}
+else {
+    Write-Log "Main: Created $job_created_yes jobs for VM deployment. Failed to create $job_created_no jobs."
+}
+
+Write-Log "Deployment Summary" -Activity
+Write-Host
+Show-Summary -deployConfig $deployConfig
 
 Write-Log "Main: Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
 
@@ -520,4 +540,7 @@ do {
 $timer.Stop()
 Write-Host
 Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
+if (Test-Path "C:\tools\rdcman.exe") {
+    Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
+}
 Write-Host

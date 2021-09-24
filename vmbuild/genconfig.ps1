@@ -216,7 +216,7 @@ function get-ValidResponse {
     while ($responseValid -eq $false) {
         #Write-Host "Not Returning: $response out of $max $alternatevalues"
         Write-Host
-        $response = Read-Host2 -Prompt $prompt $currentValue        
+        $response = Read-Host2 -Prompt $prompt $currentValue
         try {
             if (![bool]$response) {
                 $responseValid = $true
@@ -230,18 +230,18 @@ function get-ValidResponse {
                     }
                 }
                 catch {}
-            }            
-            if ($responseValid -eq $false -and $null -ne $alternatevalues) {     
+            }
+            if ($responseValid -eq $false -and $null -ne $alternatevalues) {
                 try {
                     if ($response.ToLowerInvariant() -eq $alternatevalues.ToLowerInvariant()) {
-                        $responseValid = $true                    
+                        $responseValid = $true
                     }
                 }
                 catch {}
-   
+
                 foreach ($i in $($alternatevalues.keys)) {
                     if ($response.ToLowerInvariant() -eq $i.ToLowerInvariant()) {
-                        $responseValid = $true                    
+                        $responseValid = $true
                     }
                 }
             }
@@ -275,13 +275,13 @@ function Select-Options {
         [string]
         $prompt,
         [Parameter(Mandatory = $false)]
-        [PSCustomObject]        
+        [PSCustomObject]
         $additionalOptions
 
     )
-   
+
     while ($true) {
-        Write-Host ""       
+        Write-Host ""
         $i = 0
         #   Write-Host "Trying to get $property"
         if ($null -eq $property) {
@@ -292,26 +292,26 @@ function Select-Options {
             $value = $property."$($_.Name)"
             Write-Host [$i] $_.Name = $value
         }
-        
+
 
         if ($null -ne $additionalOptions) {
-            $additionalOptions.keys | ForEach-Object { 
-                $value = $additionalOptions."$($_)"                 
+            $additionalOptions.keys | ForEach-Object {
+                $value = $additionalOptions."$($_)"
                 Write-Host [$_] $value
                 #$additional = $_
             }
         }
-    
+
 
         $response = get-ValidResponse $prompt $i $null $additionalOptions
         if ([bool]$response) {
             $return = $null
             if ($null -ne $additionalOptions) {
                 #write-Host "Returning $response"
-                $additionalOptions.keys | ForEach-Object { 
+                $additionalOptions.keys | ForEach-Object {
                     if ($response.ToLowerInvariant() -eq $_.ToLowerInvariant()) {
                         $return = $_
-                        
+
                     }
                 }
             }
@@ -361,12 +361,12 @@ function Select-Options {
                         $valid = $false
                         Write-Host
                         while ($valid -eq $false) {
-                            $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value                           
+                            $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
                             if ([bool]$response2) {
                                 if ($property."$($_.Name)" -is [Int]) {
                                     $property."$($_.Name)" = [Int]$response2
                                 }
-                                else {                             
+                                else {
                                     if ($value -is [bool]) {
                                         if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
                                             if ($response2.ToLowerInvariant() -eq "true") {
@@ -385,8 +385,8 @@ function Select-Options {
 
                                     }
                                     $property."$($_.Name)" = $response2
-                                        
-                                    
+
+
                                 }
                                 $c = Test-Configuration -InputObject $Config
                                 $valid = $c.Valid
@@ -398,7 +398,7 @@ function Select-Options {
                                 }
 
                             }
-                            else {                                
+                            else {
                                 $property."$($_.Name)" = $value
                                 $c = Test-Configuration -InputObject $Config
                                 $valid = $c.Valid
@@ -429,7 +429,7 @@ function Select-VirtualMachines {
         $i = 0
         foreach ($virtualMachine in $Config.virtualMachines) {
             $i = $i + 1
-            write-Host "[$i] - $($virtualMachine)"        
+            write-Host "[$i] - $($virtualMachine)"
         }
         write-Host "[N] - New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
@@ -438,8 +438,8 @@ function Select-VirtualMachines {
             if ($response.ToLowerInvariant() -eq "n") {
                 $Config.VirtualMachines += [PSCustomObject]@{
                     vmName          = "Member" + $([int]$i + 1)
-                    role            = "DomainMember"                    
-                    operatingSystem = "Windows 10 Latest (64-bit)"                    
+                    role            = "DomainMember"
+                    operatingSystem = "Windows 10 Latest (64-bit)"
                     memory          = "2GB"
                     virtualProcs    = 2
                 }
@@ -504,20 +504,20 @@ function Select-VirtualMachines {
                             if ($diskscount -eq 1) {
                                 $virtualMachine.psobject.properties.remove('additionalDisks')
                             }
-                            else {                            
+                            else {
                                 $i = 0
                                 $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
                                     $i = $i + 1
-                                    if ($i -eq $diskscount) {              
+                                    if ($i -eq $diskscount) {
                                         $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
-                                    }                
-                                }                                          
+                                    }
+                                }
                             }
                             if ($diskscount -eq 1) {
                                 $virtualMachine.psobject.properties.remove('additionalDisks')
                             }
                         }
-                    }                
+                    }
                 }
             }
             if ($newValue -eq "D") {
@@ -526,12 +526,12 @@ function Select-VirtualMachines {
                 $i = 0
                 foreach ($virtualMachine in $newvm) {
                     $i = $i + 1
-                    if ($i -ne $response) {              
+                    if ($i -ne $response) {
                         $Config.virtualMachines += $virtualMachine
-                    }                
-                }                
+                    }
+                }
             }
-            
+
 
 
         }
@@ -564,7 +564,8 @@ while ($valid -eq $false) {
 }
 # $($file.Name)
 #Write-Host
-Show-Summary ($c)
+Show-Summary ($c.DeployConfig)
+Write-Host
 $date = Get-Date -Format "MM-dd-yyyy"
 if ($($Global:configfile.Name).StartsWith("xGen")) {
     $postfix = $($Global:configfile.Name).SubString(16)
