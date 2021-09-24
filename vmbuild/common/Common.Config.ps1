@@ -204,11 +204,11 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName value [$($ConfigObject.vmOptions.domainName)] contains invalid characters, is too long, or too short. You must specify a valid Domain name. For example: contoso.com." -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainName.Length -gt 63){
+        if ($ConfigObject.vmOptions.domainName.Length -gt 63) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too long. Must be less than 63 chars" -ReturnObject $ReturnObject -Failure
         }
 
-       if ($ConfigObject.vmOptions.domainName.Length -lt 5){
+        if ($ConfigObject.vmOptions.domainName.Length -lt 5) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too short. Must be at least 5 chars" -ReturnObject $ReturnObject -Failure
         }
     }
@@ -224,11 +224,11 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
         }
         
-        if ($ConfigObject.vmOptions.domainAdminName.Length -gt 64){
+        if ($ConfigObject.vmOptions.domainAdminName.Length -gt 64) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] is too long. Must be less than 64 chars" -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainAdminName.Length -lt 3){
+        if ($ConfigObject.vmOptions.domainAdminName.Length -lt 3) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] is too short. Must be at least 3 chars" -ReturnObject $ReturnObject -Failure
         }
     }
@@ -542,6 +542,11 @@ function Test-ValidRoleDC {
             # Server OS
             Test-ValidVmServerOS -VM $DCVM -ReturnObject $ReturnObject
         }
+
+        if ($DCVM.sqlVersion) {
+            Add-ValidationMessage -Message "$vmRole Validation: Domain Controller: Can not have SQL Installed" -ReturnObject $ReturnObject -Failure
+        }
+
     }
     else {
 
@@ -601,7 +606,12 @@ function Test-ValidRoleCSPS {
 
     # Site Code
     if ($VM.siteCode.Length -ne 3) {
-        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code [$($VM.siteCode)]." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code [$($VM.siteCode)] Must be exactly 3 chars." -ReturnObject $ReturnObject -Failure
+    }
+
+    $pattern = "^[a-zA-Z0-9]+$"
+    if (-not ($VM.siteCode -match $pattern)) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code (Must be AlphaNumeric) [$($VM.siteCode)]." -ReturnObject $ReturnObject -Failure
     }
 
     # Server OS
@@ -885,7 +895,7 @@ Function Show-Summary {
         Write-Host "[$CHECKMARK] Network: $($deployConfig.vmOptions.network)"
         Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
     }
-    Write-Host "[$CHECKMARK] Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
+    Write-Host "[$CHECKMARK] Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
     $out = $deployConfig.virtualMachines | Format-table vmName, role, operatingSystem, memory, @{Label = "Procs"; Expression = { $_.virtualProcs } }, @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } }, @{Label = "SQL"; Expression = { if ($null -ne $_.SqlVersion) { "YES" } } }  | Out-String
     Write-Host
     $out.Trim() | Out-Host
