@@ -32,6 +32,12 @@ else {
 try {
     # Set Window
     Set-Window -ProcessID $PID -X 20 -Y 20 -Width 1200 -Height 900
+    $parent = (Get-WmiObject win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
+    if ($parent) {
+        # set parent, assuming cmd -> ps
+        Set-Window -ProcessID $parent -X 20 -Y 20 -Width 1350 -Height 950
+    }
+
 }
 catch {
     Write-Log "Main: Failed to set window size. $_" -LogOnly -Warning
