@@ -160,7 +160,6 @@ function Get-Menu {
         [string]
         $CurrentValue
     )
-    write-Host
 
     $i = 0
 
@@ -419,7 +418,11 @@ function Select-Options {
                         $valid = $false
                         Write-Host
                         while ($valid -eq $false) {
+                            if ($value -is [bool]){
+                            $response2 = Get-Menu -Prompt "Select new Value for $($_.Name)" -CurrentValue $value -OptionArray @("True","False") 
+                            }else{
                             $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
+                            }
                             if (-not [String]::IsNullOrWhiteSpace($response2)) {
                                 if ($property."$($_.Name)" -is [Int]) {
                                     $property."$($_.Name)" = [Int]$response2
