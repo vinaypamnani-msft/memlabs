@@ -463,7 +463,7 @@ function Test-ValidVmServerOS {
     $vmRole = $VM.role
 
     if ($VM.operatingSystem -notlike "*Server*") {
-        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server OS for Primary/CAS/DPMP roles, or when SQL is selected." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server OS for Primary/CAS/DPMP roles, or when SQL is selected." -ReturnObject $ReturnObject -Warning
     }
 
 }
@@ -535,7 +535,7 @@ function Test-ValidRoleDC {
     if ($containsDC) {
 
         if ($existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration with vmOptions.existingDCNameWithPrefix. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration with vmOptions.existingDCNameWithPrefix. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Warning
         }
 
         if (Test-SingleRole -VM $DCVM -ReturnObject $ReturnObject) {
@@ -544,7 +544,7 @@ function Test-ValidRoleDC {
         }
 
         if ($DCVM.sqlVersion) {
-            Add-ValidationMessage -Message "$vmRole Validation: Adding SQL on Domain Controller is not supported." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: Adding SQL on Domain Controller is not supported." -ReturnObject $ReturnObject -Warning
         }
 
     }
@@ -552,7 +552,7 @@ function Test-ValidRoleDC {
 
         # Existing Scenario, without existing DC Name
         if (-not $existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: DC role not specified in the configuration file and vmOptions.existingDCNameWithPrefix not present." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: DC role not specified in the configuration file and vmOptions.existingDCNameWithPrefix not present." -ReturnObject $ReturnObject -Warning
         }
 
         if ($existingDC) {
@@ -639,7 +639,7 @@ function Test-SingleRole {
     # Single Role
     if ($VM -is [object[]] -and $VM.Count -ne 1) {
         $vmRole = $VM.role | Select-Object -Unique
-        Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Warning
         return $false
     }
 
@@ -704,7 +704,7 @@ function Test-Configuration {
 
     # CAS/Primary must include DC
     if (($containsCS -or $containsPS) -and -not $containsDC) {
-        Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not supported." -ReturnObject $return -Failure
+        Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not supported." -ReturnObject $return -Warning
     }
 
     # VM Validations
@@ -757,7 +757,7 @@ function Test-Configuration {
 
         # CAS without Primary
         if (-not $containsPS) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Warning
         }
 
         # Validate CAS role
