@@ -80,7 +80,7 @@ function Select-Config {
         Write-Option $i $($file.Name)
     }
     if (-Not $NoMore.IsPresent) {
-        Write-Option "M" "Show More (Custom and Previous config files)"
+        Write-Option "M" "Show More (Custom and Previous config files)" -color DarkGreen -Color2 Green
     }
     $responseValid = $false
     while ($responseValid -eq $false) {
@@ -96,7 +96,7 @@ function Select-Config {
         catch {}
         if (-Not $NoMore.IsPresent) {
             if ($response.ToLowerInvariant() -eq "m") {
-                $config = Select-Config $configDir -NoMore
+                $config = Select-Config $configDir -NoMore 
                 if (-not $null -eq $config) {
                     return $config
                 }
@@ -106,7 +106,7 @@ function Select-Config {
                     write-Host "[$i] $($file.Name)"
                 }
                 if (-Not $NoMore.IsPresent) {
-                    Write-Option "M" "Show More (Custom and Previous config files)"
+                    Write-Option "M" "Show More (Custom and Previous config files)" -color DarkGreen -Color2 Green
                 }
             }
         }
@@ -337,11 +337,11 @@ function Select-Options {
                             while ($valid -eq $false) {
                                 $property."$name" = Get-Menu "Select OS Version" $($Common.Supported.OperatingSystems) $value
                                 if (Get-TestResult -SuccessOnWarning) {
-                                    return $null
+                                    return
                                 }
                                 else {
                                     if ($property."$name" -eq $value) {
-                                        return $null
+                                        return
                                     }
                                 }
                             }
@@ -352,11 +352,11 @@ function Select-Options {
                             while ($valid -eq $false) {
                                 $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $value
                                 if (Get-TestResult -SuccessOnWarning) {
-                                    return $null
+                                    return
                                 }
                                 else {
                                     if ($property."$name" -eq $value) {
-                                        return $null
+                                        return
                                     }
                                 }
                             }
@@ -371,11 +371,11 @@ function Select-Options {
                                     $property."$name" = Get-Menu "Select Role" $($Common.Supported.Roles) $value
                                 }
                                 if (Get-TestResult -SuccessOnWarning) {
-                                    return $null
+                                    return
                                 }
                                 else {
                                     if ($property."$name" -eq $value) {
-                                        return $null
+                                        return
                                     }
                                 }
                             }
@@ -385,11 +385,11 @@ function Select-Options {
                             while ($valid -eq $false) {
                                 $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
                                 if (Get-TestResult -SuccessOnWarning) {
-                                    return $null
+                                    return
                                 }
                                 else {
                                     if ($property."$name" -eq $value) {
-                                        return $null
+                                        return
                                     }
                                 }
                             }
@@ -400,11 +400,11 @@ function Select-Options {
                                 $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
                                 $property."$name" = Get-Menu "Select Existing DC" $vms $value
                                 if (Get-TestResult -SuccessOnWarning) {
-                                    return $null
+                                    return
                                 }
                                 else {
                                     if ($property."$name" -eq $value) {
-                                        return $null
+                                        return
                                     }
                                 }
                             }
@@ -418,10 +418,11 @@ function Select-Options {
                         $valid = $false
                         Write-Host
                         while ($valid -eq $false) {
-                            if ($value -is [bool]){
-                            $response2 = Get-Menu -Prompt "Select new Value for $($_.Name)" -CurrentValue $value -OptionArray @("True","False") 
-                            }else{
-                            $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
+                            if ($value -is [bool]) {
+                                $response2 = Get-Menu -Prompt "Select new Value for $($_.Name)" -CurrentValue $value -OptionArray @("True", "False") 
+                            }
+                            else {
+                                $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
                             }
                             if (-not [String]::IsNullOrWhiteSpace($response2)) {
                                 if ($property."$($_.Name)" -is [Int]) {
@@ -443,13 +444,17 @@ function Select-Options {
 
                                     }
                                     $property."$($_.Name)" = $response2
-                                }
+                                }                                
                                 $valid = Get-TestResult -SuccessOnWarning
+                                if ($response2 -eq $value){
+                                    $valid = $true
+                                }
+                    
                             }
                             else {
                                 # Enter was pressed. Set the Default value, and test, but dont block.
                                 $property."$($_.Name)" = $value
-                                $valid = Get-TestResult -SuccessOnError
+                                $valid = Get-TestResult -SuccessOnError                                
                             }
                         }
                     }
@@ -458,7 +463,7 @@ function Select-Options {
 
             }
         }
-        else { return $null }
+        else { return }
     }
 }
 
@@ -497,7 +502,7 @@ function get-VMString {
     )
 
     $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(15, " ")
-    $name = "$machineName " + $("["+$($virtualmachine.role)+"]").PadRight(15," ")
+    $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(15, " ")
     $mem = $($virtualMachine.memory).PadLEft(4, " ")
     $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
     $name += "VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)"
