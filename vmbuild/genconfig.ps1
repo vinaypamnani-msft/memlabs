@@ -544,7 +544,7 @@ function Select-VirtualMachines {
             $name = Get-VMString $virtualMachine
             write-Option "$i" "$($name)"
         }
-        write-Option -Color Green -Color2 Green "N" "New Virtual Machine"
+        write-Option -color DarkGreen -Color2 Green "N" "New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
