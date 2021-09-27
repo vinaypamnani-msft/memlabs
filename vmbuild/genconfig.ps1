@@ -463,7 +463,10 @@ function Select-Options {
 
             }
         }
-        else { return }
+        else { 
+            $valid = Get-TestResult -SuccessOnError
+            return 
+        }
     }
 }
 
@@ -539,6 +542,7 @@ function Select-VirtualMachines {
     while ($true) {
         Write-Host ""
         $i = 0
+        $valid = Get-TestResult -SuccessOnError
         foreach ($virtualMachine in $Config.virtualMachines) {
             $i = $i + 1
             $name = Get-VMString $virtualMachine
@@ -658,7 +662,10 @@ function Select-VirtualMachines {
 
 
         }
-        else { return }
+        else {
+            $valid = Get-TestResult -SuccessOnError
+            return 
+        }
     }
 }
 
