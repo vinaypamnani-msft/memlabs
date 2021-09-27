@@ -100,8 +100,8 @@ function Write-Log {
             $Text | Out-File $Common.LogPath -Append
         }
         catch {
-            # Retry
-            $Text | Out-File $Common.LogPath -Append
+            # Retry and ignore if failed
+            $Text | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue
         }
     }
 
@@ -111,8 +111,8 @@ function Write-Log {
             $Text | Out-File $Common.LogPath -Append
         }
         catch {
-            # Retry
-            $Text | Out-File $Common.LogPath -Append
+            # Retry and ignore if failed
+            $Text | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue
         }
     }
 }
@@ -920,8 +920,8 @@ function Set-SupportedOptions {
 
     $roles = @(
         "DC",
-        "PS",
-        "CS",
+        "Primary",
+        "CAS",
         "DPMP",
         "DomainMember"
     )
@@ -984,7 +984,7 @@ if (-not $Common.Initialized) {
         StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
         StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
         StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
-        LogPath               = Join-Path $PSScriptRoot "vmbuild.log"                                     # Log File
+        LogPath               = Join-Path $PSScriptRoot "VMBuild.log"                                     # Log File
         VerboseEnabled        = $false                                                                    # Verbose Logging
         Supported             = $null                                                                     # Supported Configs
         AzureFileList         = $null

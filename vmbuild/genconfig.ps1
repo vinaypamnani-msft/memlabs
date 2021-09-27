@@ -30,6 +30,33 @@ function write-help {
     Write-Host -ForegroundColor Yellow "[Ctrl-C]" -NoNewline
     Write-Host -ForegroundColor $color " to exit without saving."
 }
+
+function Write-Option {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $option,
+        [string]
+        $text,
+        [object]
+        $color,
+        [object]
+        $color2
+    )
+
+    if ($null -eq $color) {
+        $color = [System.ConsoleColor]::Gray
+    }
+    if ($null -eq $color2) {
+        $color2 = [System.ConsoleColor]::White
+    }
+    write-host "[" -NoNewline
+    Write-Host -ForegroundColor $color2 $option -NoNewline
+    Write-Host "] " -NoNewLine
+    Write-Host -ForegroundColor $color "$text"
+
+}
 # Gets the json files from the config\samples directory, and offers them up for selection.
 # if 'M' is selected, shows the json files from the config directory.
 function Select-Config {
@@ -50,10 +77,10 @@ function Select-Config {
     $i = 0
     foreach ($file in $files) {
         $i = $i + 1
-        write-Host "[$i] - $($file.Name)"
+        Write-Option $i $($file.Name)
     }
     if (-Not $NoMore.IsPresent) {
-        Write-Host "[M] - Show More (Custom and Previous config files)"
+        Write-Option "M" "Show More (Custom and Previous config files)" -color DarkGreen -Color2 Green
     }
     $responseValid = $false
     while ($responseValid -eq $false) {
@@ -69,17 +96,17 @@ function Select-Config {
         catch {}
         if (-Not $NoMore.IsPresent) {
             if ($response.ToLowerInvariant() -eq "m") {
-                $config = Select-Config $configDir -NoMore
+                $config = Select-Config $configDir -NoMore 
                 if (-not $null -eq $config) {
                     return $config
                 }
                 $i = 0
                 foreach ($file in $files) {
                     $i = $i + 1
-                    write-Host "[$i] - $($file.Name)"
+                    write-Host "[$i] $($file.Name)"
                 }
                 if (-Not $NoMore.IsPresent) {
-                    Write-Host "[M] - Show More (Custom and Previous config files)"
+                    Write-Option "M" "Show More (Custom and Previous config files)" -color DarkGreen -Color2 Green
                 }
             }
         }
@@ -133,13 +160,12 @@ function Get-Menu {
         [string]
         $CurrentValue
     )
-    write-Host
 
     $i = 0
 
     foreach ($option in $OptionArray) {
         $i = $i + 1
-        Write-Host "[$i] - $option"
+        Write-Option $i $option
     }
     $response = get-ValidResponse $Prompt $i $CurrentValue
 
@@ -158,7 +184,7 @@ function Get-Menu {
 
 }
 
-#Checks if the response from the menu was valid. 
+#Checks if the response from the menu was valid.
 # Prompt is the prompt to display
 # Max is the max int allowed [1], [2], [3], etc
 # The current value of the option
@@ -264,13 +290,15 @@ function Select-Options {
         $property | Get-Member -MemberType NoteProperty | ForEach-Object {
             $i = $i + 1
             $value = $property."$($_.Name)"
-            Write-Host [$i] $_.Name = $value
+            $padding = 27 - ($i.ToString().Length)
+            Write-Option $i "$($($_.Name).PadRight($padding," "")) = $value"
         }
 
         if ($null -ne $additionalOptions) {
             $additionalOptions.keys | ForEach-Object {
                 $value = $additionalOptions."$($_)"
-                Write-Host -ForegroundColor DarkGreen [$_] $value
+                #Write-Host -ForegroundColor DarkGreen [$_] $value
+                Write-Option $_ $value -color DarkGreen -Color2 Green
             }
         }
 
@@ -278,13 +306,18 @@ function Select-Options {
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             $return = $null
             if ($null -ne $additionalOptions) {
-                $additionalOptions.keys | ForEach-Object {
-                    if ($response.ToLowerInvariant() -eq $_.ToLowerInvariant()) {
-                        # HACK..  "return $_" doesnt work here.. acts like a continue.. Maybe because of the foreach-object?
-                        $return = $_
-
+                foreach ($item in $($additionalOptions.keys)) {
+                    if ($response.ToLowerInvariant() -eq $item.ToLowerInvariant()) {
+                        $return = $item
                     }
                 }
+                #$additionalOptions.keys | ForEach-Object {
+                #    if ($response.ToLowerInvariant() -eq $_.ToLowerInvariant()) {
+                #        # HACK..  "return $_" doesnt work here.. acts like a continue.. Maybe because of the foreach-object?
+                #        $return = $_
+
+                #   }
+                #}
             }
             #Return here instead
             if ($null -ne $return) {
@@ -300,41 +333,97 @@ function Select-Options {
                     $name = $($_.Name)
                     switch ($name) {
                         "operatingSystem" {
-                            $property."$name" = Get-Menu "Select OS Version" $($Common.Supported.OperatingSystems) $value
-                            return $null
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                $property."$name" = Get-Menu "Select OS Version" $($Common.Supported.OperatingSystems) $value
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return
+                                }
+                                else {
+                                    if ($property."$name" -eq $value) {
+                                        return
+                                    }
+                                }
+                            }
+
                         }
                         "sqlVersion" {
-                            $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $value
-                            return $null
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $value
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return
+                                }
+                                else {
+                                    if ($property."$name" -eq $value) {
+                                        return
+                                    }
+                                }
+                            }
                         }
                         "role" {
-                            if ($Global:AddToExisting -eq $true) {
-                                $property."$name" = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                if ($Global:AddToExisting -eq $true) {
+                                    $property."$name" = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
+                                }
+                                else {
+                                    $property."$name" = Get-Menu "Select Role" $($Common.Supported.Roles) $value
+                                }
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return
+                                }
+                                else {
+                                    if ($property."$name" -eq $value) {
+                                        return
+                                    }
+                                }
                             }
-                            else {
-                                $property."$name" = Get-Menu "Select Role" $($Common.Supported.Roles) $value
-                            }
-                            return $null
                         }
                         "version" {
-                            $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
-                            return $null
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return
+                                }
+                                else {
+                                    if ($property."$name" -eq $value) {
+                                        return
+                                    }
+                                }
+                            }
                         }
                         "existingDCNameWithPrefix" {
-                            $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
-                            $property."$name" = Get-Menu "Select Existing DC" $vms $value
-                            return $null
+                            $valid = $false
+                            while ($valid -eq $false) {
+                                $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
+                                $property."$name" = Get-Menu "Select Existing DC" $vms $value
+                                if (Get-TestResult -SuccessOnWarning) {
+                                    return
+                                }
+                                else {
+                                    if ($property."$name" -eq $value) {
+                                        return
+                                    }
+                                }
+                            }
                         }
                     }
                     if ($value -is [System.Management.Automation.PSCustomObject]) {
-                        Select-Options $value "Select data to modify"
+                        Select-Options $value "Select data to modify" | out-null
                     }
                     else {
-                        
+
                         $valid = $false
                         Write-Host
                         while ($valid -eq $false) {
-                            $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
+                            if ($value -is [bool]) {
+                                $response2 = Get-Menu -Prompt "Select new Value for $($_.Name)" -CurrentValue $value -OptionArray @("True", "False") 
+                            }
+                            else {
+                                $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
+                            }
                             if (-not [String]::IsNullOrWhiteSpace($response2)) {
                                 if ($property."$($_.Name)" -is [Int]) {
                                     $property."$($_.Name)" = [Int]$response2
@@ -355,13 +444,17 @@ function Select-Options {
 
                                     }
                                     $property."$($_.Name)" = $response2
+                                }                                
+                                $valid = Get-TestResult -SuccessOnWarning
+                                if ($response2 -eq $value){
+                                    $valid = $true
                                 }
-                                $valid = Get-TestResult -SuccessOnWarning                                
+                    
                             }
                             else {
                                 # Enter was pressed. Set the Default value, and test, but dont block.
-                                $property."$($_.Name)" = $value                                
-                                $valid = Get-TestResult -SuccessOnError
+                                $property."$($_.Name)" = $value
+                                $valid = Get-TestResult -SuccessOnError                                
                             }
                         }
                     }
@@ -370,7 +463,7 @@ function Select-Options {
 
             }
         }
-        else { return $null }
+        else { return }
     }
 }
 
@@ -394,10 +487,52 @@ Function Get-TestResult {
             $valid = $true
         }
     }
-    if ($SuccessOnError.IsPresent) {       
-        $valid = $true        
+    if ($SuccessOnError.IsPresent) {
+        $valid = $true
     }
     return $valid
+}
+
+function get-VMString {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [object]
+        $virtualMachine
+    )
+
+    $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(15, " ")
+    $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(15, " ")
+    $mem = $($virtualMachine.memory).PadLEft(4, " ")
+    $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
+    $name += "VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)"
+
+    if ($virtualMachine.additionalDisks) {
+        $name += ", $($virtualMachine.additionalDisks.psobject.Properties.Value.count) Extra Disk(s)]"
+    }
+    else {
+        $name += "]"
+    }
+
+    if ($virtualMachine.siteCode -and $virtualMachine.cmInstallDir) {
+        $name += "`tCM [SiteCode $($virtualMachine.siteCode), "
+        $name += "InstallDir $($virtualMachine.cmInstallDir)]"
+    }
+
+    if ($virtualMachine.siteCode -and -not $virtualMachine.cmInstallDir) {
+        $name += "`tCM [SiteCode $($virtualMachine.siteCode)]"
+    }
+
+    if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
+        $name += "`tSQL [$($virtualMachine.sqlVersion)]"
+    }
+
+    if ($virtualMachine.sqlVersion -and $virtualMachine.sqlInstanceDir) {
+        $name += "`tSQL [$($virtualMachine.sqlVersion), "
+        $name += "SqlDir $($virtualMachine.sqlInstanceDir)]"
+    }
+
+    return $name
 }
 
 function Select-VirtualMachines {
@@ -406,9 +541,10 @@ function Select-VirtualMachines {
         $i = 0
         foreach ($virtualMachine in $Config.virtualMachines) {
             $i = $i + 1
-            write-Host "[$i] - $($virtualMachine)"
+            $name = Get-VMString $virtualMachine
+            write-Option "$i" "$($name)"
         }
-        write-Host -ForegroundColor Green "[N] - New Virtual Machine"
+        write-Option -color DarkGreen -Color2 Green "N" "New Virtual Machine"
         $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
@@ -448,6 +584,14 @@ function Select-VirtualMachines {
                         if (([string]::IsNullOrEmpty($newValue))) {
                             break
                         }
+                        if ($null -ne $newValue -and $newValue -is [string]) {
+                            $newValue = [string]$newValue.Trim()
+                            #Write-Host "NewValue = '$newValue'"
+                            $newValue = [string]$newValue.ToUpper()
+                        }
+                        if (([string]::IsNullOrEmpty($newValue))) {
+                            break
+                        }
                         if ($newValue -eq "S") {
                             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
                             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
@@ -468,7 +612,8 @@ function Select-VirtualMachines {
                                 }
                                 if ($letters -lt 90) {
                                     $letter = $([char]$letters).ToString()
-                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
+                                    $size = [string]$($letters + 31) + "GB"
+                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value $size
                                 }
                             }
                         }
@@ -494,6 +639,7 @@ function Select-VirtualMachines {
                                 $virtualMachine.psobject.properties.remove('additionalDisks')
                             }
                         }
+                        Get-TestResult -SuccessOnError | out-null
                     }
                 }
             }
@@ -523,16 +669,16 @@ function Save-Config {
     if ($config.vmOptions.existingDCNameWithPrefix) {
         $file += "-ADD"
     }
-    elseif (-not $config.cmOptions) {        
-        $file += "-NOSCCM"        
+    elseif (-not $config.cmOptions) {
+        $file += "-NOSCCM"
     }
-    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "CS" }) {
+    elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "cas" }) {
         $file += "-CAS-$($config.cmOptions.version)-"
     }
-    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "PS" }) {
+    elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "primary" }) {
         $file += "-PRI-$($config.cmOptions.version)-"
     }
-    
+
     $file += "($($config.virtualMachines.Count)VMs)-"
     $date = Get-Date -Format "MM-dd-yyyy"
     $file += $date
@@ -541,8 +687,8 @@ function Save-Config {
 
     $splitpath = Split-Path -Path $fileName -Leaf
     $response = Read-Host2 -Prompt "Save Filename" $splitpath
-    
-    if (-not [String]::IsNullOrWhiteSpace($response)) {       
+
+    if (-not [String]::IsNullOrWhiteSpace($response)) {
         $filename = Join-Path $configDir $response
     }
 

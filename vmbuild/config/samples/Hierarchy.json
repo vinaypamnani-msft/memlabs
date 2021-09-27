@@ -18,12 +18,12 @@
             "vmName": "DC1",
             "operatingSystem": "Server 2022",
             "role": "DC",
-            "memory": "4GB",
+            "memory": "2GB",
             "virtualProcs": 4
         },
         {
             "vmName": "CS1",
-            "role": "CS",
+            "role": "CAS",
             "siteCode": "CS1",
             "operatingSystem": "Server 2022",
             "sqlVersion": "SQL Server 2019",
@@ -32,12 +32,12 @@
             "additionalDisks": {
                 "E": "250GB"
             },
-            "memory": "16GB",
+            "memory": "12GB",
             "virtualProcs": 8
         },
         {
             "vmName": "PS1",
-            "role": "PS",
+            "role": "Primary",
             "siteCode": "PS1",
             "operatingSystem": "Server 2022",
             "sqlVersion": "SQL Server 2019",
@@ -46,7 +46,7 @@
             "additionalDisks": {
                 "E": "250GB"
             },
-            "memory": "16GB",
+            "memory": "12GB",
             "virtualProcs": 8
         },
         {
@@ -56,21 +56,21 @@
             "additionalDisks": {
                 "E": "250GB"
             },
-            "memory": "4GB",
+            "memory": "3GB",
             "virtualProcs": 4
         },
         {
             "vmName": "W10-1",
             "operatingSystem": "Windows 10 Latest (64-bit)",
             "role": "DomainMember",
-            "memory": "4GB",
+            "memory": "2GB",
             "virtualProcs": 4
         },
         {
             "vmName": "W10-2",
             "operatingSystem": "Windows 10 Latest (64-bit)",
             "role": "DomainMember",
-            "memory": "4GB",
+            "memory": "2GB",
             "virtualProcs": 4
         }
     ]
