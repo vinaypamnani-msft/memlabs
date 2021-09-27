@@ -586,7 +586,7 @@ function Select-VirtualMachines {
                         }
                         if ($null -ne $newValue -and $newValue -is [string]) {
                             $newValue = [string]$newValue.Trim()
-                            Write-Host "NewValue = '$newValue'"
+                            #Write-Host "NewValue = '$newValue'"
                             $newValue = [string]$newValue.ToUpper()
                         }
                         if (([string]::IsNullOrEmpty($newValue))) {
