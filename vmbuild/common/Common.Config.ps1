@@ -849,8 +849,10 @@ Function Show-Summary {
     )
 
     $CHECKMARK = ([char]8730)
+    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
 
-    if (-not $null -eq $($deployConfig.cmOptions)) {
+
+    if ($null -ne $($deployConfig.cmOptions) -and $containsPS) {
         if ($deployConfig.cmOptions.install -eq $true) {
             Write-Host "[$CHECKMARK] ConfigMgr $($deployConfig.cmOptions.version) will be installed and " -NoNewline
             if ($deployConfig.cmOptions.updateToLatest -eq $true) {
