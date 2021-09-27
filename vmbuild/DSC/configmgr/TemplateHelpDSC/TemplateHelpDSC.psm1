@@ -1234,16 +1234,16 @@ class InitializeDisks {
 
         if ($null -eq $_Disks) {
             Write-Verbose "No disks to initialize."
+            return
         }
 
         # Loop through disks
         $count = 0
         $label = "DATA"
         foreach ($disk in $_Disks.psobject.properties) {
-            $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $disk.Value }
-            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $disk.Name | Format-Volume -FileSystem NTFS -NewFileSystemLabel "$label`_$count" -Confirm:$false -Force
             Write-Verbose "Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)"
-            Start-Sleep -Seconds 15
+            $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $disk.Value } | Select-Object -First 1
+            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $disk.Name | Format-Volume -FileSystem NTFS -NewFileSystemLabel "$label`_$count" -Confirm:$false -Force
             $count++
         }
 
