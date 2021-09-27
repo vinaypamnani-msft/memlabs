@@ -581,7 +581,10 @@ function Select-VirtualMachines {
                         }
                         $customOptions["D"] = "Delete this VM"
                         $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
-                        if ($null -ne $newValue) {
+                        if (([string]::IsNullOrEmpty($newValue))) {
+                            break
+                        }
+                        if ($null -ne $newValue -and $newValue -is [string]) {
                             $newValue = [string]$newValue.Trim()
                             Write-Host "NewValue = '$newValue'"
                             $newValue = [string]$newValue.ToUpper()
