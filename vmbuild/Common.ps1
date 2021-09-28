@@ -469,7 +469,7 @@ function Test-DHCPScope {
     }
 
     if ($createScope) {
-        Add-DhcpServerv4Scope -Name $scopeID -StartRange $ConfigParams.DHCPScopeStart -EndRange $ConfigParams.DHCPScopeEnd -SubnetMask 255.255.255.0
+        Add-DhcpServerv4Scope -Name $scopeID -StartRange $ConfigParams.DHCPScopeStart -EndRange $ConfigParams.DHCPScopeEnd -SubnetMask 255.255.255.0 -ErrorAction SilentlyContinue
         $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorVariable ScopeErr -ErrorAction SilentlyContinue
         if ($scope) {
             Write-Log "Test-DHCPScope: '$scopeID' scope added to DHCP."
@@ -481,7 +481,7 @@ function Test-DHCPScope {
     }
 
     try {
-        Set-DhcpServerv4OptionValue -ScopeId $scopeID -DnsServer $ConfigParams.DHCPDNSAddress -WinsServer $ConfigParams.DHCPDNSAddress -DnsDomain $ConfigParams.DomainName -Router $ConfigParams.DHCPDefaultGateway -Force
+        Set-DhcpServerv4OptionValue -ScopeId $scopeID -DnsServer $ConfigParams.DHCPDNSAddress -WinsServer $ConfigParams.DHCPDNSAddress -DnsDomain $ConfigParams.DomainName -Router $ConfigParams.DHCPDefaultGateway -Force -ErrorAction Stop
         Write-Log "Test-DHCPScope: Added/updated scope options for '$scopeID' scope in DHCP." -Success
         return $true
     }
