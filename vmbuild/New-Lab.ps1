@@ -95,6 +95,7 @@ $VM_Create = {
     $currentItem = $using:currentItem
     $deployConfig = $using:deployConfig
     $forceNew = $using:ForceNew
+    $createVM = $using:CreateVM
     $domainName = $deployConfig.parameters.DomainName
     $network = $deployConfig.vmOptions.network
 
@@ -105,29 +106,50 @@ $VM_Create = {
     # Set base VM path
     $virtualMachinePath = Join-Path $deployConfig.vmOptions.basePath $deployConfig.vmOptions.domainName
 
-    # Check if VM already exists
-    $exists = Get-VM $currentItem.vmName -ErrorAction SilentlyContinue
-    if ($exists -and -not $ForceNew.IsPresent) {
-        Write-Log "PSJOB: $($currentItem.vmName): VM already exists. ForceNew switch is NOT present. Exiting." -Failure -OutputStream -HostOnly
-        return
-    }
+    if ($createVM) {
 
-    # Create VM
-    $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -WhatIf:$using:WhatIf
-    if (-not $created) {
-        Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild.log." -Failure -OutputStream -HostOnly
-        return
-    }
+        # Check if VM already exists
+        $exists = Get-VM $currentItem.vmName -ErrorAction SilentlyContinue
+        if ($exists -and -not $ForceNew.IsPresent) {
+            Write-Log "PSJOB: $($currentItem.vmName): VM already exists. ForceNew switch is NOT present. Exiting." -Failure -OutputStream -HostOnly
+            return
+        }
 
-    # Wait for VM to finish OOBE
-    $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
-    if (-not $connected) {
-        Write-Log "PSJOB: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
-        return
+        # Create VM
+        $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -WhatIf:$using:WhatIf
+        if (-not $created) {
+            Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild.log." -Failure -OutputStream -HostOnly
+            return
+        }
+
+        # Wait for VM to finish OOBE
+        $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
+        if (-not $connected) {
+            Write-Log "PSJOB: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
+            return
+        }
+    }
+    else {
+        # Check if VM is connectable
+        $exists = Get-Vm -Name $currentItem.vmName -ErrorAction SilentlyContinue
+        if ($exists -and $exists.State -ne "Running") {
+            # Validation should prevent from ever getting in this block
+            Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue -ErrorVariable StartErr
+            if ($StartErr) {
+                Write-Log "PSJOB: $($currentItem.vmName): Could not start the VM. Exiting." -Failure -OutputStream
+                return
+            }
+        }
+
+        $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
+        if (-not $connected) {
+            Write-Log "PSJOB: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
+            return
+        }
     }
 
     # Get VM Session
-    $ps = Get-VmSession -VmName $currentItem.vmName
+    $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
     if (-not $ps) {
         Write-Log "PSJOB: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
@@ -135,7 +157,7 @@ $VM_Create = {
     }
 
     # Set PS Execution Policy (required on client OS)
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -143,14 +165,14 @@ $VM_Create = {
 
     # Copy DSC files
     Write-Log "PSJOB: $($currentItem.vmName): Copying required PS modules to the VM."
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to copy required PS modules to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
     }
     Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC\$cmDscFolder" -Destination "C:\staging\DSC" -Recurse -Container -Force
 
     # Extract DSC modules
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -270,6 +292,7 @@ $VM_Create = {
 
         # Get required variables from parent scope
         $cmDscFolder = $using:cmDscFolder
+        $createVM = $using:createVM
 
         # Define DSC variables
         $dscConfigPath = "C:\staging\DSC\$cmDscFolder\DSCConfiguration"
@@ -279,14 +302,29 @@ $VM_Create = {
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
         "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n====="  | Out-File $log -Append
 
+        # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
+        $dscLog = "C:\staging\DSC\DSC_Log.txt"
+        if (Test-Path $dscLog) {
+            $newName = $dscLog -replace ".txt", ((get-date).ToString("_yyyyMMdd_HHmmss")+".txt")
+            "Renaming $dscLog to $newName" | Out-File $log -Append
+            Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+        }
+
         "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
         Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
 
         "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
-        Start-DscConfiguration -Wait -Path $dscConfigPath -Verbose -ErrorAction Stop
+        if ($createVM) {
+            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+        }
+        else {
+            # Don't wait, if we're not creating a new VM and running DSC on an existing VM
+            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+        }
+
     }
 
-    Write-Log "PSJOB: $($currentItem.vmName): Starting $($currentItem.role) role configuration via DSC." -OutputStream
+    Write-Log "PSJOB: $($currentItem.vmName): Starting $($currentItem.role) role configuration via DSC."
 
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -DisplayName "DSC: Install Modules" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
@@ -508,21 +546,41 @@ Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 [System.Collections.ArrayList]$jobs = @()
 $job_created_yes = 0
 $job_created_no = 0
+
+# Existing DC scenario
+$existingDC = $deployConfig.vmOptions.existingDCNameWithPrefix
+if ($existingDC) {
+    # create a dummy VM object for the existingDC
+    $deployConfig.virtualMachines += [PSCustomObject]@{
+        vmName          = $existingDC
+        role            = "DC"
+        operatingSystem = "Server 2022" # Dummy value that passes validation
+        memory          = "2GB"         # Dummy value that passes validation
+        virtualProcs    = 2             # Dummy value that passes validation
+    }
+}
+
+# New scenario
+$CreateVM = $true
 foreach ($currentItem in $deployConfig.virtualMachines) {
 
     if ($WhatIf) {
-        Write-Log "Main: Will start a job to create VM $($currentItem.vmName)"
+        Write-Log "Main: Will start a job for VM $($currentItem.vmName)"
         continue
     }
+
+    # Existing DC scenario
+    $CreateVM = $true
+    if ($currentItem.vmName -eq $existingDC) { $CreateVM = $false }
 
     $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
 
     if ($Err.Count -ne 0) {
-        Write-Log "Main: Failed to start job to create VM $($currentItem.vmName). $Err" -Failure
+        Write-Log "Main: Failed to start job for VM $($currentItem.vmName). $Err" -Failure
         $job_created_no++
     }
     else {
-        Write-Log "Main: Created job $($job.Id) to create VM $($currentItem.vmName)" -LogOnly
+        Write-Log "Main: Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
         $jobs += $job
         $job_created_yes++
     }
