@@ -95,24 +95,28 @@ function Write-Log {
     $Text = "$time $Text"
 
     # Write to log, non verbose entries
+    $write = $false
     if (-not $HostOnly.IsPresent -and -not $IsVerbose) {
-        try {
-            $Text | Out-File $Common.LogPath -Append
-        }
-        catch {
-            # Retry and ignore if failed
-            $Text | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue
-        }
+        $write = $true
     }
 
     # Write verbose entries, if verbose logging enabled
     if ($IsVerbose -and $Common.VerboseEnabled) {
+        $write = $true
+    }
+
+    if ($write) {
         try {
             $Text | Out-File $Common.LogPath -Append
         }
         catch {
-            # Retry and ignore if failed
-            $Text | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue
+            try {
+                # Retry once and ignore if failed
+                $Text | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue
+            }
+            catch {
+                # ignore
+            }
         }
     }
 }
@@ -435,6 +439,34 @@ function Test-NetworkSwitch {
     }
 }
 
+function New-DHCPRelayAgent {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Network Subnet.")]
+        [string]$Network,
+        [Parameter(Mandatory = $true, HelpMessage = "IP of DHCP Server.")]
+        [string]$DHCPServerIP
+    )
+
+    $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$Network*" }
+
+    if (-not $adapter) {
+        Write-Log "New-DHCPRelayAgent: Network adapter for $Network was not found."
+        return $false
+    }
+
+    $interfaceAlias = $adapter.InterfaceAlias
+    $text = & netsh routing ip relay install
+    if (-not $text -like "*Ok.*") {
+        Write-Log "New-DHCPRelayAgent: 'DHCP Relay Agent' not added to RRAS." -Failure
+        return $false
+    }
+
+    & netsh routing ip relay add dhcpserver $DHCPServerIP
+    & netsh routing ip relay add interface name="$interfaceAlias"
+    & netsh routing ip relay set interface name="$interfaceAlias" relaymode=enable maxhop=1 minsecs=2
+
+}
+
 function New-VirtualMachine {
     param (
         [Parameter(Mandatory = $true)]
@@ -579,6 +611,8 @@ function Wait-ForVm {
         [switch]$OobeComplete,
         [Parameter(Mandatory = $false, ParameterSetName = "VmTestPath")]
         [string]$PathToVerify,
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
+        [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false)]
         [int]$TimeoutMinutes = 10,
         [Parameter(Mandatory = $false)]
@@ -619,7 +653,7 @@ function Wait-ForVm {
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
-            $out = Invoke-VmCommand -VmName $VmName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $out = Invoke-VmCommand -VmName $VmName -SuppressLog -VmDomainName $VmDomainName -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
 
             # Wait until OOBE is ready
             $status = "Waiting for OOBE to complete. "
@@ -636,7 +670,7 @@ function Wait-ForVm {
             if ($readyOobe) {
                 Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 15
-                $out = Invoke-VmCommand -VmName $VmName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
+                $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "Wait-ForVm: $VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
             }
@@ -659,7 +693,7 @@ function Wait-ForVm {
             Start-Sleep -Seconds 5
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
-            $out = Invoke-VmCommand -VmName $VmName -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
             $ready = $true -eq $out.ScriptBlockOutput
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
@@ -742,7 +776,7 @@ function Invoke-VmCommand {
     if ($SecondsToWaitBefore) { Start-Sleep -Seconds $SecondsToWaitBefore }
 
     # Get VM Session
-    $ps = Get-VmSession -VmName $VmName -DomainName $VmDomainName
+    $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName
     $failed = $null -eq $ps
 
     # Run script block inside VM
@@ -778,7 +812,7 @@ function Get-VmSession {
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
         [string]$VmName,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name for creating creds.")]
-        [string]$DomainName = "WORKGROUP"
+        [string]$VmDomainName = "WORKGROUP"
     )
 
     # Retrieve session from cache
@@ -791,7 +825,7 @@ function Get-VmSession {
     }
 
     # Get PS Session
-    $username = "$DomainName\$($Common.LocalAdmin.UserName)"
+    $username = "$VmDomainName\$($Common.LocalAdmin.UserName)"
 
     $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
 
@@ -928,6 +962,7 @@ function Set-SupportedOptions {
 
     $rolesForExisting = @(
         "DPMP",
+        "Primary",
         "DomainMember"
     )
 

@@ -704,7 +704,7 @@ function Test-Configuration {
 
     # CAS/Primary must include DC
     if (($containsCS -or $containsPS) -and -not $containsDC) {
-        Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not supported." -ReturnObject $return -Warning
+        #Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not supported." -ReturnObject $return -Warning
     }
 
     # VM Validations
@@ -810,9 +810,16 @@ function Test-Configuration {
     # create params object
     $network = $configObject.vmOptions.network.Substring(0, $configObject.vmOptions.network.LastIndexOf("."))
     $clientsCsv = ($virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
+
+    # DCName (prefer name in config over existing)
+    $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
+    if (-not $DCName) {
+        $DCName = $configObject.vmOptions.existingDCNameWithPrefix
+    }
+
     $params = [PSCustomObject]@{
         DomainName         = $configObject.vmOptions.domainName
-        DCName             = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
+        DCName             = $DCName
         CSName             = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
         PSName             = ($virtualMachines | Where-Object { $_.role -eq "Primary" }).vmName
         DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
