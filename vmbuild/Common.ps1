@@ -626,10 +626,10 @@ function New-VirtualMachine {
 
     try {
         Write-Log "New-VirtualMachine: $VmName`: Starting virtual machine"
-        Start-VM -Name $VmName
+        Start-VM -Name $VmName -ErrorAction Stop
     }
     catch {
-        Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $_"
+        Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message)"
         return $false
     }
 
