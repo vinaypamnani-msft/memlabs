@@ -521,6 +521,14 @@ if (-not $switch) {
     return
 }
 
+# Test if DHCP scope exists, if not create it
+Write-Log "Main: Creating/verifying DHCP scope options for specified network." -Activity
+$worked = Test-DHCPScope -ConfigParams $deployConfig.parameters
+if (-not $worked) {
+    Write-Log "Main: Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
+    return
+}
+
 # DSC Folder
 $cmDscFolder = "configmgr"
 

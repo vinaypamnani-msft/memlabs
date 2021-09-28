@@ -95,13 +95,13 @@
 
             WriteStatus WaitDomain {
                 DependsOn = "[InstallFeatureForSCCM]InstallFeature"
-                Status    = "Waiting for domain to be ready to obtain an IP"
+                Status    = "Waiting for domain to be ready"
             }
         }
         else {
             WriteStatus WaitDomain {
                 DependsOn = "[SetCustomPagingFile]PagingSettings"
-                Status    = "Waiting for domain to be ready to obtain an IP"
+                Status    = "Waiting for domain to be ready"
             }
         }
 

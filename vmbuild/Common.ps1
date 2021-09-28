@@ -439,31 +439,56 @@ function Test-NetworkSwitch {
     }
 }
 
-function New-DHCPRelayAgent {
+function Test-DHCPScope {
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Network Subnet.")]
-        [string]$Network,
-        [Parameter(Mandatory = $true, HelpMessage = "IP of DHCP Server.")]
-        [string]$DHCPServerIP
+        [Parameter(Mandatory = $true, HelpMessage = "Parameters object of deploy Configuration.")]
+        [object]$ConfigParams
     )
 
-    $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$Network*" }
+    $scopeID = $ConfigParams.DHCPScopeId
+    $createScope = $false
 
-    if (-not $adapter) {
-        Write-Log "New-DHCPRelayAgent: Network adapter for $Network was not found."
-        return $false
+    $dhcp = Get-Service -Name DHCPServer
+    if (-not $dhcp) {
+        Write-Log "Test-DHCPScope: DHCP is not installed. Installing..."
+        $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
+
+        if (-not $installed.Success) {
+            Write-Log "Test-DHCPScope: DHCP Installation failed $($installed.ExitCode). Install DHCP windows feature manually, and try again." -Failure
+            return $false
+        }
     }
 
-    $interfaceAlias = $adapter.InterfaceAlias
-    $text = & netsh routing ip relay install
-    if (-not $text -like "*Ok.*") {
-        Write-Log "New-DHCPRelayAgent: 'DHCP Relay Agent' not added to RRAS." -Failure
-        return $false
+    $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
+    if ($scope) {
+        Write-Log "Test-DHCPScope: '$scopeID' scope is already present in DHCP." -Success
+        $createScope = $false
+    }
+    else {
+        $createScope = $true
     }
 
-    & netsh routing ip relay add dhcpserver $DHCPServerIP
-    & netsh routing ip relay add interface name="$interfaceAlias"
-    & netsh routing ip relay set interface name="$interfaceAlias" relaymode=enable maxhop=1 minsecs=2
+    if ($createScope) {
+        Add-DhcpServerv4Scope -Name $scopeID -StartRange $ConfigParams.DHCPScopeStart -EndRange $ConfigParams.DHCPScopeEnd -SubnetMask 255.255.255.0
+        $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorVariable ScopeErr -ErrorAction SilentlyContinue
+        if ($scope) {
+            Write-Log "Test-DHCPScope: '$scopeID' scope added to DHCP."
+        }
+        else {
+            Write-Log "Test-DHCPScope: Failed to add '$scopeID' to DHCP. $ScopeErr" -Failure
+            return $false
+        }
+    }
+
+    try {
+        Set-DhcpServerv4OptionValue -ScopeId $scopeID -DnsServer $ConfigParams.DHCPDNSAddress -WinsServer $ConfigParams.DHCPDNSAddress -DnsDomain $ConfigParams.DomainName -Router $ConfigParams.DHCPDefaultGateway -Force
+        Write-Log "Test-DHCPScope: Added/updated scope options for '$scopeID' scope in DHCP." -Success
+        return $true
+    }
+    catch {
+        Write-Log "Test-DHCPScope: Failed to add/update scope options for '$scopeID' scope in DHCP. $_" -Failure
+        return $false
+    }
 
 }
 

@@ -99,7 +99,7 @@
 
         WriteStatus WaitDomain {
             DependsOn = "[InstallFeatureForSCCM]InstallFeature"
-            Status    = "Waiting for domain to be ready to obtain an IP"
+            Status    = "Waiting for domain to be ready"
         }
 
         WaitForDomainReady WaitForDomain {
