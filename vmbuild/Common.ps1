@@ -424,7 +424,18 @@ function Test-NetworkSwitch {
     }
     else {
         Write-Log "Get-NetworkSwitch: '$interfaceAlias' not found in NAT. Restarting RemoteAccess service before adding it."
-        Restart-Service RemoteAccess
+        try {
+            Restart-Service RemoteAccess
+        }
+        catch {
+            try {
+                Restart-Service RemoteAccess
+            }
+            catch {
+                Write-Log "Get-NetworkSwitch: Failed to restart RemoteAccess service. Restart the service manually, and try again."
+                return $false
+            }
+        }
         & netsh routing ip nat add interface "$interfaceAlias"
     }
 
@@ -448,7 +459,7 @@ function Test-DHCPScope {
     $scopeID = $ConfigParams.DHCPScopeId
     $createScope = $false
 
-    $dhcp = Get-Service -Name DHCPServer
+    $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
         Write-Log "Test-DHCPScope: DHCP is not installed. Installing..."
         $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
