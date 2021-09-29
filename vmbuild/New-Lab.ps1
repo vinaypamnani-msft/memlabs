@@ -312,6 +312,13 @@ $VM_Create = {
             Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
         }
 
+        # Remove DSC_Status file, if exists
+        $dscStatus = "C:\staging\DSC\DSC_Status.txt"
+        if (Test-Path $dscStatus) {
+            "Removing $dscStatus" | Out-File $log -Append
+            Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
+        }
+
         # Rename the Role.json file, if it exists for DC re-run
         $jsonPath = Join-Path "C:\staging\DSC" "$($currentItem.role).json"
         if (Test-Path $jsonPath) {
