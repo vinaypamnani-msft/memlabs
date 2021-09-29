@@ -53,10 +53,5 @@ Configuration Host {
             NetAdapterName = $phsyicalInterface
         }
 
-        xDhcpServerAuthorization LocalServerActivation {
-            DependsOn        = "[xVMSwitch]ExternalSwitch"
-            IsSingleInstance = 'Yes'
-            Ensure           = 'Present'
-        }
     }
 }

@@ -336,7 +336,7 @@ $VM_Create = {
         }
 
         "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
-        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
+        Remove-DscConfigurationDocument -Stage Current,Pending,Previous -Force
         Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
 
         "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
