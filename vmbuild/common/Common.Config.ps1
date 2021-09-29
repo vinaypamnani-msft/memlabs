@@ -977,7 +977,7 @@ function Get-SubnetList {
         }
 
         if ($DomainName) {
-            $return = $return | Where-Object { $_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant() }
+            $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
         }
 
         return $return
@@ -1020,11 +1020,11 @@ function Get-VMList {
     }
 
     if ($DomainName) {
-        $return = $return | Where-Object { $_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant() }
+        $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
     }
 
     if ($Subnet) {
-        $return = $return | Where-Object { $_.Subnet.ToLowerInvariant() -eq $Subnet.ToLowerInvariant() }
+        $return = $return | Where-Object { $_.Subnet -and ($_.Subnet.ToLowerInvariant() -eq $Subnet.ToLowerInvariant()) }
     }
 
     return $return
