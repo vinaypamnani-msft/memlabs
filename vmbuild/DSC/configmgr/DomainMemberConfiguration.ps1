@@ -21,11 +21,6 @@
     $DCName = $deployConfig.parameters.DCName
     $IsDPMP = $deployConfig.parameters.ThisMachineRole -eq "DPMP"
 
-    # Set DC name ot existing DC
-    if (-not $DCName) {
-        $DCName = $deployConfig.vmOptions.existingDCNameWithPrefix
-    }
-
     # Domain Admin Name
     $DomainAdminName = $deployConfig.vmOptions.domainAdminName
     $cm_admin = "$DNAME\$DomainAdminName"

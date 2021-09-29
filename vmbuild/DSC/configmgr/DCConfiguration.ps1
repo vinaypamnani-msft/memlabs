@@ -25,7 +25,7 @@
     $Configuration = $deployConfig.parameters.Scenario
 
     $setNetwork = $true
-    if ($deployConfig.vmOptions.existingDCNameWithPrefix) {
+    if ($deployConfig.parameters.ExistingDCName) {
         $setNetwork = $false
     }
 

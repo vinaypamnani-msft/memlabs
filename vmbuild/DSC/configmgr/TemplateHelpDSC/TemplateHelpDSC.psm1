@@ -1396,6 +1396,7 @@ class JoinDomain {
         $_retryCount = 100
         try {
             Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Stop
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
         }
         catch {
@@ -1828,7 +1829,7 @@ class SetCustomPagingFile {
             Set-CimInstance $currentpagingfile -Property @{InitialSize = $_InitialSize ; MaximumSize = $_MaximumSize }
         }
 
-
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
 
@@ -1887,6 +1888,7 @@ class SetupDomain {
             -SysvolPath "C:\Windows\SYSVOL" `
             -Force:$true
 
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
 

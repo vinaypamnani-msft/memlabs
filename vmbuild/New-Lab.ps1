@@ -336,7 +336,7 @@ $VM_Create = {
         }
 
         "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
-        Remove-DscConfigurationDocument -Stage Current,Pending,Previous -Force
+        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
         Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
 
         "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
@@ -583,28 +583,24 @@ $job_created_no = 0
 
 # Existing DC scenario
 $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
-$existingDC = $deployConfig.vmOptions.existingDCNameWithPrefix
+$existingDC = $deployConfig.parameters.ExistingDCName
 if ($existingDC -and $containsPS) {
     # create a dummy VM object for the existingDC
     $deployConfig.virtualMachines += [PSCustomObject]@{
-        vmName          = $existingDC
-        role            = "DC"
-        operatingSystem = "Server 2022" # Dummy value that passes validation
-        memory          = "2GB"         # Dummy value that passes validation
-        virtualProcs    = 2             # Dummy value that passes validation
+        vmName = $existingDC
+        role   = "DC"
+        hidden = $true
     }
 }
 
 # Existing CAS scenario
-$existingCAS = $deployConfig.vmOptions.existingCASNameWithPrefix
+$existingCAS = $deployConfig.parameters.ExistingCASName
 if ($existingCAS -and $containsPS) {
     # create a dummy VM object for the existingCAS
     $deployConfig.virtualMachines += [PSCustomObject]@{
-        vmName          = $existingCAS
-        role            = "CAS"
-        operatingSystem = "Server 2022" # Dummy value that passes validation
-        memory          = "2GB"         # Dummy value that passes validation
-        virtualProcs    = 2             # Dummy value that passes validation
+        vmName = $existingCAS
+        role   = "CAS"
+        hidden = $true
     }
 }
 

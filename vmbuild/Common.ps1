@@ -492,9 +492,10 @@ function Test-DHCPScope {
     }
 
     try {
+        New-DhcpScopeDescription -ConfigParams $ConfigParams
         $dcnet = Get-Vm -Name $ConfigParams.DCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
         if ($dcnet) {
-            $dcIpv4 = $dcnet.IPAddresses | Where-Object {$_ -notlike "*:*" }
+            $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
         }
         else {
             $dcIpv4 = $ConfigParams.DHCPDNSAddress
@@ -508,6 +509,49 @@ function Test-DHCPScope {
         return $false
     }
 
+}
+
+function New-DhcpScopeDescription {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Parameters object of deploy Configuration.")]
+        [object]$ConfigParams
+    )
+
+    try {
+        $scopeID = $ConfigParams.DHCPScopeId
+
+        $dhcpDesc = [PSCustomObject]@{
+            Domain  = $ConfigParams.domainName
+            DC      = $ConfigParams.DCName
+            Primary = $ConfigParams.PSName
+            CAS     = $ConfigParams.CSName
+        }
+
+        $dhcpDescJson = ($dhcpDesc | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
+        Set-DhcpServerv4Scope -ScopeId $scopeID -Description $dhcpDescJson
+
+    }
+    catch {
+        Write-Log "New-DhcpScopeDescription: Failed to add/update description for '$scopeID' scope in DHCP. $_" -Failure
+    }
+}
+
+function Get-DhcpScopeDescription {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]
+        [string]$ScopeId
+    )
+
+    try {
+        $scope = Get-DhcpServerv4Scope -ScopeId $ScopeId -ErrorAction Stop
+        $scopeDescObject = $scope.Description | ConvertFrom-Json
+        return $scopeDescObject
+
+    }
+    catch {
+        Write-Log "Get-DhcpScopeDescription: Failed to get description for '$ScopeId' scope in DHCP. $_" -Failure
+        return $null
+    }
 }
 
 function New-VirtualMachine {
@@ -889,6 +933,7 @@ function Get-VmSession {
         if ($VmDomainUser -ne $Common.LocalAdmin.UserName) {
             $username = "WORKGROUP\$($Common.LocalAdmin.UserName)"
             $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
+            $cacheKey = $VmName + $Common.LocalAdmin.UserName
             $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
             if ($Err1.Count -ne 0) {
                 Write-Log "Get-VmSession: $VmName`: Failed to establish a session using $username. Error: $Err1" -Failure -Verbose
