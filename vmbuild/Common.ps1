@@ -898,7 +898,7 @@ function Get-VmSession {
     }
 
     # Cache & return session
-    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username." -Success -LogOnly
+    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username." -Success -Verbose
     $global:ps_cache[$cacheKey] = $ps
     return $ps
 }
