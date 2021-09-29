@@ -97,6 +97,7 @@ $VM_Create = {
     $forceNew = $using:ForceNew
     $createVM = $using:CreateVM
     $domainName = $deployConfig.parameters.DomainName
+    $domainUser = $deployConfig.vmOptions.domainAdminName
     $network = $deployConfig.vmOptions.network
 
     # Determine which OS image file to use for the VM
@@ -149,7 +150,7 @@ $VM_Create = {
     }
 
     # Get VM Session
-    $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+    $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName -VmDomainUser $domainUser
 
     if (-not $ps) {
         Write-Log "PSJOB: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
@@ -157,7 +158,7 @@ $VM_Create = {
     }
 
     # Set PS Execution Policy (required on client OS)
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -VmDomainUser $domainUser -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -165,14 +166,14 @@ $VM_Create = {
 
     # Copy DSC files
     Write-Log "PSJOB: $($currentItem.vmName): Copying required PS modules to the VM."
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -VmDomainUser $domainUser -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to copy required PS modules to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
     }
     Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC\$cmDscFolder" -Destination "C:\staging\DSC" -Recurse -Container -Force
 
     # Extract DSC modules
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -VmDomainUser $domainUser -ScriptBlock { Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -293,6 +294,7 @@ $VM_Create = {
         # Get required variables from parent scope
         $cmDscFolder = $using:cmDscFolder
         $createVM = $using:createVM
+        $currentItem = $using:CurrentItem
 
         # Define DSC variables
         $dscConfigPath = "C:\staging\DSC\$cmDscFolder\DSCConfiguration"
@@ -305,12 +307,29 @@ $VM_Create = {
         # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
         $dscLog = "C:\staging\DSC\DSC_Log.txt"
         if (Test-Path $dscLog) {
-            $newName = $dscLog -replace ".txt", ((get-date).ToString("_yyyyMMdd_HHmmss")+".txt")
+            $newName = $dscLog -replace ".txt", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".txt")
             "Renaming $dscLog to $newName" | Out-File $log -Append
             Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
         }
 
+        # Rename the Role.json file, if it exists for DC re-run
+        $jsonPath = Join-Path "C:\staging\DSC" "$($currentItem.role).json"
+        if (Test-Path $jsonPath) {
+            $newName = $jsonPath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
+            Rename-Item -Path $jsonPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+        }
+
+        # For CAS re-run, mark ScriptWorkflow not started
+        $ConfigurationFile = Join-Path -Path "C:\staging\DSC" -ChildPath "ScriptWorkflow.json"
+        if (Test-Path $ConfigurationFile) {
+            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            $Configuration.ScriptWorkFlow.Status = 'NotStart'
+            $Configuration.ScriptWorkFlow.StartTime = ''
+            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        }
+
         "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
+        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
         Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
 
         "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
@@ -326,13 +345,13 @@ $VM_Create = {
 
     Write-Log "PSJOB: $($currentItem.vmName): Starting $($currentItem.role) role configuration via DSC."
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -DisplayName "DSC: Install Modules" -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -VmDomainUser $domainUser -ScriptBlock $DSC_InstallModules -DisplayName "DSC: Install Modules" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
     }
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -DisplayName "DSC: Create $($currentItem.role) Configuration" -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -VmDomainUser $domainUser -ScriptBlock $DSC_CreateConfig -DisplayName "DSC: Create $($currentItem.role) Configuration" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -340,10 +359,10 @@ $VM_Create = {
 
     # Enable PS Remoting on client OS before starting DSC. Ignore failures, this will work but reports a failure...
     if ($currentItem.operatingSystem -notlike "*SERVER*") {
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures." -WhatIf:$WhatIf
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -VmDomainUser $domainUser -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures." -WhatIf:$WhatIf
     }
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration" -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -VmDomainUser $domainUser -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "$($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
         # Retry once before exiting
@@ -556,12 +575,26 @@ $job_created_yes = 0
 $job_created_no = 0
 
 # Existing DC scenario
+$containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
 $existingDC = $deployConfig.vmOptions.existingDCNameWithPrefix
-if ($existingDC) {
+if ($existingDC -and $containsPS) {
     # create a dummy VM object for the existingDC
     $deployConfig.virtualMachines += [PSCustomObject]@{
         vmName          = $existingDC
         role            = "DC"
+        operatingSystem = "Server 2022" # Dummy value that passes validation
+        memory          = "2GB"         # Dummy value that passes validation
+        virtualProcs    = 2             # Dummy value that passes validation
+    }
+}
+
+# Existing CAS scenario
+$existingCAS = $deployConfig.vmOptions.existingCASNameWithPrefix
+if ($existingCAS -and $containsPS) {
+    # create a dummy VM object for the existingCAS
+    $deployConfig.virtualMachines += [PSCustomObject]@{
+        vmName          = $existingCAS
+        role            = "CAS"
         operatingSystem = "Server 2022" # Dummy value that passes validation
         memory          = "2GB"         # Dummy value that passes validation
         virtualProcs    = 2             # Dummy value that passes validation
@@ -580,6 +613,7 @@ foreach ($currentItem in $deployConfig.virtualMachines) {
     # Existing DC scenario
     $CreateVM = $true
     if ($currentItem.vmName -eq $existingDC) { $CreateVM = $false }
+    if ($currentItem.vmName -eq $existingCAS) { $CreateVM = $false }
 
     $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
 

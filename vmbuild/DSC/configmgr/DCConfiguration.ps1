@@ -24,6 +24,11 @@
     $DHCP_ScopeId = $deployConfig.parameters.DHCPScopeId
     $Configuration = $deployConfig.parameters.Scenario
 
+    $setNetwork = $true
+    if ($deployConfig.vmOptions.existingDCNameWithPrefix) {
+        $setNetwork = $false
+    }
+
     # AD Site Name
     if ($PSName) {
         $PSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PSName }
@@ -163,40 +168,49 @@
             Role      = "DC"
         }
 
-        WriteStatus NetworkDNS {
-            DependsOn = "[SetupDomain]FirstDS"
-            Status    = "Setting Primary DNS, Default Gateway and DNS Forwarders"
-        }
+        if ($setNetwork) {
 
-        IPAddress NewIPAddressDC {
-            DependsOn      = "[SetupDomain]FirstDS"
-            IPAddress      = $DHCP_DNSAddress
-            InterfaceAlias = 'Ethernet'
-            AddressFamily  = 'IPV4'
-        }
+            WriteStatus NetworkDNS {
+                DependsOn = "[SetupDomain]FirstDS"
+                Status    = "Setting Primary DNS, Default Gateway and DNS Forwarders"
+            }
 
-        DefaultGatewayAddress SetDefaultGateway {
-            DependsOn      = "[IPAddress]NewIPAddressDC"
-            Address        = $DHCP_DefaultGateway
-            InterfaceAlias = 'Ethernet'
-            AddressFamily  = 'IPv4'
-        }
+            IPAddress NewIPAddressDC {
+                DependsOn      = "[SetupDomain]FirstDS"
+                IPAddress      = $DHCP_DNSAddress
+                InterfaceAlias = 'Ethernet'
+                AddressFamily  = 'IPV4'
+            }
 
-        DnsServerForwarder DnsServerForwarder {
-            DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
-            IsSingleInstance = 'Yes'
-            IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
-            UseRootHint      = $true
-            EnableReordering = $true
-        }
+            DefaultGatewayAddress SetDefaultGateway {
+                DependsOn      = "[IPAddress]NewIPAddressDC"
+                Address        = $DHCP_DefaultGateway
+                InterfaceAlias = 'Ethernet'
+                AddressFamily  = 'IPv4'
+            }
 
-        WriteStatus ADCS {
-            DependsOn = "[DnsServerForwarder]DnsServerForwarder"
-            Status    = "Installing Certificate Authority"
+            DnsServerForwarder DnsServerForwarder {
+                DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
+                IsSingleInstance = 'Yes'
+                IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+                UseRootHint      = $true
+                EnableReordering = $true
+            }
+
+            WriteStatus ADCS {
+                DependsOn = "[DnsServerForwarder]DnsServerForwarder"
+                Status    = "Installing Certificate Authority"
+            }
+        }
+        else {
+            WriteStatus ADCS {
+                DependsOn = "[SetupDomain]FirstDS"
+                Status    = "Installing Certificate Authority"
+            }
         }
 
         InstallCA InstallCA {
-            DependsOn = "[DnsServerForwarder]DnsServerForwarder"
+            DependsOn     = "[WriteStatus]ADCS"
             HashAlgorithm = "SHA256"
         }
 

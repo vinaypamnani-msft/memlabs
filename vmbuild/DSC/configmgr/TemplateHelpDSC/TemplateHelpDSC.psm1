@@ -1115,6 +1115,11 @@ class RegisterTaskScheduler {
             New-Item $ProvisionToolPath -ItemType directory | Out-Null
         }
 
+        $exists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
+        if ($exists) {
+            Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
+        }
+
         $sourceDirctory = "$_ScriptPath\*"
         $destDirctory = "$ProvisionToolPath\"
 
@@ -1139,7 +1144,7 @@ class RegisterTaskScheduler {
         $Password = $_AdminCreds.GetNetworkCredential().Password
 
         $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
-        $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password
+        $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force
 
         # $TaskStartTime = [datetime]::Now.AddMinutes(2)
         # $service = new-object -ComObject("Schedule.Service")
@@ -1163,8 +1168,16 @@ class RegisterTaskScheduler {
     }
 
     [bool] Test() {
-        $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
-        if (!(Test-Path $ProvisionToolPath)) {
+
+        $ConfigurationFile = Join-Path -Path "C:\Staging\DSC" -ChildPath "ScriptWorkflow.json"
+        if (-not (Test-Path $ConfigurationFile)) {
+            return $false
+        }
+
+        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        if ($Configuration.ScriptWorkflow.Status -eq 'NotStart') {
+            $Configuration.ScriptWorkflow.Status = 'Scheduled'
+            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
             return $false
         }
 

@@ -36,33 +36,41 @@ if (!(Test-Path C:\$CM\Redist)) {
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
+# Reset upgrade action (in case called again in add to existing scenario)
 # Set Install action as Running
-$Configuration.InstallSCCM.Status = 'Running'
-$Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration.UpgradeSCCM.Status = 'NotStart'
+$Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-# Ensure CM files were downloaded
-$cmsourcepath = "c:\$CM"
-if (!(Test-Path $cmsourcepath)) {
-    Write-DscStatus "Downloading $CM installation source..."
-    if ($CM -eq "CMTP") {
-        $cmurl = "https://go.microsoft.com/fwlink/?linkid=2077212&clcid=0x409"
-    }
-    else {
-        $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
-    }
+if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
 
-    Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
+    # Set Install action as Running
+    $Configuration.InstallSCCM.Status = 'Running'
+    $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
+    # Ensure CM files were downloaded
+    $cmsourcepath = "c:\$CM"
     if (!(Test-Path $cmsourcepath)) {
-        Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
+        Write-DscStatus "Downloading $CM installation source..."
+        if ($CM -eq "CMTP") {
+            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2077212&clcid=0x409"
+        }
+        else {
+            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
+        }
+
+        Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
+
+        if (!(Test-Path $cmsourcepath)) {
+            Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
+        }
     }
-}
 
-Write-DscStatus "Creating $Config.ini file" # Standalone or Hierarchy
-$CMINIPath = "c:\$CM\$Config.ini"
+    Write-DscStatus "Creating $Config.ini file" # Standalone or Hierarchy
+    $CMINIPath = "c:\$CM\$Config.ini"
 
-$cmini = @'
+    $cmini = @'
 [Identification]
 Action=%InstallAction%
 Preview=0
@@ -101,101 +109,74 @@ SysCenterId=
 [HierarchyExpansionOption]
 '@
 
-# Get SQL instance info
-$inst = (get-itemproperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server').InstalledInstances[0]
-$p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').$inst
-$sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
+    # Get SQL instance info
+    $inst = (get-itemproperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server').InstalledInstances[0]
+    $p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').$inst
+    $sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
 
-# Set ini values
-$installAction = if ($CurrentRole -eq "CAS") { "InstallCAS" } else { "InstallPrimarySite" }
-$cmini = $cmini.Replace('%InstallAction%', $installAction)
-$cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
-$cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")
-$cmini = $cmini.Replace('%SQLMachineFQDN%', "$env:computername.$DomainFullName")
-$cmini = $cmini.Replace('%SiteCode%', $SiteCode)
-$cmini = $cmini.Replace('%SQLDataFilePath%', $sqlinfo.DefaultData)
-$cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
-$cmini = $cmini.Replace('%CM%', $CM)
+    # Set ini values
+    $installAction = if ($CurrentRole -eq "CAS") { "InstallCAS" } else { "InstallPrimarySite" }
+    $cmini = $cmini.Replace('%InstallAction%', $installAction)
+    $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
+    $cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")
+    $cmini = $cmini.Replace('%SQLMachineFQDN%', "$env:computername.$DomainFullName")
+    $cmini = $cmini.Replace('%SiteCode%', $SiteCode)
+    $cmini = $cmini.Replace('%SQLDataFilePath%', $sqlinfo.DefaultData)
+    $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
+    $cmini = $cmini.Replace('%CM%', $CM)
 
-# Remove items not needed on CAS
-if ($installAction -eq "InstallCAS") {
-    $cmini = $cmini.Replace('RoleCommunicationProtocol=HTTPorHTTPS', "")
-    $cmini = $cmini.Replace('ClientsUsePKICertificate=0', "")
-}
-
-# Set site name
-if ($CM -eq "CMTP") {
-    $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Tech Preview")
-    $cmini = $cmini.Replace('Preview=0', "Preview=1")
-}
-else {
-    $cmini = $cmini.Replace('Preview=0', "")
+    # Remove items not needed on CAS
     if ($installAction -eq "InstallCAS") {
-        $cmini = $cmini.Replace('%SiteName%', "ConfigMgr CAS")
+        $cmini = $cmini.Replace('RoleCommunicationProtocol=HTTPorHTTPS', "")
+        $cmini = $cmini.Replace('ClientsUsePKICertificate=0', "")
+    }
+
+    # Set site name
+    if ($CM -eq "CMTP") {
+        $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Tech Preview")
+        $cmini = $cmini.Replace('Preview=0', "Preview=1")
     }
     else {
-        $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+        $cmini = $cmini.Replace('Preview=0', "")
+        if ($installAction -eq "InstallCAS") {
+            $cmini = $cmini.Replace('%SiteName%', "ConfigMgr CAS")
+        }
+        else {
+            $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+        }
     }
-}
 
-# Set sql instance
-if ($inst.ToUpper() -eq "MSSQLSERVER") {
-    $cmini = $cmini.Replace('%SQLInstance%', "")
+    # Set sql instance
+    if ($inst.ToUpper() -eq "MSSQLSERVER") {
+        $cmini = $cmini.Replace('%SQLInstance%', "")
+    }
+    else {
+        $tinstance = $inst.ToUpper() + "\"
+        $cmini = $cmini.Replace('%SQLInstance%', $tinstance)
+    }
+
+    # Create ini
+    $cmini > $CMINIPath
+
+    # Install CM
+    $CMInstallationFile = "c:\$CM\SMSSETUP\BIN\X64\Setup.exe"
+
+    # Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log
+    Write-DscStatusSetup
+
+    Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+
+    Write-DscStatus "Installation finished."
+
+    # Write action completed
+    $Configuration.InstallSCCM.Status = 'Completed'
+    $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
 }
 else {
-    $tinstance = $inst.ToUpper() + "\"
-    $cmini = $cmini.Replace('%SQLInstance%', $tinstance)
+    Write-DscStatus "ConfigMgr is already installed."
 }
-
-# Create ini
-$cmini > $CMINIPath
-
-# Install CM
-$CMInstallationFile = "c:\$CM\SMSSETUP\BIN\X64\Setup.exe"
-
-# Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log
-Write-DscStatusSetup
-
-Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
-
-Write-DscStatus "Installation finished."
-
-# Delete ini file?
-# Remove-Item $CMINIPath
-
-# Read Site Code from registry
-$SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
-$ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
-
-# Get CM module path
-$key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-$subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-$uiInstallPath = $subKey.GetValue("UI Installation Directory")
-$modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-$initParams = @{}
-
-# Import the ConfigurationManager.psd1 module
-if ($null -eq (Get-Module ConfigurationManager)) {
-    Import-Module $modulePath
-}
-
-# Connect to the site's drive if it is not already present
-Write-DscStatus "Setting PS Drive"
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-
-while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-    Write-DscStatus "Retry in 10s to Set PS Drive"
-    Start-Sleep -Seconds 10
-    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-}
-
-# Set the current location to be the site code.
-Set-Location "$($SiteCode):\" @initParams
-
-# Write action completed
-$Configuration.InstallSCCM.Status = 'Completed'
-$Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 # get the available update
 function getupdate() {
@@ -239,6 +220,35 @@ function getupdate() {
     return $updatepack
 }
 
+# Read Site Code from registry
+$SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+$ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
+
+# Get CM module path
+$key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+$subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+$uiInstallPath = $subKey.GetValue("UI Installation Directory")
+$modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
+$initParams = @{}
+
+# Import the ConfigurationManager.psd1 module
+if ($null -eq (Get-Module ConfigurationManager)) {
+    Import-Module $modulePath
+}
+
+# Connect to the site's drive if it is not already present
+Write-DscStatus "Setting PS Drive"
+New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+
+while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+    Write-DscStatus "Retry in 10s to Set PS Drive"
+    Start-Sleep -Seconds 10
+    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+}
+
+# Set the current location to be the site code.
+Set-Location "$($SiteCode):\" @initParams
+
 # Check if we should update to the  latest version
 if ($UpdateToLatest) {
 
@@ -246,6 +256,8 @@ if ($UpdateToLatest) {
     $Configuration.UpgradeSCCM.Status = 'Running'
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
+
 
     # Wait for 2 mins before checking DMP Downloader status
     Write-DscStatus "Checking for updates. Waiting for DMP Downloader."
@@ -531,8 +543,6 @@ if ($UpdateToLatest) {
     }
 }
 else {
-    # $UpdateToLatest not set, finish install.
-    Write-DscStatus "Installation finished."
 
     # Write action completed, PS can start when UpgradeSCCM.EndTime is not empty
     $Configuration.UpgradeSCCM.Status = 'NotRequested'
@@ -570,12 +580,12 @@ else {
     }
 
     # Wait for replication ready
-    $replicationStatus = Get-CMDatabaseReplicationStatus
+    $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
     Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'"
     while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
         Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'" -RetrySeconds 60
         Start-Sleep -Seconds 60
-        $replicationStatus = Get-CMDatabaseReplicationStatus
+        $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
     }
 
     Write-DscStatus "Primary installation complete. Replication link is 'Active'."

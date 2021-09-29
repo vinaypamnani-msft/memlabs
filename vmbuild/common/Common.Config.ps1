@@ -567,7 +567,7 @@ function Test-ValidRoleDC {
                     # Check network in Hyper-V
                     $vmnet = Get-VM -Name $existingDC -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
                     if ($vmnet.SwitchName -ne $configObject.vmOptions.network) {
-                        Add-ValidationMessage -Message "$vmRole Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM Switch [$($vmnet.SwitchName)] doesn't match specified network [$($configObject.vmOptions.network)]." -ReturnObject $ReturnObject -Warning
+                        # Add-ValidationMessage -Message "$vmRole Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM Switch [$($vmnet.SwitchName)] doesn't match specified network [$($configObject.vmOptions.network)]." -ReturnObject $ReturnObject -Warning
                     }
                 }
                 else {
@@ -803,6 +803,10 @@ function Test-Configuration {
         $scenario = "Standalone"
     }
 
+    if ($configObject.vmOptions.existingCASNameWithPrefix) {
+        $scenario = "Hierarchy"
+    }
+
     # add prefix to vm names
     $virtualMachines = $configObject.virtualMachines
     $virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
@@ -817,10 +821,16 @@ function Test-Configuration {
         $DCName = $configObject.vmOptions.existingDCNameWithPrefix
     }
 
+    # CSName (prefer name in config over existing)
+    $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
+    if (-not $CSName) {
+        $CSName = $configObject.vmOptions.existingCASNameWithPrefix
+    }
+
     $params = [PSCustomObject]@{
         DomainName         = $configObject.vmOptions.domainName
         DCName             = $DCName
-        CSName             = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
+        CSName             = $CSName
         PSName             = ($virtualMachines | Where-Object { $_.role -eq "Primary" }).vmName
         DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
         DomainMembers      = $clientsCsv

@@ -220,7 +220,7 @@
 
         WriteStatus WaitDelegate {
             DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
-            Status    = "Verifying Systems Management container and SQL permissions"
+            Status    = "Wait for DC to assign permissions to Systems Management container"
         }
 
         WaitForConfigurationFile WaitPSJoinDomain {

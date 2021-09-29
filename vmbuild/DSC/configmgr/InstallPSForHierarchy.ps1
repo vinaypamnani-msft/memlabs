@@ -11,8 +11,6 @@ $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 $CSName = $deployConfig.parameters.CSName
-$CSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $CSName }
-$CSSiteCode = $CSVM.siteCode
 
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
@@ -132,7 +130,8 @@ $p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance N
 $sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
 
 # Set CM Source Path
-$cmsourcepath = "\\$CSName\SMS_$CSSiteCode\cd.latest"
+$csShare = Invoke-Command -ComputerName $CSName -ScriptBlock { Get-SmbShare | Where-Object {$_.Name -like 'SMS_*' -and $_.Path -notlike '*despoolr.box*' -and $_.Description -like 'SMS Site *'} }
+$cmsourcepath = "\\$CSName\$($csShare.Name)\cd.latest"
 
 # Set ini values
 $cmini = $cmini.Replace('%InstallDir%',$SMSInstallDir)

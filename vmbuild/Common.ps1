@@ -492,7 +492,14 @@ function Test-DHCPScope {
     }
 
     try {
-        Set-DhcpServerv4OptionValue -ScopeId $scopeID -DnsServer $ConfigParams.DHCPDNSAddress -WinsServer $ConfigParams.DHCPDNSAddress -DnsDomain $ConfigParams.DomainName -Router $ConfigParams.DHCPDefaultGateway -Force -ErrorAction Stop
+        $dcnet = Get-Vm -Name $ConfigParams.DCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+        if ($dcnet) {
+            $dcIpv4 = $dcnet.IPAddresses | Where-Object {$_ -notlike "*:*" }
+        }
+        else {
+            $dcIpv4 = $ConfigParams.DHCPDNSAddress
+        }
+        Set-DhcpServerv4OptionValue -ScopeId $scopeID -DnsServer $dcIpv4 -WinsServer $dcIpv4 -DnsDomain $ConfigParams.DomainName -Router $ConfigParams.DHCPDefaultGateway -Force -ErrorAction Stop
         Write-Log "Test-DHCPScope: Added/updated scope options for '$scopeID' scope in DHCP." -Success
         return $true
     }
@@ -766,6 +773,8 @@ function Invoke-VmCommand {
         [switch]$SuppressLog,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Username for creating creds.")]
+        [string]$VmDomainUser = $Common.LocalAdmin.UserName,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
@@ -812,7 +821,7 @@ function Invoke-VmCommand {
     if ($SecondsToWaitBefore) { Start-Sleep -Seconds $SecondsToWaitBefore }
 
     # Get VM Session
-    $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName
+    $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainUser $VmDomainUser
     $failed = $null -eq $ps
 
     # Run script block inside VM
@@ -825,6 +834,11 @@ function Invoke-VmCommand {
                 Write-Log "Invoke-VmCommand: $VmName`: Failed to run '$DisplayName'. Error: $Err2" -Failure
             }
         }
+    }
+    else {
+        # Uncomment when debugging, this is called many times while waiting for VM to be ready
+        # Write-Log "Invoke-VmCommand: $VmName`: Failed to get VM Session." -Failure -LogOnly
+        # return $return
     }
 
     # Set Command Result state in return object
@@ -848,32 +862,44 @@ function Get-VmSession {
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
         [string]$VmName,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name for creating creds.")]
-        [string]$VmDomainName = "WORKGROUP"
+        [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Username for creating creds.")]
+        [string]$VmDomainUser = $Common.LocalAdmin.UserName
     )
 
+    $cacheKey = $VmName + $VmDomainUser
+
     # Retrieve session from cache
-    if ($global:ps_cache.ContainsKey($VmName)) {
-        $ps = $global:ps_cache[$VmName]
+    if ($global:ps_cache.ContainsKey($cacheKey)) {
+        $ps = $global:ps_cache[$cacheKey]
         if ($ps.Availability -eq "Available") {
-            # Write-Log "Get-VmSession: $VmName`: Returning session from cache." -LogOnly -Verbose
+            Write-Log "Get-VmSession: $VmName`: Returning session from cache." -Verbose
             return $ps
         }
     }
 
     # Get PS Session
-    $username = "$VmDomainName\$($Common.LocalAdmin.UserName)"
+    $username = "$VmDomainName\$VmDomainUser"
 
     $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
 
     $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
         Write-Log "Get-VmSession: $VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
-        return $null
+        if ($VmDomainUser -ne $Common.LocalAdmin.UserName) {
+            $username = "WORKGROUP\$($Common.LocalAdmin.UserName)"
+            $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
+            $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
+            if ($Err1.Count -ne 0) {
+                Write-Log "Get-VmSession: $VmName`: Failed to establish a session using $username. Error: $Err1" -Failure -Verbose
+                return $null
+            }
+        }
     }
 
     # Cache & return session
-    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username." -Success -Verbose
-    $global:ps_cache[$VmName] = $ps
+    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username." -Success -LogOnly
+    $global:ps_cache[$cacheKey] = $ps
     return $ps
 }
 
