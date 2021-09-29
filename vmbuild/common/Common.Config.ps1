@@ -531,11 +531,12 @@ function Test-ValidRoleDC {
 
     $containsDC = $configObject.virtualMachines.role.Contains("DC")
     $existingDC = $configObject.parameters.ExistingDCName
+    $domain = $ConfigObject.vmOptions.domainName
 
     if ($containsDC) {
 
         if ($existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC found in this domain [$existingDC]. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Warning
         }
 
         if (Test-SingleRole -VM $DCVM -ReturnObject $ReturnObject) {
@@ -920,6 +921,113 @@ function Get-ExistingForDomain {
         Write-Log "Get-ExistingNetwork: Failed to set existing servers. $_" -Failure
         return $null
     }
+}
+
+function Get-DomainList {
+
+    try {
+
+        $existingValue = @()
+        $scopes = Get-DhcpServerv4Scope -ErrorAction Stop
+
+        foreach ($scope in $scopes) {
+            $scopeDescObject = Get-DhcpScopeDescription -ScopeId $scope.ScopeId
+            if ($scopeDescObject) {
+                $existingValue += $scopeDescObject.domain.ToLowerInvariant()
+            }
+        }
+
+        return ($existingValue | Select-Object -Unique)
+
+    }
+    catch {
+        Write-Log "Get-DomainList: Failed to get domain list. $_" -Failure -LogOnly
+        return $null
+    }
+}
+
+function Get-SubnetList {
+
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $DomainName
+    )
+
+    try {
+
+        $return = @()
+        $scopes = Get-DhcpServerv4Scope -ErrorAction Stop
+
+        foreach ($scope in $scopes) {
+
+            $scopeDescObject = Get-DhcpScopeDescription -ScopeId $scope.ScopeId
+
+            $vmObject = [PSCustomObject]@{
+                Subnet = $scope.ScopeId.IPAddressToString
+                Domain = $null
+            }
+
+            if ($scopeDescObject) {
+                $vmObject.Domain = $scopeDescObject.domain
+            }
+
+            $return += $vmObject
+        }
+
+        if ($DomainName) {
+            $return = $return | Where-Object { $_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant() }
+        }
+
+        return $return
+
+    }
+    catch {
+        Write-Log "Get-SubnetList: Failed to get subnet list. $_" -Failure -LogOnly
+        return $null
+    }
+}
+
+function Get-VMList {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $DomainName,
+        [Parameter()]
+        [string]
+        $Subnet
+    )
+
+    $return = @()
+
+    $virtualMachines = Get-VM
+    foreach ($vm in $virtualMachines) {
+        $vmnet = $vm | Get-VMNetworkAdapter
+        $vmSwitch = $vmnet.SwitchName
+        $scope = Get-DhcpServerv4Scope -ScopeId $vmSwitch -ErrorAction Stop
+        $scopeDescObject = $scope.Description | ConvertFrom-Json
+
+        $vmObject = [PSCustomObject]@{
+            VMName = $vm.Name
+            Domain = $scopeDescObject.domain
+            Subnet = $vmSwitch
+        }
+
+        $return += $vmObject
+
+    }
+
+    if ($DomainName) {
+        $return = $return | Where-Object { $_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant() }
+    }
+
+    if ($Subnet) {
+        $return = $return | Where-Object { $_.Subnet.ToLowerInvariant() -eq $Subnet.ToLowerInvariant() }
+    }
+
+    return $return
 }
 
 Function Show-Summary {
