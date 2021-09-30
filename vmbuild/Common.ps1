@@ -424,18 +424,16 @@ function Test-NetworkSwitch {
     }
     else {
         Write-Log "Get-NetworkSwitch: '$interfaceAlias' not found in NAT. Restarting RemoteAccess service before adding it."
-        try {
-            Restart-Service RemoteAccess -ErrorAction Stop
-        }
-        catch {
+        $success = $false
+        while (-not $success) {
             try {
-                Start-Sleep -Seconds 10
                 Restart-Service RemoteAccess -ErrorAction Stop
+                $success = $true
             }
             catch {
-                Write-Log "Get-NetworkSwitch: Failed to restart RemoteAccess service. Restart the service manually, and try again."
-                return $false
-            }
+                Write-Log "Get-NetworkSwitch: Retry Restarting RemoteAccess Service"
+                Start-Sleep -Seconds 10
+            }         
         }
         & netsh routing ip nat add interface "$interfaceAlias"
     }
