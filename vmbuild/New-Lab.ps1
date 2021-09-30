@@ -158,6 +158,28 @@ $VM_Create = {
         }
     }
 
+    # Assign DHCP reservation for PS/CS
+
+    if ($currentItem.role -in "Primary", "CAS") {
+        try {
+            $vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop
+            if ($vmnet) {
+                $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
+                if ($currentItem.role -eq "CAS") {
+                    Remove-DhcpServerv4Reservation -IPAddress ($network + ".5") -ErrorAction SilentlyContinue
+                    Add-DhcpServerv4Reservation -ScopeId $deployConfig.vmOptions.network -IPAddress ($network + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop
+                }
+                if ($currentItem.role -eq "Primary") {
+                    Remove-DhcpServerv4Reservation -IPAddress ($network + ".10") -ErrorAction SilentlyContinue
+                    Add-DhcpServerv4Reservation -ScopeId $deployConfig.vmOptions.network -IPAddress ($network + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop
+                }
+            }
+        }
+        catch {
+            Write-Log "PSJOB: $($currentItem.vmName): Could not assign DHCP Reservation for $($currentItem.role). $_" -Warning
+        }
+    }
+
     # Get VM Session
     $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
