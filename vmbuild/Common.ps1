@@ -429,7 +429,8 @@ function Test-NetworkSwitch {
         }
         catch {
             try {
-                Restart-Service RemoteAccess  -ErrorAction Stop
+                Start-Sleep -Seconds 10
+                Restart-Service RemoteAccess -ErrorAction Stop
             }
             catch {
                 Write-Log "Get-NetworkSwitch: Failed to restart RemoteAccess service. Restart the service manually, and try again."
