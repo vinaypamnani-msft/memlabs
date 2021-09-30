@@ -1,0 +1,32 @@
+{
+    "vmOptions": {
+        "prefix": "NC-",
+        "basePath": "E:\\VirtualMachines",
+        "domainName": "adatum.com",
+        "domainAdminName": "admin",
+        "network": "192.168.3.0"
+    },
+    "virtualMachines": [
+        {
+            "vmName": "DC1",
+            "role": "DC",
+            "operatingSystem": "Server 2022",
+            "memory": "2GB",
+            "virtualProcs": 4
+        },              
+        {
+            "vmName": "W10-1",
+            "role": "DomainMember",
+            "operatingSystem": "Windows 10 Latest (64-bit)",
+            "memory": "2GB",
+            "virtualProcs": 4
+        },
+        {
+            "vmName": "W10-2",
+            "role": "DomainMember",
+            "operatingSystem": "Windows 10 Latest (64-bit)",
+            "memory": "2GB",
+            "virtualProcs": 4
+        }
+    ]
+}

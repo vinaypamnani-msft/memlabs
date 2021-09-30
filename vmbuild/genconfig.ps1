@@ -138,10 +138,11 @@ function Select-NewDomainConfig {
 
     $CASJson = Join-Path $sampleDir "Hierarchy.json"
     $PRIJson = Join-Path $sampleDir "Standalone.json"
-
+    $NoCMJson = Join-Path $sampleDir "NoConfigMgr.json"
     switch ($response.ToLowerInvariant()) {
         "c" { $newConfig = Get-Content $CASJson -Force | ConvertFrom-Json }
-        "p" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }       
+        "p" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }    
+        "n" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }     
     }
 
     $newConfig.vmOptions.domainName = $domain
