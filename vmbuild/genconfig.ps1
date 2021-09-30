@@ -82,22 +82,8 @@ function Select-MainMenu {
     }
 }
 
-function Select-NewDomainConfig {
+function Get-ValidSubnets {
 
-    $ValidDomainNames = [System.Collections.ArrayList]("adatum.com", "adventure-works.com", "alpineskihouse.com", "bellowscollege.com", "bestforyouorganics.com", "contoso.com", "contososuites.com",
-        "consolidatedmessenger.com", "fabrikam.com", "fabrikamresidences.com", "firstupconsultants.com", "fourthcoffee.com", "graphicdesigninstitute.com", "humongousinsurance.com",
-        "lamnahealthcare.com", "libertysdelightfulsinfulbakeryandcafe.com", "lucernepublishing.com", "margiestravel.com", "munsonspicklesandpreservesfarm.com", "nodpublishers.com",
-        "northwindtraders.com", "proseware.com", "relecloud.com", "fineartschool.net", "southridgevideo.com", "tailspintoys.com", "tailwindtraders.com", "treyresearch.net", "thephone-company.com",
-        "vanarsdelltd.com", "wideworldimporters.com", "wingtiptoys.com", "woodgrovebank.com", "techpreview.com" )
-
-    foreach ($domain in (Get-DomainList)) {
-        $ValidDomainNames.Remove($domain.ToLowerInvariant())
-    }
-
-    $domain = $null
-    while (-not $domain) {
-        $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames
-    }
 
     $subnetlist = @()
     for ($i = 1; $i -lt 254; $i++) {
@@ -117,14 +103,38 @@ function Select-NewDomainConfig {
             
         }
     }
+
+    return $subnetlist
+
+}
+
+function Select-NewDomainConfig {
+
+    $ValidDomainNames = [System.Collections.ArrayList]("adatum.com", "adventure-works.com", "alpineskihouse.com", "bellowscollege.com", "bestforyouorganics.com", "contoso.com", "contososuites.com",
+        "consolidatedmessenger.com", "fabrikam.com", "fabrikamresidences.com", "firstupconsultants.com", "fourthcoffee.com", "graphicdesigninstitute.com", "humongousinsurance.com",
+        "lamnahealthcare.com", "libertysdelightfulsinfulbakeryandcafe.com", "lucernepublishing.com", "margiestravel.com", "munsonspicklesandpreservesfarm.com", "nodpublishers.com",
+        "northwindtraders.com", "proseware.com", "relecloud.com", "fineartschool.net", "southridgevideo.com", "tailspintoys.com", "tailwindtraders.com", "treyresearch.net", "thephone-company.com",
+        "vanarsdelltd.com", "wideworldimporters.com", "wingtiptoys.com", "woodgrovebank.com", "techpreview.com" )
+
+    foreach ($domain in (Get-DomainList)) {
+        $ValidDomainNames.Remove($domain.ToLowerInvariant())
+    }
+
+    $domain = $null
+    while (-not $domain) {
+        $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames
+    }
+
+    $subnetlist = Get-ValidSubnets
+   
     while (-not $network) {
         $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
     }
  
     $customOptions = @{ "C" = "CAS and Primary"; "P" = "Primary Site only"; "N" = "No Configmgr" }
     $response = $null
-    while (-not $response){
-    $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
+    while (-not $response) {
+        $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
     }
 
     $CASJson = Join-Path $sampleDir "Hierarchy.json"
@@ -220,11 +230,11 @@ function Select-Config {
 function Show-ExistingNetwork {
 
     $domain = Get-Menu -Prompt "Select existing domain" -OptionArray (Get-DomainList)
-    if (-not $domain) {
+    if ([string]::isnullorwhitespace($domain)) {
         return $null
     }
     $subnet = Select-ExistingSubnets $domain
-    if (-not $subnet) {
+    if ([string]::IsNullOrWhiteSpace($subnet)) {
         return $null
     }
 
@@ -250,8 +260,15 @@ function Select-ExistingSubnets {
             return $null
         }
         #write-host "response $response"
-        if ($response.ToLowerInvariant() -eq "n") {
-            $response = Read-Host2 -Prompt "Select new subnet:"            
+        if ($response.ToLowerInvariant() -eq "n") { 
+
+            $subnetlist = Get-ValidSubnets
+   
+            while (-not $network) {
+                $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
+            }
+            $response = $network
+            
         }
         $valid = Get-TestResult -Config (Generate-ExistingConfig -Domain $Domain -Subnet $response)
     }
