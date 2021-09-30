@@ -1153,7 +1153,6 @@ function Set-SupportedOptions {
 
 if (-not $Common.Initialized) {
 
-
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
@@ -1193,5 +1192,8 @@ if (-not $Common.Initialized) {
 
     ### Set supported options
     Set-SupportedOptions
+
+    # Retrieve VM List, and cache results
+    Get-List -Type VM -ResetCache | Out-Null
 
 }

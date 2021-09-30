@@ -955,53 +955,66 @@ function Get-DomainList {
     }
 }
 
+$global:vm_List = $null
 function Get-List {
 
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
         [ValidateSet("VM", "Subnet", "Prefix", "UniqueDomain", "UniqueSubnet", "UniquePrefix")]
-        [string]
-        $Type,
+        [string] $Type,
         [Parameter(Mandatory = $false)]
-        [string]
-        $DomainName
+        [string] $DomainName,
+        [Parameter(Mandatory = $false)]
+        [switch] $ResetCache
     )
 
     try {
 
-        $return = @()
-        $virtualMachines = Get-VM
-        foreach ($vm in $virtualMachines) {
-
-            $vmNoteObject = $vm.Notes | ConvertFrom-Json
-            if ($vmNoteObject) {
-                $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
-                $vmObject = [PSCustomObject]@{
-                    VmName     = $vm.Name
-                    Role       = $vmNoteObject.role
-                    Domain     = $vmNoteObject.domain
-                    Subnet     = $vmNoteObject.network
-                    Prefix     = $vmNoteObject.prefix
-                    Success    = $vmNoteObject.success
-                    InProgress = $inProgress
-                }
-            }
-            else {
-                $vmNet = $vm | Get-VMNetworkAdapter
-                $vmObject = [PSCustomObject]@{
-                    VmName     = $vm.Name
-                    Subnet     = $vmNet.SwitchName
-                    Role       = $null
-                    Domain     = $null
-                    Prefix     = $null
-                    Success    = $null
-                    InProgress = $null
-                }
-            }
-
-            $return += $vmObject
+        if ($ResetCache.IsPresent) {
+            $global:vm_List = $null
         }
+
+        if ($null -eq $global:vm_List) {
+
+            Write-Log "Get-List: Obtaining '$Type' list and caching it." -LogOnly
+            $return = @()
+            $virtualMachines = Get-VM
+            foreach ($vm in $virtualMachines) {
+
+                $vmNoteObject = $vm.Notes | ConvertFrom-Json
+                if ($vmNoteObject) {
+                    $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
+                    $vmObject = [PSCustomObject]@{
+                        VmName     = $vm.Name
+                        Role       = $vmNoteObject.role
+                        Domain     = $vmNoteObject.domain
+                        Subnet     = $vmNoteObject.network
+                        Prefix     = $vmNoteObject.prefix
+                        Success    = $vmNoteObject.success
+                        InProgress = $inProgress
+                    }
+                }
+                else {
+                    $vmNet = $vm | Get-VMNetworkAdapter
+                    $vmObject = [PSCustomObject]@{
+                        VmName     = $vm.Name
+                        Subnet     = $vmNet.SwitchName
+                        Role       = $null
+                        Domain     = $null
+                        Prefix     = $null
+                        Success    = $null
+                        InProgress = $null
+                    }
+                }
+
+                $return += $vmObject
+            }
+
+            $global:vm_List = $return
+        }
+
+        $return = $global:vm_List
 
         if ($DomainName) {
             $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
@@ -1038,47 +1051,6 @@ function Get-List {
         Write-Log "Get-List: Failed to get '$Type' list. $_" -Failure -LogOnly
         return $null
     }
-}
-
-function Get-VMList {
-    [CmdletBinding()]
-    param (
-        [Parameter()]
-        [string]
-        $DomainName,
-        [Parameter()]
-        [string]
-        $Subnet
-    )
-
-    $return = @()
-
-    $virtualMachines = Get-VM
-    foreach ($vm in $virtualMachines) {
-        $vmnet = $vm | Get-VMNetworkAdapter
-        $vmSwitch = $vmnet.SwitchName
-        $scope = Get-DhcpServerv4Scope -ScopeId $vmSwitch -ErrorAction Stop
-        $scopeDescObject = $scope.Description | ConvertFrom-Json
-
-        $vmObject = [PSCustomObject]@{
-            VMName = $vm.Name
-            Domain = $scopeDescObject.domain
-            Subnet = $vmSwitch
-        }
-
-        $return += $vmObject
-
-    }
-
-    if ($DomainName) {
-        $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
-    }
-
-    if ($Subnet) {
-        $return = $return | Where-Object { $_.Subnet -and ($_.Subnet.ToLowerInvariant() -eq $Subnet.ToLowerInvariant()) }
-    }
-
-    return $return
 }
 
 Function Show-Summary {
