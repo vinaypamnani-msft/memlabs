@@ -491,7 +491,7 @@ function Test-DHCPScope {
     }
 
     try {
-        New-DhcpScopeDescription -ConfigParams $ConfigParams
+        #New-DhcpScopeDescription -ConfigParams $ConfigParams
         $dcnet = Get-Vm -Name $ConfigParams.DCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
         if ($dcnet) {
             $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
