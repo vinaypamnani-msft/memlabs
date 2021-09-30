@@ -685,10 +685,16 @@ function Test-Configuration {
     $return.DeployConfig = $deployConfig
 
     # Contains roles
-    $containsDC = $deployConfig.virtualMachines.role.Contains("DC")
-    $containsCS = $deployConfig.virtualMachines.role.Contains("CAS")
-    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
-    $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
+    if ($deployConfig.virtualMachines) {
+        $containsDC = $deployConfig.virtualMachines.role.Contains("DC")
+        $containsCS = $deployConfig.virtualMachines.role.Contains("CAS")
+        $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
+        $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
+    }
+    else {
+        $containsDC = $containsCS = $containsPS = $containsDPMP = $false
+    }
+
     $needCMOptions = $containsCS -or $containsPS
 
     # VM Options
@@ -847,7 +853,8 @@ function New-DeployConfig {
 
     if ($existingCSName -and $containsPS) {
         $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" }
-        if ($PSVM.standalone) { # TODO: Add this prop in genconfig
+        if ($PSVM.standalone) {
+            # TODO: Add this prop in genconfig
             $scenario = "Standalone"
         }
         else {
