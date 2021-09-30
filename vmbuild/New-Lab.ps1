@@ -130,7 +130,7 @@ $VM_Create = {
         }
 
         # Write a note to the VM
-        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -InProgress
+        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -InProgress
 
         # Wait for VM to finish OOBE
         $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
@@ -159,7 +159,6 @@ $VM_Create = {
     }
 
     # Assign DHCP reservation for PS/CS
-
     if ($currentItem.role -in "Primary", "CAS") {
         try {
             $vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop

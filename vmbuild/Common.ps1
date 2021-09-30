@@ -550,18 +550,21 @@ function New-VmNote {
     )
 
     try {
-
+        $ProgressPreference = 'SilentlyContinue'
         if ($InProgress.IsPresent) {
             $vmNote = [PSCustomObject]@{
-                role       = $Role
                 inProgress = $true
+                role       = $Role
+                domain     = $DeployConfig.vmoptions.domainName
+                network    = $DeployConfig.vmoptions.network
+                prefix     = $DeployConfig.vmoptions.prefix
                 lastUpdate = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
         }
         else {
             $vmNote = [PSCustomObject]@{
-                role       = $Role
                 success    = $Successful
+                role       = $Role
                 domain     = $DeployConfig.vmoptions.domainName
                 network    = $DeployConfig.vmoptions.network
                 prefix     = $DeployConfig.vmoptions.prefix
@@ -577,6 +580,9 @@ function New-VmNote {
     }
     catch {
         Write-Log "New-VmNote: Failed to add a note to the VM '$VmName' in Hyper-V. $_" -Failure
+    }
+    finally {
+        $ProgressPreference = 'Continue'
     }
 }
 
