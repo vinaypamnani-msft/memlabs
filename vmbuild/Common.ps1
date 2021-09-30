@@ -433,7 +433,7 @@ function Test-NetworkSwitch {
             catch {
                 Write-Log "Get-NetworkSwitch: Retry Restarting RemoteAccess Service"
                 Start-Sleep -Seconds 10
-            }         
+            }
         }
         & netsh routing ip nat add interface "$interfaceAlias"
     }
@@ -540,29 +540,37 @@ function New-VmNote {
         [Parameter(Mandatory = $true)]
         [string]$VmName,
         [Parameter(Mandatory = $true)]
-        [string]$DomainName,
-        [Parameter(Mandatory = $true)]
         [string]$Role,
-        [Parameter(Mandatory = $true)]
-        [string]$Network,
-        [Parameter(Mandatory = $true)]
-        [string]$Prefix,
-        [Parameter(Mandatory = $true)]
-        [string]$Successful
+        [Parameter(Mandatory = $false)]
+        [object]$DeployConfig,
+        [Parameter(Mandatory = $false)]
+        [bool]$Successful,
+        [Parameter(Mandatory = $false)]
+        [switch]$InProgress
     )
 
     try {
-        $vmNote = [PSCustomObject]@{
-            domain         = $DomainName
-            role           = $Role
-            network        = $Network
-            prefix         = $Prefix
-            success        = $Successful
-            lastUpdateTime = (Get-Date -format "MM/dd/yyyy HH:mm")
+
+        if ($InProgress.IsPresent) {
+            $vmNote = [PSCustomObject]@{
+                role       = $Role
+                inProgress = $true
+                lastUpdate = (Get-Date -format "MM/dd/yyyy HH:mm")
+            }
+        }
+        else {
+            $vmNote = [PSCustomObject]@{
+                role       = $Role
+                success    = $Successful
+                domain     = $DeployConfig.vmoptions.domainName
+                network    = $DeployConfig.vmoptions.network
+                prefix     = $DeployConfig.vmoptions.prefix
+                lastUpdate = (Get-Date -format "MM/dd/yyyy HH:mm")
+            }
         }
 
         $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-        $vm = Get-Vm $VmName -ErrorAction SilentlyContinue
+        $vm = Get-Vm $VmName -ErrorAction Stop
         if ($vm) {
             $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
         }
@@ -981,7 +989,7 @@ function Get-VmSession {
     }
 
     # Cache & return session
-    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username. CacheKey [$cacheKey]" -Success -LogOnly
+    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username. CacheKey [$cacheKey]" -Success -Verbose
     $global:ps_cache[$cacheKey] = $ps
     return $ps
 }

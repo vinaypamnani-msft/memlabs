@@ -1,9 +1,11 @@
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $true, ParameterSetName="Domain")]
+    [Parameter(Mandatory = $true, ParameterSetName = "Domain")]
     [string] $DomainName,
-    [Parameter(Mandatory = $true, ParameterSetName="Orphaned")]
+    [Parameter(Mandatory = $true, ParameterSetName = "Orphaned")]
     [switch] $Orphaned,
+    [Parameter(Mandatory = $true, ParameterSetName = "InProgress")]
+    [switch] $InProgress,
     [Parameter()]
     [switch] $WhatIf
 )
@@ -24,15 +26,13 @@ function Remove-VirtualMachine {
 
     $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
     if ($vmTest) {
-        Write-Log "Remove-Lab: $VmName`: Virtual machine exists.Removing." -HostOnly
+        Write-Log "Remove-Lab: VM '$VmName' exists. Removing." -SubActivity -HostOnly
         if ($vmTest.State -ne "Off") {
-            Write-Log "Remove-Lab: $VmName`: Turning the VM off forcefully..." -HostOnly
             $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf
         }
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf
         Write-Log "Remove-Lab: $VmName`: Purging $($vmTest.Path) folder..." -HostOnly
         Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
-        Write-Log "Remove-Lab: $VmName`: Purge complete." -HostOnly
     }
 }
 
@@ -44,64 +44,90 @@ function Remove-DhcpScope {
 
     $dhcpScope = Get-DhcpServerv4Scope -ScopeID $ScopeId -ErrorAction SilentlyContinue
     if ($dhcpScope) {
-        Write-Log "Remove-Lab: $ScopeId`: Scope exists.Removing." -HostOnly
+        Write-Log "Remove-Lab: DHCP Scope '$ScopeId' exists. Removing." -SubActivity -HostOnly
         $dhcpScope | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
     }
 }
 
+
+
 if ($Orphaned.IsPresent) {
-    $virtualMachines = Get-VM
-    foreach($vm in $virtualMachines) {
-        $vmNote = $vm.Notes
-        $vmNoteObject = $vmNote | ConvertFrom-Json
-        if (-not $vmNoteObject) {
-            # Prompt for delete
-            $response = Read-Host -Prompt "$($vm.Name) may be orphaned. Delete? [y/N]"
+    Write-Log "Main: Remove Lab called for Orphaned objects." -Activity -HostOnly
+    $virtualMachines = Get-List -Type VM
+    foreach ($vm in $virtualMachines) {
+
+        if (-not $vm.Domain) {
+            # Prompt for delete, likely no json object in vm notes
+            Write-Host
+            $response = Read-Host -Prompt "VM $($vm.VmName) may be orphaned. Delete? [y/N]"
             if ($response.ToLowerInvariant() -eq "y") {
-                Remove-VirtualMachine -VmName $vm.Name
+                Remove-VirtualMachine -VmName $vm.VmName
             }
         }
         else {
-            if (-not $vmNoteObject.success) {
-                Remove-VirtualMachine -VmName $vm.Name
+            if ($null -ne $vm.success -and $vm.success -eq $false) {
+                Remove-VirtualMachine -VmName $vm.VmName
             }
         }
     }
 
     # Loop through vm's again (in case some were deleted)
     $vmNetworksInUse = @()
-    foreach($vm in (Get-VM)) {
-        $vmnet = $vm | Get-VMNetworkAdapter
+    foreach ($vm in (Get-VM)) {
+        $vmnet = Get-VMNetworkAdapter -VmName $vm.Name
         $vmNetworksInUse += $vmnet.SwitchName
     }
 
     $scopes = Get-DhcpServerv4Scope
-    foreach($scope in $scopes) {
+    foreach ($scope in $scopes) {
         $scopeId = $scope.ScopeId.IPAddressToString
         if ($vmNetworksInUse -notcontains $scopeId) {
-            $response = Read-Host -Prompt "'$scopeId' may be orphaned. Delete? [y/N]"
+            Write-Host
+            $response = Read-Host -Prompt "DHCP Scope '$scopeId' may be orphaned. Delete? [y/N]"
             if ($response.ToLowerInvariant() -eq "y") {
                 Remove-DhcpScope -ScopeId $scopeId
             }
         }
     }
 
+    Write-Host
     return
 }
 
+if ($InProgress.IsPresent) {
+
+    Write-Log "Main: Remove Lab called for InProgress objects." -Activity -HostOnly
+
+    $virtualMachines = Get-List -Type VM
+    foreach ($vm in $virtualMachines) {
+        if ($vm.inProgress) {
+            Remove-VirtualMachine -VmName $vm.VmName
+        }
+    }
+
+    Write-Host
+    return
+}
+
+
+
+Write-Log "Main: Remove Lab called for '$DomainName' domain." -Activity -HostOnly
+
 if ($DomainName) {
-    $vmsToDelete = Get-VMList -DomainName $DomainName
+    $vmsToDelete = Get-List -Type VM -DomainName $DomainName
     $scopesToDelete = Get-SubnetList -DomainName $DomainName
 }
 else {
-    $vmsToDelete = Get-VMList
-    $scopesToDelete = Get-SubnetList -DomainName $DomainName
+    $vmsToDelete = Get-List -Type VM
+    $scopesToDelete = Get-SubnetList
 }
 
 foreach ($vm in $vmsToDelete) {
-    Remove-VirtualMachine -VmName $vm.VMName
+    Remove-VirtualMachine -VmName $vm.VmName
 }
 
 foreach ($scope in $scopesToDelete) {
     Remove-DhcpScope -ScopeId $scope.Subnet
 }
+
+Write-Host

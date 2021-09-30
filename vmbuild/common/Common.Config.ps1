@@ -836,14 +836,14 @@ function New-DeployConfig {
 
     # DCName (prefer name in config over existing)
     $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
-    $existingDCName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -DC
+    $existingDCName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -Role "DC"
     if (-not $DCName) {
         $DCName = $existingDCName
     }
 
     # CSName (prefer name in config over existing)
     $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
-    $existingCSName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -CAS
+    $existingCSName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -Role "CAS"
     if (-not $CSName) {
         $CSName = $existingCSName
     }
@@ -895,34 +895,20 @@ function Get-ExistingForDomain {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
-        [Parameter(Mandatory = $false, HelpMessage = "Switch to indicate whether existing DC is retrieved")]
-        [switch]$DC,
-        [Parameter(Mandatory = $false, HelpMessage = "Switch to indicate whether existing CAS is retrieved")]
-        [switch]$CAS
+        [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
+        [ValidateSet("DC", "CAS", "Primary")]
+        [string]$Role
     )
 
     try {
 
-        $propToCheck = "DC"
-        if ($DC.IsPresent) {
-            $propToCheck = "DC"
-        }
-
-        if ($CAS.IsPresent) {
-            $propToCheck = "CAS"
-        }
-
         $existingValue = $null
-        $scopes = Get-DhcpServerv4Scope -ErrorAction Stop
-
-        foreach ($scope in $scopes) {
-            $scopeDescObject = Get-DhcpScopeDescription -ScopeId $scope.ScopeId
-            if ($scopeDescObject) {
-                if ($scopeDescObject.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) {
-                    $existingValue = $scopeDescObject.$propToCheck
-                    if ($null -ne $existingValue) {
-                        break
-                    }
+        $vmList = Get-List -Type VM -DomainName $DomainName
+        foreach ($vm in $vmList) {
+            if ($vm.Role.ToLowerInvariant() -eq $Role.ToLowerInvariant()) {
+                $existingValue = $vm.VmName
+                if ($null -ne $existingValue) {
+                    break
                 }
             }
         }
@@ -931,7 +917,29 @@ function Get-ExistingForDomain {
 
     }
     catch {
-        Write-Log "Get-ExistingNetwork: Failed to set existing servers. $_" -Failure
+        Write-Log "Get-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
+        return $null
+    }
+}
+
+function Get-SubnetList {
+
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]
+        $DomainName
+    )
+    try {
+
+        if ($DomainName) {
+            return (Get-List -Type Subnet -DomainName $DomainName)
+        }
+
+        return (Get-List -Type Subnet)
+
+    }
+    catch {
+        Write-Log "Get-SubnetList: Failed to get subnet list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -939,19 +947,7 @@ function Get-ExistingForDomain {
 function Get-DomainList {
 
     try {
-
-        $existingValue = @()
-        $scopes = Get-DhcpServerv4Scope -ErrorAction Stop
-
-        foreach ($scope in $scopes) {
-            $scopeDescObject = Get-DhcpScopeDescription -ScopeId $scope.ScopeId
-            if ($scopeDescObject) {
-                $existingValue += $scopeDescObject.domain.ToLowerInvariant()
-            }
-        }
-
-        return ($existingValue | Select-Object -Unique)
-
+        return (Get-List -Type UniqueDomain)
     }
     catch {
         Write-Log "Get-DomainList: Failed to get domain list. $_" -Failure -LogOnly
@@ -959,11 +955,15 @@ function Get-DomainList {
     }
 }
 
-function Get-SubnetList {
+function Get-List {
 
     [CmdletBinding()]
     param (
-        [Parameter()]
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("VM", "Subnet", "Prefix", "UniqueDomain", "UniqueSubnet", "UniquePrefix")]
+        [string]
+        $Type,
+        [Parameter(Mandatory = $false)]
         [string]
         $DomainName
     )
@@ -971,19 +971,33 @@ function Get-SubnetList {
     try {
 
         $return = @()
-        $scopes = Get-DhcpServerv4Scope -ErrorAction Stop
+        $virtualMachines = Get-VM
+        foreach ($vm in $virtualMachines) {
 
-        foreach ($scope in $scopes) {
-
-            $scopeDescObject = Get-DhcpScopeDescription -ScopeId $scope.ScopeId
-
-            $vmObject = [PSCustomObject]@{
-                Subnet = $scope.ScopeId.IPAddressToString
-                Domain = $null
+            $vmNoteObject = $vm.Notes | ConvertFrom-Json
+            if ($vmNoteObject) {
+                $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
+                $vmObject = [PSCustomObject]@{
+                    VmName     = $vm.Name
+                    Role       = $vmNoteObject.role
+                    Domain     = $vmNoteObject.domain
+                    Subnet     = $vmNoteObject.network
+                    Prefix     = $vmNoteObject.prefix
+                    Success    = $vmNoteObject.success
+                    InProgress = $inProgress
+                }
             }
-
-            if ($scopeDescObject) {
-                $vmObject.Domain = $scopeDescObject.domain
+            else {
+                $vmNet = $vm | Get-VMNetworkAdapter
+                $vmObject = [PSCustomObject]@{
+                    VmName     = $vm.Name
+                    Subnet     = $vmNet.SwitchName
+                    Role       = $null
+                    Domain     = $null
+                    Prefix     = $null
+                    Success    = $null
+                    InProgress = $null
+                }
             }
 
             $return += $vmObject
@@ -993,11 +1007,35 @@ function Get-SubnetList {
             $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
         }
 
-        return $return
+        $return = $return | Sort-Object -Property * -Unique
+
+        if ($Type -eq "VM") {
+            return $return
+        }
+
+        if ($Type -eq "Subnet") {
+            return $return | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
+        }
+
+        if ($Type -eq "Prefix") {
+            return $return | Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
+        }
+
+        if ($Type -eq "UniqueDomain") {
+            return $return | Select-Object -ExpandProperty Domain -Unique
+        }
+
+        if ($Type -eq "UniqueSubnet") {
+            return $return | Select-Object -ExpandProperty Subnet -Unique
+        }
+
+        if ($Type -eq "UniquePrefix") {
+            return $return | Select-Object -ExpandProperty Prefix -Unique
+        }
 
     }
     catch {
-        Write-Log "Get-SubnetList: Failed to get subnet list. $_" -Failure -LogOnly
+        Write-Log "Get-List: Failed to get '$Type' list. $_" -Failure -LogOnly
         return $null
     }
 }

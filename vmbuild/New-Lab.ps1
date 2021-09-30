@@ -129,6 +129,9 @@ $VM_Create = {
             return
         }
 
+        # Write a note to the VM
+        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -InProgress
+
         # Wait for VM to finish OOBE
         $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
         if (-not $connected) {
@@ -452,7 +455,7 @@ $VM_Create = {
     }
 
     # Set VM Note
-    New-VmNote -VmName $currentItem.vmName -DomainName $currentItem.domain -Role $currentItem.role -Network $deployConfig.vmOptions.network -Prefix $deployConfig.vmOptions.prefix -Successful $worked
+    New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $worked
 }
 
 Clear-Host
