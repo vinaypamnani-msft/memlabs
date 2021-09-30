@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param (
+    [Parameter(Mandatory = $true)]
+    [string] $DomainName,
     [Parameter()]
-    [string]
-    $DomainName
+    [switch] $WhatIf
 )
 
 # Tell common to re-init
@@ -12,14 +13,6 @@ if ($Common.Initialized) {
 
 # Dot source common
 . $PSScriptRoot\Common.ps1
-
-# Set Verbose
-if ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent) {
-    $Common.VerboseEnabled = $true
-}
-else {
-    $Common.VerboseEnabled = $false
-}
 
 if ($DomainName) {
     $vmsToDelete = Get-VMList -DomainName $DomainName
@@ -37,11 +30,11 @@ foreach ($vm in $vmsToDelete) {
         Write-Log "Remove-Lab: $VmName`: Virtual machine exists.Removing."
         if ($vmTest.State -ne "Off") {
             Write-Log "Remove-Lab: $VmName`: Turning the VM off forcefully..."
-            $vmTest | Stop-VM -TurnOff -Force
+            $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf
         }
-        $vmTest | Remove-VM -Force
+        $vmTest | Remove-VM -Force -WhatIf:$WhatIf
         Write-Log "Remove-Lab: $VmName`: Purging $($vmTest.Path) folder..."
-        Remove-Item -Path $($vmTest.Path) -Force -Recurse
+        Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
         Write-Log "Remove-Lab: $VmName`: Purge complete."
     }
 }
@@ -51,6 +44,6 @@ foreach ($scope in $scopesToDelete) {
     $dhcpScope = Get-DhcpServerv4Scope -ScopeID $scopeId -ErrorAction SilentlyContinue
     if ($dhcpScope) {
         Write-Log "Remove-Lab: $scopeId`: Scope exists.Removing."
-        $dhcpScope | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+        $dhcpScope | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
     }
 }
