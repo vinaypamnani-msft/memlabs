@@ -128,8 +128,8 @@ function Select-NewDomainConfig {
 
     $usedPrefixes = Get-List -Type UniquePrefix
     foreach ($dname in $ValidDomainNames) {
-        foreach ($prefix in $usedPrefixes) {
-            if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $prefix.ToLowerInvariant()) {
+        foreach ($usedPrefix in $usedPrefixes) {
+            if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $usedPrefix.ToLowerInvariant()) {
                 Write-Verbose ("Removing $dname")
                 $ValidDomainNames.Remove($dname)
             }
@@ -139,7 +139,8 @@ function Select-NewDomainConfig {
     while (-not $domain) {
         $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames.Keys
     }
-    Write-Verbose "Prefix = $($ValidDomainNames[$domain])"
+    $prefix =  $($ValidDomainNames[$domain])
+    Write-Verbose "Prefix = $prefix"
     $subnetlist = Get-ValidSubnets
    
     while (-not $network) {
@@ -163,6 +164,7 @@ function Select-NewDomainConfig {
 
     $newConfig.vmOptions.domainName = $domain
     $newConfig.vmOptions.network = $network
+    $newConfig.vmOptions.prefix = $prefix
     return $newConfig
 }
 
