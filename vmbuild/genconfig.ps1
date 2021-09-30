@@ -75,7 +75,6 @@ function Select-MainMenu {
             Default {}
         }
         if ($SelectedConfig) {
-            $SelectedConfig | out-host
             return $SelectedConfig
         }
 
@@ -223,7 +222,6 @@ function Select-Config {
     }
     $Global:configfile = $files[[int]$response - 1]
     $configSelected = Get-Content $Global:configfile -Force | ConvertFrom-Json
-    $configSelected |  out-host
     return $configSelected
 }
 
