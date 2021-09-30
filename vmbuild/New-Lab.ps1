@@ -440,13 +440,19 @@ $VM_Create = {
         }
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
+
     if (-not $complete) {
+        $worked = $false
         Write-Log "PSJOB: $($currentItem.vmName): Configuration did not complete in allotted time ($timeout minutes) for $($currentItem.role)." -OutputStream -Failure
     }
     else {
+        $worked = $true
         Write-Progress "$($currentItem.role) configuration completed successfully. Elapsed time: $($stopWatch.Elapsed)" -Status $status.ScriptBlockOutput -Completed
         Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
+
+    # Set VM Note
+    New-VmNote -VmName $currentItem.vmName -DomainName $currentItem.domain -Role $currentItem.role -Network $deployConfig.vmOptions.network -Prefix $deployConfig.vmOptions.prefix -Successful $worked
 }
 
 Clear-Host
@@ -648,7 +654,8 @@ Write-Host
 Show-Summary -deployConfig $deployConfig
 
 Write-Log "Main: Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
-
+$failedCount = 0
+$successCount = 0
 do {
     $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
     foreach ($job in $runningJobs) {
@@ -657,9 +664,17 @@ do {
 
     $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
     foreach ($job in $completedJobs) {
-        Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
-        $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
         Write-JobProgress($job)
+        Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
+        $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
+        $jobOutput
+        if ($jobOutPut.StartsWith("ERROR")) {
+            $failedCount++
+        }
+        else {
+            $successCount++
+        }
+
         #$job | Remove-Job -Force -Confirm:$false
         $jobs.Remove($job)
     }
@@ -669,7 +684,8 @@ do {
 
 } until ($runningJobs.Count -eq 0)
 
-# Write-Progress -Activity "Waiting for virtual machines to be created" -Completed
+Write-Log "Main: Job Completion Status." -Activity
+Write-Log "Main: $successCount jobs completed successfully, $failedCount failed."
 
 $timer.Stop()
 Write-Host
