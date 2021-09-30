@@ -1115,6 +1115,11 @@ class RegisterTaskScheduler {
             New-Item $ProvisionToolPath -ItemType directory | Out-Null
         }
 
+        $exists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
+        if ($exists) {
+            Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
+        }
+
         $sourceDirctory = "$_ScriptPath\*"
         $destDirctory = "$ProvisionToolPath\"
 
@@ -1139,7 +1144,7 @@ class RegisterTaskScheduler {
         $Password = $_AdminCreds.GetNetworkCredential().Password
 
         $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
-        $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password
+        $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force
 
         # $TaskStartTime = [datetime]::Now.AddMinutes(2)
         # $service = new-object -ComObject("Schedule.Service")
@@ -1163,8 +1168,16 @@ class RegisterTaskScheduler {
     }
 
     [bool] Test() {
-        $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
-        if (!(Test-Path $ProvisionToolPath)) {
+
+        $ConfigurationFile = Join-Path -Path "C:\Staging\DSC" -ChildPath "ScriptWorkflow.json"
+        if (-not (Test-Path $ConfigurationFile)) {
+            return $false
+        }
+
+        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        if ($Configuration.ScriptWorkflow.Status -eq 'NotStart') {
+            $Configuration.ScriptWorkflow.Status = 'Scheduled'
+            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
             return $false
         }
 
@@ -1234,16 +1247,16 @@ class InitializeDisks {
 
         if ($null -eq $_Disks) {
             Write-Verbose "No disks to initialize."
+            return
         }
 
         # Loop through disks
         $count = 0
         $label = "DATA"
         foreach ($disk in $_Disks.psobject.properties) {
-            $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $disk.Value }
-            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $disk.Name | Format-Volume -FileSystem NTFS -NewFileSystemLabel "$label`_$count" -Confirm:$false -Force
             Write-Verbose "Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)"
-            Start-Sleep -Seconds 15
+            $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $disk.Value } | Select-Object -First 1
+            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $disk.Name | Format-Volume -FileSystem NTFS -NewFileSystemLabel "$label`_$count" -Confirm:$false -Force
             $count++
         }
 
@@ -1383,6 +1396,7 @@ class JoinDomain {
         $_retryCount = 100
         try {
             Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Stop
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
         }
         catch {
@@ -1815,7 +1829,7 @@ class SetCustomPagingFile {
             Set-CimInstance $currentpagingfile -Property @{InitialSize = $_InitialSize ; MaximumSize = $_MaximumSize }
         }
 
-
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
 
@@ -1874,6 +1888,7 @@ class SetupDomain {
             -SysvolPath "C:\Windows\SYSVOL" `
             -Force:$true
 
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
 

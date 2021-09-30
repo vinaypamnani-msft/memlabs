@@ -97,7 +97,7 @@
 
         WriteStatus WaitDomain {
             DependsOn = "[InstallFeatureForSCCM]InstallFeature"
-            Status    = "Waiting for domain to be ready to obtain an IP"
+            Status    = "Waiting for domain to be ready"
         }
 
         WaitForDomainReady WaitForDomain {
@@ -246,7 +246,7 @@
 
         WriteStatus WaitDelegate {
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
-            Status    = "Verifying Systems Management container and SQL permissions"
+            Status    = "Wait for DC to assign permissions to Systems Management container"
         }
 
         WaitForConfigurationFile DelegateControl {

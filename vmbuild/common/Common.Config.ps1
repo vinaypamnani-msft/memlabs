@@ -297,14 +297,14 @@ function Test-ValidVmSupported {
     $vmName = $VM.vmName
 
     # vmName characters
-    if ($vm.vmName.Length + $ConfigObject.vmOptions.prefix.Length -gt 15) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] with prefix [$($ConfigObject.vmOptions.prefix)] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Failure
+    if ($vm.vmName.Length -gt 15) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Failure
     }
 
     #prefix + vmName combined name validation
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
     if ($($ConfigObject.vmOptions.prefix + $vm.vmName) -match $pattern) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] with prefix [$($ConfigObject.vmOptions.prefix)] has an invalid name." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has an invalid name." -ReturnObject $ReturnObject -Failure
     }
 
     # Supported OS
@@ -313,7 +313,7 @@ function Test-ValidVmSupported {
     }
 
     # Supported DSC Roles for Existing scenario
-    if ($configObject.vmOptions.existingDCNameWithPrefix) {
+    if ($configObject.parameters.ExistingDCName) {
         # Supported DSC Roles for Existing Scenario
         if ($Common.Supported.RolesForExisting -notcontains $vm.role) {
             $supportedRoles = $Common.Supported.RolesForExisting -join ", "
@@ -463,7 +463,7 @@ function Test-ValidVmServerOS {
     $vmRole = $VM.role
 
     if ($VM.operatingSystem -notlike "*Server*") {
-        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server OS for Primary/CAS/DPMP roles, or when SQL is selected." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server OS for Primary/CAS/DPMP roles, or when SQL is selected." -ReturnObject $ReturnObject -Warning
     }
 
 }
@@ -530,12 +530,13 @@ function Test-ValidRoleDC {
     $vmRole = "DC"
 
     $containsDC = $configObject.virtualMachines.role.Contains("DC")
-    $existingDC = $configObject.vmOptions.existingDCNameWithPrefix
+    $existingDC = $configObject.parameters.ExistingDCName
+    $domain = $ConfigObject.vmOptions.domainName
 
     if ($containsDC) {
 
         if ($existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration with vmOptions.existingDCNameWithPrefix. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Warning
         }
 
         if (Test-SingleRole -VM $DCVM -ReturnObject $ReturnObject) {
@@ -544,7 +545,7 @@ function Test-ValidRoleDC {
         }
 
         if ($DCVM.sqlVersion) {
-            Add-ValidationMessage -Message "$vmRole Validation: Adding SQL on Domain Controller is not supported." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: Adding SQL on Domain Controller is not supported." -ReturnObject $ReturnObject -Warning
         }
 
     }
@@ -552,7 +553,7 @@ function Test-ValidRoleDC {
 
         # Existing Scenario, without existing DC Name
         if (-not $existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: DC role not specified in the configuration file and vmOptions.existingDCNameWithPrefix not present." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: DC role not specified in the configuration file and existing DC not found." -ReturnObject $ReturnObject -Warning
         }
 
         if ($existingDC) {
@@ -560,19 +561,19 @@ function Test-ValidRoleDC {
             # Check VM exists in Hyper-V
             $vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
             if (-not $vm) {
-                Add-ValidationMessage -Message "$vmRole Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM with the same name was not found in Hyper-V." -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: Existing DC found [$existingDC] but VM with the same name was not found in Hyper-V." -ReturnObject $ReturnObject -Warning
             }
             else {
                 if ($vm.State -eq "Running") {
                     # Check network in Hyper-V
-                    $vmnet = Get-VM -Name $existingDC -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
-                    if ($vmnet.SwitchName -ne $configObject.vmOptions.network) {
-                        Add-ValidationMessage -Message "$vmRole Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM Switch [$($vmnet.SwitchName)] doesn't match specified network [$($configObject.vmOptions.network)]." -ReturnObject $ReturnObject -Warning
-                    }
+                    # $vmnet = Get-VM -Name $existingDC -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+                    # if ($vmnet.SwitchName -ne $configObject.vmOptions.network) {
+                    #     Add-ValidationMessage -Message "$vmRole Validation: Existing DC [$existingDC] found but VM Switch [$($vmnet.SwitchName)] doesn't match specified network [$($configObject.vmOptions.network)]." -ReturnObject $ReturnObject -Warning
+                    # }
                 }
                 else {
                     # VM Not running, cannot validate network
-                    Add-ValidationMessage -Message "$vmRole Validation: vmOptions.existingDCNameWithPrefix [$existingDC] specified in the configuration file but VM is not Running." -ReturnObject $ReturnObject -Warning
+                    Add-ValidationMessage -Message "$vmRole Validation: Existing DC [$existingDC] found but VM is not Running." -ReturnObject $ReturnObject -Warning
                 }
             }
         }
@@ -639,7 +640,7 @@ function Test-SingleRole {
     # Single Role
     if ($VM -is [object[]] -and $VM.Count -ne 1) {
         $vmRole = $VM.role | Select-Object -Unique
-        Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Warning
         return $false
     }
 
@@ -680,23 +681,32 @@ function Test-Configuration {
         $configObject = $InputObject | ConvertTo-Json -Depth 3 | ConvertFrom-Json
     }
 
+    $deployConfig = New-DeployConfig -configObject $configObject
+    $return.DeployConfig = $deployConfig
+
     # Contains roles
-    $containsDC = $configObject.virtualMachines.role.Contains("DC")
-    $containsCS = $configObject.virtualMachines.role.Contains("CAS")
-    $containsPS = $configObject.virtualMachines.role.Contains("Primary")
-    $containsDPMP = $configObject.virtualMachines.role.Contains("DPMP")
+    if ($deployConfig.virtualMachines) {
+        $containsDC = $deployConfig.virtualMachines.role.Contains("DC")
+        $containsCS = $deployConfig.virtualMachines.role.Contains("CAS")
+        $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
+        $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
+    }
+    else {
+        $containsDC = $containsCS = $containsPS = $containsDPMP = $false
+    }
+
     $needCMOptions = $containsCS -or $containsPS
 
     # VM Options
     # ===========
-    Test-ValidVmOptions -ConfigObject $configObject -ReturnObject $return
+    Test-ValidVmOptions -ConfigObject $deployConfig -ReturnObject $return
 
     # CM Options
     # ===========
 
     # CM Version
     if ($needCMOptions) {
-        Test-ValidCmOptions -ConfigObject $configObject -ReturnObject $return
+        Test-ValidCmOptions -ConfigObject $deployConfig -ReturnObject $return
     }
 
     # Role Conflicts
@@ -704,15 +714,15 @@ function Test-Configuration {
 
     # CAS/Primary must include DC
     if (($containsCS -or $containsPS) -and -not $containsDC) {
-        Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not supported." -ReturnObject $return -Failure
+        #Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not supported." -ReturnObject $return -Warning
     }
 
     # VM Validations
     # ==============
-    foreach ($vm in $configObject.virtualMachines) {
+    foreach ($vm in $deployConfig.virtualMachines) {
 
         # Supported values
-        Test-ValidVmSupported -VM $vm -ConfigObject $configObject -ReturnObject $return
+        Test-ValidVmSupported -VM $vm -ConfigObject $deployConfig -ReturnObject $return
 
         # Valid Memory
         Test-ValidVmMemory -VM $vm -ReturnObject $return
@@ -740,24 +750,24 @@ function Test-Configuration {
 
     # DC Validation
     # ==============
-    Test-ValidRoleDC -ConfigObject $configObject -ReturnObject $return
+    Test-ValidRoleDC -ConfigObject $deployConfig -ReturnObject $return
 
     # CAS Validations
     # ==============
     if ($containsCS) {
 
-        $CSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "CAS" }
+        $CSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "CAS" }
         $vmName = $CSVM.vmName
         $vmRole = $CSVM.role
 
         # tech preview and CAS
-        if ($configObject.cmOptions.version -eq "tech-preview") {
+        if ($deployConfig.cmOptions.version -eq "tech-preview") {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Failure
         }
 
         # CAS without Primary
         if (-not $containsPS) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Warning
         }
 
         # Validate CAS role
@@ -769,7 +779,7 @@ function Test-Configuration {
     # ==============
     if ($containsPS) {
         # Validate Primary role
-        $PSVM = $configObject.virtualMachines | Where-Object { $_.role -eq "Primary" }
+        $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
         Test-ValidRoleCSPS -VM $PSVM -ReturnObject $return
     }
 
@@ -777,7 +787,7 @@ function Test-Configuration {
     # =================
     if ($containsDPMP) {
 
-        $DPMPVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DPMP" }
+        $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
 
         # DPMP VM count -eq 1
         if (Test-SingleRole -VM $DPMPVM -ReturnObject $return) {
@@ -793,8 +803,21 @@ function Test-Configuration {
         return $return
     }
 
-    # everything is good, create deployJson
+    # everything is good
+    $return.Valid = $true
 
+    return $return
+}
+
+function New-DeployConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [object]
+        $configObject
+    )
+
+    $containsCS = $configObject.virtualMachines.role.Contains("CAS")
     # Scenario
     if ($containsCS) {
         $scenario = "Hierarchy"
@@ -810,10 +833,39 @@ function Test-Configuration {
     # create params object
     $network = $configObject.vmOptions.network.Substring(0, $configObject.vmOptions.network.LastIndexOf("."))
     $clientsCsv = ($virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
+
+    # DCName (prefer name in config over existing)
+    $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
+    $existingDCName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -Role "DC"
+    if (-not $DCName) {
+        $DCName = $existingDCName
+    }
+
+    # CSName (prefer name in config over existing)
+    $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
+    $existingCSName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -Role "CAS"
+    if (-not $CSName) {
+        $CSName = $existingCSName
+    }
+
+    # TODO: Figure out how to allow Standalone PS in a domain that already has a CAS?
+    $containsPS = $configObject.virtualMachines.role.Contains("Primary")
+
+    if ($existingCSName -and $containsPS) {
+        $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" }
+        if ($PSVM.standalone) {
+            # TODO: Add this prop in genconfig
+            $scenario = "Standalone"
+        }
+        else {
+            $scenario = "Hierarchy"
+        }
+    }
+
     $params = [PSCustomObject]@{
         DomainName         = $configObject.vmOptions.domainName
-        DCName             = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
-        CSName             = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
+        DCName             = $DCName
+        CSName             = $CSName
         PSName             = ($virtualMachines | Where-Object { $_.role -eq "Primary" }).vmName
         DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
         DomainMembers      = $clientsCsv
@@ -823,6 +875,8 @@ function Test-Configuration {
         DHCPDefaultGateway = $network + ".200"
         DHCPScopeStart     = $network + ".20"
         DHCPScopeEnd       = $network + ".199"
+        ExistingDCName     = $existingDCName
+        ExistingCASName    = $existingCSName
         ThisMachineName    = $null
         ThisMachineRole    = $null
     }
@@ -834,10 +888,169 @@ function Test-Configuration {
         parameters      = $params
     }
 
-    $return.Valid = $true
-    $return.DeployConfig = $deploy
+    return $deploy
+}
 
-    return $return
+function Get-ExistingForDomain {
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
+        [ValidateSet("DC", "CAS", "Primary")]
+        [string]$Role
+    )
+
+    try {
+
+        $existingValue = $null
+        $vmList = Get-List -Type VM -DomainName $DomainName
+        foreach ($vm in $vmList) {
+            if ($vm.Role.ToLowerInvariant() -eq $Role.ToLowerInvariant()) {
+                $existingValue = $vm.VmName
+                if ($null -ne $existingValue) {
+                    break
+                }
+            }
+        }
+
+        return $existingValue
+
+    }
+    catch {
+        Write-Log "Get-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
+        return $null
+    }
+}
+
+function Get-SubnetList {
+
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]
+        $DomainName
+    )
+    try {
+
+        if ($DomainName) {
+            return (Get-List -Type Subnet -DomainName $DomainName)
+        }
+
+        return (Get-List -Type Subnet)
+
+    }
+    catch {
+        Write-Log "Get-SubnetList: Failed to get subnet list. $_" -Failure -LogOnly
+        return $null
+    }
+}
+
+function Get-DomainList {
+
+    try {
+        return (Get-List -Type UniqueDomain)
+    }
+    catch {
+        Write-Log "Get-DomainList: Failed to get domain list. $_" -Failure -LogOnly
+        return $null
+    }
+}
+
+$global:vm_List = $null
+function Get-List {
+
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("VM", "Subnet", "Prefix", "UniqueDomain", "UniqueSubnet", "UniquePrefix")]
+        [string] $Type,
+        [Parameter(Mandatory = $false)]
+        [string] $DomainName,
+        [Parameter(Mandatory = $false)]
+        [switch] $ResetCache
+    )
+
+    try {
+
+        if ($ResetCache.IsPresent) {
+            $global:vm_List = $null
+        }
+
+        if ($null -eq $global:vm_List) {
+
+            Write-Log "Get-List: Obtaining '$Type' list and caching it." -LogOnly
+            $return = @()
+            $virtualMachines = Get-VM
+            foreach ($vm in $virtualMachines) {
+
+                $vmNoteObject = $vm.Notes | ConvertFrom-Json
+                if ($vmNoteObject) {
+                    $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
+                    $vmObject = [PSCustomObject]@{
+                        VmName     = $vm.Name
+                        Role       = $vmNoteObject.role
+                        Domain     = $vmNoteObject.domain
+                        Subnet     = $vmNoteObject.network
+                        Prefix     = $vmNoteObject.prefix
+                        Success    = $vmNoteObject.success
+                        InProgress = $inProgress
+                    }
+                }
+                else {
+                    $vmNet = $vm | Get-VMNetworkAdapter
+                    $vmObject = [PSCustomObject]@{
+                        VmName     = $vm.Name
+                        Subnet     = $vmNet.SwitchName
+                        Role       = $null
+                        Domain     = $null
+                        Prefix     = $null
+                        Success    = $null
+                        InProgress = $null
+                    }
+                }
+
+                $return += $vmObject
+            }
+
+            $global:vm_List = $return
+        }
+
+        $return = $global:vm_List
+
+        if ($DomainName) {
+            $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
+        }
+
+        $return = $return | Sort-Object -Property * -Unique
+
+        if ($Type -eq "VM") {
+            return $return
+        }
+
+        if ($Type -eq "Subnet") {
+            return $return | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
+        }
+
+        if ($Type -eq "Prefix") {
+            return $return | Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
+        }
+
+        if ($Type -eq "UniqueDomain") {
+            return $return | Select-Object -ExpandProperty Domain -Unique
+        }
+
+        if ($Type -eq "UniqueSubnet") {
+            return $return | Select-Object -ExpandProperty Subnet -Unique
+        }
+
+        if ($Type -eq "UniquePrefix") {
+            return $return | Select-Object -ExpandProperty Prefix -Unique
+        }
+
+    }
+    catch {
+        Write-Log "Get-List: Failed to get '$Type' list. $_" -Failure -LogOnly
+        return $null
+    }
 }
 
 Function Show-Summary {
@@ -849,8 +1062,10 @@ Function Show-Summary {
     )
 
     $CHECKMARK = ([char]8730)
+    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
 
-    if (-not $null -eq $($deployConfig.cmOptions)) {
+
+    if ($null -ne $($deployConfig.cmOptions) -and $containsPS) {
         if ($deployConfig.cmOptions.install -eq $true) {
             Write-Host "[$CHECKMARK] ConfigMgr $($deployConfig.cmOptions.version) will be installed and " -NoNewline
             if ($deployConfig.cmOptions.updateToLatest -eq $true) {
@@ -885,7 +1100,7 @@ Function Show-Summary {
 
     if (-not $null -eq $($deployConfig.vmOptions)) {
 
-        if ($null -eq $deployConfig.vmOptions.existingDCNameWithPrefix) {
+        if ($null -eq $deployConfig.parameters.ExistingDCName) {
             Write-Host "[$CHECKMARK] Domain: $($deployConfig.vmOptions.domainName) will be created."
         }
         else {
@@ -896,7 +1111,9 @@ Function Show-Summary {
         Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
     }
     Write-Host "[$CHECKMARK] Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
-    $out = $deployConfig.virtualMachines | Format-table vmName, role, operatingSystem, memory, @{Label = "Procs"; Expression = { $_.virtualProcs } }, @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } }, @{Label = "SQL"; Expression = { if ($null -ne $_.SqlVersion) { "YES" } } }  | Out-String
+    $out = $deployConfig.virtualMachines | Where-Object { -not $_.hidden } `
+    | Format-table vmName, role, operatingSystem, memory, @{Label = "Procs"; Expression = { $_.virtualProcs } }, @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } }, @{Label = "SQL"; Expression = { if ($null -ne $_.SqlVersion) { "YES" } } } `
+    | Out-String
     Write-Host
     $out.Trim() | Out-Host
 }

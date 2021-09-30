@@ -1,6 +1,6 @@
 Configuration Host {
 
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xDscDiagnostics'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xDhcpServer', 'xDscDiagnostics'
 
     $phsyicalNic = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
     $phsyicalInterface = $phsyicalNic.Name
@@ -31,12 +31,27 @@ Configuration Host {
             IncludeAllSubFeature = $true
         }
 
+        WindowsFeature DHCP {
+            DependsOn            = "[WindowsFeature]Hyper-V-PowerShell"
+            Name                 = 'DHCP'
+            Ensure               = 'Present'
+            IncludeAllSubFeature = $true
+        }
+
+        WindowsFeature RSAT-DHCP {
+            DependsOn            = "[WindowsFeature]DHCP"
+            Name                 = 'RSAT-DHCP'
+            Ensure               = 'Present'
+            IncludeAllSubFeature = $true
+        }
+
         xVMSwitch ExternalSwitch {
-            DependsOn      = '[WindowsFeature]Hyper-V-PowerShell'
+            DependsOn      = '[WindowsFeature]RSAT-DHCP'
             Ensure         = 'Present'
             Name           = $externalSwitchName
             Type           = 'External'
             NetAdapterName = $phsyicalInterface
         }
+
     }
 }

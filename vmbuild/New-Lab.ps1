@@ -95,8 +95,16 @@ $VM_Create = {
     $currentItem = $using:currentItem
     $deployConfig = $using:deployConfig
     $forceNew = $using:ForceNew
-    $domainName = $deployConfig.parameters.DomainName
+    $createVM = $using:CreateVM
     $network = $deployConfig.vmOptions.network
+
+    # Set domain name, depending on whether we need to create new VM or use existing one
+    if (-not $createVM -or ($currentItem.role -eq "DC") ) {
+        $domainName = $deployConfig.parameters.DomainName
+    }
+    else {
+        $domainName = "WORKGROUP"
+    }
 
     # Determine which OS image file to use for the VM
     $imageFile = $Common.AzureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
@@ -105,29 +113,75 @@ $VM_Create = {
     # Set base VM path
     $virtualMachinePath = Join-Path $deployConfig.vmOptions.basePath $deployConfig.vmOptions.domainName
 
-    # Check if VM already exists
-    $exists = Get-VM $currentItem.vmName -ErrorAction SilentlyContinue
-    if ($exists -and -not $ForceNew.IsPresent) {
-        Write-Log "PSJOB: $($currentItem.vmName): VM already exists. ForceNew switch is NOT present. Exiting." -Failure -OutputStream -HostOnly
-        return
+    if ($createVM) {
+
+        # Check if VM already exists
+        $exists = Get-VM $currentItem.vmName -ErrorAction SilentlyContinue
+        if ($exists -and -not $ForceNew.IsPresent) {
+            Write-Log "PSJOB: $($currentItem.vmName): VM already exists. ForceNew switch is NOT present. Exiting." -Failure -OutputStream -HostOnly
+            return
+        }
+
+        # Create VM
+        $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -WhatIf:$using:WhatIf
+        if (-not $created) {
+            Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild.log." -Failure -OutputStream -HostOnly
+            return
+        }
+
+        # Write a note to the VM
+        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -InProgress
+
+        # Wait for VM to finish OOBE
+        $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
+        if (-not $connected) {
+            Write-Log "PSJOB: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
+            return
+        }
+    }
+    else {
+        # Check if VM is connectable
+        $exists = Get-Vm -Name $currentItem.vmName -ErrorAction SilentlyContinue
+        if ($exists -and $exists.State -ne "Running") {
+            # Validation should prevent from ever getting in this block
+            Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue -ErrorVariable StartErr
+            if ($StartErr) {
+                Write-Log "PSJOB: $($currentItem.vmName): Could not start the VM. Exiting." -Failure -OutputStream
+                return
+            }
+        }
+
+        $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
+        if (-not $connected) {
+            Write-Log "PSJOB: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
+            return
+        }
     }
 
-    # Create VM
-    $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -WhatIf:$using:WhatIf
-    if (-not $created) {
-        Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild.log." -Failure -OutputStream -HostOnly
-        return
-    }
+    # Assign DHCP reservation for PS/CS
 
-    # Wait for VM to finish OOBE
-    $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
-    if (-not $connected) {
-        Write-Log "PSJOB: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
-        return
+    if ($currentItem.role -in "Primary", "CAS") {
+        try {
+            $vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop
+            if ($vmnet) {
+                $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
+                if ($currentItem.role -eq "CAS") {
+                    Remove-DhcpServerv4Reservation -IPAddress ($network + ".5") -ErrorAction SilentlyContinue
+                    Add-DhcpServerv4Reservation -ScopeId $deployConfig.vmOptions.network -IPAddress ($network + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop
+                }
+                if ($currentItem.role -eq "Primary") {
+                    Remove-DhcpServerv4Reservation -IPAddress ($network + ".10") -ErrorAction SilentlyContinue
+                    Add-DhcpServerv4Reservation -ScopeId $deployConfig.vmOptions.network -IPAddress ($network + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop
+                }
+            }
+        }
+        catch {
+            Write-Log "PSJOB: $($currentItem.vmName): Could not assign DHCP Reservation for $($currentItem.role). $_" -Warning
+        }
     }
 
     # Get VM Session
-    $ps = Get-VmSession -VmName $currentItem.vmName
+    $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
     if (-not $ps) {
         Write-Log "PSJOB: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
@@ -135,7 +189,7 @@ $VM_Create = {
     }
 
     # Set PS Execution Policy (required on client OS)
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -143,14 +197,14 @@ $VM_Create = {
 
     # Copy DSC files
     Write-Log "PSJOB: $($currentItem.vmName): Copying required PS modules to the VM."
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to copy required PS modules to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
     }
     Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC\$cmDscFolder" -Destination "C:\staging\DSC" -Recurse -Container -Force
 
     # Extract DSC modules
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force } -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -270,6 +324,8 @@ $VM_Create = {
 
         # Get required variables from parent scope
         $cmDscFolder = $using:cmDscFolder
+        $createVM = $using:createVM
+        $currentItem = $using:CurrentItem
 
         # Define DSC variables
         $dscConfigPath = "C:\staging\DSC\$cmDscFolder\DSCConfiguration"
@@ -279,14 +335,53 @@ $VM_Create = {
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
         "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n====="  | Out-File $log -Append
 
+        # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
+        $dscLog = "C:\staging\DSC\DSC_Log.txt"
+        if (Test-Path $dscLog) {
+            $newName = $dscLog -replace ".txt", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".txt")
+            "Renaming $dscLog to $newName" | Out-File $log -Append
+            Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+        }
+
+        # Remove DSC_Status file, if exists
+        $dscStatus = "C:\staging\DSC\DSC_Status.txt"
+        if (Test-Path $dscStatus) {
+            "Removing $dscStatus" | Out-File $log -Append
+            Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
+        }
+
+        # Rename the Role.json file, if it exists for DC re-run
+        $jsonPath = Join-Path "C:\staging\DSC" "$($currentItem.role).json"
+        if (Test-Path $jsonPath) {
+            $newName = $jsonPath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
+            Rename-Item -Path $jsonPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+        }
+
+        # For CAS re-run, mark ScriptWorkflow not started
+        $ConfigurationFile = Join-Path -Path "C:\staging\DSC" -ChildPath "ScriptWorkflow.json"
+        if (Test-Path $ConfigurationFile) {
+            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            $Configuration.ScriptWorkFlow.Status = 'NotStart'
+            $Configuration.ScriptWorkFlow.StartTime = ''
+            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        }
+
         "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
+        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
         Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
 
         "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
-        Start-DscConfiguration -Wait -Path $dscConfigPath -Verbose -ErrorAction Stop
+        if ($createVM) {
+            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+        }
+        else {
+            # Don't wait, if we're not creating a new VM and running DSC on an existing VM
+            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+        }
+
     }
 
-    Write-Log "PSJOB: $($currentItem.vmName): Starting $($currentItem.role) role configuration via DSC." -OutputStream
+    Write-Log "PSJOB: $($currentItem.vmName): Starting $($currentItem.role) role configuration via DSC."
 
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -DisplayName "DSC: Install Modules" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
@@ -309,7 +404,7 @@ $VM_Create = {
     if ($result.ScriptBlockFailed) {
         Write-Log "$($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
         # Retry once before exiting
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration" -WhatIf:$WhatIf
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration" -WhatIf:$WhatIf
         if ($result.ScriptBlockFailed) {
             Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
@@ -370,13 +465,19 @@ $VM_Create = {
         }
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
+
     if (-not $complete) {
+        $worked = $false
         Write-Log "PSJOB: $($currentItem.vmName): Configuration did not complete in allotted time ($timeout minutes) for $($currentItem.role)." -OutputStream -Failure
     }
     else {
+        $worked = $true
         Write-Progress "$($currentItem.role) configuration completed successfully. Elapsed time: $($stopWatch.Elapsed)" -Status $status.ScriptBlockOutput -Completed
         Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
+
+    # Set VM Note
+    New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $worked
 }
 
 Clear-Host
@@ -483,6 +584,14 @@ if (-not $switch) {
     return
 }
 
+# Test if DHCP scope exists, if not create it
+Write-Log "Main: Creating/verifying DHCP scope options for specified network." -Activity
+$worked = Test-DHCPScope -ConfigParams $deployConfig.parameters
+if (-not $worked) {
+    Write-Log "Main: Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
+    return
+}
+
 # DSC Folder
 $cmDscFolder = "configmgr"
 
@@ -508,21 +617,52 @@ Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 [System.Collections.ArrayList]$jobs = @()
 $job_created_yes = 0
 $job_created_no = 0
+
+# Existing DC scenario
+$containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
+$existingDC = $deployConfig.parameters.ExistingDCName
+if ($existingDC -and $containsPS) {
+    # create a dummy VM object for the existingDC
+    $deployConfig.virtualMachines += [PSCustomObject]@{
+        vmName = $existingDC
+        role   = "DC"
+        hidden = $true
+    }
+}
+
+# Existing CAS scenario
+$existingCAS = $deployConfig.parameters.ExistingCASName
+if ($existingCAS -and $containsPS) {
+    # create a dummy VM object for the existingCAS
+    $deployConfig.virtualMachines += [PSCustomObject]@{
+        vmName = $existingCAS
+        role   = "CAS"
+        hidden = $true
+    }
+}
+
+# New scenario
+$CreateVM = $true
 foreach ($currentItem in $deployConfig.virtualMachines) {
 
     if ($WhatIf) {
-        Write-Log "Main: Will start a job to create VM $($currentItem.vmName)"
+        Write-Log "Main: Will start a job for VM $($currentItem.vmName)"
         continue
     }
+
+    # Existing DC scenario
+    $CreateVM = $true
+    if ($currentItem.vmName -eq $existingDC) { $CreateVM = $false }
+    if ($currentItem.vmName -eq $existingCAS) { $CreateVM = $false }
 
     $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
 
     if ($Err.Count -ne 0) {
-        Write-Log "Main: Failed to start job to create VM $($currentItem.vmName). $Err" -Failure
+        Write-Log "Main: Failed to start job for VM $($currentItem.vmName). $Err" -Failure
         $job_created_no++
     }
     else {
-        Write-Log "Main: Created job $($job.Id) to create VM $($currentItem.vmName)" -LogOnly
+        Write-Log "Main: Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
         $jobs += $job
         $job_created_yes++
     }
@@ -539,7 +679,8 @@ Write-Host
 Show-Summary -deployConfig $deployConfig
 
 Write-Log "Main: Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
-
+$failedCount = 0
+$successCount = 0
 do {
     $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
     foreach ($job in $runningJobs) {
@@ -548,9 +689,17 @@ do {
 
     $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
     foreach ($job in $completedJobs) {
-        Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
-        $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
         Write-JobProgress($job)
+        Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
+        $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
+        $jobOutput
+        if ($jobOutPut.StartsWith("ERROR")) {
+            $failedCount++
+        }
+        else {
+            $successCount++
+        }
+
         #$job | Remove-Job -Force -Confirm:$false
         $jobs.Remove($job)
     }
@@ -560,7 +709,8 @@ do {
 
 } until ($runningJobs.Count -eq 0)
 
-# Write-Progress -Activity "Waiting for virtual machines to be created" -Completed
+Write-Log "Main: Job Completion Status." -Activity
+Write-Log "Main: $successCount jobs completed successfully, $failedCount failed."
 
 $timer.Stop()
 Write-Host

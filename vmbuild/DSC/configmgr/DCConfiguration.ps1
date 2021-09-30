@@ -22,9 +22,12 @@
     $DHCP_DNSAddress = $deployConfig.parameters.DHCPDNSAddress
     $DHCP_DefaultGateway = $deployConfig.parameters.DHCPDefaultGateway
     $DHCP_ScopeId = $deployConfig.parameters.DHCPScopeId
-    $DHCP_ScopeStart = $deployConfig.parameters.DHCPScopeStart
-    $DHCP_ScopeEnd = $deployConfig.parameters.DHCPScopeEnd
     $Configuration = $deployConfig.parameters.Scenario
+
+    $setNetwork = $true
+    if ($deployConfig.parameters.ExistingDCName) {
+        $setNetwork = $false
+    }
 
     # AD Site Name
     if ($PSName) {
@@ -130,7 +133,7 @@
 
         ADGroup AddToDomainAdmin {
             GroupName        = "Domain Admins"
-            MembersToInclude = @($DomainAdminName)
+            MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
             DependsOn        = @("[ADUser]Admin", "[ADUser]cm-svc")
         }
 
@@ -165,98 +168,49 @@
             Role      = "DC"
         }
 
-        WriteStatus NetworkDNS {
-            DependsOn = "[SetupDomain]FirstDS"
-            Status    = "Setting Primary DNS, Default Gateway and configuring DNS Forwarders"
-        }
+        if ($setNetwork) {
 
-        IPAddress NewIPAddressDC {
-            DependsOn      = "[SetupDomain]FirstDS"
-            IPAddress      = $DHCP_DNSAddress
-            InterfaceAlias = 'Ethernet'
-            AddressFamily  = 'IPV4'
-        }
+            WriteStatus NetworkDNS {
+                DependsOn = "[SetupDomain]FirstDS"
+                Status    = "Setting Primary DNS, Default Gateway and DNS Forwarders"
+            }
 
-        DefaultGatewayAddress SetDefaultGateway {
-            DependsOn      = "[IPAddress]NewIPAddressDC"
-            Address        = $DHCP_DefaultGateway
-            InterfaceAlias = 'Ethernet'
-            AddressFamily  = 'IPv4'
-        }
+            IPAddress NewIPAddressDC {
+                DependsOn      = "[SetupDomain]FirstDS"
+                IPAddress      = $DHCP_DNSAddress
+                InterfaceAlias = 'Ethernet'
+                AddressFamily  = 'IPV4'
+            }
 
-        DnsServerForwarder DnsServerForwarder {
-            DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
-            IsSingleInstance = 'Yes'
-            IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
-            UseRootHint      = $true
-            EnableReordering = $true
-        }
+            DefaultGatewayAddress SetDefaultGateway {
+                DependsOn      = "[IPAddress]NewIPAddressDC"
+                Address        = $DHCP_DefaultGateway
+                InterfaceAlias = 'Ethernet'
+                AddressFamily  = 'IPv4'
+            }
 
-        WriteStatus NetworkDHCP {
-            DependsOn = "[DnsServerForwarder]DnsServerForwarder"
-            Status    = "Installing DHCP and configuring DHCP scopes & options"
-        }
+            DnsServerForwarder DnsServerForwarder {
+                DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
+                IsSingleInstance = 'Yes'
+                IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+                UseRootHint      = $true
+                EnableReordering = $true
+            }
 
-        WindowsFeature DHCP {
-            DependsOn            = "[DnsServerForwarder]DnsServerForwarder"
-            Name                 = 'DHCP'
-            Ensure               = 'Present'
-            IncludeAllSubFeature = $true
+            WriteStatus ADCS {
+                DependsOn = "[DnsServerForwarder]DnsServerForwarder"
+                Status    = "Installing Certificate Authority"
+            }
         }
-
-        WindowsFeature RSAT-DHCP {
-            DependsOn            = "[WindowsFeature]DHCP"
-            Name                 = 'RSAT-DHCP'
-            Ensure               = 'Present'
-            IncludeAllSubFeature = $true
-        }
-
-        xDhcpServerAuthorization LocalServerActivation {
-            DependsOn        = "[WindowsFeature]RSAT-DHCP"
-            IsSingleInstance = 'Yes'
-            Ensure           = 'Present'
-        }
-
-        xDhcpServerScope Scope {
-            DependsOn     = "[xDhcpServerAuthorization]LocalServerActivation"
-            Ensure        = 'Present'
-            ScopeId       = $DHCP_ScopeId
-            IPStartRange  = $DHCP_ScopeStart
-            IPEndRange    = $DHCP_ScopeEnd
-            Name          = $DHCP_ScopeId
-            SubnetMask    = '255.255.255.0'
-            LeaseDuration = ((New-TimeSpan -Hours 72).ToString())
-            State         = 'Active'
-            AddressFamily = 'IPv4'
-        }
-
-        DhcpScopeOptionValue ScopeOptionGateway {
-            DependsOn     = "[xDhcpServerScope]Scope"
-            OptionId      = 3
-            Value         = $DHCP_DefaultGateway
-            ScopeId       = $DHCP_ScopeId
-            VendorClass   = ''
-            UserClass     = ''
-            AddressFamily = 'IPv4'
-        }
-
-        DhcpScopeOptionValue ScopeOptionDNS {
-            DependsOn     = "[DhcpScopeOptionValue]ScopeOptionGateway"
-            OptionId      = 6
-            Value         = @($DHCP_DNSAddress)
-            ScopeId       = $DHCP_ScopeId
-            VendorClass   = ''
-            UserClass     = ''
-            AddressFamily = 'IPv4'
-        }
-
-        WriteStatus ADCS {
-            DependsOn = "[DhcpScopeOptionValue]ScopeOptionDNS"
-            Status    = "Installing Certificate Authority"
+        else {
+            WriteStatus ADCS {
+                DependsOn = "[SetupDomain]FirstDS"
+                Status    = "Installing Certificate Authority"
+            }
         }
 
         InstallCA InstallCA {
-            DependsOn     = "[DhcpScopeOptionValue]ScopeOptionDNS"
+            DependsOn     = "[WriteStatus]ADCS"
             HashAlgorithm = "SHA256"
         }
 

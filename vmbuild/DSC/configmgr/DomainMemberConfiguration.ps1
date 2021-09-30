@@ -21,11 +21,6 @@
     $DCName = $deployConfig.parameters.DCName
     $IsDPMP = $deployConfig.parameters.ThisMachineRole -eq "DPMP"
 
-    # Set DC name ot existing DC
-    if (-not $DCName) {
-        $DCName = $deployConfig.vmOptions.existingDCNameWithPrefix
-    }
-
     # Domain Admin Name
     $DomainAdminName = $deployConfig.vmOptions.domainAdminName
     $cm_admin = "$DNAME\$DomainAdminName"
@@ -95,13 +90,13 @@
 
             WriteStatus WaitDomain {
                 DependsOn = "[InstallFeatureForSCCM]InstallFeature"
-                Status    = "Waiting for domain to be ready to obtain an IP"
+                Status    = "Waiting for domain to be ready"
             }
         }
         else {
             WriteStatus WaitDomain {
                 DependsOn = "[SetCustomPagingFile]PagingSettings"
-                Status    = "Waiting for domain to be ready to obtain an IP"
+                Status    = "Waiting for domain to be ready"
             }
         }
 

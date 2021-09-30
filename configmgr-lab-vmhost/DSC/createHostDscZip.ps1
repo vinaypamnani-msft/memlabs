@@ -15,6 +15,7 @@ Set-Location $PSScriptRoot
 Write-Host "Importing Modules.."
 $modules = @(
     'xHyper-V',
+    'xDhcpServer',
     'xDscDiagnostics'
 )
 
