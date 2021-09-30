@@ -536,6 +536,43 @@ function New-DhcpScopeDescription {
     }
 }
 
+function New-VmNote {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $true)]
+        [string]$DomainName,
+        [Parameter(Mandatory = $true)]
+        [string]$Role,
+        [Parameter(Mandatory = $true)]
+        [string]$Network,
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix,
+        [Parameter(Mandatory = $true)]
+        [string]$Successful
+    )
+
+    try {
+        $vmNote = [PSCustomObject]@{
+            domain         = $DomainName
+            role           = $Role
+            network        = $Network
+            prefix         = $Prefix
+            success        = $Successful
+            lastUpdateTime = (Get-Date -format "MM/dd/yyyy HH:mm")
+        }
+
+        $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
+        $vm = Get-Vm $VmName -ErrorAction SilentlyContinue
+        if ($vm) {
+            $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Log "New-VmNote: Failed to add a note to the VM '$VmName' in Hyper-V. $_" -Failure
+    }
+}
+
 function Get-DhcpScopeDescription {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]
