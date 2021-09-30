@@ -550,7 +550,7 @@ function New-VmNote {
     )
 
     try {
-
+        $ProgressPreference = 'SilentlyContinue'
         if ($InProgress.IsPresent) {
             $vmNote = [PSCustomObject]@{
                 role       = $Role
@@ -577,6 +577,9 @@ function New-VmNote {
     }
     catch {
         Write-Log "New-VmNote: Failed to add a note to the VM '$VmName' in Hyper-V. $_" -Failure
+    }
+    finally {
+        $ProgressPreference = 'Continue'
     }
 }
 
