@@ -60,18 +60,19 @@ function Write-Option {
 
 function Select-MainMenu {
     while ($true) {
-        $customOptions = @{ "C" = "Create New Domain"; "E" = "Expand Existing Domain"; "S" = "Load Sample Configuration"; "F" = "Load saved config from File" }
+        $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration"; "4" = "Load saved config from File"; "D" = "Delete an existing domain" }
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
-        write-host "response $response"
+        write-Verbose "response $response"
         if (-not $response) {
             continue
         }
         $SelectedConfig = $null
         switch ($response.ToLowerInvariant()) {
-            "c" { $SelectedConfig = Select-NewDomainConfig }
-            "e" { $SelectedConfig = Show-ExistingNetwork }
-            "s" { $SelectedConfig = Select-Config $sampleDir -NoMore }
-            "f" { $SelectedConfig = Select-Config $configDir -NoMore }
+            "1" { $SelectedConfig = Select-NewDomainConfig }
+            "2" { $SelectedConfig = Show-ExistingNetwork }
+            "3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
+            "4" { $SelectedConfig = Select-Config $configDir -NoMore }
+            "d" {}
             Default {}
         }
         if ($SelectedConfig) {
@@ -109,21 +110,36 @@ function Get-ValidSubnets {
 
 function Select-NewDomainConfig {
 
-    $ValidDomainNames = [System.Collections.ArrayList]("adatum.com", "adventure-works.com", "alpineskihouse.com", "bellowscollege.com", "bestforyouorganics.com", "contoso.com", "contososuites.com",
-        "consolidatedmessenger.com", "fabrikam.com", "fabrikamresidences.com", "firstupconsultants.com", "fourthcoffee.com", "graphicdesigninstitute.com", "humongousinsurance.com",
-        "lamnahealthcare.com", "libertysdelightfulsinfulbakeryandcafe.com", "lucernepublishing.com", "margiestravel.com", "munsonspicklesandpreservesfarm.com", "nodpublishers.com",
-        "northwindtraders.com", "proseware.com", "relecloud.com", "fineartschool.net", "southridgevideo.com", "tailspintoys.com", "tailwindtraders.com", "treyresearch.net", "thephone-company.com",
-        "vanarsdelltd.com", "wideworldimporters.com", "wingtiptoys.com", "woodgrovebank.com", "techpreview.com" )
+    #$ValidDomainNames = [System.Collections.ArrayList]("adatum.com", "adventure-works.com", "alpineskihouse.com", "bellowscollege.com", "bestforyouorganics.com", "contoso.com", "contososuites.com",
+    #   "consolidatedmessenger.com", "fabrikam.com", "fabrikamresidences.com", "firstupconsultants.com", "fourthcoffee.com", "graphicdesigninstitute.com", "humongousinsurance.com",
+    #   "lamnahealthcare.com", "libertysdelightfulsinfulbakeryandcafe.com", "lucernepublishing.com", "margiestravel.com", "munsonspicklesandpreservesfarm.com", "nodpublishers.com",
+    #   "northwindtraders.com", "proseware.com", "relecloud.com", "fineartschool.net", "southridgevideo.com", "tailspintoys.com", "tailwindtraders.com", "treyresearch.net", "thephone-company.com",
+    #  "vanarsdelltd.com", "wideworldimporters.com", "wingtiptoys.com", "woodgrovebank.com", "techpreview.com" )
 
+    $ValidDomainNames = @{"adatum.com" = "ADA-" ; "adventure-works.com" = "ADV-" ; "alpineskihouse.com" = "ALP-" ; "bellowscollege.com" = "BLC-" ; "bestforyouorganics.com" = "BFY-" ; "contoso.com" = "CON-" ; "contososuites.com" = "COS-" ;
+        "consolidatedmessenger.com" = "COM-" ; "fabrikam.com" = "FAB-" ; "fabrikamresidences.com" = "FBR-" ; "firstupconsultants.com" = "FIR-" ; "fourthcoffee.com" = "FOR-" ; "graphicdesigninstitute.com" = "GDU-" ; "humongousinsurance.com" = "HUM-" ;
+        "lamnahealthcare.com" = "LAM-" ; "libertysdelightfulsinfulbakeryandcafe.com" = "LIB-" ; "lucernepublishing.com" = "LUC-" ; "margiestravel.com" = "MGT-" ; "munsonspicklesandpreservesfarm.com" = "MPP-" ; "nodpublishers.com" = "NOD-" ;
+        "northwindtraders.com" = "NWR-" ; "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-"; 
+        "thephone-company.com" = "TPC-" ; "vanarsdelltd.com" = "VAN-" ; "wideworldimporters.com" = "WWI-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "TEC-" 
+    }
     foreach ($domain in (Get-DomainList)) {
         $ValidDomainNames.Remove($domain.ToLowerInvariant())
     }
 
+    $usedPrefixes = Get-List -Type UniquePrefix
+    foreach ($dname in $ValidDomainNames) {
+        foreach ($prefix in $usedPrefixes) {
+            if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $prefix.ToLowerInvariant()) {
+                Write-Verbose ("Removing $dname")
+                $ValidDomainNames.Remove($dname)
+            }
+        }    
+    }
     $domain = $null
     while (-not $domain) {
-        $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames
+        $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames.Keys
     }
-
+    Write-Verbose "Prefix = $($ValidDomainNames[$domain])"
     $subnetlist = Get-ValidSubnets
    
     while (-not $network) {
@@ -288,13 +304,22 @@ function Generate-ExistingConfig {
 
     Write-Verbose "Generating $Domain $Subnet"
 
+    $prefix = Get-List -Type UniquePrefix -Domain $Domain| select -First 1
+
+    if ([string]::IsNullOrWhiteSpace($prefix))
+    {
+        $prefix = "CUSTOM-"
+    }
     $vmOptions = [PSCustomObject]@{
-        prefix          = "CUSTOM-"
+        prefix          = $prefix
         basePath        = "E:\VirtualMachines"
         domainName      = $Domain
         domainAdminName = "admin"
         network         = $Subnet
     }
+
+
+    
 
     $virtualMachines = @()
     $virtualMachines += [PSCustomObject]@{
@@ -327,7 +352,7 @@ function Read-Host2 {
         $HideHelp
     )
     if (-not $HideHelp.IsPresent) {
-    write-help
+        write-help
     }
     Write-Host -ForegroundColor Cyan $prompt -NoNewline
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
@@ -990,14 +1015,14 @@ while ($valid -eq $false) {
         Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
     }
 
-    if ($valid){
+    if ($valid) {
         Show-Summary ($c.DeployConfig)
         Write-Host
         Write-Host "Answering 'no' below will take you back to previous menus to allow you to correct mistakes"
         $response = Read-Host2 -Prompt "Everything correct? (Y/n)" -HideHelp
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-               $valid = $false
+                $valid = $false
             }           
         }
     }
