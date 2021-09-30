@@ -425,11 +425,11 @@ function Test-NetworkSwitch {
     else {
         Write-Log "Get-NetworkSwitch: '$interfaceAlias' not found in NAT. Restarting RemoteAccess service before adding it."
         try {
-            Restart-Service RemoteAccess
+            Restart-Service RemoteAccess -ErrorAction Stop
         }
         catch {
             try {
-                Restart-Service RemoteAccess
+                Restart-Service RemoteAccess  -ErrorAction Stop
             }
             catch {
                 Write-Log "Get-NetworkSwitch: Failed to restart RemoteAccess service. Restart the service manually, and try again."
