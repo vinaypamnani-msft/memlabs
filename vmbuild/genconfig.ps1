@@ -285,7 +285,7 @@ function Generate-ExistingConfig {
         $Subnet        
     )
 
-    Write-Host "Generating $Domain $Subnet"
+    Write-Verbose "Generating $Domain $Subnet"
 
     $vmOptions = [PSCustomObject]@{
         prefix          = "CUSTOM-"
@@ -320,9 +320,14 @@ function Read-Host2 {
         $prompt,
         [Parameter()]
         [string]
-        $currentValue
+        $currentValue,
+        [Parameter()]
+        [switch]
+        $HideHelp
     )
+    if (-not $HideHelp.IsPresent) {
     write-help
+    }
     Write-Host -ForegroundColor Cyan $prompt -NoNewline
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
         Write-Host " [" -NoNewline
@@ -983,9 +988,21 @@ while ($valid -eq $false) {
         Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)"
         Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
     }
+
+    if ($valid){
+        Show-Summary ($c.DeployConfig)
+        Write-Host
+        Write-Host "Answering 'no' below will take you back to previous menus to allow you to correct mistakes"
+        $response = Read-Host2 -Prompt "Everything correct? (Y/n)" -HideHelp
+        if (-not [String]::IsNullOrWhiteSpace($response)) {
+            if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+               $valid = $false
+            }           
+        }
+    }
 }
 
-Show-Summary ($c.DeployConfig)
+#Show-Summary ($c.DeployConfig)
 Save-Config $Global:Config
 #Write-Host
 #$date = Get-Date -Format "MM-dd-yyyy"
