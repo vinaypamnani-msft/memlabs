@@ -812,7 +812,6 @@ function New-DeployConfig {
     )
 
     $containsCS = $configObject.virtualMachines.role.Contains("CAS")
-
     # Scenario
     if ($containsCS) {
         $scenario = "Hierarchy"
@@ -820,12 +819,6 @@ function New-DeployConfig {
     else {
         $scenario = "Standalone"
     }
-
-    if ($configObject.parameters.ExistingCASName) {
-        $scenario = "Hierarchy"
-    }
-
-    # TODO: Figure out how to allow Standalone PS in a domain that already has a CAS?
 
     # add prefix to vm names
     $virtualMachines = $configObject.virtualMachines
@@ -847,6 +840,19 @@ function New-DeployConfig {
     $existingCSName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -CAS
     if (-not $CSName) {
         $CSName = $existingCSName
+    }
+
+    # TODO: Figure out how to allow Standalone PS in a domain that already has a CAS?
+    $containsPS = $configObject.virtualMachines.role.Contains("Primary")
+
+    if ($existingCSName -and $containsPS) {
+        $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" }
+        if ($PSVM.standalone) { # TODO: Add this prop in genconfig
+            $scenario = "Standalone"
+        }
+        else {
+            $scenario = "Hierarchy"
+        }
     }
 
     $params = [PSCustomObject]@{

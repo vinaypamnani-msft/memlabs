@@ -698,10 +698,10 @@ function Wait-ForVm {
         [switch]$OobeComplete,
         [Parameter(Mandatory = $false, ParameterSetName = "VmTestPath")]
         [string]$PathToVerify,
-        [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
-        [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false)]
         [int]$TimeoutMinutes = 10,
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
+        [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
@@ -740,7 +740,7 @@ function Wait-ForVm {
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
-            $out = Invoke-VmCommand -VmName $VmName -SuppressLog -VmDomainName $VmDomainName -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
 
             # Wait until OOBE is ready
             $status = "Waiting for OOBE to complete. "
@@ -774,9 +774,16 @@ function Wait-ForVm {
     }
 
     if ($PathToVerify) {
-        Write-Log "Wait-ForVm: $VmName`: Waiting for $PathToVerify to be present..."
+        if ($PathToVerify -eq "C:\Users") {
+            $msg = "Waiting for VM to respond"
+        }
+        else {
+            $msg = "Waiting for $PathToVerify to exist"
+        }
+
+        Write-Log "Wait-ForVm: $VmName`: $msg..."
         do {
-            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for $PathToVerify to be present" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $msg -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             Start-Sleep -Seconds 5
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
@@ -805,20 +812,14 @@ function Invoke-VmCommand {
         [string]$VmName,
         [Parameter(Mandatory = $true, HelpMessage = "Script Block to execute")]
         [ScriptBlock]$ScriptBlock,
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
+        [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false, HelpMessage = "Argument List to supply to ScriptBlock")]
         [string[]]$ArgumentList,
         [Parameter(Mandatory = $false, HelpMessage = "Display Name of the script for log/console")]
         [string]$DisplayName,
-        [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait before running ScriptBlock")]
-        [int]$SecondsToWaitBefore,
-        [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait after running ScriptBlock")]
-        [int]$SecondsToWaitAfter,
         [Parameter(Mandatory = $false, HelpMessage = "Suppress log entries. Useful when waiting for VM to be ready to run commands.")]
         [switch]$SuppressLog,
-        [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
-        [string]$VmDomainName = "WORKGROUP",
-        [Parameter(Mandatory = $false, HelpMessage = "Domain Username for creating creds.")]
-        [string]$VmDomainUser = $Common.LocalAdmin.UserName,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
@@ -861,11 +862,8 @@ function Invoke-VmCommand {
         $HashArguments.Add("ArgumentList", $ArgumentList)
     }
 
-    # Wait before
-    if ($SecondsToWaitBefore) { Start-Sleep -Seconds $SecondsToWaitBefore }
-
     # Get VM Session
-    $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainUser $VmDomainUser
+    $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName
     $failed = $null -eq $ps
 
     # Run script block inside VM
@@ -893,9 +891,6 @@ function Invoke-VmCommand {
         }
     }
 
-    # Wait after regardless of success/failure
-    if ($SecondsToWaitAfter) { Start-Sleep -Seconds $SecondsToWaitAfter }
-
     return $return
 
 }
@@ -905,35 +900,42 @@ function Get-VmSession {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
         [string]$VmName,
-        [Parameter(Mandatory = $false, HelpMessage = "Domain Name for creating creds.")]
-        [string]$VmDomainName = "WORKGROUP",
-        [Parameter(Mandatory = $false, HelpMessage = "Domain Username for creating creds.")]
-        [string]$VmDomainUser = $Common.LocalAdmin.UserName
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
+        [string]$VmDomainName = "WORKGROUP"
     )
 
-    $cacheKey = $VmName + $VmDomainUser
+    $ps = $null
+
+    # Cache key
+    $cacheKey = $VmName + "-" + $VmDomainName
+
+    # Set domain name to VmName when workgroup
+    if ($VmDomainName -eq "WORKGROUP") {
+        $vmDomainName = $VmName
+    }
+
+    # Get PS Session
+    $username = "$VmDomainName\$($Common.LocalAdmin.UserName)"
 
     # Retrieve session from cache
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
         if ($ps.Availability -eq "Available") {
-            Write-Log "Get-VmSession: $VmName`: Returning session from cache." -Verbose
+            Write-Log "Get-VmSession: $VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
             return $ps
         }
     }
-
-    # Get PS Session
-    $username = "$VmDomainName\$VmDomainUser"
 
     $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
 
     $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
         Write-Log "Get-VmSession: $VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
-        if ($VmDomainUser -ne $Common.LocalAdmin.UserName) {
-            $username = "WORKGROUP\$($Common.LocalAdmin.UserName)"
+        if ($VmDomainName -ne $VmName) {
+            $username = "$VmName\$($Common.LocalAdmin.UserName)"
             $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
-            $cacheKey = $VmName + $Common.LocalAdmin.UserName
+            $cacheKey = $VmName + "-WORKGROUP"
+            Write-Log "Get-VmSession: $VmName`: Attempting to get a session using $username." -Verbose
             $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
             if ($Err1.Count -ne 0) {
                 Write-Log "Get-VmSession: $VmName`: Failed to establish a session using $username. Error: $Err1" -Failure -Verbose
@@ -943,7 +945,7 @@ function Get-VmSession {
     }
 
     # Cache & return session
-    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username." -Success -Verbose
+    Write-Log "Get-VmSession: $VmName`: Created session with VM using $username. CacheKey [$cacheKey]" -Success -LogOnly
     $global:ps_cache[$cacheKey] = $ps
     return $ps
 }

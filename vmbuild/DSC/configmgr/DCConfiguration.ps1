@@ -133,7 +133,7 @@
 
         ADGroup AddToDomainAdmin {
             GroupName        = "Domain Admins"
-            MembersToInclude = @($DomainAdminName)
+            MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
             DependsOn        = @("[ADUser]Admin", "[ADUser]cm-svc")
         }
 
