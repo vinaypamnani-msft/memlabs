@@ -553,15 +553,18 @@ function New-VmNote {
         $ProgressPreference = 'SilentlyContinue'
         if ($InProgress.IsPresent) {
             $vmNote = [PSCustomObject]@{
-                role       = $Role
                 inProgress = $true
+                role       = $Role
+                domain     = $DeployConfig.vmoptions.domainName
+                network    = $DeployConfig.vmoptions.network
+                prefix     = $DeployConfig.vmoptions.prefix
                 lastUpdate = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
         }
         else {
             $vmNote = [PSCustomObject]@{
-                role       = $Role
                 success    = $Successful
+                role       = $Role
                 domain     = $DeployConfig.vmoptions.domainName
                 network    = $DeployConfig.vmoptions.network
                 prefix     = $DeployConfig.vmoptions.prefix

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true, ParameterSetName = "Domain")]
+    [Parameter(Mandatory = $false, ParameterSetName = "InProgress")]
     [string] $DomainName,
     [Parameter(Mandatory = $true, ParameterSetName = "Orphaned")]
     [switch] $Orphaned,
@@ -98,7 +99,12 @@ if ($InProgress.IsPresent) {
 
     Write-Log "Main: Remove Lab called for InProgress objects." -Activity -HostOnly
 
-    $virtualMachines = Get-List -Type VM
+    if ($DomainName) {
+        $virtualMachines = Get-List -Type VM -DomainName $DomainName
+    }
+    else {
+        $virtualMachines = Get-List -Type VM
+    }
     foreach ($vm in $virtualMachines) {
         if ($vm.inProgress) {
             Remove-VirtualMachine -VmName $vm.VmName
