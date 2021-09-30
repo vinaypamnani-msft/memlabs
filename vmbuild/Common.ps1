@@ -1162,6 +1162,7 @@ if (-not $Common.Initialized) {
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
+        ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\samples")   # Path for Config files
         AzureFilesPath        = $storagePath                                                              # Path for downloaded files
         AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
         AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
