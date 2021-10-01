@@ -456,64 +456,73 @@ function Generate-ExistingConfig {
     }
 
     $configGenerated = $null
+    $configGenerated = [PSCustomObject]@{
+        #cmOptions       = $newCmOptions
+        vmOptions       = $vmOptions
+        virtualMachines = $()  
+    }
+
+    $configGenerated = Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated
     
-    $machineName = Get-NewMachineName $Domain $Role
-    Write-Verbose "Machine Name Generated $machineName"
-    $virtualMachines = @()
-    if ([string]::IsNullOrWhiteSpace($role) -or $role -eq "DomainMember") {
-        $virtualMachines += [PSCustomObject]@{
-            vmName          = $machineName
-            role            = "DomainMember"
-            operatingSystem = "Server 2022"
-            memory          = "2GB"
-            virtualProcs    = 2
-        }
-    }
-    elseif ($role -eq "DPMP") {
-        $virtualMachines += [PSCustomObject]@{
-            vmName          = $machineName
-            role            = $role
-            operatingSystem = "Server 2022"
-            memory          = "3GB"
-            virtualProcs    = 2
-        }
-    }
-    elseif ($role -eq "Primary") {
-       
-        $newCmOptions = [PSCustomObject]@{
-            version                   = "current-branch"
-            install                   = $true
-            updateToLatest            = $true
-            installDPMPRoles          = $true
-            pushClientToDomainMembers = $true
-        }
-        $newSiteCode = Get-NewSiteCode $Domain
-        $virtualMachines += [PSCustomObject]@{
-            vmName          = $machineName
-            role            = $role
-            operatingSystem = "Server 2022"
-            memory          = "12GB"
-            sqlVersion      = "SQL Server 2019"
-            sqlInstanceDir  = "C:\SQL"
-            cmInstallDir    = "C:\ConfigMgr"
-            siteCode        = $newSiteCode
-            virtualProcs    = 4
-        }                
-    }
-    if ($role -eq "Primary") {
-        $configGenerated = [PSCustomObject]@{
-            cmOptions       = $newCmOptions
-            vmOptions       = $vmOptions
-            virtualMachines = $virtualMachines        
-        }
-    }
-    else {
-        $configGenerated = [PSCustomObject]@{
-            #cmOptions       = $newCmOptions
-            vmOptions       = $vmOptions
-            virtualMachines = $virtualMachines  
-        }
-    }
+    #   $configGenerated = $null
+    
+    #  $machineName = Get-NewMachineName $Domain $Role
+    #  Write-Verbose "Machine Name Generated $machineName"
+    #  $virtualMachines = @()
+    #  if ([string]::IsNullOrWhiteSpace($role) -or $role -eq "DomainMember") {
+    #      $virtualMachines += [PSCustomObject]@{
+    #          vmName          = $machineName
+    #          role            = "DomainMember"
+    #          operatingSystem = "Server 2022"
+    #          memory          = "2GB"
+    #          virtualProcs    = 2
+    #      }
+    #  }
+    #  elseif ($role -eq "DPMP") {
+    #      $virtualMachines += [PSCustomObject]@{
+    #          vmName          = $machineName
+    #          role            = $role
+    #          operatingSystem = "Server 2022"
+    #          memory          = "3GB"
+    #          virtualProcs    = 2
+    #      }
+    #  }
+    #  elseif ($role -eq "Primary") {
+    #     
+    #      $newCmOptions = [PSCustomObject]@{
+    #          version                   = "current-branch"
+    #          install                   = $true
+    #          updateToLatest            = $true
+    #          installDPMPRoles          = $true
+    #          pushClientToDomainMembers = $true
+    #      }
+    #      $newSiteCode = Get-NewSiteCode $Domain
+    #      $virtualMachines += [PSCustomObject]@{
+    #          vmName          = $machineName
+    #          role            = $role
+    #          operatingSystem = "Server 2022"
+    #          memory          = "12GB"
+    #          sqlVersion      = "SQL Server 2019"
+    #          sqlInstanceDir  = "C:\SQL"
+    #          cmInstallDir    = "C:\ConfigMgr"
+    #          siteCode        = $newSiteCode
+    #          virtualProcs    = 4
+    #      }                
+    #  }
+    #  if ($role -eq "Primary") {
+    #      $configGenerated = [PSCustomObject]@{
+    #          cmOptions       = $newCmOptions
+    #          vmOptions       = $vmOptions
+    #          virtualMachines = $virtualMachines        
+    #      }
+    #  }
+    #  else {
+    #      $configGenerated = [PSCustomObject]@{
+    #          #cmOptions       = $newCmOptions
+    #          vmOptions       = $vmOptions
+    #          virtualMachines = $virtualMachines  
+    #      }
+    #  }
     Write-Verbose "Config: $configGenerated"
     return $configGenerated
 }
@@ -1006,6 +1015,90 @@ function get-VMString {
     return $name
 }
 
+function Add-NewVMForRole {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $Role,  
+        [Parameter()]
+        [string]
+        $Domain,  
+        [Parameter()]
+        [object]
+        $ConfigToModify
+    )
+
+    Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify"
+    $machineName = Get-NewMachineName $Domain $Role
+    Write-Verbose "Machine Name Generated $machineName"
+
+    $virtualMachine = [PSCustomObject]@{
+        vmName          = $machineName
+        role            = $Role
+        operatingSystem = "Server 2022"
+        memory          = "2GB"
+        virtualProcs    = 2
+    }
+
+    switch ($Role) {    
+        "CAS" { 
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "C:\ConfigMgr"
+            $newSiteCode = Get-NewSiteCode $Domain -Role $role
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
+            $virtualMachine.Memory = "12GB"
+            $virtualMachine.operatingSystem = "Server 2022"    
+            $existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
+            if ($existingPrimary -eq 0) {
+                $ConfigToModify = Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify
+            }
+        }
+        "Primary" {
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "C:\ConfigMgr"
+            $newSiteCode = Get-NewSiteCode $Domain -Role $role
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
+            $virtualMachine.Memory = "12GB"
+            $virtualMachine.operatingSystem = "Server 2022"
+            $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
+            if ($existingDPMP -eq 0) {
+                $ConfigToModify = Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify
+            }
+        }
+        "DomainMember" { }
+        "DPMP" {
+            $virtualMachine.memory = "3GB"
+        }
+        "DC" { }
+    }   
+
+    if ($null -eq $ConfigToModify.VirtualMachines) {
+        $ConfigToModify.virtualMachines = @()
+    }
+           
+    $ConfigToModify.virtualMachines += $virtualMachine
+
+    if ($role -eq "Primary" -or $role -eq "CAS") {
+        if ($null -eq $ConfigToModify.cmOptions) {
+            $newCmOptions = [PSCustomObject]@{
+                version                   = "current-branch"
+                install                   = $true
+                updateToLatest            = $true
+                installDPMPRoles          = $true
+                pushClientToDomainMembers = $true
+            }
+            $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions   
+        }
+    }
+
+    Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
+    return $ConfigToModify
+}
+
+
 function Select-VirtualMachines {
     while ($true) {
         Write-Host ""
@@ -1021,6 +1114,7 @@ function Select-VirtualMachines {
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
+                ###### $role =Select-RolesForExisting
                 $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role DomainMember -ConfigToCheck $Global:Config
                 $global:config.virtualMachines += [PSCustomObject]@{
                     vmName          = $newMachineName
