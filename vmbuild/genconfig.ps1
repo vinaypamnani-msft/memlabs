@@ -144,7 +144,7 @@ function Select-NewDomainConfig {
     }
 
     $usedPrefixes = Get-List -Type UniquePrefix
-    foreach ($dname in $ValidDomainNames) {
+    foreach ($dname in $ValidDomainNames.Keys) {
         foreach ($usedPrefix in $usedPrefixes) {
             if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $usedPrefix.ToLowerInvariant()) {
                 Write-Verbose ("Removing $dname")
