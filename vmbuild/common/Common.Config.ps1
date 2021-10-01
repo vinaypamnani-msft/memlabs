@@ -934,7 +934,7 @@ function Get-ExistingForDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
-        [ValidateSet("DC", "CAS", "Primary")]
+        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember")]
         [string]$Role
     )
 
@@ -956,6 +956,34 @@ function Get-ExistingForDomain {
     }
     catch {
         Write-Log "Get-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
+        return $null
+    }
+}
+
+function Get-ExistingForSubnet {
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "Subnet")]
+        [string]$Subnet,
+        [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
+        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember")]
+        [string]$Role
+    )
+
+    try {
+
+        $existingValue = @()
+        $vmList = Get-List -Type VM | Where-Object {$_.Subnet -eq $Subnet}
+        foreach ($vm in $vmList) {
+            if ($vm.Role.ToLowerInvariant() -eq $Role.ToLowerInvariant()) {
+                $existingValue += $vm.VmName
+            }
+        }
+
+        return $existingValue
+
+    }
+    catch {
+        Write-Log "Get-ExistingForSubnet: Failed to get existing $Role from $Subnet. $_" -Failure
         return $null
     }
 }
