@@ -91,9 +91,9 @@ function Select-MainMenu {
             continue
         }
         switch ($response.ToLowerInvariant()) {
-            "1" { $SelectedConfig = Select-Options $($Global:Config.vmOptions) "Select Global Property to modify" }
-            "2" { $SelectedConfig = Select-Options $($Global:Config.cmOptions) "Select ConfigMgr Property to modify" }
-            "3" { $SelectedConfig = Select-VirtualMachines }
+            "1" { Select-Options $($Global:Config.vmOptions) "Select Global Property to modify" }
+            "2" { Select-Options $($Global:Config.cmOptions) "Select ConfigMgr Property to modify" }
+            "3" { Select-VirtualMachines }
             "d" { return $true }
         }       
     }
@@ -314,6 +314,8 @@ function Select-ExistingSubnets {
                     $subnetListNew.Add($subnet)
                 }                
             }
+        }else{
+            $subnetListNew = $subnetList
         }
 
         $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListNew -AdditionalOptions $customOptions
@@ -404,7 +406,7 @@ function Generate-ExistingConfig {
             sqlVersion      = "SQL Server 2019"
             sqlInstanceDir  = "C:\SQL"
             cmInstallDir    = "C:\ConfigMgr"
-            siteCode        = "PR2"
+            siteCode        = "PS2"
             virtualProcs    = 4
         }         
         $configGenerated = [PSCustomObject]@{
