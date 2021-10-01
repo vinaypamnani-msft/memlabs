@@ -600,6 +600,11 @@ function Test-ValidRoleCSPS {
         return
     }
 
+    # Minimum Memory
+    if ($VM.memory / 1 -lt 6GB) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 6GB memory." -ReturnObject $ReturnObject -Failure
+    }
+
     # Primary/CAS must contain SQL
     if (-not $VM.sqlVersion) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Failure
@@ -709,14 +714,6 @@ function Test-Configuration {
         Test-ValidCmOptions -ConfigObject $deployConfig -ReturnObject $return
     }
 
-    # Role Conflicts
-    # ==============
-
-    # CAS/Primary must include DC
-    if (($containsCS -or $containsPS) -and -not $containsDC) {
-        #Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified in the configuration file without DC; CAS/Primary roles require a DC to be present in the config file. Adding them to an existing environment is not supported." -ReturnObject $return -Warning
-    }
-
     # VM Validations
     # ==============
     foreach ($vm in $deployConfig.virtualMachines) {
@@ -795,6 +792,47 @@ function Test-Configuration {
             Test-ValidVmServerOS -VM $DPMPVM -ReturnObject $return
         }
 
+    }
+
+    # Role Conflicts
+    # ==============
+
+    # CAS/Primary must include DC
+    if (($containsCS -or $containsPS) -and -not $deployConfig.parameters.DCName ) {
+        Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified but a new/existing DC was not found; CAS/Primary roles require a DC." -ReturnObject $return -Warning
+    }
+
+    # Total Memory
+    # =============
+    $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
+    $totalMemory = $totalMemory.Sum / 1GB
+    $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
+    $availableMemory = $availableMemory * 1KB / 1GB
+
+    if ($totalMemory -gt $availableMemory) {
+        Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB]." -ReturnObject $return -Warning
+    }
+
+    # Unique Names
+    # =============
+
+    # Names in deployment
+    $vmInDeployment = $deployConfig.virtualMachines.vmName
+    $unique1 = $vmInDeployment | Select-Object -Unique
+    $compare = Compare-Object -ReferenceObject $vmInDeployment -DifferenceObject $unique1
+    if ($compare) {
+        $duplicates = $compare.InputObject -split ","
+        Add-ValidationMessage -Message "Name Conflict: Deployment contains duplicate VM names [$duplicates]" -ReturnObject $return -Warning
+    }
+
+    # Names in domain
+    $allVMs = Get-List -Type VM | Select-Object -Expand VmName
+    $all = $allVMs + $vmInDeployment
+    $unique2 = $all | Select-Object -Unique
+    $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
+    if ($compare2) {
+        $duplicates = $compare2.InputObject -split ","
+        Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V." -ReturnObject $return -Warning
     }
 
     # Return if validation failed
@@ -986,29 +1024,31 @@ function Get-List {
                 if ($vmNoteObject) {
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
                     $vmObject = [PSCustomObject]@{
-                        VmName     = $vm.Name
-                        Role       = $vmNoteObject.role
-                        Memory     = $vm.MemoryAssigned
-                        State      = $vm.State
-                        Domain     = $vmNoteObject.domain
-                        Subnet     = $vmNoteObject.network
-                        Prefix     = $vmNoteObject.prefix
-                        Success    = $vmNoteObject.success
-                        InProgress = $inProgress
+                        VmName      = $vm.Name
+                        Role        = $vmNoteObject.role
+                        Memory      = $vm.MemoryAssigned
+                        State       = $vm.State
+                        Domain      = $vmNoteObject.domain
+                        DomainAdmin = $vmNoteObject.domainAdmin
+                        Subnet      = $vmNoteObject.network
+                        Prefix      = $vmNoteObject.prefix
+                        Success     = $vmNoteObject.success
+                        InProgress  = $inProgress
                     }
                 }
                 else {
                     $vmNet = $vm | Get-VMNetworkAdapter
                     $vmObject = [PSCustomObject]@{
-                        VmName     = $vm.Name
-                        Subnet     = $vmNet.SwitchName
-                        Memory     = $vm.MemoryAssigned
-                        State      = $vm.State
-                        Role       = $null
-                        Domain     = $null
-                        Prefix     = $null
-                        Success    = $null
-                        InProgress = $null
+                        VmName      = $vm.Name
+                        Subnet      = $vmNet.SwitchName
+                        Memory      = $vm.MemoryAssigned
+                        State       = $vm.State
+                        Role        = $null
+                        Domain      = $null
+                        DomainAdmin = $null
+                        Prefix      = $null
+                        Success     = $null
+                        InProgress  = $null
                     }
                 }
 
