@@ -133,11 +133,11 @@ function Select-NewDomainConfig {
     #   "northwindtraders.com", "proseware.com", "relecloud.com", "fineartschool.net", "southridgevideo.com", "tailspintoys.com", "tailwindtraders.com", "treyresearch.net", "thephone-company.com",
     #  "vanarsdelltd.com", "wideworldimporters.com", "wingtiptoys.com", "woodgrovebank.com", "techpreview.com" )
 
-    $ValidDomainNames = @{"adatum.com" = "ADA-" ; "adventure-works.com" = "ADV-" ; "alpineskihouse.com" = "ALP-" ; "bellowscollege.com" = "BLC-" ; "bestforyouorganics.com" = "BFY-" ; "contoso.com" = "CON-" ; "contososuites.com" = "COS-" ;
-        "consolidatedmessenger.com" = "COM-" ; "fabrikam.com" = "FAB-" ; "fabrikamresidences.com" = "FBR-" ; "firstupconsultants.com" = "FIR-" ; "fourthcoffee.com" = "FOR-" ; "graphicdesigninstitute.com" = "GDU-" ; "humongousinsurance.com" = "HUM-" ;
-        "lamnahealthcare.com" = "LAM-" ; "libertysdelightfulsinfulbakeryandcafe.com" = "LIB-" ; "lucernepublishing.com" = "LUC-" ; "margiestravel.com" = "MGT-" ; "munsonspicklesandpreservesfarm.com" = "MPP-" ; "nodpublishers.com" = "NOD-" ;
-        "northwindtraders.com" = "NWR-" ; "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-"; 
-        "thephone-company.com" = "TPC-" ; "vanarsdelltd.com" = "VAN-" ; "wideworldimporters.com" = "WWI-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "TEC-" 
+    $ValidDomainNames = @{"adatum.com" = "ADA-" ; "adventure-works.com" = "ADV-" ; "alpineskihouse.com" = "ALP-" ; "bellowscollege.com" = "BLC-" ;  "contoso.com" = "CON-" ; "contososuites.com" = "COS-" ;
+        "fabrikam.com" = "FAB-" ; "fourthcoffee.com" = "FOR-" ; 
+        "lamnahealthcare.com" = "LAM-"  ;  "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
+        "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-"; 
+        "vanarsdelltd.com" = "VAN-" ;  "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "TEC-" 
     }
     foreach ($domain in (Get-DomainList)) {
         $ValidDomainNames.Remove($domain.ToLowerInvariant())
@@ -309,7 +309,7 @@ function Select-ExistingSubnets {
         $subnetListNew = @()
         if ($Role -eq "Primary"){
             foreach ($subnet in $subnetList) {
-                $existingPri = Get-ExistingForSubnet -Subnet $subnet -Role DC
+                $existingPri = Get-ExistingForSubnet -Subnet $subnet -Role Primary
                 if ($null -eq $existingPri){
                     $subnetListNew.Add($subnet)
                 }                
