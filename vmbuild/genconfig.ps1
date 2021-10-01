@@ -106,14 +106,16 @@ function Select-DeleteDomain {
 function get-VMOptionsSummary{
 
     $options = $Global:Config.vmOptions
-    $Output = "[$($options.domainName)]`t[Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.domainAdminName)] [Location [$($options.basePath)]"
+    $domainName = "[$($options.domainName)]".PadRight(21)
+    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.domainAdminName)] [Location [$($options.basePath)]"
     return $Output
 }
 
 function get-CMOptionsSummary{
 
     $options = $Global:Config.cmOptions
-    $Output = "[$($options.version)] - Install: [$($options.install)] Update: [$($options.updateToLatest)] DPMP: [$($options.installDPMPRoles)] Push Clients: [$($options.pushClientToDomainMembers)]"
+    $ver = "[$($options.version)]".PadRight(21)
+    $Output = "$ver [Install $($options.install)] [Update $($options.updateToLatest)] [DPMP $($options.installDPMPRoles)] [Push Clients $($options.pushClientToDomainMembers)]"
     return $Output
 }
 
@@ -144,8 +146,8 @@ function get-VMSummary{
     if ($numMember -gt0 ){
         $RoleList += "[$numMember Members]"
     }
-
-    $Output = "[$numVMs VM(s)] - $RoleList"
+    $num = "[$numVMs VM(s)]".PadRight(21)
+    $Output = "$num $RoleList"
     return $Output
 }
 
