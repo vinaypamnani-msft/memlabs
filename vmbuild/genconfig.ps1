@@ -191,7 +191,13 @@ function Get-NewSiteCode {
     )
 
     if ($Role -eq "CAS") {
-        return "CAS"
+        $NumberOfCAS = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
+        if ($NumberOfCAS -eq 0){
+            return "CAS"
+        }
+        else {
+            return "CS" + ($NumberOfCAS + 1)
+        }
     }
     $NumberOfPrimaries = (Get-ExistingForDomain -DomainName $Domain -Role Primary | Measure-Object).Count
     #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
@@ -389,10 +395,10 @@ function Select-ExistingSubnets {
         $subnetList = Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Get-Unique
 
         $subnetListNew = @()
-        if ($Role -eq "Primary") {
+        if ($Role -eq "Primary" -or $Role -eq "CAS") {
             foreach ($subnet in $subnetList) {
-                $existingPri = Get-ExistingForSubnet -Subnet $subnet -Role Primary
-                if ($null -eq $existingPri) {
+                $existingRole = Get-ExistingForSubnet -Subnet $subnet -Role $Role
+                if ($null -eq $existingRole) {
                     $subnetListNew += $subnet
                 }                
             }
