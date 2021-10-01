@@ -988,6 +988,8 @@ function Get-List {
                     $vmObject = [PSCustomObject]@{
                         VmName     = $vm.Name
                         Role       = $vmNoteObject.role
+                        Memory     = $vm.MemoryAssigned
+                        State      = $vm.State
                         Domain     = $vmNoteObject.domain
                         Subnet     = $vmNoteObject.network
                         Prefix     = $vmNoteObject.prefix
@@ -1000,6 +1002,8 @@ function Get-List {
                     $vmObject = [PSCustomObject]@{
                         VmName     = $vm.Name
                         Subnet     = $vmNet.SwitchName
+                        Memory     = $vm.MemoryAssigned
+                        State      = $vm.State
                         Role       = $null
                         Domain     = $null
                         Prefix     = $null
