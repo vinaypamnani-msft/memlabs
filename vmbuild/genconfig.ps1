@@ -102,9 +102,63 @@ function Select-DeleteDomain {
     }
 }
 
+
+function get-VMOptionsSummary{
+
+    $options = $Global:Config.vmOptions
+    $Output = "[$($options.domainName)]`t[Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.domainAdminName)] [Location [$($options.basePath)]"
+    return $Output
+}
+
+function get-CMOptionsSummary{
+
+    $options = $Global:Config.cmOptions
+    $Output = "[$($options.version)] - Install: [$($options.install)] Update: [$($options.updateToLatest)] DPMP: [$($options.installDPMPRoles)] Push Clients: [$($options.pushClientToDomainMembers)]"
+    return $Output
+}
+
+function get-VMSummary{
+
+    $vms = $Global:Config.virtualMachines
+
+    $numVMs = ($vms | Measure-Object).Count
+    $numDCs = ($vms | Where-Object {$_.Role -eq "DC"} | Measure-Object).Count
+    $numDPMP = ($vms | Where-Object {$_.Role -eq "DPMP"} | Measure-Object).Count
+    $numPri = ($vms | Where-Object {$_.Role -eq "Primary"} | Measure-Object).Count
+    $numCas = ($vms | Where-Object {$_.Role -eq "CAS"} | Measure-Object).Count
+    $numMember = ($vms | Where-Object {$_.Role -eq "DomainMember"} | Measure-Object).Count
+
+    $RoleList = ""
+    if ($numDCs -gt0 ){
+        $RoleList += "[DC]"
+    }
+    if ($numCas -gt0 ){
+        $RoleList += "[CAS]"
+    }
+    if ($numPri -gt0 ){
+        $RoleList += "[Primary]"
+    } 
+    if ($numDPMP -gt0 ){
+        $RoleList += "[DPMP]"
+    }
+    if ($numMember -gt0 ){
+        $RoleList += "[$numMember Members]"
+    }
+
+    $Output = "[$numVMs VM(s)] - $RoleList"
+    return $Output
+}
+
 function Select-MainMenu {
     while ($true) {
-        $customOptions = [ordered]@{ "1" = "VM Options"; "2" = "CM Options"; "3" = "Virtual Machines"; "S" = "Save and Exit"}
+        #$customOptions = [ordered]@{ "1" = "VM Options"; "2" = "CM Options"; "3" = "Virtual Machines"; "S" = "Save and Exit"}
+        $customOptions = [ordered]@{}
+        $customOptions += @{"1" = "Global VM Options `t`t $(get-VMOptionsSummary)"}
+        if ($Global:Config.cmOptions){
+            $customOptions += @{"2" = "Global CM Options `t`t $(get-CMOptionsSummary)" }
+        }
+        $customOptions += @{"3" = "Virtual Machines `t`t $(get-VMSummary)" }
+
         if ($InternalUseOnly.IsPresent){
             $customOptions+= @{ "D" = "Deploy Config"}
         }
@@ -124,7 +178,6 @@ function Select-MainMenu {
 }
 
 function Get-ValidSubnets {
-
 
     $subnetlist = @()
     for ($i = 1; $i -lt 254; $i++) {
