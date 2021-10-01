@@ -58,7 +58,7 @@ function Write-Option {
 
 }
 
-function Select-MainMenu {
+function Select-ConfigMenu {
     while ($true) {
         $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration"; "4" = "Load saved config from File"; "D" = "Delete an existing domain" }
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
@@ -82,6 +82,23 @@ function Select-MainMenu {
     }
 }
 
+function Select-MainMenu {
+    while ($true) {
+        $customOptions = [ordered]@{ "1" = "VM Options"; "2" = "CM Options"; "3" = "Virtual Machines"; "D" = "Deploy Config" }
+        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
+        write-Verbose "response $response"
+        if (-not $response) {
+            continue
+        }
+        switch ($response.ToLowerInvariant()) {
+            "1" { $SelectedConfig = Select-Options $($Global:Config.vmOptions) "Select Global Property to modify" }
+            "2" { $SelectedConfig = Select-Options $($Global:Config.cmOptions) "Select ConfigMgr Property to modify" }
+            "3" { $SelectedConfig = Select-VirtualMachines }
+            "d" { return $true }
+        }       
+    }
+}
+
 function Get-ValidSubnets {
 
 
@@ -93,14 +110,14 @@ function Get-ValidSubnets {
             if ($subnet.Subnet -eq $newSubnet) {
                 $found = $true
                 break
-            }
+            }  
         }
         if (-not $found) {
             $subnetlist += $newSubnet
             if ($subnetlist.Count -gt 5) {
                 break
             }
-
+            
         }
     }
 
@@ -119,21 +136,21 @@ function Select-NewDomainConfig {
     $ValidDomainNames = @{"adatum.com" = "ADA-" ; "adventure-works.com" = "ADV-" ; "alpineskihouse.com" = "ALP-" ; "bellowscollege.com" = "BLC-" ; "bestforyouorganics.com" = "BFY-" ; "contoso.com" = "CON-" ; "contososuites.com" = "COS-" ;
         "consolidatedmessenger.com" = "COM-" ; "fabrikam.com" = "FAB-" ; "fabrikamresidences.com" = "FBR-" ; "firstupconsultants.com" = "FIR-" ; "fourthcoffee.com" = "FOR-" ; "graphicdesigninstitute.com" = "GDU-" ; "humongousinsurance.com" = "HUM-" ;
         "lamnahealthcare.com" = "LAM-" ; "libertysdelightfulsinfulbakeryandcafe.com" = "LIB-" ; "lucernepublishing.com" = "LUC-" ; "margiestravel.com" = "MGT-" ; "munsonspicklesandpreservesfarm.com" = "MPP-" ; "nodpublishers.com" = "NOD-" ;
-        "northwindtraders.com" = "NWR-" ; "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-";
-        "thephone-company.com" = "TPC-" ; "vanarsdelltd.com" = "VAN-" ; "wideworldimporters.com" = "WWI-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "TEC-"
+        "northwindtraders.com" = "NWR-" ; "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-"; 
+        "thephone-company.com" = "TPC-" ; "vanarsdelltd.com" = "VAN-" ; "wideworldimporters.com" = "WWI-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "TEC-" 
     }
     foreach ($domain in (Get-DomainList)) {
         $ValidDomainNames.Remove($domain.ToLowerInvariant())
     }
 
     $usedPrefixes = Get-List -Type UniquePrefix
-    foreach ($dname in $ValidDomainNames.Keys) {
+    foreach ($dname in $ValidDomainNames) {
         foreach ($usedPrefix in $usedPrefixes) {
             if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $usedPrefix.ToLowerInvariant()) {
                 Write-Verbose ("Removing $dname")
                 $ValidDomainNames.Remove($dname)
             }
-        }
+        }    
     }
     $domain = $null
     while (-not $domain) {
@@ -142,11 +159,11 @@ function Select-NewDomainConfig {
     $prefix = $($ValidDomainNames[$domain])
     Write-Verbose "Prefix = $prefix"
     $subnetlist = Get-ValidSubnets
-
+   
     while (-not $network) {
         $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
     }
-
+ 
     $customOptions = @{ "C" = "CAS and Primary"; "P" = "Primary Site only"; "N" = "No Configmgr" }
     $response = $null
     while (-not $response) {
@@ -158,8 +175,8 @@ function Select-NewDomainConfig {
     $NoCMJson = Join-Path $sampleDir "NoConfigMgr.json"
     switch ($response.ToLowerInvariant()) {
         "c" { $newConfig = Get-Content $CASJson -Force | ConvertFrom-Json }
-        "p" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }
-        "n" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
+        "p" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }    
+        "n" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }     
     }
 
     $newConfig.vmOptions.domainName = $domain
@@ -186,7 +203,7 @@ function Select-Config {
     $files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
     $files += Get-ChildItem $ConfigPath\*.json -Include "NoConfigMgr.json"
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
-    $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json"
+    $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json"
     $responseValid = $false
     while ($responseValid -eq $false) {
         $i = 0
@@ -213,7 +230,7 @@ function Select-Config {
         catch {}
         if (-Not $NoMore.IsPresent) {
             if ($response.ToLowerInvariant() -eq "m") {
-                $configSelected = Select-Config $configDir -NoMore
+                $configSelected = Select-Config $configDir -NoMore 
                 if (-not $null -eq $configSelected) {
                     return $configSelected
                 }
@@ -251,13 +268,25 @@ function Show-ExistingNetwork {
     if ([string]::isnullorwhitespace($domain)) {
         return $null
     }
+    $role = Select-RolesForExisting
+
     $subnet = Select-ExistingSubnets $domain
     if ([string]::IsNullOrWhiteSpace($subnet)) {
         return $null
     }
 
-    return Generate-ExistingConfig $domain $subnet
+    return Generate-ExistingConfig $domain $subnet $role
+}
+function Select-RolesForExisting {
 
+    $role = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
+
+    return $role
+    #   switch ($role) {
+    #       "Primary" { }
+    #       "DomainMember" { }
+    #       "DPMP" {}
+    #   }   
 }
 
 function Select-ExistingSubnets {
@@ -265,28 +294,43 @@ function Select-ExistingSubnets {
     param (
         [Parameter()]
         [string]
-        $Domain
+        $Domain,
+        [Parameter()]
+        [string]
+        $Role
     )
 
     $valid = $false
     while ($valid -eq $false) {
 
         $customOptions = @{ "N" = "add New Subnet to domain" }
-        $response = Get-Menu -Prompt "Select existing subnet" -OptionArray (Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Get-Unique) -AdditionalOptions $customOptions
+        $subnetList = Get-SubnetList -DomainName $Domain | Select -Expand Subnet | Get-Unique
+
+        $subnetListNew = @()
+        if ($Role -eq "Primary"){
+            foreach ($subnet in $subnetList) {
+                $existingPri = Get-ExistingForSubnet -Subnet $subnet -Role DC
+                if ($null -eq $existingPri){
+                    $subnetListNew.Add($subnet)
+                }                
+            }
+        }
+
+        $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListNew -AdditionalOptions $customOptions
         #write-host "response $response"
         if (-not $response) {
             return $null
         }
         #write-host "response $response"
-        if ($response.ToLowerInvariant() -eq "n") {
+        if ($response.ToLowerInvariant() -eq "n") { 
 
             $subnetlist = Get-ValidSubnets
-
+   
             while (-not $network) {
                 $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
             }
             $response = $network
-
+            
         }
         $valid = Get-TestResult -Config (Generate-ExistingConfig -Domain $Domain -Subnet $response)
     }
@@ -301,12 +345,14 @@ function Generate-ExistingConfig {
         $Domain,
         [Parameter()]
         [string]
-        $Subnet
+        $Subnet,
+        [string]
+        $Role       
     )
 
-    Write-Verbose "Generating $Domain $Subnet"
+    Write-Verbose "Generating $Domain $Subnet $role"
 
-    $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
+    $prefix = Get-List -Type UniquePrefix -Domain $Domain | select -First 1
 
     if ([string]::IsNullOrWhiteSpace($prefix)) {
         $prefix = "CUSTOM-"
@@ -320,20 +366,59 @@ function Generate-ExistingConfig {
     }
 
 
-
+    
 
     $virtualMachines = @()
-    $virtualMachines += [PSCustomObject]@{
-        vmName          = "NEWVM"
-        role            = "DomainMember"
-        operatingSystem = "Server 2022"
-        memory          = "2GB"
-        virtualProcs    = 2
+    if ([string]::IsNullOrWhiteSpace($role) -or $role -eq "DomainMember") {
+        $virtualMachines += [PSCustomObject]@{
+            vmName          = "NEWMember"
+            role            = "DomainMember"
+            operatingSystem = "Server 2022"
+            memory          = "2GB"
+            virtualProcs    = 2
+        }
     }
-    $configGenerated = [PSCustomObject]@{
-        #cmOptions       = $configObject.cmOptions
-        vmOptions       = $vmOptions
-        virtualMachines = $virtualMachines
+    elseif ($role -eq "DPMP") {
+        $virtualMachines += [PSCustomObject]@{
+            vmName          = "NEWDPMP"
+            role            = "DPMP"
+            operatingSystem = "Server 2022"
+            memory          = "3GB"
+            virtualProcs    = 2
+        }
+    }
+    elseif ($role -eq "Primary") {
+       
+        $newCmOptions = [PSCustomObject]@{
+            version                   = "current-branch"
+            install                   = $true
+            updateToLatest            = $true
+            installDPMPRoles          = $true
+            pushClientToDomainMembers = $true
+        }
+        $virtualMachines += [PSCustomObject]@{
+            vmName          = "NEWPRI"
+            role            = "Primary"
+            operatingSystem = "Server 2022"
+            memory          = "12GB"
+            sqlVersion      = "SQL Server 2019"
+            sqlInstanceDir  = "C:\SQL"
+            cmInstallDir    = "C:\ConfigMgr"
+            siteCode        = "PR2"
+            virtualProcs    = 4
+        }         
+        $configGenerated = [PSCustomObject]@{
+            cmOptions       = $newCmOptions
+            vmOptions       = $vmOptions
+            virtualMachines = $virtualMachines        
+        }                        
+    }
+    if (-not $role -eq "Primary") {
+        $configGenerated = [PSCustomObject]@{
+            #cmOptions       = $newCmOptions
+            vmOptions       = $vmOptions
+            virtualMachines = $virtualMachines        
+        }
     }
     return $configGenerated
 }
@@ -605,14 +690,14 @@ function Select-Options {
                                 if ($Global:AddToExisting -eq $true) {
 
                                     $role = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
-                                    $property."$name" = $role
+                                    $property."$name" = $role                                    
                                 }
                                 else {
                                     $role = Get-Menu "Select Role" $($Common.Supported.Roles) $value
                                     $property."$name" = $role
                                 }
 
-                                if ($role -eq "Primary") {
+                                if ($role -eq "Primary") {                                        
                                     if ($null -eq $($global:config.cmOptions)) {
                                         $newCmOptions = [PSCustomObject]@{
                                             version                   = "current-branch"
@@ -621,7 +706,7 @@ function Select-Options {
                                             installDPMPRoles          = $true
                                             pushClientToDomainMembers = $true
                                         }
-                                        $global:config | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
+                                        $global:config | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions                                        
                                     }
                                     if ($null -eq $($property.sqlVersion) ) {
                                         $property | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -639,7 +724,7 @@ function Select-Options {
                                     $property.operatingSystem = "Server 2022"
                                     Select-Options $($global:config.cmOptions) "Select ConfigMgr Property to modify"
                                 }
-
+                                
 
 
                                 if (Get-TestResult -SuccessOnWarning) {
@@ -691,7 +776,7 @@ function Select-Options {
                         Write-Host
                         while ($valid -eq $false) {
                             if ($value -is [bool]) {
-                                $response2 = Get-Menu -Prompt "Select new Value for $($_.Name)" -CurrentValue $value -OptionArray @("True", "False")
+                                $response2 = Get-Menu -Prompt "Select new Value for $($_.Name)" -CurrentValue $value -OptionArray @("True", "False") 
                             }
                             else {
                                 $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
@@ -716,17 +801,17 @@ function Select-Options {
 
                                     }
                                     $property."$($_.Name)" = $response2
-                                }
+                                }                                
                                 $valid = Get-TestResult -SuccessOnWarning
                                 if ($response2 -eq $value) {
                                     $valid = $true
                                 }
-
+                    
                             }
                             else {
                                 # Enter was pressed. Set the Default value, and test, but dont block.
                                 $property."$($_.Name)" = $value
-                                $valid = Get-TestResult -SuccessOnError
+                                $valid = Get-TestResult -SuccessOnError                                
                             }
                         }
                     }
@@ -735,9 +820,9 @@ function Select-Options {
 
             }
         }
-        else {
+        else { 
             $valid = Get-TestResult -SuccessOnError
-            return
+            return 
         }
     }
 }
@@ -942,7 +1027,7 @@ function Select-VirtualMachines {
         }
         else {
             $valid = Get-TestResult -SuccessOnError
-            return
+            return 
         }
     }
 }
@@ -994,7 +1079,7 @@ function Save-Config {
 }
 $Global:Config = $null
 #$Global:Config = Select-Config $sampleDir
-$Global:Config = Select-MainMenu
+$Global:Config = Select-ConfigMenu
 $Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
 $Global:AddToExisting = $false
 #if ($($deployConfig.parameters.existingDCName)) {
@@ -1002,9 +1087,10 @@ $Global:AddToExisting = $false
 #}
 $valid = $false
 while ($valid -eq $false) {
-    Select-Options $($Global:Config.vmOptions) "Select Global Property to modify"
-    Select-Options $($Global:Config.cmOptions) "Select ConfigMgr Property to modify"
-    Select-VirtualMachines
+    #Select-Options $($Global:Config.vmOptions) "Select Global Property to modify"
+    #Select-Options $($Global:Config.cmOptions) "Select ConfigMgr Property to modify"
+    #Select-VirtualMachines
+    $valid = Select-MainMenu
     $c = Test-Configuration -InputObject $Config
     Write-Host
 
@@ -1024,7 +1110,7 @@ while ($valid -eq $false) {
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                 $valid = $false
-            }
+            }           
         }
     }
 }
