@@ -53,7 +53,7 @@ function Write-Option {
     }
     write-host "[" -NoNewline
     Write-Host -ForegroundColor $color2 $option -NoNewline
-    Write-Host "] " -NoNewLine
+    Write-Host "] ".PadRight(4-$option.Length) -NoNewLine
     Write-Host -ForegroundColor $color "$text"
 
 }
@@ -156,7 +156,7 @@ function Select-NewDomainConfig {
     $customOptions = @{ "C" = "Custom Domain"}
     while (-not $domain) {
         $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames.Keys -additionalOptions $customOptions
-        if ($domain.ToLowerInvariant = "c") {
+        if ($domain.ToLowerInvariant() = "c") {
             $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
         }
     }
