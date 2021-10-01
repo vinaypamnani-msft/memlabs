@@ -270,7 +270,7 @@ function Show-ExistingNetwork {
     }
     $role = Select-RolesForExisting
 
-    $subnet = Select-ExistingSubnets $domain
+    $subnet = Select-ExistingSubnets $domain $role
     if ([string]::IsNullOrWhiteSpace($subnet)) {
         return $null
     }
@@ -338,6 +338,9 @@ function Select-ExistingSubnets {
     }
     return $response
 }
+
+
+
 
 function Generate-ExistingConfig {
     [CmdletBinding()]
