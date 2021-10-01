@@ -104,7 +104,10 @@ function Select-DeleteDomain {
 
 function Select-MainMenu {
     while ($true) {
-        $customOptions = [ordered]@{ "1" = "VM Options"; "2" = "CM Options"; "3" = "Virtual Machines"; "D" = "Deploy Config" }
+        $customOptions = [ordered]@{ "1" = "VM Options"; "2" = "CM Options"; "3" = "Virtual Machines"; "S" = "Save and Exit"}
+        if ($InternalUseOnly.IsPresent){
+            $customOptions+= @{ "D" = "Deploy Config"}
+        }
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
         write-Verbose "response $response"
         if (-not $response) {
@@ -115,6 +118,7 @@ function Select-MainMenu {
             "2" { Select-Options $($Global:Config.cmOptions) "Select ConfigMgr Property to modify" }
             "3" { Select-VirtualMachines }
             "d" { return $true }
+            "s" { return $false }
         }       
     }
 }
@@ -1301,7 +1305,7 @@ function Save-Config {
     $filename = Join-Path $configDir $file
 
     $splitpath = Split-Path -Path $fileName -Leaf
-    $response = Read-Host2 -Prompt "Save Filename" $splitpath
+    $response = Read-Host2 -Prompt "Save Filename" $splitpath -HideHelp
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $filename = Join-Path $configDir $response
@@ -1330,7 +1334,7 @@ while ($valid -eq $false) {
     #Select-Options $($Global:Config.vmOptions) "Select Global Property to modify"
     #Select-Options $($Global:Config.cmOptions) "Select ConfigMgr Property to modify"
     #Select-VirtualMachines
-    $valid = Select-MainMenu
+    $return.DeployNow = Select-MainMenu
     $c = Test-Configuration -InputObject $Config
     Write-Host
 
@@ -1386,37 +1390,38 @@ if (-not $InternalUseOnly.IsPresent) {
 
 
 #================================= NEW LAB SCENERIO ============================================
-if ($InternalUseOnly.IsPresent) {
-    $response = Read-Host2 -Prompt "Deploy Now? (y/N)" $null
-    if (-not [String]::IsNullOrWhiteSpace($response)) {
-        if ($response.ToLowerInvariant() -eq "y") {
-            Write-Host
-            Write-Host "Deleting VM's will remove the existing VM's with the same names as the VM's we are deploying. Disks and all artifacts will be destroyed"
-            $response = Read-Host2 -Prompt "Delete old VMs? (y/N)"
-            if (-not [String]::IsNullOrWhiteSpace($response)) {
-                if ($response.ToLowerInvariant() -eq "y") {
-                    $return.ForceNew = $true
-                    $return.DeployNow = $true
-                    # Write-Host "Starting new-lab with delete VM options"
-                }
-                else {
-                    $return.DeployNow = $true
-                    # Write-Host "Starting new-lab without delete VM options"
-                }
-            }
-            else {
-                $return.DeployNow = $true
-                # Write-Host "Starting new-lab without delete VM options"
-            }
-        }
-        else {
+if ($InternalUseOnly.IsPresent) {    
+    #$response = Read-Host2 -Prompt "Deploy Now? (y/N)" $null
+    #if (-not [String]::IsNullOrWhiteSpace($response)) {
+     #   if ($response.ToLowerInvariant() -eq "y") {
+        #    Write-Host
+        #    Write-Host "Deleting VM's will remove the existing VM's with the same names as the VM's we are deploying. Disks and all artifacts will be destroyed"
+        #    $response = Read-Host2 -Prompt "Delete old VMs? (y/N)"
+        #    if (-not [String]::IsNullOrWhiteSpace($response)) {
+        #        if ($response.ToLowerInvariant() -eq "y") {
+        #            $return.ForceNew = $true
+        #            $return.DeployNow = $true
+        #            # Write-Host "Starting new-lab with delete VM options"
+        #        }
+        #        else {
+        #            $return.DeployNow = $true
+        #            # Write-Host "Starting new-lab without delete VM options"
+        #        }
+        #    }
+        #    else {
+        #        $return.DeployNow = $true
+        #        # Write-Host "Starting new-lab without delete VM options"
+        #    }
+      #  $return.DeployNow = $true
+      #  }
+      #  else {
             # Write-Host "Not Deploying."
-        }
+      #  }
 
-    }
-    else {
+    #}
+    #else {
         # Write-Host "Not Deploying."
-    }
+    #}
     return $return
 }
 
