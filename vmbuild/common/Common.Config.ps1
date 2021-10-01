@@ -1139,7 +1139,7 @@ Function Show-Summary {
     $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
 
 
-    if ($null -ne $($deployConfig.cmOptions) -and $containsPS) {
+    if ($null -ne $($deployConfig.cmOptions) -and $containsPS -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true) {
             Write-Host "[$CHECKMARK] ConfigMgr $($deployConfig.cmOptions.version) will be installed and " -NoNewline
             if ($deployConfig.cmOptions.updateToLatest -eq $true) {
@@ -1153,14 +1153,14 @@ Function Show-Summary {
             Write-Host "[x] ConfigMgr will not be installed."
         }
 
-        if ($deployConfig.cmOptions.installDPMPRoles) {
+        if ($deployConfig.cmOptions.installDPMPRoles -and $deployConfig.cmOptions.install -eq $true) {
             Write-Host "[$CHECKMARK] DPMP roles will be pushed from the Configmgr Primary Server"
         }
         else {
             Write-Host "[x] DPMP roles will not be installed"
         }
 
-        if ($deployConfig.cmOptions.pushClientToDomainMembers) {
+        if ($deployConfig.cmOptions.pushClientToDomainMembers-and $deployConfig.cmOptions.install -eq $true) {
             Write-Host "[$CHECKMARK] ConfigMgr Clients will be installed on domain members"
         }
         else {

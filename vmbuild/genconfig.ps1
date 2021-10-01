@@ -164,8 +164,15 @@ function Get-NewSiteCode {
     param (
         [Parameter()]
         [String]
-        $Domain
+        $Domain,
+        [Parameter()]
+        [String]
+        $Role
     )
+
+    if ($Role -eq "CAS") {
+        return "CAS"
+    }
     $NumberOfPrimaries = (Get-ExistingForDomain -DomainName $Domain -Role Primary | Measure-Object).Count
     #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
 
@@ -771,7 +778,7 @@ function Select-Options {
                                 $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
                                 $property.vmName = $newMachineName   
 
-                                if ($role -eq "Primary") {                                        
+                                if ($role -eq "Primary" -or $role -eq "CAS") {                                        
                                     if ($null -eq $($global:config.cmOptions)) {
                                         $newCmOptions = [PSCustomObject]@{
                                             version                   = "current-branch"
@@ -792,7 +799,7 @@ function Select-Options {
                                         $property | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
                                     }
                                     if ($null -eq $($property.siteCode) ) {
-                                        $newSiteCode = Get-NewSiteCode $Global:Config.vmOptions.domainName
+                                        $newSiteCode = Get-NewSiteCode $Global:Config.vmOptions.domainName -Role $role
                                         $property | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
                                     }
                                     $property.Memory = "12GB"
