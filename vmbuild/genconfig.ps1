@@ -72,13 +72,33 @@ function Select-ConfigMenu {
             "2" { $SelectedConfig = Show-ExistingNetwork }
             "3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "4" { $SelectedConfig = Select-Config $configDir -NoMore }
-            "d" {}
+            "d" { Select-DeleteDomain }
             Default {}
         }
         if ($SelectedConfig) {
             return $SelectedConfig
         }
 
+    }
+}
+
+function Select-DeleteDomain {
+    
+    $domain = Get-Menu -Prompt "Select existing domain" -OptionArray (Get-DomainList)
+    if ([string]::isnullorwhitespace($domain)) {
+        return $null
+    }
+    Write-Host 
+    Write-Host "Domain contains these resources:"
+    get-list -Type VM -DomainName $domain | Format-Table | Out-Host
+
+    Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
+    $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
+    if (-not [String]::IsNullOrWhiteSpace($response)) {
+        if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
+            & "$($PSScriptRoot)\Remove-Lab.ps1" -DomainName $domain
+            Get-List -type VM -ResetCache | Out-Null
+        }           
     }
 }
 
@@ -146,7 +166,7 @@ function Get-NewMachineName {
     [int]$i = 1
     while ($true) {
         $NewName = $RoleName + ($RoleCount + $i)
-        if ($null -eq $ConfigToCheck){
+        if ($null -eq $ConfigToCheck) {
             break
         }
         if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName } | Measure-Object).Count -eq 0) {
