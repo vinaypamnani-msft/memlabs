@@ -31,7 +31,7 @@ function Write-DscStatus {
 
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
-$Config = $deployConfig.parameters.Scenario
+$scenario = $deployConfig.parameters.Scenario
 $CurrentRole = $deployConfig.parameters.ThisMachineRole
 
 # Provision Tool path, RegisterTaskScheduler copies files here
@@ -47,7 +47,7 @@ if (Test-Path -Path $ConfigurationFile) {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 }
 else {
-    if ($Config -eq "Standalone") {
+    if ($scenario -eq "Standalone") {
         [hashtable]$Actions = @{
             InstallSCCM    = @{
                 Status    = 'NotStart'
@@ -147,7 +147,7 @@ else {
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
 
-if ($Config -eq "Standalone") {
+if ($scenario -eq "Standalone") {
 
     #Install CM and Config
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"

@@ -615,6 +615,11 @@ function Test-ValidRoleCSPS {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code [$($VM.siteCode)] Must be exactly 3 chars." -ReturnObject $ReturnObject -Failure
     }
 
+    # Parent Site Code
+    if ($VM.parentSiteCode -and $VM.parentSiteCode.Length -ne 3) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code [$($VM.parentSiteCode)] Must be exactly 3 chars." -ReturnObject $ReturnObject -Failure
+    }
+
     $pattern = "^[a-zA-Z0-9]+$"
     if (-not ($VM.siteCode -match $pattern)) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code (Must be AlphaNumeric) [$($VM.siteCode)]." -ReturnObject $ReturnObject -Failure
@@ -802,6 +807,10 @@ function Test-Configuration {
         Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified but a new/existing DC was not found; CAS/Primary roles require a DC." -ReturnObject $return -Warning
     }
 
+    if ($deployConfig.parameters.scenario -eq "Hierarchy" -and -not $deployConfig.parameters.CSName) {
+        Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
+    }
+
     # Total Memory
     # =============
     $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
@@ -856,6 +865,7 @@ function New-DeployConfig {
     )
 
     $containsCS = $configObject.virtualMachines.role.Contains("CAS")
+
     # Scenario
     if ($containsCS) {
         $scenario = "Hierarchy"
@@ -880,24 +890,26 @@ function New-DeployConfig {
     }
 
     # CSName (prefer name in config over existing)
-    $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
-    $existingCSName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -Role "CAS"
-    if (-not $CSName) {
-        $CSName = $existingCSName
+    $containsPS = $configObject.virtualMachines.role.Contains("Primary")
+    if ($containsPS) {
+        $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" }
+        $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PSVM.parentSiteCode
+        $existingCSName = $existingCS.vmName
+        $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
+        if (-not $CSName) {
+            $CSName = $existingCSName
+        }
     }
 
-    # TODO: Figure out how to allow Standalone PS in a domain that already has a CAS?
-    $containsPS = $configObject.virtualMachines.role.Contains("Primary")
-
     if ($existingCSName -and $containsPS) {
-        $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" }
-        if ($PSVM.standalone) {
-            # TODO: Add this prop in genconfig
-            $scenario = "Standalone"
-        }
-        else {
+
+        if ($PSVM.parentSiteCode) {
             $scenario = "Hierarchy"
         }
+        else {
+            $scenario = "Standalone"
+        }
+
     }
 
     $params = [PSCustomObject]@{
@@ -940,13 +952,68 @@ function Get-ExistingForDomain {
 
     try {
 
-        $existingValue = $null
+        $existingValue = @()
         $vmList = Get-List -Type VM -DomainName $DomainName
         foreach ($vm in $vmList) {
             if ($vm.Role.ToLowerInvariant() -eq $Role.ToLowerInvariant()) {
-                $existingValue = $vm.VmName
-                if ($null -ne $existingValue) {
-                    break
+                $existingValue += $vm.VmName
+            }
+        }
+
+        if ($existingValue.Count -gt 0) {
+            return $existingValue
+        }
+
+        return $null
+
+    }
+    catch {
+        Write-Log "Get-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
+        return $null
+    }
+}
+
+function Get-ExistingSiteServer {
+    param(
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name")]
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
+        [string]$SiteCode
+    )
+
+    try {
+
+        if ($DomainName) {
+            $vmList = Get-List -Type VM -DomainName $DomainName
+        }
+        else {
+            $vmList = Get-List -Type VM
+        }
+
+        $existingValue = @()
+        foreach ($vm in $vmList) {
+            $so = $null
+            if ($vm.siteCode) {
+                if ($PSBoundParameters.ContainsKey("SiteCode") -and $vm.siteCode.ToLowerInvariant() -eq $SiteCode.ToLowerInvariant()) {
+                    Write-Host "Here $($vm.VmName)"
+                    $so = [PSCustomObject]@{
+                        VmName   = $vm.VmName
+                        Role     = $vm.Role
+                        SiteCode = $vm.siteCode
+                        Domain   = $vm.domain
+                    }
+                    $existingValue += $so
+                }
+
+                if (-not $PSBoundParameters.ContainsKey("SiteCode")) {
+                    Write-Host "There $($vm.VmName)"
+                    $so = [PSCustomObject]@{
+                        VmName   = $vm.VmName
+                        Role     = $vm.Role
+                        SiteCode = $vm.siteCode
+                        Domain   = $vm.domain
+                    }
+                    $existingValue += $so
                 }
             }
         }
@@ -955,7 +1022,7 @@ function Get-ExistingForDomain {
 
     }
     catch {
-        Write-Log "Get-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
+        Write-Log "Get-ExistingSiteServer: Failed to get existing site servers. $_" -Failure
         return $null
     }
 }
@@ -972,7 +1039,7 @@ function Get-ExistingForSubnet {
     try {
 
         $existingValue = @()
-        $vmList = Get-List -Type VM | Where-Object {$_.Subnet -eq $Subnet}
+        $vmList = Get-List -Type VM | Where-Object { $_.Subnet -eq $Subnet }
         foreach ($vm in $vmList) {
             if ($vm.Role.ToLowerInvariant() -eq $Role.ToLowerInvariant()) {
                 $existingValue += $vm.VmName
@@ -1160,7 +1227,7 @@ Function Show-Summary {
             Write-Host "[x] DPMP roles will not be installed"
         }
 
-        if ($deployConfig.cmOptions.pushClientToDomainMembers-and $deployConfig.cmOptions.install -eq $true) {
+        if ($deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
             Write-Host "[$CHECKMARK] ConfigMgr Clients will be installed on domain members"
         }
         else {

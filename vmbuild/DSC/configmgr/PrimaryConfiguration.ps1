@@ -19,7 +19,8 @@
     $DName = $DomainName.Split(".")[0]
 
     $DCName = $deployConfig.parameters.DCName
-    $Configuration = $deployConfig.parameters.Scenario
+    $CSName = $deployConfig.parameters.CSName
+    $Scenario = $deployConfig.parameters.Scenario
 
     # Domain Admin User name
     $DomainAdminName = $deployConfig.vmOptions.domainAdminName
@@ -30,7 +31,13 @@
 
     # SQL Instance Location
     $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
-    if ($ThisVM.sqlInstanceDir) { $SQLInstanceDir = $ThisVM.sqlInstanceDir }
+    $SQLInstanceName = "MSSQLSERVER"
+    if ($ThisVM.sqlInstanceDir) {
+        $SQLInstanceDir = $ThisVM.sqlInstanceDir
+    }
+    if ($ThisVM.sqlInstanceName) {
+        $SQLInstanceName = $ThisVM.sqlInstanceName
+    }
 
     # Log share
     $LogFolder = "DSC"
@@ -148,11 +155,11 @@
 
         WriteStatus InstallSQL {
             DependsOn = '[InstallADK]ADKInstall'
-            Status    = "Installing SQL Server (default instance)"
+            Status    = "Installing SQL Server ($SQLInstanceName instance)"
         }
 
         SqlSetup InstallSQL {
-            InstanceName        = 'MSSQLSERVER'
+            InstanceName        = $SQLInstanceName
             InstanceDir         = $SQLInstanceDir
             SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
             Features            = 'SQLENGINE,CONN,BC'
@@ -171,7 +178,7 @@
             DynamicAlloc = $false
             MinMemory    = 2048
             MaxMemory    = 8192
-            InstanceName = 'MSSQLSERVER'
+            InstanceName = $SQLInstanceName
         }
 
         WriteStatus SSMS {
@@ -192,7 +199,7 @@
             DependsOn       = "[InstallSSMS]SSMS"
         }
 
-        if ($Configuration -eq "Standalone") {
+        if ($Scenario -eq "Standalone") {
 
             WriteStatus DownLoadSCCM {
                 DependsOn = "[File]ShareFolder"
@@ -223,7 +230,7 @@
 
             WriteStatus WaitCS {
                 DependsOn = "[File]ShareFolder"
-                Status    = "Waiting for CAS Server to join domain"
+                Status    = "Waiting for CAS Server $CSName to join domain"
             }
 
             WaitForConfigurationFile WaitCSJoinDomain {
@@ -259,20 +266,27 @@
             DependsOn     = "[FileReadAccessShare]DomainSMBShare"
         }
 
-        AddBuiltinPermission AddSQLPermission {
-            Ensure    = "Present"
+        WriteStatus ChangeToLocalSystem {
             DependsOn = "[WaitForConfigurationFile]DelegateControl"
+            Status    = "Configuring SQL services to use LocalSystem"
+        }
+
+        ChangeSqlInstancePort SqlInstancePort {
+            SQLInstanceName = $SQLInstanceName
+            SQLInstancePort = 2433
+            Ensure          = "Present"
+            DependsOn       = "[WaitForConfigurationFile]DelegateControl"
         }
 
         ChangeSQLServicesAccount ChangeToLocalSystem {
-            SQLInstanceName = "MSSQLSERVER"
+            SQLInstanceName = $SQLInstanceName
             Ensure          = "Present"
-            DependsOn       = "[AddBuiltinPermission]AddSQLPermission"
+            DependsOn       = "[ChangeSqlInstancePort]SqlInstancePort"
         }
 
         if ($InstallConfigMgr) {
 
-            WriteStatus InstallAndUpdateSCCM {
+            WriteStatus RunScriptWorkflow {
                 DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
                 Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
             }
@@ -283,7 +297,7 @@
                 DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
             }
 
-            RegisterTaskScheduler InstallAndUpdateSCCM {
+            RegisterTaskScheduler RunScriptWorkflow {
                 TaskName       = "ScriptWorkFlow"
                 ScriptName     = "ScriptWorkFlow.ps1"
                 ScriptPath     = $PSScriptRoot
@@ -300,7 +314,7 @@
                 ReadNode      = "ScriptWorkflow"
                 ReadNodeValue = "Completed"
                 Ensure        = "Present"
-                DependsOn     = "[RegisterTaskScheduler]InstallAndUpdateSCCM"
+                DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
             }
 
             WriteStatus Complete {

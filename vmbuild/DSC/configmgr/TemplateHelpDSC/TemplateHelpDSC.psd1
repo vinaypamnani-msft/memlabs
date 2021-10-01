@@ -22,6 +22,7 @@ DscResourcesToExport = @(
     'WriteStatus',
     'WriteFileOnce',
     'WaitForFileToExist',
+    'ChangeSqlInstancePort',
     'ChangeSQLServicesAccount',
     'RegisterTaskScheduler',
     'DownloadSCCM',
