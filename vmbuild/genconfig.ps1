@@ -153,8 +153,12 @@ function Select-NewDomainConfig {
         }    
     }
     $domain = $null
+    $customOptions = @{ "C" = "Custom Domain"}
     while (-not $domain) {
-        $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames.Keys
+        $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames.Keys -additionalOptions $customOptions
+        if ($domain.ToLowerInvariant = "c") {
+            $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
+        }
     }
     $prefix = $($ValidDomainNames[$domain])
     Write-Verbose "Prefix = $prefix"
