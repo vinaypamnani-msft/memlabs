@@ -53,7 +53,7 @@ function Write-Option {
     }
     write-host "[" -NoNewline
     Write-Host -ForegroundColor $color2 $option -NoNewline
-    Write-Host "] ".PadRight(4-$option.Length) -NoNewLine
+    Write-Host "] ".PadRight(4 - $option.Length) -NoNewLine
     Write-Host -ForegroundColor $color "$text"
 
 }
@@ -125,6 +125,54 @@ function Get-ValidSubnets {
 
 }
 
+function Get-NewMachineName {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [String]
+        $Domain,
+        [Parameter()]
+        [String]
+        $Role,
+        [Parameter()]
+        [Object]
+        $ConfigToCheck
+    )
+    $RoleCount = (get-list -Type VM -DomainName $Domain | where { $_.Role -eq $Role } | Measure-Object).Count
+    $RoleName = $Role
+    if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role)) {
+        $RoleName = "Member"
+    }
+    [int]$i = 1
+    while ($true) {
+        $NewName = $RoleName + ($RoleCount + $i)
+        if ($null -eq $ConfigToCheck){
+            break
+        }
+        if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName } | Measure-Object).Count -eq 0) {
+            break
+        }
+        $i++
+    }
+    return $NewName
+
+}
+
+
+function Get-NewSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [String]
+        $Domain
+    )
+    $NumberOfPrimaries = (Get-ExistingForDomain -DomainName $Domain -Role Primary | Measure-Object).Count
+    #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
+
+    return "PS" + ($NumberOfPrimaries + 1)
+
+}
+
 function Select-NewDomainConfig {
 
     #$ValidDomainNames = [System.Collections.ArrayList]("adatum.com", "adventure-works.com", "alpineskihouse.com", "bellowscollege.com", "bestforyouorganics.com", "contoso.com", "contososuites.com",
@@ -133,11 +181,11 @@ function Select-NewDomainConfig {
     #   "northwindtraders.com", "proseware.com", "relecloud.com", "fineartschool.net", "southridgevideo.com", "tailspintoys.com", "tailwindtraders.com", "treyresearch.net", "thephone-company.com",
     #  "vanarsdelltd.com", "wideworldimporters.com", "wingtiptoys.com", "woodgrovebank.com", "techpreview.com" )
 
-    $ValidDomainNames = @{"adatum.com" = "ADA-" ; "adventure-works.com" = "ADV-" ; "alpineskihouse.com" = "ALP-" ; "bellowscollege.com" = "BLC-" ;  "contoso.com" = "CON-" ; "contososuites.com" = "COS-" ;
+    $ValidDomainNames = @{"adatum.com" = "ADA-" ; "adventure-works.com" = "ADV-" ; "alpineskihouse.com" = "ALP-" ; "bellowscollege.com" = "BLC-" ; "contoso.com" = "CON-" ; "contososuites.com" = "COS-" ;
         "fabrikam.com" = "FAB-" ; "fourthcoffee.com" = "FOR-" ; 
-        "lamnahealthcare.com" = "LAM-"  ;  "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
+        "lamnahealthcare.com" = "LAM-"  ; "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
         "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-"; 
-        "vanarsdelltd.com" = "VAN-" ;  "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "TEC-" 
+        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "TEC-" 
     }
     foreach ($domain in (Get-DomainList)) {
         $ValidDomainNames.Remove($domain.ToLowerInvariant())
@@ -153,7 +201,7 @@ function Select-NewDomainConfig {
         }    
     }
     $domain = $null
-    $customOptions = @{ "C" = "Custom Domain"}
+    $customOptions = @{ "C" = "Custom Domain" }
     while (-not $domain) {
         $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames.Keys -additionalOptions $customOptions
         if ($domain.ToLowerInvariant() = "c") {
@@ -268,22 +316,25 @@ function Select-Config {
 
 function Show-ExistingNetwork {
 
+    $Global:AddToExisting = $true
     $domain = Get-Menu -Prompt "Select existing domain" -OptionArray (Get-DomainList)
     if ([string]::isnullorwhitespace($domain)) {
         return $null
     }
-    $role = Select-RolesForExisting
-
-    $subnet = Select-ExistingSubnets $domain $role
+    [string]$role = Select-RolesForExisting
+    [string]$subnet = $null
+    $subnet = Select-ExistingSubnets -Domain $domain -Role $role
+    Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
     if ([string]::IsNullOrWhiteSpace($subnet)) {
         return $null
     }
 
+    Write-verbose "[Show-ExistingNetwork] Calling Generate-ExistingConfig '$domain' '$subnet' '$role'"
     return Generate-ExistingConfig $domain $subnet $role
 }
 function Select-RolesForExisting {
 
-    $role = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
+    $role = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value -CurrentValue "DomainMember"
 
     return $role
     #   switch ($role) {
@@ -308,24 +359,26 @@ function Select-ExistingSubnets {
     while ($valid -eq $false) {
 
         $customOptions = @{ "N" = "add New Subnet to domain" }
-        $subnetList = Get-SubnetList -DomainName $Domain | Select -Expand Subnet | Get-Unique
+        $subnetList = Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Get-Unique
 
         $subnetListNew = @()
-        if ($Role -eq "Primary"){
+        if ($Role -eq "Primary") {
             foreach ($subnet in $subnetList) {
                 $existingPri = Get-ExistingForSubnet -Subnet $subnet -Role Primary
-                if ($null -eq $existingPri){
-                    $subnetListNew.Add($subnet)
+                if ($null -eq $existingPri) {
+                    $subnetListNew += $subnet
                 }                
             }
-        }else{
+        }
+        else {
             $subnetListNew = $subnetList
         }
-
+        [string]$response = $null
         $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListNew -AdditionalOptions $customOptions
-        #write-host "response $response"
-        if (-not $response) {
-            return $null
+        write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
+        if ([string]::IsNullOrWhiteSpace($response)) {
+            Write-Verbose "[Select-ExistingSubnets] Subnet response = null"
+            return
         }
         #write-host "response $response"
         if ($response.ToLowerInvariant() -eq "n") { 
@@ -335,12 +388,13 @@ function Select-ExistingSubnets {
             while (-not $network) {
                 $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
             }
-            $response = $network
+            $response = [string]$network
             
         }
-        $valid = Get-TestResult -Config (Generate-ExistingConfig -Domain $Domain -Subnet $response)
-    }
-    return $response
+        $valid = Get-TestResult -Config (Generate-ExistingConfig -Domain $Domain -Subnet $response -Role $Role)
+    }   
+    Write-Verbose "[Select-ExistingSubnets] Subnet response = $response"
+    return [string]$response
 }
 
 
@@ -361,10 +415,10 @@ function Generate-ExistingConfig {
 
     Write-Verbose "Generating $Domain $Subnet $role"
 
-    $prefix = Get-List -Type UniquePrefix -Domain $Domain | select -First 1
+    $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
 
     if ([string]::IsNullOrWhiteSpace($prefix)) {
-        $prefix = "CUSTOM-"
+        $prefix = "NULL-"
     }
     $vmOptions = [PSCustomObject]@{
         prefix          = $prefix
@@ -374,13 +428,14 @@ function Generate-ExistingConfig {
         network         = $Subnet
     }
 
-
+    $configGenerated = $null
     
-
+    $machineName = Get-NewMachineName $Domain $Role
+    Write-Verbose "Machine Name Generated $machineName"
     $virtualMachines = @()
     if ([string]::IsNullOrWhiteSpace($role) -or $role -eq "DomainMember") {
         $virtualMachines += [PSCustomObject]@{
-            vmName          = "NEWMember"
+            vmName          = $machineName
             role            = "DomainMember"
             operatingSystem = "Server 2022"
             memory          = "2GB"
@@ -389,8 +444,8 @@ function Generate-ExistingConfig {
     }
     elseif ($role -eq "DPMP") {
         $virtualMachines += [PSCustomObject]@{
-            vmName          = "NEWDPMP"
-            role            = "DPMP"
+            vmName          = $machineName
+            role            = $role
             operatingSystem = "Server 2022"
             memory          = "3GB"
             virtualProcs    = 2
@@ -405,30 +460,34 @@ function Generate-ExistingConfig {
             installDPMPRoles          = $true
             pushClientToDomainMembers = $true
         }
+        $newSiteCode = Get-NewSiteCode $Domain
         $virtualMachines += [PSCustomObject]@{
-            vmName          = "NEWPRI"
-            role            = "Primary"
+            vmName          = $machineName
+            role            = $role
             operatingSystem = "Server 2022"
             memory          = "12GB"
             sqlVersion      = "SQL Server 2019"
             sqlInstanceDir  = "C:\SQL"
             cmInstallDir    = "C:\ConfigMgr"
-            siteCode        = "PS2"
+            siteCode        = $newSiteCode
             virtualProcs    = 4
-        }         
+        }                
+    }
+    if ($role -eq "Primary") {
         $configGenerated = [PSCustomObject]@{
             cmOptions       = $newCmOptions
             vmOptions       = $vmOptions
             virtualMachines = $virtualMachines        
-        }                        
+        }
     }
-    if (-not $role -eq "Primary") {
+    else {
         $configGenerated = [PSCustomObject]@{
             #cmOptions       = $newCmOptions
             vmOptions       = $vmOptions
-            virtualMachines = $virtualMachines        
+            virtualMachines = $virtualMachines  
         }
     }
+    Write-Verbose "Config: $configGenerated"
     return $configGenerated
 }
 
@@ -699,12 +758,15 @@ function Select-Options {
                                 if ($Global:AddToExisting -eq $true) {
 
                                     $role = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
-                                    $property."$name" = $role                                    
+                                    $property."$name" = $role                                
                                 }
                                 else {
                                     $role = Get-Menu "Select Role" $($Common.Supported.Roles) $value
                                     $property."$name" = $role
                                 }
+
+                                $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
+                                $property.vmName = $newMachineName   
 
                                 if ($role -eq "Primary") {                                        
                                     if ($null -eq $($global:config.cmOptions)) {
@@ -727,11 +789,14 @@ function Select-Options {
                                         $property | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
                                     }
                                     if ($null -eq $($property.siteCode) ) {
-                                        $property | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value "PR2"
+                                        $newSiteCode = Get-NewSiteCode $Global:Config.vmOptions.domainName
+                                        $property | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
                                     }
                                     $property.Memory = "12GB"
                                     $property.operatingSystem = "Server 2022"
-                                    Select-Options $($global:config.cmOptions) "Select ConfigMgr Property to modify"
+                                    #$newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
+                                    #$property.vmName = $newMachineName
+                                    #Select-Options $($global:config.cmOptions) "Select ConfigMgr Property to modify"
                                 }
                                 
 
@@ -926,8 +991,9 @@ function Select-VirtualMachines {
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
+                $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role DomainMember -ConfigToCheck $Global:Config
                 $global:config.virtualMachines += [PSCustomObject]@{
-                    vmName          = "Member" + $([int]$i + 1)
+                    vmName          = $newMachineName
                     role            = "DomainMember"
                     operatingSystem = "Server 2022"
                     memory          = "2GB"
@@ -1091,9 +1157,10 @@ $Global:Config = $null
 $Global:Config = Select-ConfigMenu
 $Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
 $Global:AddToExisting = $false
-#if ($($deployConfig.parameters.existingDCName)) {
-#    $Global:AddToExisting = $true
-#}
+$existingDCName = $deployConfig.parameters.existingDCName
+if (-not [string]::IsNullOrWhiteSpace($existingDCName)) {
+    $Global:AddToExisting = $true
+}
 $valid = $false
 while ($valid -eq $false) {
     #Select-Options $($Global:Config.vmOptions) "Select Global Property to modify"
