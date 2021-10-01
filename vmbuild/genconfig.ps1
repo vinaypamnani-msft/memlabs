@@ -114,7 +114,7 @@ function Get-ValidSubnets {
         }
         if (-not $found) {
             $subnetlist += $newSubnet
-            if ($subnetlist.Count -gt 5) {
+            if ($subnetlist.Count -gt 8) {
                 break
             }
             
