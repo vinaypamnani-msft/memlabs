@@ -205,6 +205,7 @@ do {
 } until ($adiscovery.Value1.ToLower() -eq "active")
 
 # Restart services to make sure push account is acknowledged by CCM
+Write-DscStatus "Restarting services"
 Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
 Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
 

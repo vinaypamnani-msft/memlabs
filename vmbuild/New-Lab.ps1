@@ -376,6 +376,7 @@ $VM_Create = {
         else {
             # Don't wait, if we're not creating a new VM and running DSC on an existing VM
             Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+            Start-Sleep -Seconds 60 # Wait for DSC Status to do tests, and wait on the latest action
         }
 
     }
