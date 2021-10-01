@@ -192,7 +192,7 @@ function Get-NewSiteCode {
 
     if ($Role -eq "CAS") {
         $NumberOfCAS = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
-        if ($NumberOfCAS -eq 0){
+        if ($NumberOfCAS -eq 0) {
             return "CAS"
         }
         else {
@@ -760,13 +760,16 @@ function Select-Options {
                 return $return
             }
             $i = 0
-            $property | Get-Member -MemberType NoteProperty | ForEach-Object {
+            foreach ($item in ($property | Get-Member -MemberType NoteProperty)) {
+                
+            
+            #$property | Get-Member -MemberType NoteProperty | ForEach-Object {
                 $i = $i + 1
-                $value = $property."$($_.Name)"
+                $value = $property."$($item.Name)"
 
 
                 if ($response -eq $i) {
-                    $name = $($_.Name)
+                    $name = $($item.Name)
                     switch ($name) {
                         "operatingSystem" {
                             $valid = $false
@@ -801,7 +804,6 @@ function Select-Options {
                             $valid = $false
                             while ($valid -eq $false) {
                                 if ($Global:AddToExisting -eq $true) {
-
                                     $role = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value
                                     $property."$name" = $role                                
                                 }
@@ -809,141 +811,143 @@ function Select-Options {
                                     $role = Get-Menu "Select Role" $($Common.Supported.Roles) $value
                                     $property."$name" = $role
                                 }
-
-                                $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
-                                $property.vmName = $newMachineName   
-
-                                if ($role -eq "Primary" -or $role -eq "CAS") {                                        
-                                    if ($null -eq $($global:config.cmOptions)) {
-                                        $newCmOptions = [PSCustomObject]@{
-                                            version                   = "current-branch"
-                                            install                   = $true
-                                            updateToLatest            = $true
-                                            installDPMPRoles          = $true
-                                            pushClientToDomainMembers = $true
-                                        }
-                                        $global:config | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions                                        
-                                    }
-                                    if ($null -eq $($property.sqlVersion) ) {
-                                        $property | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
-                                    }
-                                    if ($null -eq $($property.cmInstallDir) ) {
-                                        $property | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "C:\ConfigMgr"
-                                    }
-                                    if ($null -eq $($property.sqlInstanceDir) ) {
-                                        $property | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
-                                    }
-                                    if ($null -eq $($property.siteCode) ) {
-                                        $newSiteCode = Get-NewSiteCode $Global:Config.vmOptions.domainName -Role $role
-                                        $property | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
-                                    }
-                                    $property.Memory = "12GB"
-                                    $property.operatingSystem = "Server 2022"
-                                    #$newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
-                                    #$property.vmName = $newMachineName
-                                    #Select-Options $($global:config.cmOptions) "Select ConfigMgr Property to modify"
-                                }
+                                Delete-VMFromConfig -vmName $property.vmName -ConfigToModify $global:config
+                                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config
+                                return "DELETED"
+                                #                             $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
+                                #                             $property.vmName = $newMachineName   
+                                #                             
+                                #                             if ($role -eq "Primary" -or $role -eq "CAS") {                                        
+                                #                                 if ($null -eq $($global:config.cmOptions)) {
+                                #                                     $newCmOptions = [PSCustomObject]@{
+                                #                                         version                   = "current-branch"
+                                #                                         install                   = $true
+                                #                                         updateToLatest            = $true
+                                #                                         installDPMPRoles          = $true
+                                #                                         pushClientToDomainMembers = $true
+                                #                                     }
+                                #                                     $global:config | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions                                        
+                                #                                 }
+                                #                                 if ($null -eq $($property.sqlVersion) ) {
+                                #                                     $property | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+                                #                                 }
+                                #                                 if ($null -eq $($property.cmInstallDir) ) {
+                                #                                     $property | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "C:\ConfigMgr"
+                                #                                 }
+                                #                                 if ($null -eq $($property.sqlInstanceDir) ) {
+                                #                                     $property | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+                                #                                 }
+                                #                                 if ($null -eq $($property.siteCode) ) {
+                                #                                     $newSiteCode = Get-NewSiteCode $Global:Config.vmOptions.domainName -Role $role
+                                #                                     $property | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
+                                #                                 }
+                                #                                 $property.Memory = "12GB"
+                                #                                 $property.operatingSystem = "Server 2022"
+                                #                                 #$newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
+                                #                                 #$property.vmName = $newMachineName
+                                #                                 #Select-Options $($global:config.cmOptions) "Select ConfigMgr Property to modify"
+                                #   }
                                 
 
 
-                                if (Get-TestResult -SuccessOnWarning) {
-                                    return
-                                }
-                                else {
-                                    if ($property."$name" -eq $value) {
-                                        return
-                                    }
-                                }
+                            if (Get-TestResult -SuccessOnWarning) {
+                                return
                             }
-                        }
-                        "version" {
-                            $valid = $false
-                            while ($valid -eq $false) {
-                                $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
-                                if (Get-TestResult -SuccessOnWarning) {
+                            else {
+                                if ($property."$name" -eq $value) {
                                     return
-                                }
-                                else {
-                                    if ($property."$name" -eq $value) {
-                                        return
-                                    }
-                                }
-                            }
-                        }
-                        "existingDCNameWithPrefix" {
-                            $valid = $false
-                            while ($valid -eq $false) {
-                                $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
-                                $property."$name" = Get-Menu "Select Existing DC" $vms $value
-                                if (Get-TestResult -SuccessOnWarning) {
-                                    return
-                                }
-                                else {
-                                    if ($property."$name" -eq $value) {
-                                        return
-                                    }
                                 }
                             }
                         }
                     }
-                    if ($value -is [System.Management.Automation.PSCustomObject]) {
-                        Select-Options $value "Select data to modify" | out-null
-                    }
-                    else {
-
+                    "version" {
                         $valid = $false
-                        Write-Host
                         while ($valid -eq $false) {
-                            if ($value -is [bool]) {
-                                $response2 = Get-Menu -Prompt "Select new Value for $($_.Name)" -CurrentValue $value -OptionArray @("True", "False") 
+                            $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $value
+                            if (Get-TestResult -SuccessOnWarning) {
+                                return
                             }
                             else {
-                                $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
-                            }
-                            if (-not [String]::IsNullOrWhiteSpace($response2)) {
-                                if ($property."$($_.Name)" -is [Int]) {
-                                    $property."$($_.Name)" = [Int]$response2
+                                if ($property."$name" -eq $value) {
+                                    return
                                 }
-                                else {
-                                    if ($value -is [bool]) {
-                                        if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
-                                            if ($response2.ToLowerInvariant() -eq "true") {
-                                                $response2 = $true
-                                            }
-                                            elseif ($response2.ToLowerInvariant() -eq "false") {
-                                                $response2 = $false
-                                            }
-                                            else {
-                                                $response2 = $value
-                                            }
-                                        }
-
-                                    }
-                                    $property."$($_.Name)" = $response2
-                                }                                
-                                $valid = Get-TestResult -SuccessOnWarning
-                                if ($response2 -eq $value) {
-                                    $valid = $true
-                                }
-                    
-                            }
-                            else {
-                                # Enter was pressed. Set the Default value, and test, but dont block.
-                                $property."$($_.Name)" = $value
-                                $valid = Get-TestResult -SuccessOnError                                
                             }
                         }
                     }
+                    "existingDCNameWithPrefix" {
+                        $valid = $false
+                        while ($valid -eq $false) {
+                            $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
+                            $property."$name" = Get-Menu "Select Existing DC" $vms $value
+                            if (Get-TestResult -SuccessOnWarning) {
+                                return
+                            }
+                            else {
+                                if ($property."$name" -eq $value) {
+                                    return
+                                }
+                            }
+                        }
+                    }
+                }
+                if ($value -is [System.Management.Automation.PSCustomObject]) {
+                    Select-Options $value "Select data to modify" | out-null
+                }
+                else {
 
+                    $valid = $false
+                    Write-Host
+                    while ($valid -eq $false) {
+                        if ($value -is [bool]) {
+                            $response2 = Get-Menu -Prompt "Select new Value for $($_.Name)" -CurrentValue $value -OptionArray @("True", "False") 
+                        }
+                        else {
+                            $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
+                        }
+                        if (-not [String]::IsNullOrWhiteSpace($response2)) {
+                            if ($property."$($_.Name)" -is [Int]) {
+                                $property."$($_.Name)" = [Int]$response2
+                            }
+                            else {
+                                if ($value -is [bool]) {
+                                    if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
+                                        if ($response2.ToLowerInvariant() -eq "true") {
+                                            $response2 = $true
+                                        }
+                                        elseif ($response2.ToLowerInvariant() -eq "false") {
+                                            $response2 = $false
+                                        }
+                                        else {
+                                            $response2 = $value
+                                        }
+                                    }
+
+                                }
+                                $property."$($_.Name)" = $response2
+                            }                                
+                            $valid = Get-TestResult -SuccessOnWarning
+                            if ($response2 -eq $value) {
+                                $valid = $true
+                            }
+                    
+                        }
+                        else {
+                            # Enter was pressed. Set the Default value, and test, but dont block.
+                            $property."$($_.Name)" = $value
+                            $valid = Get-TestResult -SuccessOnError                                
+                        }
+                    }
                 }
 
             }
-        }
-        else { 
-            $valid = Get-TestResult -SuccessOnError
-            return 
+
         }
     }
+    else { 
+        $valid = Get-TestResult -SuccessOnError
+        return 
+    }
+}
 }
 
 Function Get-TestResult {
@@ -1120,16 +1124,17 @@ function Select-VirtualMachines {
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
-                ###### $role =Select-RolesForExisting
-                $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role DomainMember -ConfigToCheck $Global:Config
-                $global:config.virtualMachines += [PSCustomObject]@{
-                    vmName          = $newMachineName
-                    role            = "DomainMember"
-                    operatingSystem = "Server 2022"
-                    memory          = "2GB"
-                    virtualProcs    = 2
-                }
-                $response = $i + 1
+                $role = Select-RolesForExisting
+                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config
+                #     $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role DomainMember -ConfigToCheck $Global:Config
+                #     $global:config.virtualMachines += [PSCustomObject]@{
+                #         vmName          = $newMachineName
+                #         role            = "DomainMember"
+                #         operatingSystem = "Server 2022"
+                #         memory          = "2GB"
+                #         virtualProcs    = 2
+                #     }
+                #     $response = $i + 1
             }
             $i = 0
             foreach ($virtualMachine in $global:config.virtualMachines) {
@@ -1155,6 +1160,9 @@ function Select-VirtualMachines {
                         $customOptions["D"] = "Delete this VM"
                         $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
                         if (([string]::IsNullOrEmpty($newValue))) {
+                            break
+                        }
+                        if ($newValue -eq "DELETED"){
                             break
                         }
                         if ($null -ne $newValue -and $newValue -is [string]) {
@@ -1216,25 +1224,51 @@ function Select-VirtualMachines {
                 }
             }
             if ($newValue -eq "D") {
-                $newvm = $global:config.virtualMachines | ConvertTo-Json | ConvertFrom-Json
-                $global:config.virtualMachines = @()
+                #$newvm = $global:config.virtualMachines | ConvertTo-Json | ConvertFrom-Json
+                #$global:config.virtualMachines = @()
+                #$i = 0
+                #foreach ($virtualMachine in $newvm) {
+                #    $i = $i + 1
+                #    if ($i -ne $response) {
+                #        $global:config.virtualMachines += $virtualMachine
+                #    }
+                #}
                 $i = 0
-                foreach ($virtualMachine in $newvm) {
+                foreach ($virtualMachine in $global:config.virtualMachines) {
                     $i = $i + 1
-                    if ($i -ne $response) {
-                        $global:config.virtualMachines += $virtualMachine
+                    if ($i -eq $response){
+                        Delete-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
                     }
-                }
+                }                       
             }
-
-
-
         }
         else {
             $valid = Get-TestResult -SuccessOnError
             return 
         }
     }
+}
+
+function Delete-VMFromConfig{
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $vmName,
+        [Parameter()]
+        [object]
+        $configToModify
+    )
+    $newvm = $configToModify.virtualMachines | ConvertTo-Json | ConvertFrom-Json
+    $configToModify.virtualMachines = @()
+    foreach ($virtualMachine in $newvm) {
+
+        if ($virtualMachine.vmName -ne $vmName) {
+            $configToModify.virtualMachines += $virtualMachine
+        }
+    }
+
+
 }
 
 function Save-Config {
