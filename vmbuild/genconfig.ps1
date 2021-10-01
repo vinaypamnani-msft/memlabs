@@ -204,7 +204,7 @@ function Select-NewDomainConfig {
     $customOptions = @{ "C" = "Custom Domain" }
     while (-not $domain) {
         $domain = Get-Menu -Prompt "Select Domain" -OptionArray $ValidDomainNames.Keys -additionalOptions $customOptions
-        if ($domain.ToLowerInvariant() = "c") {
+        if ($domain.ToLowerInvariant() -eq "c") {
             $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
         }
     }
@@ -561,12 +561,15 @@ function Get-Menu {
         foreach ($option in $OptionArray) {
             $i = $i + 1
             if ($i -eq $response) {
+                Write-Verbose "[Get-Menu] Returned (O) $option"
                 return $option
             }
         }
+        Write-Verbose "[Get-Menu] Returned (R) $response"
         return $response
     }
     else {
+        Write-Verbose "[Get-Menu] Returned (CV) $CurrentValue"
         return $CurrentValue
     }
 
