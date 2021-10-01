@@ -1026,7 +1026,7 @@ function Get-List {
                     $vmObject = [PSCustomObject]@{
                         VmName      = $vm.Name
                         Role        = $vmNoteObject.role
-                        Memory      = $vm.MemoryAssigned
+                        MemoryGB    = $vm.MemoryAssigned / 1GB
                         State       = $vm.State
                         Domain      = $vmNoteObject.domain
                         DomainAdmin = $vmNoteObject.domainAdmin
@@ -1041,7 +1041,7 @@ function Get-List {
                     $vmObject = [PSCustomObject]@{
                         VmName      = $vm.Name
                         Subnet      = $vmNet.SwitchName
-                        Memory      = $vm.MemoryAssigned
+                        MemoryGB    = $vm.MemoryAssigned / 1GB
                         State       = $vm.State
                         Role        = $null
                         Domain      = $null
