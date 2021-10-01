@@ -574,6 +574,11 @@ function New-VmNote {
             }
         }
 
+        if ($Role -eq "CAS" -or $Role -eq "Primary") {
+            $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
+            $vmNote | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $ThisVM.SiteCode
+        }
+
         $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
         $vm = Get-Vm $VmName -ErrorAction Stop
         if ($vm) {
