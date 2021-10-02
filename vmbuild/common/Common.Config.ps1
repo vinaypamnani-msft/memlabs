@@ -540,14 +540,16 @@ function Test-ValidRoleDC {
         }
 
         if (Test-SingleRole -VM $DCVM -ReturnObject $ReturnObject) {
+
             # Server OS
             Test-ValidVmServerOS -VM $DCVM -ReturnObject $ReturnObject
-        }
 
-        if ($DCVM.sqlVersion) {
-            Add-ValidationMessage -Message "$vmRole Validation: Adding SQL on Domain Controller is not supported." -ReturnObject $ReturnObject -Warning
-        }
+            # No SQL on DC
+            if ($DCVM.sqlVersion) {
+                Add-ValidationMessage -Message "$vmRole Validation: Adding SQL on Domain Controller is not supported." -ReturnObject $ReturnObject -Warning
+            }
 
+        }
     }
     else {
 
