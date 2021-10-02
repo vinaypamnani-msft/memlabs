@@ -882,7 +882,7 @@ function Select-Options {
                                     $property."$name" = $role
                                 }
                                 Delete-VMFromConfig -vmName $property.vmName -ConfigToModify $global:config
-                                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config
+                                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -Name $property.vmName
                                 return "DELETED"
                                 #                             $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
                                 #                             $property.vmName = $newMachineName
@@ -1110,12 +1110,19 @@ function Add-NewVMForRole {
         $Domain,
         [Parameter()]
         [object]
-        $ConfigToModify
+        $ConfigToModify,
+        [Parameter()]
+        [string]
+        $Name = $null
     )
 
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify"
+    if ([string]::IsNullOrWhiteSpace($Name)){
     $machineName = Get-NewMachineName $Domain $Role
     Write-Verbose "Machine Name Generated $machineName"
+    }else {
+        $machineName = $Name
+    }
 
     $virtualMachine = [PSCustomObject]@{
         vmName          = $machineName
