@@ -1172,9 +1172,12 @@ public static class DisableConsoleQuickEdit
     }
 }
 "@
-[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-$QuickEditMode = add-type -TypeDefinition $QuickEditCodeSnippet -Language CSharp
 
+if ($null -eq $QuickEditMode) {
+    try{
+    $QuickEditMode = add-type -TypeDefinition $QuickEditCodeSnippet -Language CSharp -ErrorAction SilentlyContinue
+    }catch{}
+}
 
 function Set-QuickEdit() {
     [CmdletBinding()]
