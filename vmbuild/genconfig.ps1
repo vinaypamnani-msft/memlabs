@@ -63,6 +63,7 @@ function Select-ConfigMenu {
         $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration"; 
         "4" = "Load saved config from File";"R" = "Regenerate Rdcman file from Hyper-V config" ;"D" = "Delete an existing domain"; }
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
+        write-host
         write-Verbose "response $response"
         if (-not $response) {
             continue
