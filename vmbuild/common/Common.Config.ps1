@@ -793,23 +793,25 @@ function Test-Configuration {
         $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
         $vmName = $PSVM.vmName
         $vmRole = $PSVM.role
+        $psParentSiteCode = $PSVM.parentSiteCode
 
         Test-ValidRoleCSPS -VM $PSVM -ReturnObject $return
 
         # Valid parent Site Code
-        if ($PSVM.parentSiteCode) {
-            $existingSiteCodes = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "CAS" | Select-Object -ExpandProperty SiteCode
+        if ($psParentSiteCode) {
+            $existingSiteCodes = @()
+            $existingSiteCodes += Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "CAS" | Select-Object -ExpandProperty SiteCode
             if ($containsCS) {
                 $existingSiteCodes += $CSVM.siteCode
             }
 
             $parentCodes = $existingSiteCodes -split ","
-            if ($PSVM.parentSiteCode -notin $existingSiteCodes) {
-                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$($PSVM.parentSiteCode)] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
+            if ($psParentSiteCode -notin $existingSiteCodes) {
+                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
             }
         }
 
-        if ($PSVM.parentSiteCode -and $deployConfig.parameters.ExistingCASName -and $deployConfig.cmOptions.updateToLatest) {
+        if ($psParentSiteCode -and $deployConfig.parameters.ExistingCASName -and $deployConfig.cmOptions.updateToLatest) {
             $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object {$_.State -ne "Running" }
             $notRunningNames = $notRunning.vmName -split ","
             if ($notRunning.Count -gt 0) {
