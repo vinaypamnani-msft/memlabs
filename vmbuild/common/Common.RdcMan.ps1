@@ -8,15 +8,15 @@ function Install-RDCman {
     $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
     $Global:newrdcmanpath = "C:\tools"
     $rdcmanexe = "RDCMan.exe"
-   
+
     # create C:\tools if not present
     if (-not (Test-Path $Global:newrdcmanpath)) {
         New-Item -Path $Global:newrdcmanpath -ItemType Directory -Force -ErrorAction SilentlyContinue
     }
-   
+
     # Download rdcman, if not present
     if (-not (Test-Path "$rdcmanapath\$rdcmanexe")) {
-   
+
         try {
             $ProgressPreference = 'SilentlyContinue'
             Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination "$Global:newrdcmanpath\$rdcmanexe" -ErrorAction SilentlyContinue
@@ -34,7 +34,7 @@ function Install-RDCman {
     # set file associations
     & cmd /c assoc .rdg=rdcman | Out-Null
     & cmd /c ftype rdcman=$Global:newrdcmanpath\$rdcmanexe | Out-Null
-     
+
 }
 
 function New-RDCManFile {
@@ -87,7 +87,7 @@ function New-RDCManFile {
         }
     }
     else {
-        Write-Log "New-RDCManFile: Cound not located $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
+        Write-Log "New-RDCManFile: Could not locate $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
         return
     }
 
@@ -147,10 +147,10 @@ function New-RDCManFileFromHyperV {
     param(
         [string]$rdcmanfile
     )
-    
+
 
     if (test-path $rdcmanfile) {
-        Write-Log "New-RDCManFile: Killing RDCMan, and Deleting $rdcmanfile." -Success
+        Write-Log "New-RDCManFile: Killing RDCMan, and Deleting $rdcmanfile."
         Get-Process -Name rdcman -ea Ignore | Stop-Process
         Start-Sleep 1
         Remove-Item $rdcmanfile | out-null
@@ -226,7 +226,7 @@ function New-RDCManFileFromHyperV {
             if (Add-RDCManServerToGroup $vm $findgroup $groupFromTemplate $existing -eq $True) {
                 $shouldSave = $true
             }
-        }     
+        }
 
         # Add new group
         [void]$file.AppendChild($findgroup)
@@ -258,7 +258,7 @@ function Add-RDCManServerToGroup {
         $groupFromTemplate,
         $existing
     )
-   
+
     $findserver = $findgroup.server | Where-Object { $_.properties.name -eq $serverName } | Select-Object -First 1
     if ($null -eq $findserver) {
         Write-Log "Add-RDCManServerToGroup: Added $serverName to RDG Group" -LogOnly
