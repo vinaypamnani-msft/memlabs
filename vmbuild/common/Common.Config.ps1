@@ -801,7 +801,7 @@ function Test-Configuration {
         if ($psParentSiteCode) {
             $casSiteCodes = Get-ValidCASSiteCodes -Config $deployConfig
             $parentCodes = $casSiteCodes -join ","
-            if ($psParentSiteCode -notin $existingSiteCodes) {
+            if ($psParentSiteCode -notin $casSiteCodes) {
                 Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
             }
         }
