@@ -464,7 +464,7 @@ function Show-ExistingNetwork {
 }
 function Select-RolesForExisting {
 
-    $role = Get-Menu "Select Role to Add" $($Common.Supported.RolesForExisting) $value -CurrentValue "DomainMember"
+    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($Common.Supported.RolesForExisting) -CurrentValue "DomainMember"
 
     return $role
     #   switch ($role) {
@@ -492,7 +492,6 @@ function Select-ExistingSubnets {
         $subnetList = @()
         $subnetList += Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Get-Unique
 
-        $subnetList += "192.168.50.0"
         $subnetListNew = @()
         if ($Role -eq "Primary" -or $Role -eq "CAS") {
             foreach ($subnet in $subnetList) {
@@ -505,7 +504,6 @@ function Select-ExistingSubnets {
         else {
             $subnetListNew = $subnetList
         }
-
         
         $subnetListModified = @()
         foreach ($sb in $subnetListNew) {
@@ -636,7 +634,7 @@ function Get-Menu {
         [string]
         $CurrentValue,
         [object]
-        $additionalOptions,
+        $additionalOptions = $null,
         [bool]
         $Test = $true
     )
@@ -647,14 +645,18 @@ function Get-Menu {
 
     foreach ($option in $OptionArray) {
         $i = $i + 1
-        Write-Option $i $option
+        if (-not [String]::IsNullOrWhiteSpace($option)) {
+            Write-Option $i $option
+        }
     }
 
     if ($null -ne $additionalOptions) {
         $additionalOptions.keys | ForEach-Object {
             $value = $additionalOptions."$($_)"
             #Write-Host -ForegroundColor DarkGreen [$_] $value
-            Write-Option $_ $value -color DarkGreen -Color2 Green
+            if (-not [String]::IsNullOrWhiteSpace($_)) {
+                Write-Option $_ $value -color DarkGreen -Color2 Green
+            }
         }
     }
 
