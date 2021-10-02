@@ -935,7 +935,7 @@ function New-DeployConfig {
     # CSName (prefer name in config over existing)
     $containsPS = $configObject.virtualMachines.role.Contains("Primary")
     if ($containsPS) {
-        $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" }
+        $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PSVM.parentSiteCode
         $existingCSName = $existingCS.vmName
         $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
