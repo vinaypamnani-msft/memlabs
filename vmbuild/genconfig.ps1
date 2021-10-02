@@ -1,8 +1,7 @@
 [CmdletBinding()]
 param (
-    [Parameter()]
-    [Switch]
-    $InternalUseOnly
+    [Parameter(Mandatory = $false, HelpMessage = "Used when calling from New-Lab")]
+    [Switch] $InternalUseOnly
 )
 
 $return = [PSCustomObject]@{
@@ -34,15 +33,14 @@ function write-help {
 function Write-Option {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [string]
-        $option,
-        [string]
-        $text,
-        [object]
-        $color,
-        [object]
-        $color2
+        [Parameter(Mandatory = $true, HelpMessage = "Option to display. Eg 1")]
+        [string] $option,
+        [Parameter(Mandatory = $true, HelpMessage = "Description of the option")]
+        [string] $text,
+        [Parameter(Mandatory = $false, HelpMessage = "Description Color")]
+        [object] $color,
+        [Parameter(Mandatory = $false, HelpMessage = "Option Color")]
+        [object] $color2
     )
 
     if ($null -eq $color) {
@@ -204,23 +202,18 @@ function Get-ValidSubnets {
 
         }
     }
-
     return $subnetlist
-
 }
 
 function Get-NewMachineName {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [String]
-        $Domain,
-        [Parameter()]
-        [String]
-        $Role,
-        [Parameter()]
-        [Object]
-        $ConfigToCheck = $global:config
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [String] $Domain,
+        [Parameter(Mandatory = $true, HelpMessage = "Role of the new machine")]
+        [String] $Role,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
+        [Object] $ConfigToCheck = $global:config
     )
     $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
     Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
@@ -251,12 +244,10 @@ function Get-NewMachineName {
 function Get-NewSiteCode {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [String]
-        $Domain,
-        [Parameter()]
-        [String]
-        $Role
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [String] $Domain,
+        [Parameter(Mandatory = $true, HelpMessage = "Role of the machine CAS/Primary")]
+        [String] $Role
     )
 
     if ($Role -eq "CAS") {
@@ -277,12 +268,14 @@ function Get-NewSiteCode {
 
 function Select-NewDomainConfig {
 
+    # Old List.. Some have netbios portions longer than 15 chars
     #$ValidDomainNames = [System.Collections.ArrayList]("adatum.com", "adventure-works.com", "alpineskihouse.com", "bellowscollege.com", "bestforyouorganics.com", "contoso.com", "contososuites.com",
     #   "consolidatedmessenger.com", "fabrikam.com", "fabrikamresidences.com", "firstupconsultants.com", "fourthcoffee.com", "graphicdesigninstitute.com", "humongousinsurance.com",
     #   "lamnahealthcare.com", "libertysdelightfulsinfulbakeryandcafe.com", "lucernepublishing.com", "margiestravel.com", "munsonspicklesandpreservesfarm.com", "nodpublishers.com",
     #   "northwindtraders.com", "proseware.com", "relecloud.com", "fineartschool.net", "southridgevideo.com", "tailspintoys.com", "tailwindtraders.com", "treyresearch.net", "thephone-company.com",
     #  "vanarsdelltd.com", "wideworldimporters.com", "wingtiptoys.com", "woodgrovebank.com", "techpreview.com" )
 
+    #Trimmed list, only showing domains with 15 chars or less in netbios portion
     $ValidDomainNames = @{"adatum.com" = "ADA-" ; "adventure-works.com" = "ADV-" ; "alpineskihouse.com" = "ALP-" ; "bellowscollege.com" = "BLC-" ; "contoso.com" = "CON-" ; "contososuites.com" = "COS-" ;
         "fabrikam.com" = "FAB-" ; "fourthcoffee.com" = "FOR-" ;
         "lamnahealthcare.com" = "LAM-"  ; "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
@@ -352,13 +345,11 @@ function Select-NewDomainConfig {
 function Select-Config {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [string]
-        $ConfigPath,
+        [Parameter(Mandatory = $true, HelpMessage = "Directory to look for .json files")]
+        [string] $ConfigPath,
         # -NoMore switch will hide the [M] More options when we go into the submenu
-        [Parameter()]
-        [switch]
-        $NoMore
+        [Parameter(Mandatory = $false, HelpMessage = "will hide the [M] More options when we go into the submenu")]
+        [switch] $NoMore
     )
     $files = @()
     $files += Get-ChildItem $ConfigPath\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
@@ -467,22 +458,16 @@ function Select-RolesForExisting {
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($Common.Supported.RolesForExisting) -CurrentValue "DomainMember"
 
     return $role
-    #   switch ($role) {
-    #       "Primary" { }
-    #       "DomainMember" { }
-    #       "DPMP" {}
-    #   }
+
 }
 
 function Select-ExistingSubnets {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [string]
-        $Domain,
-        [Parameter()]
-        [string]
-        $Role
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [String] $Domain,
+        [Parameter(Mandatory = $true, HelpMessage = "Role")]
+        [String] $Role
     )
 
     $valid = $false
@@ -495,8 +480,10 @@ function Select-ExistingSubnets {
         $subnetListNew = @()
         if ($Role -eq "Primary" -or $Role -eq "CAS") {
             foreach ($subnet in $subnetList) {
-                $existingRole = Get-ExistingForSubnet -Subnet $subnet -Role $Role
-                if ($null -eq $existingRole) {
+                # If a subnet has a Primary or a CAS in it.. we can not add either.
+                $existingRolePri = Get-ExistingForSubnet -Subnet $subnet -Role Primary
+                $existingRoleCAS = Get-ExistingForSubnet -Subnet $subnet -Role CAS
+                if ($null -eq $existingRolePri -and $null -eq $existingRoleCAS) {
                     $subnetListNew += $subnet
                 }
             }
@@ -548,18 +535,14 @@ function Select-ExistingSubnets {
 function Generate-ExistingConfig {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [string]
-        $Domain,
-        [Parameter()]
-        [string]
-        $Subnet,
-        [Parameter()]
-        [string]
-        $Role,
-        [Parameter()]
-        [string]
-        $ParentSiteCode = $null
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [String] $Domain,
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [string] $Subnet,
+        [Parameter(Mandatory = $true, HelpMessage = "Role")]
+        [String] $Role,
+        [Parameter(Mandatory = $false, HelpMessage = "Parent Side code, if we are deploying a primary in a heirarchy")]
+        [string] $ParentSiteCode = $null
     )
 
     Write-Verbose "Generating $Domain $Subnet $role $ParentSiteCode"
@@ -594,15 +577,12 @@ function Generate-ExistingConfig {
 function Read-Host2 {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [string]
-        $prompt,
-        [Parameter()]
-        [string]
-        $currentValue,
-        [Parameter()]
-        [switch]
-        $HideHelp
+        [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
+        [string] $prompt,
+        [Parameter(Mandatory = $false, HelpMessage = "shows current value in []")]
+        [string] $currentValue,
+        [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
+        [switch] $HideHelp
     )
     if (-not $HideHelp.IsPresent) {
         write-help
@@ -624,19 +604,16 @@ function Read-Host2 {
 function Get-Menu {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [string]
-        $Prompt,
-        [Parameter()]
-        [object]
-        $OptionArray,
-        [Parameter()]
-        [string]
-        $CurrentValue,
-        [object]
-        $additionalOptions = $null,
-        [bool]
-        $Test = $true
+        [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
+        [string] $prompt,
+        [Parameter(Mandatory = $false, HelpMessage = "Array of objects to display a menu from")]
+        [object] $OptionArray,
+        [Parameter(Mandatory = $false, HelpMessage = "The default if enter is pressed")]
+        [string] $CurrentValue,
+        [Parameter(Mandatory = $false, HelpMessage = "Additional Menu options, in dictionary format.. X = Exit")]
+        [object] $additionalOptions = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
+        [bool] $Test = $true
     )
 
     write-Host
@@ -689,21 +666,18 @@ function Get-Menu {
 function get-ValidResponse {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [string]
-        $Prompt,
-        [Parameter()]
-        [int]
-        $max,
-        [Parameter()]
-        [string]
-        $currentValue,
-        [object]
-        $additionalOptions,
+        [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
+        [string] $prompt,
+        [Parameter(Mandatory = $true, HelpMessage = "Max # to be valid.  If your Menu is 1-5, 5 is the max. Higher numbers will fail")]
+        [int] $max,
+        [Parameter(Mandatory = $false, HelpMessage = "Current value will be returned if enter is pressed")]
+        [string] $currentValue,
+        [Parameter(Mandatory = $false, HelpMessage = "Extra Valid entries that allow escape.. EG X = Exit")]
+        [object] $additionalOptions,
         [switch]
         $AnyString,
-        [switch]
-        $TestBeforeReturn
+        [Parameter(Mandatory = $false, HelpMessage = "Run a test-Configuration before exiting")]
+        [switch] $TestBeforeReturn
 
     )
 
@@ -769,15 +743,12 @@ function get-ValidResponse {
 function Select-Options {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [object]
-        $property,
-        [Parameter()]
-        [string]
-        $prompt,
-        [Parameter(Mandatory = $false)]
-        [PSCustomObject]
-        $additionalOptions
+        [Parameter(Mandatory = $true, HelpMessage = "Property to Enumerate and automatically display a menu")]
+        [object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
+        [string] $prompt,
+        [Parameter(Mandatory = $false, HelpMessage = "Append additional Items to menu.. Eg X = Exit")]
+        [PSCustomObject] $additionalOptions
 
     )
 
@@ -1005,15 +976,12 @@ function Select-Options {
 Function Get-TestResult {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [switch]
-        $SuccessOnWarning,
-        [Parameter()]
-        [switch]
-        $SuccessOnError,
-        [Parameter()]
-        [object]
-        $config = $Global:Config
+        [Parameter(Mandatory = $false, HelpMessage = "Returns true even if warnings are present")]
+        [switch] $SuccessOnWarning,
+        [Parameter(Mandatory = $false, HelpMessage = "Returns true even if errors are present")]
+        [switch] $SuccessOnError,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to check")]
+        [object] $config = $Global:Config
     )
     #If Config hasnt been generated yet.. Nothing to test
     if ($null -eq $config) {
@@ -1040,9 +1008,8 @@ Function Get-TestResult {
 function get-VMString {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [object]
-        $virtualMachine
+        [Parameter(Mandatory = $true, HelpMessage = "VirtualMachine Object from config")]
+        [object] $virtualMachine
     )
 
     $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(15, " ")
@@ -1089,21 +1056,16 @@ function get-VMString {
 function Add-NewVMForRole {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [string]
-        $Role,
-        [Parameter()]
-        [string]
-        $Domain,
-        [Parameter()]
-        [object]
-        $ConfigToModify,
-        [Parameter()]
-        [string]
-        $Name = $null,
-        [Parameter()]
-        [string]
-        $ParentSiteCode = $null
+        [Parameter(Mandatory = $true, HelpMessage = "Role")]
+        [String] $Role,
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [String] $Domain,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "Force VM Name. Otherwise auto-generated")]
+        [string] $Name = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary in a Heirarchy")]
+        [string] $ParentSiteCode = $null
     )
 
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify"
@@ -1325,12 +1287,10 @@ function Select-VirtualMachines {
 function Remove-VMFromConfig {
     [CmdletBinding()]
     param (
-        [Parameter()]
-        [string]
-        $vmName,
-        [Parameter()]
-        [object]
-        $configToModify
+        [Parameter(Mandatory = $true, HelpMessage = "Name of VM to remove.")]
+        [string] $vmName,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
+        [object] $configToModify = $global:config
     )
     $newvm = $configToModify.virtualMachines | ConvertTo-Json | ConvertFrom-Json
     $configToModify.virtualMachines = @()
