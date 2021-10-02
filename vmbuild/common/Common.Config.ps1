@@ -804,7 +804,15 @@ function Test-Configuration {
             }
 
             if ($PSVM.parentSiteCode -notin $existingSiteCodes) {
-                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$($PSVM.parentSiteCode)] which is invalid." -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$($PSVM.parentSiteCode)] which is invalid. Valid Site Codes: $existingSiteCodes" -ReturnObject $return -Failure
+            }
+        }
+
+        if ($PSVM.parentSiteCode -and $deployConfig.parameters.ExistingCASName -and $deployConfig.cmOptions.updateToLatest) {
+            $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object {$_.State -ne "Running" }
+            $notRunningNames = $notRunning.vmName -split ","
+            if ($notRunning.Count -gt 0) {
+                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Failure
             }
         }
     }
@@ -1032,6 +1040,7 @@ function Get-ExistingSiteServer {
                         Role     = $vm.Role
                         SiteCode = $vm.siteCode
                         Domain   = $vm.domain
+                        State    = $vm.State
                     }
                     $existingValue += $so
                 }
@@ -1043,6 +1052,7 @@ function Get-ExistingSiteServer {
                         Role     = $vm.Role
                         SiteCode = $vm.siteCode
                         Domain   = $vm.domain
+                        State    = $vm.State
                     }
                     $existingValue += $so
                 }
