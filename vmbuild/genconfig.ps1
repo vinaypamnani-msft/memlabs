@@ -937,21 +937,21 @@ function Select-Options {
                             }
                         }
                     }
-                    "existingDCNameWithPrefix" {
-                        $valid = $false
-                        while ($valid -eq $false) {
-                            $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
-                            $property."$name" = Get-Menu "Select Existing DC" $vms $value
-                            if (Get-TestResult -SuccessOnWarning) {
-                                return
-                            }
-                            else {
-                                if ($property."$name" -eq $value) {
-                                    return
-                                }
-                            }
-                        }
-                    }
+                    # "existingDCNameWithPrefix" {
+                    #     $valid = $false
+                    #     while ($valid -eq $false) {
+                    #         $vms = Get-VM -ErrorAction SilentlyContinue | Select-Object -Expand Name
+                    #         $property."$name" = Get-Menu "Select Existing DC" $vms $value
+                    #         if (Get-TestResult -SuccessOnWarning) {
+                    #             return
+                    #         }
+                    #         else {
+                    #             if ($property."$name" -eq $value) {
+                    #                 return
+                    #             }
+                    #         }
+                    #     }
+                    # }
                 }
                 if ($value -is [System.Management.Automation.PSCustomObject]) {
                     Select-Options $value "Select data to modify" | out-null
@@ -1035,6 +1035,7 @@ Function Get-TestResult {
     $c = Test-Configuration -InputObject $Config
     $valid = $c.Valid
     if ($valid -eq $false) {
+        # $MyInvocation | Out-Host
         Write-Host -ForegroundColor Red $c.Message
     }
     if ($SuccessOnWarning.IsPresent) {
@@ -1177,7 +1178,7 @@ function Select-VirtualMachines {
     while ($true) {
         Write-Host ""
         $i = 0
-        $valid = Get-TestResult -SuccessOnError
+        #$valid = Get-TestResult -SuccessOnError
         foreach ($virtualMachine in $global:config.virtualMachines) {
             $i = $i + 1
             $name = Get-VMString $virtualMachine
