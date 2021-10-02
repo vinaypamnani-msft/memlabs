@@ -55,11 +55,10 @@ function Write-Option {
     Write-Host -ForegroundColor $color "$text"
 
 }
-
 function Select-ConfigMenu {
     while ($true) {
         $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration";
-            "4" = "Load saved config from File"; "R" = "Regenerate Rdcman file from Hyper-V config" ; "D" = "Delete an existing domain"; 
+            "4" = "Load saved config from File"; "R" = "Regenerate Rdcman file from Hyper-V config" ; "D" = "Delete an existing domain%Red%Yellow"; 
         }
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
         write-host
@@ -162,11 +161,11 @@ function Select-MainMenu {
             $customOptions += @{"2" = "Global CM Options `t`t $(get-CMOptionsSummary)" }
         }
         $customOptions += @{"3" = "Virtual Machines `t`t $(get-VMSummary)" }
-
-        if ($InternalUseOnly.IsPresent) {
-            $customOptions += @{ "D" = "Deploy Config" }
-        }
         $customOptions += @{ "S" = "Save and Exit" }
+        if ($InternalUseOnly.IsPresent) {
+            $customOptions += @{ "D" = "Deploy Config%Green%Green" }
+        }
+        
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -Test:$false
         write-Verbose "response $response"
         if (-not $response) {
@@ -434,13 +433,14 @@ function Show-ExistingNetwork {
             #$existingSiteCodes += ($global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode  
             
             $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
-            $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions
+            $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions -Test $false
             if ($result.ToLowerInvariant() -eq "x") {
                 $ParentSiteCode = $null
             }
             else {
                 $ParentSiteCode = $result
             }
+            Get-TestResult -SuccessOnError | out-null
         }
     }
     [string]$subnet = $null
@@ -629,10 +629,22 @@ function Get-Menu {
 
     if ($null -ne $additionalOptions) {
         $additionalOptions.keys | ForEach-Object {
+
+            $color1 = "DarkGreen"
+            $color2 = "Green"
+
             $value = $additionalOptions."$($_)"
             #Write-Host -ForegroundColor DarkGreen [$_] $value
             if (-not [String]::IsNullOrWhiteSpace($_)) {
-                Write-Option $_ $value -color DarkGreen -Color2 Green
+                $TextValue = $value -split "%"
+                
+                if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
+                    $color1 = $TextValue[1]
+                }
+                if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
+                    $color2 = $TextValue[2]
+                }
+                Write-Option $_ $TextValue[0] -color $color1 -Color2 $color2
             }
         }
     }
@@ -748,8 +760,9 @@ function Select-Options {
         [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
         [string] $prompt,
         [Parameter(Mandatory = $false, HelpMessage = "Append additional Items to menu.. Eg X = Exit")]
-        [PSCustomObject] $additionalOptions
-
+        [PSCustomObject] $additionalOptions,
+        [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
+        [bool] $Test = $true
     )
 
     while ($true) {
@@ -868,10 +881,9 @@ function Select-Options {
                                 }
                                 Remove-VMFromConfig -vmName $property.vmName -ConfigToModify $global:config
                                 $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -Name $property.vmName
-                                return "DELETED"
 
-                                if (Get-TestResult -SuccessOnWarning) {
-                                    return
+                                if (Get-TestResult -config $global:config -SuccessOnWarning) {
+                                    return "DELETED"
                                 }
                                 else {
                                     if ($property."$name" -eq $value) {
@@ -948,7 +960,12 @@ function Select-Options {
                                     Write-Verbose ("$_ name = $($_.Name) or $name = $response2")
                                     $property."$($Name)" = $response2
                                 }
-                                $valid = Get-TestResult -SuccessOnWarning
+                                if ($Test.IsPresent) {
+                                    $valid = Get-TestResult -SuccessOnWarning
+                                }
+                                else {
+                                    $valid = $true
+                                }
                                 if ($response2 -eq $value) {
                                     $valid = $true
                                 }
@@ -967,7 +984,12 @@ function Select-Options {
             }
         }
         else {
-            $valid = Get-TestResult -SuccessOnError
+            if ($Test.IsPresent) {
+                $valid = Get-TestResult -SuccessOnError
+            }
+            else {
+                $valid = $true
+            }        
             return
         }
     }
@@ -1150,7 +1172,7 @@ function Add-NewVMForRole {
     }
 
     if ($existingPrimary -gt 0) {
-        ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" }).ParentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" }).SiteCode
+        ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).ParentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
     }
 
     if ($existingDPMP -eq 0) {
@@ -1179,7 +1201,8 @@ function Select-VirtualMachines {
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
                 $role = Select-RolesForExisting
-                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config               
+                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config
+                Get-TestResult -SuccessOnError | out-null               
             }
             $i = 0
             foreach ($virtualMachine in $global:config.virtualMachines) {
@@ -1201,7 +1224,7 @@ function Select-VirtualMachines {
                             $customOptions["X"] = "Remove SQL"
                         }
                         $customOptions["D"] = "Delete this VM"
-                        $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions
+                        $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions -Test:$false
                         if (([string]::IsNullOrEmpty($newValue))) {
                             break
                         }
@@ -1263,7 +1286,9 @@ function Select-VirtualMachines {
                                 $virtualMachine.psobject.properties.remove('additionalDisks')
                             }
                         }
-                        Get-TestResult -SuccessOnError | out-null
+                        if (-not $newValue -eq "D") {
+                            Get-TestResult -SuccessOnError | out-null
+                        }
                     }
                 }
             }
@@ -1292,6 +1317,7 @@ function Remove-VMFromConfig {
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
         [object] $configToModify = $global:config
     )
+    $DeletedVM = $null
     $newvm = $configToModify.virtualMachines | ConvertTo-Json | ConvertFrom-Json
     $configToModify.virtualMachines = @()
     foreach ($virtualMachine in $newvm) {
@@ -1299,6 +1325,16 @@ function Remove-VMFromConfig {
         if ($virtualMachine.vmName -ne $vmName) {
             $configToModify.virtualMachines += $virtualMachine
         }
+        else {
+            $DeletedVM = $virtualMachine
+        }
+    }
+    if ($DeletedVM.Role -eq "CAS"){
+        $primaryParentSideCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).ParentSiteCode
+        if ($primaryParentSideCode -eq $DeletedVM.SiteCode) {
+            ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).ParentSiteCode = $null
+        }
+
     }
 }
 
