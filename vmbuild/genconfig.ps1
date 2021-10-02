@@ -220,16 +220,21 @@ function Get-NewMachineName {
         $Role,
         [Parameter()]
         [Object]
-        $ConfigToCheck
+        $ConfigToCheck = $global:config
     )
-    $RoleCount = (get-list -Type VM -DomainName $Domain | where { $_.Role -eq $Role } | Measure-Object).Count
+    $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
+    Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
     $RoleName = $Role
     if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role)) {
         $RoleName = "Member"
     }
+
+    $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
+    Write-Verbose "[Get-NewMachineName] found $ConfigCount machines in Config with role $Role"
+    $TotalCount = [int]$RoleCount + [int]$ConfigCount
     [int]$i = 1
     while ($true) {
-        $NewName = $RoleName + ($RoleCount + $i)
+        $NewName = $RoleName + ($TotalCount + $i)
         if ($null -eq $ConfigToCheck) {
             break
         }
@@ -313,7 +318,7 @@ function Select-NewDomainConfig {
         $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
     }
 
-    $customOptions = [ordered]@{ "1" = "CAS and Primary"; "2" = "Primary Site only"; "3" = "No Configmgr" }
+    $customOptions = [ordered]@{ "1" = "CAS and Primary"; "2" = "Primary Site only"; "3" = "Tech Preview (NO CAS)" ; "4" = "No Configmgr"; }
     $response = $null
     while (-not $response) {
         $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
@@ -322,10 +327,18 @@ function Select-NewDomainConfig {
     $CASJson = Join-Path $sampleDir "Hierarchy.json"
     $PRIJson = Join-Path $sampleDir "Standalone.json"
     $NoCMJson = Join-Path $sampleDir "NoConfigMgr.json"
+    $TPJson = Join-Path $sampleDir "TechPreview.json"
     switch ($response.ToLowerInvariant()) {
         "1" { $newConfig = Get-Content $CASJson -Force | ConvertFrom-Json }
         "2" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }
-        "3" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
+        "3" {
+            $newConfig = Get-Content $TPJson -Force | ConvertFrom-Json
+            $usedPrefixes = Get-List -Type UniquePrefix
+            if ("CTP-" -notin $usedPrefixes) {
+                $prefix = "CTP-"
+            }
+        }
+        "4" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
     }
 
     $newConfig.vmOptions.domainName = $domain
@@ -420,6 +433,25 @@ function Show-ExistingNetwork {
         return $null
     }
     [string]$role = Select-RolesForExisting
+
+    if ($role -eq "Primary") {
+        $ExistingCasCount = (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
+        if ($ExistingCasCount -gt 0) {
+
+            $existingSiteCodes = @()
+            $existingSiteCodes += (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" }).SiteCode
+            #$existingSiteCodes += ($global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode  
+            
+            $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
+            $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions
+            if ($result.ToLowerInvariant() -eq "x") {
+                $ParentSiteCode = $null
+            }
+            else {
+                $ParentSiteCode = $result
+            }
+        }
+    }
     [string]$subnet = $null
     $subnet = Select-ExistingSubnets -Domain $domain -Role $role
     Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
@@ -428,11 +460,11 @@ function Show-ExistingNetwork {
     }
 
     Write-verbose "[Show-ExistingNetwork] Calling Generate-ExistingConfig '$domain' '$subnet' '$role'"
-    return Generate-ExistingConfig $domain $subnet $role
+    return Generate-ExistingConfig $domain $subnet $role -ParentSiteCode $ParentSiteCode
 }
 function Select-RolesForExisting {
 
-    $role = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $value -CurrentValue "DomainMember"
+    $role = Get-Menu "Select Role to Add" $($Common.Supported.RolesForExisting) $value -CurrentValue "DomainMember"
 
     return $role
     #   switch ($role) {
@@ -471,14 +503,28 @@ function Select-ExistingSubnets {
         else {
             $subnetListNew = $subnetList
         }
+
+        
+        $subnetListModified = @()
+        foreach ($sb in $subnetListNew) {
+            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object {$_.SiteCode -ne $null } | Group-Object -Property Subnet | Select-Object Name, @{l="SiteCode";e={$_.Group.SiteCode -join ","}}| Where-Object {$_.Name -eq $sb} | Select-Object -expand SiteCode
+            if ([string]::IsNullOrWhiteSpace($SiteCodes)){
+                $subnetListModified += "$sb"    
+            }else{
+                $subnetListModified += "$sb ($SiteCodes)"    
+            }            
+        }
+        $subnetListModified += "192.168.5.0"
         [string]$response = $null
-        $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListNew -AdditionalOptions $customOptions
+        $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions
         write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
         if ([string]::IsNullOrWhiteSpace($response)) {
             Write-Verbose "[Select-ExistingSubnets] Subnet response = null"
             return
         }
-        #write-host "response $response"
+        write-Verbose "response $response"
+        $response = $response -Split " " | Select-Object -First 1
+        write-Verbose "Sanitized response $response"
         if ($response.ToLowerInvariant() -eq "n") {
 
             $subnetlist = Get-ValidSubnets
@@ -507,11 +553,15 @@ function Generate-ExistingConfig {
         [Parameter()]
         [string]
         $Subnet,
+        [Parameter()]
         [string]
-        $Role
+        $Role,
+        [Parameter()]
+        [string]
+        $ParentSiteCode = $null
     )
 
-    Write-Verbose "Generating $Domain $Subnet $role"
+    Write-Verbose "Generating $Domain $Subnet $role $ParentSiteCode"
 
     $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
 
@@ -533,67 +583,8 @@ function Generate-ExistingConfig {
         virtualMachines = $()
     }
 
-    $configGenerated = Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated
+    $configGenerated = Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode
 
-    #   $configGenerated = $null
-
-    #  $machineName = Get-NewMachineName $Domain $Role
-    #  Write-Verbose "Machine Name Generated $machineName"
-    #  $virtualMachines = @()
-    #  if ([string]::IsNullOrWhiteSpace($role) -or $role -eq "DomainMember") {
-    #      $virtualMachines += [PSCustomObject]@{
-    #          vmName          = $machineName
-    #          role            = "DomainMember"
-    #          operatingSystem = "Server 2022"
-    #          memory          = "2GB"
-    #          virtualProcs    = 2
-    #      }
-    #  }
-    #  elseif ($role -eq "DPMP") {
-    #      $virtualMachines += [PSCustomObject]@{
-    #          vmName          = $machineName
-    #          role            = $role
-    #          operatingSystem = "Server 2022"
-    #          memory          = "3GB"
-    #          virtualProcs    = 2
-    #      }
-    #  }
-    #  elseif ($role -eq "Primary") {
-    #
-    #      $newCmOptions = [PSCustomObject]@{
-    #          version                   = "current-branch"
-    #          install                   = $true
-    #          updateToLatest            = $true
-    #          installDPMPRoles          = $true
-    #          pushClientToDomainMembers = $true
-    #      }
-    #      $newSiteCode = Get-NewSiteCode $Domain
-    #      $virtualMachines += [PSCustomObject]@{
-    #          vmName          = $machineName
-    #          role            = $role
-    #          operatingSystem = "Server 2022"
-    #          memory          = "12GB"
-    #          sqlVersion      = "SQL Server 2019"
-    #          sqlInstanceDir  = "C:\SQL"
-    #          cmInstallDir    = "C:\ConfigMgr"
-    #          siteCode        = $newSiteCode
-    #          virtualProcs    = 4
-    #      }
-    #  }
-    #  if ($role -eq "Primary") {
-    #      $configGenerated = [PSCustomObject]@{
-    #          cmOptions       = $newCmOptions
-    #          vmOptions       = $vmOptions
-    #          virtualMachines = $virtualMachines
-    #      }
-    #  }
-    #  else {
-    #      $configGenerated = [PSCustomObject]@{
-    #          #cmOptions       = $newCmOptions
-    #          vmOptions       = $vmOptions
-    #          virtualMachines = $virtualMachines
-    #      }
-    #  }
     Write-Verbose "Config: $configGenerated"
     return $configGenerated
 }
@@ -863,11 +854,12 @@ function Select-Options {
                             #$existingSiteCodes += Get-ExistingSiteServer -DomainName $global:config.vmOptions.domainName -Role "CAS" | Select-Object -ExpandProperty SiteCode
                             #$existingSiteCodes += ($global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode  
                             
-                            $additionalOptions = @{ "X" = "No Parent - Standalone Primary"}
+                            $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
                             $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to:" -OptionArray $casSiteCodes -CurrentValue $value -additionalOptions $additionalOptions
-                            if ($result.ToLowerInvariant() -eq "x"){
+                            if ($result.ToLowerInvariant() -eq "x") {
                                 $property."$name" = $null
-                            }else {
+                            }
+                            else {
                                 $property."$name" = $result
                             }
                             return
@@ -1138,7 +1130,10 @@ function Add-NewVMForRole {
         $ConfigToModify,
         [Parameter()]
         [string]
-        $Name = $null
+        $Name = $null,
+        [Parameter()]
+        [string]
+        $ParentSiteCode = $null
     )
 
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify"
@@ -1174,9 +1169,11 @@ function Add-NewVMForRole {
         }
         "Primary" {
             $existingCAS = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-            $ParentSiteCode = $null
-            if ($existingCAS -eq 1) {
-                $ParentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode                
+            if ([string]::IsNullOrWhiteSpace($ParentSiteCode)) {
+                $ParentSiteCode = $null
+                if ($existingCAS -eq 1) {
+                    $ParentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode                
+                }
             }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ParentSiteCode' -Value $ParentSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -1219,6 +1216,11 @@ function Add-NewVMForRole {
     if ($existingPrimary -eq 0) {
         $ConfigToModify = Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify
     }
+
+    if ($existingPrimary -gt 0) {
+        ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" }).ParentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" }).SiteCode
+    }
+
     if ($existingDPMP -eq 0) {
         $ConfigToModify = Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify
     }
@@ -1245,16 +1247,7 @@ function Select-VirtualMachines {
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
                 $role = Select-RolesForExisting
-                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config
-                #     $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role DomainMember -ConfigToCheck $Global:Config
-                #     $global:config.virtualMachines += [PSCustomObject]@{
-                #         vmName          = $newMachineName
-                #         role            = "DomainMember"
-                #         operatingSystem = "Server 2022"
-                #         memory          = "2GB"
-                #         virtualProcs    = 2
-                #     }
-                #     $response = $i + 1
+                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config               
             }
             $i = 0
             foreach ($virtualMachine in $global:config.virtualMachines) {
