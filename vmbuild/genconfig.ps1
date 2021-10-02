@@ -489,8 +489,10 @@ function Select-ExistingSubnets {
     while ($valid -eq $false) {
 
         $customOptions = @{ "N" = "add New Subnet to domain" }
-        $subnetList = Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Get-Unique
+        $subnetList = @()
+        $subnetList += Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Get-Unique
 
+        $subnetList += "192.168.50.0"
         $subnetListNew = @()
         if ($Role -eq "Primary" -or $Role -eq "CAS") {
             foreach ($subnet in $subnetList) {
