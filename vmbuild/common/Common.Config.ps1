@@ -736,6 +736,7 @@ function Test-Configuration {
         Test-ValidVmDisks -VM $vm -ReturnObject $return
 
         if ($vm.sqlVersion) {
+
             # Supported SQL
             if ($Common.Supported.SqlVersions -notcontains $vm.sqlVersion) {
                 Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]." -ReturnObject $return -Failure
@@ -746,6 +747,11 @@ function Test-Configuration {
 
             # sqlInstance dir
             Test-ValidVmPath -VM $vm -PathProperty "sqlInstanceDir" -ValidPathExample "F:\SQL" -ReturnObject $return
+
+            # sqlInstanceName
+            if (-not $VM.sqlInstanceName) {
+                Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Failure
+            }
         }
 
     }
@@ -995,7 +1001,7 @@ function Get-ExistingSiteServer {
             $so = $null
             if ($vm.siteCode) {
                 if ($PSBoundParameters.ContainsKey("SiteCode") -and $vm.siteCode.ToLowerInvariant() -eq $SiteCode.ToLowerInvariant()) {
-                    Write-Host "Here $($vm.VmName)"
+
                     $so = [PSCustomObject]@{
                         VmName   = $vm.VmName
                         Role     = $vm.Role
@@ -1006,7 +1012,7 @@ function Get-ExistingSiteServer {
                 }
 
                 if (-not $PSBoundParameters.ContainsKey("SiteCode")) {
-                    Write-Host "There $($vm.VmName)"
+
                     $so = [PSCustomObject]@{
                         VmName   = $vm.VmName
                         Role     = $vm.Role
