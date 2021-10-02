@@ -557,11 +557,13 @@ try {
     }
     else {
         Write-Log "Main: Config validation failed. `r`n$($testConfigResult.Message)" -Failure
+        Write-Host
         return
     }
 }
 catch {
     Write-Log "Main: Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
+    Write-Host
     return
 }
 

@@ -640,7 +640,9 @@ function Get-Menu {
         [string]
         $CurrentValue,
         [object]
-        $additionalOptions
+        $additionalOptions,
+        [bool]
+        $Test = $true
     )
 
     write-Host
@@ -659,7 +661,7 @@ function Get-Menu {
         }
     }
 
-    $response = get-ValidResponse $Prompt $i $CurrentValue -AdditionalOptions $additionalOptions -TestBeforeReturn
+    $response = get-ValidResponse $Prompt $i $CurrentValue -AdditionalOptions $additionalOptions -TestBeforeReturn:$Test
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $i = 0
@@ -1035,8 +1037,9 @@ Function Get-TestResult {
     $c = Test-Configuration -InputObject $Config
     $valid = $c.Valid
     if ($valid -eq $false) {
+        Write-Host -ForegroundColor Red "`r`n$($c.Message)`r`n"
         # $MyInvocation | Out-Host
-        Write-Host -ForegroundColor Red $c.Message
+
     }
     if ($SuccessOnWarning.IsPresent) {
         if ( $c.Failures -eq 0) {
@@ -1403,7 +1406,7 @@ while ($valid -eq $false) {
         $valid = $true
     }
     else {
-        Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)"
+        Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)`r`n"
         Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
     }
 

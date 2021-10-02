@@ -852,7 +852,7 @@ function Test-Configuration {
 
     # Return if validation failed
     if ($return.Problems -ne 0) {
-        $return.Message = $return.Message.ToString()
+        $return.Message = $return.Message.ToString().Trim()
         return $return
     }
 
