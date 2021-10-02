@@ -788,9 +788,25 @@ function Test-Configuration {
     # Primary Validations
     # ==============
     if ($containsPS) {
+
         # Validate Primary role
         $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
+        $vmName = $PSVM.vmName
+        $vmRole = $PSVM.role
+
         Test-ValidRoleCSPS -VM $PSVM -ReturnObject $return
+
+        # Valid parent Site Code
+        if ($PSVM.parentSiteCode) {
+            $existingSiteCodes = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "CAS"| Select-Object -ExpandProperty SiteCode
+            if ($containsCS) {
+                $existingSiteCodes += $CSVM.siteCode
+            }
+
+            if ($PSVM.parentSiteCode -notin $existingSiteCodes) {
+                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$($PSVM.parentSiteCode)] which is invalid." -ReturnObject $return -Failure
+            }
+        }
     }
 
     # DPMP Validations
@@ -985,6 +1001,9 @@ function Get-ExistingSiteServer {
     param(
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name")]
         [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "Role")]
+        [ValidateSet("CAS", "Primary")]
+        [string]$Role,
         [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
         [string]$SiteCode
     )
@@ -996,6 +1015,10 @@ function Get-ExistingSiteServer {
         }
         else {
             $vmList = Get-List -Type VM
+        }
+
+        if ($Role) {
+            $vmList = $vmList | Where-Object {$_.Role -eq $Role}
         }
 
         $existingValue = @()
