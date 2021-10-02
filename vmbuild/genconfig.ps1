@@ -156,7 +156,6 @@ function get-VMSummary{
 
 function Select-MainMenu {
     while ($true) {
-        #$customOptions = [ordered]@{ "1" = "VM Options"; "2" = "CM Options"; "3" = "Virtual Machines"; "S" = "Save and Exit"}
         $customOptions = [ordered]@{}
         $customOptions += @{"1" = "Global VM Options `t`t $(get-VMOptionsSummary)"}
         if ($Global:Config.cmOptions){
@@ -168,7 +167,7 @@ function Select-MainMenu {
             $customOptions+= @{ "D" = "Deploy Config"}
         }
         $customOptions+= @{ "S" = "Save and Exit"}
-        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
+        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -Test:$false
         write-Verbose "response $response"
         if (-not $response) {
             continue
@@ -1038,7 +1037,7 @@ Function Get-TestResult {
     $valid = $c.Valid
     if ($valid -eq $false) {
         Write-Host -ForegroundColor Red "`r`n$($c.Message)`r`n"
-        # $MyInvocation | Out-Host
+        $MyInvocation | Out-Host
 
     }
     if ($SuccessOnWarning.IsPresent) {
@@ -1291,16 +1290,7 @@ function Select-VirtualMachines {
                     }
                 }
             }
-            if ($newValue -eq "D") {
-                #$newvm = $global:config.virtualMachines | ConvertTo-Json | ConvertFrom-Json
-                #$global:config.virtualMachines = @()
-                #$i = 0
-                #foreach ($virtualMachine in $newvm) {
-                #    $i = $i + 1
-                #    if ($i -ne $response) {
-                #        $global:config.virtualMachines += $virtualMachine
-                #    }
-                #}
+            if ($newValue -eq "D") {                
                 $i = 0
                 foreach ($virtualMachine in $global:config.virtualMachines) {
                     $i = $i + 1
@@ -1311,7 +1301,7 @@ function Select-VirtualMachines {
             }
         }
         else {
-            $valid = Get-TestResult -SuccessOnError
+            Get-TestResult -SuccessOnError | Out-Null
             return
         }
     }
