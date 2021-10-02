@@ -1170,7 +1170,8 @@ if (-not $Common.Initialized) {
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
-
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    
     # Common global props
     $global:Common = [PSCustomObject]@{
         Initialized           = $true
@@ -1187,6 +1188,7 @@ if (-not $Common.Initialized) {
         StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
         StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
         LogPath               = Join-Path $PSScriptRoot "VMBuild.log"                                     # Log File
+        RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
         VerboseEnabled        = $false                                                                    # Verbose Logging
         Supported             = $null                                                                     # Supported Configs
         AzureFileList         = $null

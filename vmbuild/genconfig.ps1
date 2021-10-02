@@ -60,7 +60,8 @@ function Write-Option {
 
 function Select-ConfigMenu {
     while ($true) {
-        $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration"; "4" = "Load saved config from File"; "D" = "Delete an existing domain" }
+        $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration"; 
+        "4" = "Load saved config from File";"R" = "Regenerate Rdcman file from Hyper-V config" ;"D" = "Delete an existing domain"; }
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
         write-Verbose "response $response"
         if (-not $response) {
@@ -72,6 +73,7 @@ function Select-ConfigMenu {
             "2" { $SelectedConfig = Show-ExistingNetwork }
             "3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "4" { $SelectedConfig = Select-Config $configDir -NoMore }
+            "r" { New-RDCManFileFromHyperV $Global:Common.RdcManFilePath}
             "d" { Select-DeleteDomain }
             Default {}
         }

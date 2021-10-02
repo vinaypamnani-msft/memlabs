@@ -607,9 +607,7 @@ if ($existingJobs) {
 }
 
 Write-Log "Main: Creating RDCMan file for specified config" -Activity
-$desktopPath = [Environment]::GetFolderPath("Desktop")
-$rdcManFilePath = Join-Path $DesktopPath "memlabs.rdg"
-New-RDCManFile $deployConfig $rdcManFilePath
+New-RDCManFile $deployConfig $global:Common.RdcManFilePath
 
 Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
