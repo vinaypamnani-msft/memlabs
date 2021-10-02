@@ -310,7 +310,7 @@ function Select-NewDomainConfig {
         $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
     }
 
-    $customOptions = [ordered]@{ "1" = "CAS and Primary"; "2" = "Primary Site only"; "3" = "Tech Preview (NO CAS)" ; "4" = "No Configmgr"; }
+    $customOptions = [ordered]@{ "1" = "CAS and Primary"; "2" = "Primary Site only"; "3" = "Tech Preview (NO CAS)" ; "4" = "No ConfigMgr"; }
     $response = $null
     while (-not $response) {
         $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
@@ -429,24 +429,24 @@ function Show-ExistingNetwork {
         $ExistingSubnetCount = (Get-List -Type VM -Domain $item | Select-Object -Property Subnet -unique | measure-object).Count
 
         if ($ExistingCasCount -gt 0) {
-            $stats += "CAS VMs: $ExistingCasCount "
+            $stats += "[CAS VMs: $ExistingCasCount] "
         }
         if ($ExistingPriCount -gt 0) {
-            $stats += "Primary VMs: $ExistingCasCount "
+            $stats += "[Primary VMs: $ExistingCasCount] "
         }
         if ($ExistingDPMPCount -gt 0) {
-            $stats += "DPMP Vms: $ExistingCasCount "
+            $stats += "[DPMP Vms: $ExistingCasCount] "
         }
 
         if ([string]::IsNullOrWhiteSpace($stats)) {
-            $stats = "No ConfigMgr Roles installed "
+            $stats = "[No ConfigMgr Roles installed] "
         }
 
         if ($ExistingSubnetCount -gt 0) {
-            $stats += "Number of Networks: $ExistingSubnetCount "
+            $stats += "[Number of Networks: $ExistingSubnetCount] "
         }
 
-        $domainList += "$item  $stats"
+        $domainList += "$($item.PadRight(22," ")) $stats"
     }
 
     while ($true) {
