@@ -54,6 +54,8 @@ if (-not $NoWindowResize.IsPresent) {
     }
 }
 
+Set-QuickEdit -DisableQuickEdit
+
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Main: Critical Failure! $($Common.FatalError)" -Failure
@@ -729,4 +731,5 @@ Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
 if (Test-Path "C:\tools\rdcman.exe") {
     Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
 }
+
 Write-Host

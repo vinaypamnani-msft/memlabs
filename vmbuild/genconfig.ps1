@@ -426,7 +426,7 @@ function Select-Config {
 }
 
 function Show-ExistingNetwork {
-
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
     $Global:AddToExisting = $true
     $domain = Get-Menu -Prompt "Select existing domain" -OptionArray (Get-DomainList)
     if ([string]::isnullorwhitespace($domain)) {
@@ -895,44 +895,9 @@ function Select-Options {
                                     $role = Get-Menu "Select Role" $($Common.Supported.Roles) $value
                                     $property."$name" = $role
                                 }
-                                Delete-VMFromConfig -vmName $property.vmName -ConfigToModify $global:config
+                                Remove-VMFromConfig -vmName $property.vmName -ConfigToModify $global:config
                                 $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -Name $property.vmName
                                 return "DELETED"
-                                #                             $newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
-                                #                             $property.vmName = $newMachineName
-                                #
-                                #                             if ($role -eq "Primary" -or $role -eq "CAS") {
-                                #                                 if ($null -eq $($global:config.cmOptions)) {
-                                #                                     $newCmOptions = [PSCustomObject]@{
-                                #                                         version                   = "current-branch"
-                                #                                         install                   = $true
-                                #                                         updateToLatest            = $true
-                                #                                         installDPMPRoles          = $true
-                                #                                         pushClientToDomainMembers = $true
-                                #                                     }
-                                #                                     $global:config | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
-                                #                                 }
-                                #                                 if ($null -eq $($property.sqlVersion) ) {
-                                #                                     $property | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
-                                #                                 }
-                                #                                 if ($null -eq $($property.cmInstallDir) ) {
-                                #                                     $property | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "C:\ConfigMgr"
-                                #                                 }
-                                #                                 if ($null -eq $($property.sqlInstanceDir) ) {
-                                #                                     $property | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
-                                #                                 }
-                                #                                 if ($null -eq $($property.siteCode) ) {
-                                #                                     $newSiteCode = Get-NewSiteCode $Global:Config.vmOptions.domainName -Role $role
-                                #                                     $property | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
-                                #                                 }
-                                #                                 $property.Memory = "12GB"
-                                #                                 $property.operatingSystem = "Server 2022"
-                                #                                 #$newMachineName = Get-NewMachineName -Domain $Global:Config.vmOptions.domainName -Role $role -ConfigToCheck $Global:Config
-                                #                                 #$property.vmName = $newMachineName
-                                #                                 #Select-Options $($global:config.cmOptions) "Select ConfigMgr Property to modify"
-                                #   }
-
-
 
                                 if (Get-TestResult -SuccessOnWarning) {
                                     return
@@ -1317,7 +1282,6 @@ function Select-VirtualMachines {
                         }
                         if ($newValue -eq "R") {
                             $diskscount = 0
-                            #$savedDisks = $virtualMachine.additionalDisks | ConvertTo-Json | ConvertFrom-Json
                             $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
                                 $diskscount++
                             }
@@ -1346,7 +1310,7 @@ function Select-VirtualMachines {
                 foreach ($virtualMachine in $global:config.virtualMachines) {
                     $i = $i + 1
                     if ($i -eq $response) {
-                        Delete-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
+                        Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
                     }
                 }
             }
@@ -1358,7 +1322,7 @@ function Select-VirtualMachines {
     }
 }
 
-function Delete-VMFromConfig {
+function Remove-VMFromConfig {
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -1376,8 +1340,6 @@ function Delete-VMFromConfig {
             $configToModify.virtualMachines += $virtualMachine
         }
     }
-
-
 }
 
 function Save-Config {
@@ -1428,7 +1390,6 @@ function Save-Config {
     Write-Verbose "11"
 }
 $Global:Config = $null
-#$Global:Config = Select-Config $sampleDir
 $Global:Config = Select-ConfigMenu
 $Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
 $Global:AddToExisting = $false
@@ -1438,9 +1399,7 @@ if (-not [string]::IsNullOrWhiteSpace($existingDCName)) {
 }
 $valid = $false
 while ($valid -eq $false) {
-    #Select-Options $($Global:Config.vmOptions) "Select Global Property to modify"
-    #Select-Options $($Global:Config.cmOptions) "Select ConfigMgr Property to modify"
-    #Select-VirtualMachines
+
     $return.DeployNow = Select-MainMenu
     $c = Test-Configuration -InputObject $Config
     Write-Host
@@ -1468,69 +1427,16 @@ while ($valid -eq $false) {
     }
 }
 
-#Show-Summary ($c.DeployConfig)
 Save-Config $Global:Config
-#Write-Host
-#$date = Get-Date -Format "MM-dd-yyyy"
-#if ($($Global:configfile.Name).StartsWith("xGen")) {
-#    $postfix = $($Global:configfile.Name).SubString(16)
-#    $filename = Join-Path $configDir "xGen-$date-$postfix"
-#}
-#else {
-#    $filename = Join-Path $configDir "xGen-$date-$($Global:configfile.Name)"
-#}
-#$splitpath = Split-Path -Path $fileName -Leaf
-#$response = Read-Host2 -Prompt "Save Filename" $splitpath
-#if (-not [String]::IsNullOrWhiteSpace($response)) {
-#    if (!$response.EndsWith("json")) {
-#        $response += ".json"
-#    }
-#    $filename = Join-Path $configDir $response
-#}
-#$config | ConvertTo-Json -Depth 3 | Out-File $filename
-#$return.ConfigFileName = Split-Path -Path $fileName -Leaf
-#Write-Host "Saved to $filename"
-#Write-Host
 
 if (-not $InternalUseOnly.IsPresent) {
     Write-Host "You can deploy this configuration by running the following command:"
     Write-Host "$($PSScriptRoot)\New-Lab.ps1 -Configuration $($return.ConfigFileName)"
 }
 
-
 #================================= NEW LAB SCENERIO ============================================
 if ($InternalUseOnly.IsPresent) {
-    #$response = Read-Host2 -Prompt "Deploy Now? (y/N)" $null
-    #if (-not [String]::IsNullOrWhiteSpace($response)) {
-    #   if ($response.ToLowerInvariant() -eq "y") {
-    #    Write-Host
-    #    Write-Host "Deleting VM's will remove the existing VM's with the same names as the VM's we are deploying. Disks and all artifacts will be destroyed"
-    #    $response = Read-Host2 -Prompt "Delete old VMs? (y/N)"
-    #    if (-not [String]::IsNullOrWhiteSpace($response)) {
-    #        if ($response.ToLowerInvariant() -eq "y") {
-    #            $return.ForceNew = $true
-    #            $return.DeployNow = $true
-    #            # Write-Host "Starting new-lab with delete VM options"
-    #        }
-    #        else {
-    #            $return.DeployNow = $true
-    #            # Write-Host "Starting new-lab without delete VM options"
-    #        }
-    #    }
-    #    else {
-    #        $return.DeployNow = $true
-    #        # Write-Host "Starting new-lab without delete VM options"
-    #    }
-    #  $return.DeployNow = $true
-    #  }
-    #  else {
-    # Write-Host "Not Deploying."
-    #  }
-
-    #}
-    #else {
-    # Write-Host "Not Deploying."
-    #}
+ 
     return $return
 }
 
