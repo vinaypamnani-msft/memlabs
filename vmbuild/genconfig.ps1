@@ -312,7 +312,7 @@ function Select-NewDomainConfig {
         $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
     }
 
-    $customOptions = @{ "C" = "CAS and Primary"; "P" = "Primary Site only"; "N" = "No Configmgr" }
+    $customOptions = [ordered]@{ "1" = "CAS and Primary"; "2" = "Primary Site only"; "3" = "No Configmgr" }
     $response = $null
     while (-not $response) {
         $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
@@ -322,9 +322,9 @@ function Select-NewDomainConfig {
     $PRIJson = Join-Path $sampleDir "Standalone.json"
     $NoCMJson = Join-Path $sampleDir "NoConfigMgr.json"
     switch ($response.ToLowerInvariant()) {
-        "c" { $newConfig = Get-Content $CASJson -Force | ConvertFrom-Json }
-        "p" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }
-        "n" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
+        "1" { $newConfig = Get-Content $CASJson -Force | ConvertFrom-Json }
+        "2" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }
+        "3" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
     }
 
     $newConfig.vmOptions.domainName = $domain
@@ -1080,11 +1080,19 @@ function get-VMString {
     }
 
     if ($virtualMachine.siteCode -and $virtualMachine.cmInstallDir) {
-        $name += "  CM [SiteCode $($virtualMachine.siteCode) ($($virtualMachine.cmInstallDir))"
+        $SiteCode = $virtualMachine.siteCode
+        if ($virtualMachine.ParentSiteCode) {
+            $SiteCode += "->$($virtualMachine.ParentSiteCode)"
+        }
+        $name += "  CM [SiteCode $SiteCode ($($virtualMachine.cmInstallDir))]"
     }
 
     if ($virtualMachine.siteCode -and -not $virtualMachine.cmInstallDir) {
-        $name += "  CM [SiteCode $($virtualMachine.siteCode)]"
+        $SiteCode = $virtualMachine.siteCode
+        if ($virtualMachine.ParentSiteCode) {
+            $SiteCode += "->$($virtualMachine.ParentSiteCode)"
+        }
+        $name += "  CM [SiteCode $SiteCode]"
     }
 
     if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
@@ -1131,7 +1139,8 @@ function Add-NewVMForRole {
         memory          = "2GB"
         virtualProcs    = 2
     }
-
+    $existingPrimary = $null
+    $existingDPMP = $null
     switch ($Role) {
         "CAS" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -1142,12 +1151,17 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine.Memory = "12GB"
             $virtualMachine.operatingSystem = "Server 2022"
-            $existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
-            if ($existingPrimary -eq 0) {
-                $ConfigToModify = Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify
-            }
+            $existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count          
+            
         }
         "Primary" {
+            $existingCAS = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
+            $ParentSiteCode = $null
+            if ($existingCAS -eq 1)
+            {
+                $ParentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode                
+            }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ParentSiteCode' -Value $ParentSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
@@ -1156,10 +1170,8 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine.Memory = "12GB"
             $virtualMachine.operatingSystem = "Server 2022"
-            $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
-            if ($existingDPMP -eq 0) {
-                $ConfigToModify = Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify
-            }
+            $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count            
+            
         }
         "DomainMember" { }
         "DPMP" {
@@ -1186,6 +1198,13 @@ function Add-NewVMForRole {
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
         }
     }
+
+    if ($existingPrimary -eq 0) {
+        $ConfigToModify = Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify
+    }
+        if ($existingDPMP -eq 0) {
+            $ConfigToModify = Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify
+        }
 
     Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
     return $ConfigToModify
