@@ -597,11 +597,6 @@ function Test-ValidRoleCSPS {
     $vmName = $VM.vmName
     $vmRole = $VM.role
 
-    # Single CAS/Primary
-    if (-not (Test-SingleRole -VM $VM -ReturnObject $ReturnObject)) {
-        return
-    }
-
     # Minimum Memory
     if ($VM.memory / 1 -lt 6GB) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 6GB memory." -ReturnObject $ReturnObject -Failure
@@ -770,18 +765,23 @@ function Test-Configuration {
         $vmName = $CSVM.vmName
         $vmRole = $CSVM.role
 
-        # tech preview and CAS
-        if ($deployConfig.cmOptions.version -eq "tech-preview") {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Failure
-        }
+        # Single CAS
+        if (Test-SingleRole -VM $CSVM -ReturnObject $return) {
 
-        # CAS without Primary
-        if (-not $containsPS) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Warning
-        }
+            # tech preview and CAS
+            if ($deployConfig.cmOptions.version -eq "tech-preview") {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Failure
+            }
 
-        # Validate CAS role
-        Test-ValidRoleCSPS -VM $CSVM -ReturnObject $return
+            # CAS without Primary
+            if (-not $containsPS) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Failure
+            }
+
+            # Validate CAS role
+            Test-ValidRoleCSPS -VM $CSVM -ReturnObject $return
+
+        }
 
     }
 
@@ -795,23 +795,35 @@ function Test-Configuration {
         $vmRole = $PSVM.role
         $psParentSiteCode = $PSVM.parentSiteCode
 
-        Test-ValidRoleCSPS -VM $PSVM -ReturnObject $return
+        if (Test-SingleRole -VM $PSVM -ReturnObject $return) {
 
-        # Valid parent Site Code
-        if ($psParentSiteCode) {
-            $casSiteCodes = Get-ValidCASSiteCodes -Config $deployConfig
-            $parentCodes = $casSiteCodes -join ","
-            if ($psParentSiteCode -notin $casSiteCodes) {
-                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
-            }
-        }
+            Test-ValidRoleCSPS -VM $PSVM -ReturnObject $return
 
-        if ($psParentSiteCode -and $deployConfig.parameters.ExistingCASName -and $deployConfig.cmOptions.updateToLatest) {
-            $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.State -ne "Running" }
-            $notRunningNames = $notRunning.vmName -join ","
-            if ($notRunning.Count -gt 0) {
-                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Failure
+            # Valid parent Site Code
+            if ($psParentSiteCode) {
+                $casSiteCodes = Get-ValidCASSiteCodes -Config $deployConfig
+                $parentCodes = $casSiteCodes -join ","
+                if ($psParentSiteCode -notin $casSiteCodes) {
+                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
+                }
             }
+
+            # Other Site servers must be running
+            if ($psParentSiteCode -and $deployConfig.parameters.ExistingCASName -and $deployConfig.cmOptions.updateToLatest) {
+                $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.State -ne "Running" }
+                $notRunningNames = $notRunning.vmName -join ","
+                if ($notRunning.Count -gt 0) {
+                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Failure
+                }
+            }
+
+            # CAS with Primary, without parentSiteCode
+            if ($containsCS) {
+                if ($PSVM.parentSiteCode -ne $CSVM.siteCode) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$($PSVM.parentSiteCode)] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Failure
+                }
+            }
+
         }
     }
 
@@ -823,6 +835,7 @@ function Test-Configuration {
 
         # DPMP VM count -eq 1
         if (Test-SingleRole -VM $DPMPVM -ReturnObject $return) {
+
             # Server OS
             Test-ValidVmServerOS -VM $DPMPVM -ReturnObject $return
         }
@@ -973,7 +986,7 @@ function New-DeployConfig {
 
 function Get-ValidCASSiteCodes {
     param (
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [object]$Config
     )
 
