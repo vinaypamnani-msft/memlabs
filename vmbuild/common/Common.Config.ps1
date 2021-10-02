@@ -1285,6 +1285,13 @@ Function Show-Summary {
             else {
                 Write-Host "NOT updated to latest"
             }
+            $PSVM = $deployConfig.virtualMachines | Where-Object {$_.Role -eq "Primary"}
+            if ($PSVM.ParentSiteCode) {
+                Write-Host "[$CHECKMARK] ConfigMgr Primary server Will join a Heirarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
+            }
+            else {
+                Write-Host "[$CHECKMARK] Primary server with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
+            }
         }
         else {
             Write-Host "[x] ConfigMgr will not be installed."
@@ -1320,6 +1327,12 @@ Function Show-Summary {
 
         Write-Host "[$CHECKMARK] Network: $($deployConfig.vmOptions.network)"
         Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
+
+        $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
+        $totalMemory = $totalMemory.Sum / 1GB
+        $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
+        $availableMemory = $availableMemory * 1KB / 1GB
+        Write-Host "[$CHECKMARK] This configuration will use $($totalMemory)GB out of $([math]::Round($availableMemory,2))GB Available RAM on host machine"
     }
     Write-Host "[$CHECKMARK] Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
     $out = $deployConfig.virtualMachines | Where-Object { -not $_.hidden } `

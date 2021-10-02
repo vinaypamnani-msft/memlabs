@@ -418,9 +418,55 @@ function Select-Config {
 function Show-ExistingNetwork {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
     $Global:AddToExisting = $true
-    $domain = Get-Menu -Prompt "Select existing domain" -OptionArray (Get-DomainList)
-    if ([string]::isnullorwhitespace($domain)) {
-        return $null
+
+    $domainList = @()
+
+    foreach ($item in (Get-DomainList)) {
+        $stats = ""
+        $ExistingCasCount = (Get-List -Type VM -Domain $item | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
+        $ExistingPriCount = (Get-List -Type VM -Domain $item | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
+        $ExistingDPMPCount = (Get-List -Type VM -Domain $item | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
+        $ExistingSubnetCount = (Get-List -Type VM -Domain $item | Select-Object -Property Subnet -unique | measure-object).Count
+
+        if ($ExistingCasCount -gt 0) {
+            $stats += "CAS VMs: $ExistingCasCount "
+        }
+        if ($ExistingPriCount -gt 0) {
+            $stats += "Primary VMs: $ExistingCasCount "
+        }
+        if ($ExistingDPMPCount -gt 0) {
+            $stats += "DPMP Vms: $ExistingCasCount "
+        }
+
+        if ([string]::IsNullOrWhiteSpace($stats)) {
+            $stats = "No ConfigMgr Roles installed "
+        }
+
+        if ($ExistingSubnetCount -gt 0) {
+            $stats += "Number of Networks: $ExistingSubnetCount "
+        }
+
+        $domainList += "$item  $stats"
+    }
+
+    while ($true) {
+        $domainExpanded = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList
+        if ([string]::isnullorwhitespace($domainExpanded)) {
+            return $null
+        }
+        $domain = ($domainExpanded -Split " ")[0]
+
+        get-list -Type VM -DomainName $domain | Format-Table | Out-Host
+
+        $response = Read-Host2 -Prompt "Add new VMs to this domain? (Y/n)" -HideHelp
+        if (-not [String]::IsNullOrWhiteSpace($response)) {
+            if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                continue
+            }else{
+                break
+            }
+        }else{ break}
+
     }
     [string]$role = Select-RolesForExisting
 
@@ -649,7 +695,7 @@ function Get-Menu {
         }
     }
 
-    $response = get-ValidResponse $Prompt $i $CurrentValue -AdditionalOptions $additionalOptions -TestBeforeReturn:$Test
+    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $additionalOptions -TestBeforeReturn:$Test
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $i = 0
@@ -1329,7 +1375,7 @@ function Remove-VMFromConfig {
             $DeletedVM = $virtualMachine
         }
     }
-    if ($DeletedVM.Role -eq "CAS"){
+    if ($DeletedVM.Role -eq "CAS") {
         $primaryParentSideCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).ParentSiteCode
         if ($primaryParentSideCode -eq $DeletedVM.SiteCode) {
             ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).ParentSiteCode = $null
