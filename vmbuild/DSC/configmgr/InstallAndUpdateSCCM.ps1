@@ -504,6 +504,7 @@ if ($UpdateToLatest) {
             }
 
             #Get if there are any other updates need to be installed
+            Write-DscStatus "Checking if another update is available..."
             $updatepack = getupdate
             if ($updatepack -ne "") {
                 Write-DscStatus "Found another update: '$($updatepack.Name)'."
