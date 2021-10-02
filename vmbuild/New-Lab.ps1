@@ -465,6 +465,17 @@ $VM_Create = {
         }
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
+    # NLA Service starts before domain is ready sometimes, and causes RDP to fail because network is considered public by firewall.
+    $Trust_Ethernet = {
+        Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse `
+        | ForEach-Object { $_.PSChildName } `
+        | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 2 }
+    }
+
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -DisplayName "Set Ethernet as Trusted" -WhatIf:$WhatIf
+    if ($result.ScriptBlockFailed) {
+        Write-Log "PSJOB: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
+    }
 
     if (-not $complete) {
         $worked = $false
