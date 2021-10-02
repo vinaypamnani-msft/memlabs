@@ -167,6 +167,7 @@ function Select-MainMenu {
         if ($InternalUseOnly.IsPresent){
             $customOptions+= @{ "D" = "Deploy Config"}
         }
+        $customOptions+= @{ "S" = "Save and Exit"}
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
         write-Verbose "response $response"
         if (-not $response) {
@@ -665,15 +666,15 @@ function Get-Menu {
         foreach ($option in $OptionArray) {
             $i = $i + 1
             if ($i -eq $response) {
-                Write-Verbose "[Get-Menu] Returned (O) $option"
+                Write-Verbose "[Get-Menu] Returned (O) '$option'"
                 return $option
             }
         }
-        Write-Verbose "[Get-Menu] Returned (R) $response"
+        Write-Verbose "[Get-Menu] Returned (R) '$response'"
         return $response
     }
     else {
-        Write-Verbose "[Get-Menu] Returned (CV) $CurrentValue"
+        Write-Verbose "[Get-Menu] Returned (CV) '$CurrentValue'"
         return $CurrentValue
     }
 
@@ -961,14 +962,14 @@ function Select-Options {
                     Write-Host
                     while ($valid -eq $false) {
                         if ($value -is [bool]) {
-                            $response2 = Get-Menu -Prompt "Select new Value for $($_.Name)" -CurrentValue $value -OptionArray @("True", "False") 
+                            $response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") 
                         }
                         else {
-                            $response2 = Read-Host2 -Prompt "Select new Value for $($_.Name)" $value
+                            $response2 = Read-Host2 -Prompt "Select new Value for $($Name)" $value
                         }
                         if (-not [String]::IsNullOrWhiteSpace($response2)) {
-                            if ($property."$($_.Name)" -is [Int]) {
-                                $property."$($_.Name)" = [Int]$response2
+                            if ($property."$($Name)" -is [Int]) {
+                                $property."$($Name)" = [Int]$response2
                             }
                             else {
                                 if ($value -is [bool]) {
@@ -985,7 +986,9 @@ function Select-Options {
                                     }
 
                                 }
-                                $property."$($_.Name)" = $response2
+
+                                Write-Verbose ("$_ name = $($_.Name) or $name = $response2")
+                                $property."$($Name)" = $response2
                             }                                
                             $valid = Get-TestResult -SuccessOnWarning
                             if ($response2 -eq $value) {
@@ -995,7 +998,7 @@ function Select-Options {
                         }
                         else {
                             # Enter was pressed. Set the Default value, and test, but dont block.
-                            $property."$($_.Name)" = $value
+                            $property."$($Name)" = $value
                             $valid = Get-TestResult -SuccessOnError                                
                         }
                     }
