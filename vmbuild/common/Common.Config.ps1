@@ -799,20 +799,15 @@ function Test-Configuration {
 
         # Valid parent Site Code
         if ($psParentSiteCode) {
-            $existingSiteCodes = @()
-            $existingSiteCodes += Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "CAS" | Select-Object -ExpandProperty SiteCode
-            if ($containsCS) {
-                $existingSiteCodes += $CSVM.siteCode
-            }
-
-            $parentCodes = $existingSiteCodes -join ","
+            $casSiteCodes = Get-ValidCASSiteCodes -Config $deployConfig
+            $parentCodes = $casSiteCodes -join ","
             if ($psParentSiteCode -notin $existingSiteCodes) {
                 Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
             }
         }
 
         if ($psParentSiteCode -and $deployConfig.parameters.ExistingCASName -and $deployConfig.cmOptions.updateToLatest) {
-            $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object {$_.State -ne "Running" }
+            $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.State -ne "Running" }
             $notRunningNames = $notRunning.vmName -join ","
             if ($notRunning.Count -gt 0) {
                 Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Failure
@@ -976,6 +971,24 @@ function New-DeployConfig {
     return $deploy
 }
 
+function Get-ValidCASSiteCodes {
+    param (
+        [Parameter(Mandatory=$true)]
+        [object]$Config
+    )
+
+    $existingSiteCodes = @()
+    $existingSiteCodes += Get-ExistingSiteServer -DomainName $Config.vmOptions.domainName -Role "CAS" | Select-Object -ExpandProperty SiteCode
+
+    $containsCS = $Config.virtualMachines.role.Contains("CAS")
+    if ($containsCS) {
+        $CSVM = $Config.virtualMachines | Where-Object { $_.role -eq "CAS" }
+        $existingSiteCodes += $CSVM.siteCode
+    }
+
+    return ($existingSiteCodes | Select-Object -Unique)
+}
+
 function Get-ExistingForDomain {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
@@ -1029,7 +1042,7 @@ function Get-ExistingSiteServer {
         }
 
         if ($Role) {
-            $vmList = $vmList | Where-Object {$_.Role -eq $Role}
+            $vmList = $vmList | Where-Object { $_.Role -eq $Role }
         }
 
         $existingValue = @()
