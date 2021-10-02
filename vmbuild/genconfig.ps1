@@ -64,7 +64,7 @@ function Select-ConfigMenu {
         "4" = "Load saved config from File";"R" = "Regenerate Rdcman file from Hyper-V config" ;"D" = "Delete an existing domain"; }
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
         write-host
-        write-Verbose "response $response"
+        write-Verbose "1 response $response"
         if (-not $response) {
             continue
         }
@@ -92,6 +92,7 @@ function Select-DeleteDomain {
         return $null
     }
     Write-Host
+    Write-Verbose "2 Select-DeleteDomain"
     Write-Host "Domain contains these resources:"
     get-list -Type VM -DomainName $domain | Format-Table | Out-Host
 
@@ -366,6 +367,7 @@ function Select-Config {
         #    $responseValid = $false
         #    while ($responseValid -eq $false) {
         Write-Host
+        Write-Verbose "3 Select-Config"
         $response = Read-Host2 -Prompt "Which config do you want to deploy"
         try {
             if ([int]$response -is [int]) {
@@ -645,6 +647,7 @@ function Get-Menu {
     )
 
     write-Host
+    Write-Verbose "4 Get-Menu"
     $i = 0
 
     foreach ($option in $OptionArray) {
@@ -710,6 +713,7 @@ function get-ValidResponse {
     $responseValid = $false
     while ($responseValid -eq $false) {
         Write-Host
+        Write-Verbose "5 get-ValidResponse"
         $response = Read-Host2 -Prompt $prompt $currentValue
         try {
             if ([String]::IsNullOrWhiteSpace($response)) {
@@ -781,7 +785,8 @@ function Select-Options {
     )
 
     while ($true) {
-        Write-Host ""
+        Write-Host
+        Write-Verbose "6 Select-Options"
         $i = 0
         #Write-Host "Trying to get $property"
         if ($null -eq $property) {
@@ -790,7 +795,8 @@ function Select-Options {
         $property | Get-Member -MemberType NoteProperty | ForEach-Object {
             $i = $i + 1
             $value = $property."$($_.Name)"
-            $padding = 27 - ($i.ToString().Length)
+            #$padding = 27 - ($i.ToString().Length)
+            $padding = 26
             Write-Option $i "$($($_.Name).PadRight($padding," "")) = $value"
         }
 
@@ -961,6 +967,7 @@ function Select-Options {
 
                     $valid = $false
                     Write-Host
+                    Write-Verbose "7 Select-Options"
                     while ($valid -eq $false) {
                         if ($value -is [bool]) {
                             $response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False")
@@ -1037,7 +1044,7 @@ Function Get-TestResult {
     $valid = $c.Valid
     if ($valid -eq $false) {
         Write-Host -ForegroundColor Red "`r`n$($c.Message)`r`n"
-        $MyInvocation | Out-Host
+        #$MyInvocation | Out-Host
 
     }
     if ($SuccessOnWarning.IsPresent) {
@@ -1121,6 +1128,7 @@ function Add-NewVMForRole {
     switch ($Role) {
         "CAS" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "C:\ConfigMgr"
             $newSiteCode = Get-NewSiteCode $Domain -Role $role
@@ -1134,6 +1142,7 @@ function Add-NewVMForRole {
         }
         "Primary" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "C:\ConfigMgr"
             $newSiteCode = Get-NewSiteCode $Domain -Role $role
@@ -1178,7 +1187,8 @@ function Add-NewVMForRole {
 
 function Select-VirtualMachines {
     while ($true) {
-        Write-Host ""
+        Write-Host
+        Write-Verbose "8 Select-VirtualMachines"
         $i = 0
         #$valid = Get-TestResult -SuccessOnError
         foreach ($virtualMachine in $global:config.virtualMachines) {
@@ -1212,10 +1222,8 @@ function Select-VirtualMachines {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
                         $customOptions = @{ "A" = "Add Additional Disk" }
                         if ($null -eq $virtualMachine.additionalDisks) {
-                            #$customOptions["A"] = "Add Additional Disk"
                         }
                         else {
-                            #$customOptions["A"] = "Add Additional Disk"
                             $customOptions["R"] = "Remove Last Additional Disk"
                         }
                         if ($null -eq $virtualMachine.sqlVersion) {
@@ -1243,10 +1251,12 @@ function Select-VirtualMachines {
                         if ($newValue -eq "S") {
                             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
                             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+                            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
                         }
                         if ($newValue -eq "X") {
                             $virtualMachine.psobject.properties.remove('sqlversion')
                             $virtualMachine.psobject.properties.remove('sqlInstanceDir')
+                            $virtualMachine.psobject.properties.remove('sqlInstanceName')
                         }
                         if ($newValue -eq "A") {
                             if ($null -eq $virtualMachine.additionalDisks) {
@@ -1337,6 +1347,7 @@ function Save-Config {
         $config
     )
     Write-Host
+    Write-Verbose "9 Save-Config"
 
     $file = "$($config.vmOptions.prefix)$($config.vmOptions.domainName)"
     if ($config.vmOptions.existingDCNameWithPrefix) {
@@ -1373,6 +1384,7 @@ function Save-Config {
     $return.ConfigFileName = Split-Path -Path $fileName -Leaf
     Write-Host "Saved to $filename"
     Write-Host
+    Write-Verbose "11"
 }
 $Global:Config = $null
 #$Global:Config = Select-Config $sampleDir
@@ -1391,6 +1403,7 @@ while ($valid -eq $false) {
     $return.DeployNow = Select-MainMenu
     $c = Test-Configuration -InputObject $Config
     Write-Host
+    Write-Verbose "12"
 
     if ($c.Valid) {
         $valid = $true
@@ -1403,6 +1416,7 @@ while ($valid -eq $false) {
     if ($valid) {
         Show-Summary ($c.DeployConfig)
         Write-Host
+        Write-verbose "13"
         Write-Host "Answering 'no' below will take you back to previous menus to allow you to correct mistakes"
         $response = Read-Host2 -Prompt "Everything correct? (Y/n)" -HideHelp
         if (-not [String]::IsNullOrWhiteSpace($response)) {
