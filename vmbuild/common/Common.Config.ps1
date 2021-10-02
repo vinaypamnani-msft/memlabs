@@ -805,7 +805,7 @@ function Test-Configuration {
                 $existingSiteCodes += $CSVM.siteCode
             }
 
-            $parentCodes = $existingSiteCodes -split ","
+            $parentCodes = $existingSiteCodes -join ","
             if ($psParentSiteCode -notin $existingSiteCodes) {
                 Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
             }
@@ -813,7 +813,7 @@ function Test-Configuration {
 
         if ($psParentSiteCode -and $deployConfig.parameters.ExistingCASName -and $deployConfig.cmOptions.updateToLatest) {
             $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object {$_.State -ne "Running" }
-            $notRunningNames = $notRunning.vmName -split ","
+            $notRunningNames = $notRunning.vmName -join ","
             if ($notRunning.Count -gt 0) {
                 Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Failure
             }
@@ -865,7 +865,7 @@ function Test-Configuration {
     $unique1 = $vmInDeployment | Select-Object -Unique
     $compare = Compare-Object -ReferenceObject $vmInDeployment -DifferenceObject $unique1
     if ($compare) {
-        $duplicates = $compare.InputObject -split ","
+        $duplicates = $compare.InputObject -join ","
         Add-ValidationMessage -Message "Name Conflict: Deployment contains duplicate VM names [$duplicates]" -ReturnObject $return -Warning
     }
 
@@ -875,7 +875,7 @@ function Test-Configuration {
     $unique2 = $all | Select-Object -Unique
     $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
     if (-not $compare -and $compare2) {
-        $duplicates = $compare2.InputObject -split ","
+        $duplicates = $compare2.InputObject -join ","
         Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V." -ReturnObject $return -Warning
     }
 
