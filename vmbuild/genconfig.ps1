@@ -507,14 +507,15 @@ function Select-ExistingSubnets {
         
         $subnetListModified = @()
         foreach ($sb in $subnetListNew) {
-            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object {$_.SiteCode -ne $null } | Group-Object -Property Subnet | Select-Object Name, @{l="SiteCode";e={$_.Group.SiteCode -join ","}}| Where-Object {$_.Name -eq $sb} | Select-Object -expand SiteCode
-            if ([string]::IsNullOrWhiteSpace($SiteCodes)){
+            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb } | Select-Object -expand SiteCode
+            if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
                 $subnetListModified += "$sb"    
-            }else{
+            }
+            else {
                 $subnetListModified += "$sb ($SiteCodes)"    
             }            
         }
-        $subnetListModified += "192.168.5.0"
+
         [string]$response = $null
         $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions
         write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
