@@ -798,13 +798,14 @@ function Test-Configuration {
 
         # Valid parent Site Code
         if ($PSVM.parentSiteCode) {
-            $existingSiteCodes = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "CAS"| Select-Object -ExpandProperty SiteCode
+            $existingSiteCodes = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "CAS" | Select-Object -ExpandProperty SiteCode
             if ($containsCS) {
                 $existingSiteCodes += $CSVM.siteCode
             }
 
+            $parentCodes = $existingSiteCodes -split ","
             if ($PSVM.parentSiteCode -notin $existingSiteCodes) {
-                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$($PSVM.parentSiteCode)] which is invalid. Valid Site Codes: $existingSiteCodes" -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$($PSVM.parentSiteCode)] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
             }
         }
 
