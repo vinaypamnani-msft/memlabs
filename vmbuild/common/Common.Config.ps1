@@ -845,7 +845,7 @@ function Test-Configuration {
     $all = $allVMs + $vmInDeployment
     $unique2 = $all | Select-Object -Unique
     $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
-    if ($compare2) {
+    if (-not $compare -and $compare2) {
         $duplicates = $compare2.InputObject -split ","
         Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V." -ReturnObject $return -Warning
     }
