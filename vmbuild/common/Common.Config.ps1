@@ -505,13 +505,13 @@ function Test-ValidVmPath {
         }
 
         if ($installDrive -ne "C" -and -not $VM.additionalDisks) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Warning
         }
 
         if ($installDrive -ne "C" -and $VM.additionalDisks) {
             $defined = $VM.additionalDisks | Get-Member -Name $installDrive
             if (-not $defined) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Warning
             }
         }
 
@@ -604,7 +604,7 @@ function Test-ValidRoleCSPS {
 
     # Primary/CAS must contain SQL
     if (-not $VM.sqlVersion) {
-        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
     }
 
     # Site Code
@@ -747,7 +747,7 @@ function Test-Configuration {
 
             # sqlInstanceName
             if (-not $VM.sqlInstanceName) {
-                Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Warning
             }
         }
 
@@ -770,12 +770,12 @@ function Test-Configuration {
 
             # tech preview and CAS
             if ($deployConfig.cmOptions.version -eq "tech-preview") {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
             }
 
             # CAS without Primary
             if (-not $containsPS) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Warning
             }
 
             # Validate CAS role
@@ -813,14 +813,14 @@ function Test-Configuration {
                 $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.State -ne "Running" }
                 $notRunningNames = $notRunning.vmName -join ","
                 if ($notRunning.Count -gt 0) {
-                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Failure
+                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Warning
                 }
             }
 
             # CAS with Primary, without parentSiteCode
             if ($containsCS) {
                 if ($PSVM.parentSiteCode -ne $CSVM.siteCode) {
-                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$($PSVM.parentSiteCode)] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Failure
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$($PSVM.parentSiteCode)] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Warning
                 }
             }
 
@@ -922,7 +922,9 @@ function New-DeployConfig {
     $virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
 
     # create params object
+    try{
     $network = $configObject.vmOptions.network.Substring(0, $configObject.vmOptions.network.LastIndexOf("."))
+    } catch {}
     $clientsCsv = ($virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
 
     # DCName (prefer name in config over existing)
