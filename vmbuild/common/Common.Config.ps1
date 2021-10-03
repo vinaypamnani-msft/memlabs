@@ -1311,9 +1311,10 @@ Function Show-Summary {
         }
     }
 
-    $CHECKMARK = ([char]8730)
+    #$CHECKMARK = ([char]8730)
     $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
-
+    $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
+    $containsMember = $deployConfig.virtualMachines.role.Contains("DomainMember")
 
     if ($null -ne $($deployConfig.cmOptions) -and $containsPS -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true) {
@@ -1336,18 +1337,30 @@ Function Show-Summary {
             Write-RedX "ConfigMgr will not be installed."
         }
 
+        
         if ($deployConfig.cmOptions.installDPMPRoles -and $deployConfig.cmOptions.install -eq $true) {
-            Write-GreenCheck "DPMP roles will be pushed from the Configmgr Primary Server"
+
+            If ($containsDPMP) {
+            Write-GreenCheck "DPMP roles will be pushed from the Configmgr Primary Server"        
+            }
+            else
+            {
+                Write-GreenCheck "DP and MP roles will be installed on the Primary Server"
+            }
         }
         else {
             Write-RedX "DPMP roles will not be installed"
         }
 
+        if ($containsMember) {
         if ($deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
             Write-GreenCheck "ConfigMgr Clients will be installed on domain members"
         }
         else {
             Write-RedX "ConfigMgr Clients will NOT be installed on domain members"
+        }}
+        else {
+            Write-RedX "No Domain Member roles defined (No ConfigMgr Clients to install)"
         }
 
     }
