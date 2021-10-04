@@ -630,7 +630,7 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $false)]
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
-        [switch]$ForceNew,
+        [switch]$ForceNew,        
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
@@ -697,6 +697,12 @@ function New-VirtualMachine {
     Write-Log "New-VirtualMachine: $VmName`: Enabling Hyper-V Guest Services"
     Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
 
+    Write-Log "New-VirtualMachine: $VmName`: Enabling TPM"
+    $HGOwner = Get-HgsGuardian UntrustedGuardian
+    $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
+    Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
+    Enable-VMTPM $VmName -ErrorAction SilentlyContinue ## Only required for Win11
+
     Write-Log "New-VirtualMachine: $VmName`: Setting Processor count to $Processors"
     Set-VM -Name $vmName -ProcessorCount $Processors
 
@@ -760,6 +766,8 @@ function Wait-ForVm {
         [string]$PathToVerify,
         [Parameter(Mandatory = $false)]
         [int]$TimeoutMinutes = 10,
+        [Parameter(Mandatory = $false)]
+        [int]$WaitSeconds = 60,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false)]
@@ -824,9 +832,9 @@ function Wait-ForVm {
 
             # OOBE and SMB ready, buffer wait to ensure we're at login screen. Bad things happen if you reboot the machine before it really finished OOBE.
             if ($readySmb) {
-                Write-Log "Wait-ForVm: $VmName`: OOBE complete, and SMB available. Waiting 30 seconds before continuing."
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete, and SMB available. Waiting 30 seconds before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-                Start-Sleep -Seconds 30
+                Write-Log "Wait-ForVm: $VmName`: OOBE complete, and SMB available. Waiting $WaitSeconds seconds before continuing."
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete, and SMB available. Waiting $WaitSeconds seconds before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Start-Sleep -Seconds $WaitSeconds
                 $ready = $true
             }
 
@@ -1177,9 +1185,10 @@ public static class DisableConsoleQuickEdit
 "@
 
 if ($null -eq $QuickEditMode) {
-    try{
-    $QuickEditMode = add-type -TypeDefinition $QuickEditCodeSnippet -Language CSharp -ErrorAction SilentlyContinue
-    }catch{}
+    try {
+        $QuickEditMode = add-type -TypeDefinition $QuickEditCodeSnippet -Language CSharp -ErrorAction SilentlyContinue
+    }
+    catch {}
 }
 
 function Set-QuickEdit() {

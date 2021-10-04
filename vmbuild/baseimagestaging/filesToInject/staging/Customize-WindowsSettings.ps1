@@ -57,8 +57,8 @@ if ($server) {
 
         Update-Log "Installing Windows Features: IIS"
         Install-WindowsFeature Web-Server -IncludeManagementTools
-        Install-WindowsFeature Web-Basic-Auth,Web-IP-Security,Web-Url-Auth,Web-Windows-Auth,Web-ASP,Web-Asp-Net
-        Install-WindowsFeature Web-Mgmt-Console,Web-Lgcy-Mgmt-Console,Web-Lgcy-Scripting,Web-WMI,Web-Mgmt-Service,Web-Mgmt-Tools,Web-Scripting-Tools
+        Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net
+        Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
     }
 
     Update-Log "Disable Windows Ink Workspace button"
@@ -102,7 +102,7 @@ $oldpath = (Get-ItemProperty -Path 'Registry::HKEY_LOCAL_MACHINE\System\CurrentC
 $newpath = $oldpath
 if (Test-Path $toolsPath) {
     $newpath = "$newpath;$toolsPath"
-    foreach($item in Get-ChildItem -Path $toolsPath -Directory) {
+    foreach ($item in Get-ChildItem -Path $toolsPath -Directory) {
         $newpath = "$newpath;$($item.FullName)"
     }
 }
@@ -130,6 +130,12 @@ New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' -Force | New-I
 Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name ShowTaskViewButton -Value 0 # Hide TaskView
 Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name ShowCortanaButton -Value 0 # Hide Cortana
 
+if (-not $server) {
+    # Dark Mode for Win 10/11
+    New-ItemProperty -Path HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize -Name AppsUseLightTheme -Value 0 -Type Dword -Force
+    New-ItemProperty -Path HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize -Name SystemUsesLightTheme -Value 0 -Type Dword -Force
+}
+
 # Create directories, if not present
 # ===================================
 if (-not (Test-Path "C:\temp")) {
@@ -156,7 +162,8 @@ if ($RunOptional.IsPresent) {
     if ($server) {
         Update-Log "Add BGInfo startup shortcut for SERVER"
         Copy-Item -Path "C:\staging\bginfo\bginfo_SERVER.lnk" -Destination "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -Force -ErrorAction SilentlyContinue
-    } else {
+    }
+    else {
         Update-Log "Add BGInfo startup shortcut for CLIENT"
         Copy-Item -Path "C:\staging\bginfo\bginfo_CLIENT.lnk" -Destination "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -Force -ErrorAction SilentlyContinue
     }
