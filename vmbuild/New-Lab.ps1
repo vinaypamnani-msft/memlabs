@@ -489,8 +489,10 @@ $VM_Create = {
         Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
 
-    # Set VM Note
-    New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $worked
+    if ($createVM) {
+        # Set VM Note
+        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $worked
+    }
 }
 
 Clear-Host
