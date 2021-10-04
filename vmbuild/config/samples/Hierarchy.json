@@ -26,8 +26,9 @@
             "role": "CAS",
             "siteCode": "CS1",
             "operatingSystem": "Server 2022",
-            "sqlVersion": "SQL Server 2019",
             "cmInstallDir": "E:\\ConfigMgr",
+            "sqlVersion": "SQL Server 2019",
+            "sqlInstanceName": "MSSQLSERVER",
             "sqlInstanceDir": "E:\\SQL",
             "additionalDisks": {
                 "E": "250GB"
@@ -39,9 +40,11 @@
             "vmName": "PS1",
             "role": "Primary",
             "siteCode": "PS1",
+            "parentSiteCode": "CS1",
             "operatingSystem": "Server 2022",
-            "sqlVersion": "SQL Server 2019",
             "cmInstallDir": "E:\\ConfigMgr",
+            "sqlVersion": "SQL Server 2019",
+            "sqlInstanceName": "MSSQLSERVER",
             "sqlInstanceDir": "E:\\SQL",
             "additionalDisks": {
                 "E": "250GB"

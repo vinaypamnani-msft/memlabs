@@ -1009,18 +1009,20 @@ class ChangeSQLServicesAccount {
 
     [void] Set() {
         $_SQLInstanceName = $this.SQLInstanceName
-        $query = "Name = '" + $_SQLInstanceName.ToUpper() + "'"
+        $serviceName = if ($_SQLInstanceName -eq "MSSQLSERVER") { $_SQLInstanceName } else { "MSSQL`$$_SQLInstanceName" }
+        $query = "Name = '$serviceName'"
         $services = Get-WmiObject win32_service -Filter $query
 
         if ($services.State -eq 'Running') {
             #Check if SQLSERVERAGENT is running
             $sqlserveragentflag = 0
-            $sqlserveragentservices = Get-WmiObject win32_service -Filter "Name = 'SQLSERVERAGENT'"
+            $sqlAgentService = if ($_SQLInstanceName -eq "SQLSERVERAGENT") { $_SQLInstanceName } else { "SQLAgent`$$_SQLInstanceName" }
+            $sqlserveragentservices = Get-WmiObject win32_service -Filter "Name = '$sqlAgentService'"
             if ($null -ne $sqlserveragentservices) {
                 if ($sqlserveragentservices.State -eq 'Running') {
-                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] SQLSERVERAGENT need to be stopped first"
+                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] $sqlAgentService need to be stopped first"
                     $Result = $sqlserveragentservices.StopService()
-                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] Stopping SQLSERVERAGENT.."
+                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] Stopping $sqlAgentService.."
                     if ($Result.ReturnValue -eq '0') {
                         $sqlserveragentflag = 1
                         Write-Verbose "[$(Get-Date -format HH:mm:ss)] Stopped"
@@ -1039,7 +1041,7 @@ class ChangeSQLServicesAccount {
             if ($Result.ReturnValue -eq '0') {
                 Write-Verbose "[$(Get-Date -format HH:mm:ss)] Successfully Change the services account"
                 if ($sqlserveragentflag -eq 1) {
-                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] Starting SQLSERVERAGENT.."
+                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] Starting $sqlAgentService.."
                     $Result = $sqlserveragentservices.StartService()
                     if ($Result.ReturnValue -eq '0') {
                         Write-Verbose "[$(Get-Date -format HH:mm:ss)] Started"
@@ -1060,7 +1062,8 @@ class ChangeSQLServicesAccount {
 
     [bool] Test() {
         $_SQLInstanceName = $this.SQLInstanceName
-        $query = "Name = '" + $_SQLInstanceName.ToUpper() + "'"
+        $serviceName = if ($_SQLInstanceName -eq "MSSQLSERVER") { $_SQLInstanceName } else { "MSSQL`$$_SQLInstanceName" }
+        $query = "Name = '$serviceName'"
         $services = Get-WmiObject win32_service -Filter $query
 
         if ($null -ne $services) {
@@ -1076,6 +1079,88 @@ class ChangeSQLServicesAccount {
     }
 
     [ChangeSQLServicesAccount] Get() {
+        return $this
+    }
+}
+
+
+[DscResource()]
+class ChangeSqlInstancePort {
+    [DscProperty(key)]
+    [string] $SQLInstanceName
+
+    [DscProperty(Mandatory)]
+    [int] $SQLInstancePort
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $_SQLInstanceName = $this.SQLInstanceName
+        $_SQLInstancePort = $this.SQLInstancePort
+
+        if ($_SQLInstanceName -eq "MSSQLSERVER") {
+            return
+        }
+
+        Try {
+            # Load the assemblies
+            Write-Verbose "[ChangeSqlInstancePort]: Setting port for $_SQLInstanceName to $_SQLInstancePort"
+
+            [system.reflection.assembly]::LoadWithPartialName("Microsoft.SqlServer.Smo") | Out-Null
+            [system.reflection.assembly]::LoadWithPartialName("Microsoft.SqlServer.SqlWmiManagement") | Out-Null
+            $mc = new-object Microsoft.SqlServer.Management.Smo.Wmi.ManagedComputer $env:COMPUTERNAME
+            $i = $mc.ServerInstances[$_SQLInstanceName]
+            $p = $i.ServerProtocols['Tcp']
+            $ip = $p.IPAddresses['IPAll']
+            $ip.IPAddressProperties['TcpDynamicPorts'].Value = ''
+            $ipa = $ip.IPAddressProperties['TcpPort']
+            $ipa.Value = [string]$_SQLInstancePort
+            $p.Alter()
+
+            New-NetFirewallRule -DisplayName 'SQL over TCP Inbound (Named Instance)' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort $_SQLInstancePort -Group "For SQL Server"
+
+        }
+        Catch {
+            Write-Verbose "ERROR[ChangeSqlInstancePort]: SET Failed: $($_.Exception.Message)"
+        }
+    }
+
+    [bool] Test() {
+
+        $_SQLInstanceName = $this.SQLInstanceName
+        $_SQLInstancePort = $this.SQLInstancePort
+
+        if ($_SQLInstanceName -eq "MSSQLSERVER") {
+            return $true
+        }
+
+        try {
+            # Load the assemblies
+            Write-Verbose "[ChangeSqlInstancePort]: Testing port for $_SQLInstanceName"
+
+            [system.reflection.assembly]::LoadWithPartialName("Microsoft.SqlServer.Smo") | Out-Null
+            [system.reflection.assembly]::LoadWithPartialName("Microsoft.SqlServer.SqlWmiManagement") | Out-Null
+            $mc = new-object Microsoft.SqlServer.Management.Smo.Wmi.ManagedComputer $env:COMPUTERNAME
+            $i = $mc.ServerInstances[$_SQLInstanceName]
+            $p = $i.ServerProtocols['Tcp']
+            $ip = $p.IPAddresses['IPAll']
+            $ipa = $ip.IPAddressProperties['TcpPort']
+            if ($ipa.Value -eq $_SQLInstancePort) {
+                return $true
+            }
+            return $false
+        }
+        catch {
+            Write-Verbose "ERROR[ChangeSqlInstancePort]: TEST Failed: $($_.Exception.Message)"
+            return $false
+        }
+    }
+
+    [ChangeSqlInstancePort] Get() {
         return $this
     }
 }

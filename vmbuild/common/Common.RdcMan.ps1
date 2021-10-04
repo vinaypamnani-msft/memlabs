@@ -2,6 +2,41 @@
 ### RDCMan Functions ###
 ########################
 
+
+function Install-RDCman {
+    # ARM template installs sysinternal tools via choco
+    $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
+    $Global:newrdcmanpath = "C:\tools"
+    $rdcmanexe = "RDCMan.exe"
+
+    # create C:\tools if not present
+    if (-not (Test-Path $Global:newrdcmanpath)) {
+        New-Item -Path $Global:newrdcmanpath -ItemType Directory -Force -ErrorAction SilentlyContinue
+    }
+
+    # Download rdcman, if not present
+    if (-not (Test-Path "$rdcmanapath\$rdcmanexe")) {
+
+        try {
+            $ProgressPreference = 'SilentlyContinue'
+            Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination "$Global:newrdcmanpath\$rdcmanexe" -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-Log "New-RDCManFile: Could not download latest RDCMan.exe. $_" -Warning -LogOnly
+        }
+        finally {
+            $ProgressPreference = 'Continue'
+        }
+    }
+    else {
+        Copy-Item -Path "$rdcmanpath\$rdcmanexe" -Destination "$Global:newrdcmanpath\$rdcmanexe" -Force -ErrorAction SilentlyContinue
+    }
+    # set file associations
+    & cmd /c assoc .rdg=rdcman | Out-Null
+    & cmd /c ftype rdcman=$Global:newrdcmanpath\$rdcmanexe | Out-Null
+
+}
+
 function New-RDCManFile {
     param(
         [object]$DeployConfig,
@@ -42,33 +77,7 @@ function New-RDCManFile {
         return
     }
 
-    # ARM template installs sysinternal tools via choco
-    $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
-    $newrdcmanpath = "C:\tools"
-    $rdcmanexe = "RDCMan.exe"
-
-    # create C:\tools if not present
-    if (-not (Test-Path $newrdcmanpath)) {
-        New-Item -Path $newrdcmanpath -ItemType Directory -Force -ErrorAction SilentlyContinue
-    }
-
-    # Download rdcman, if not present
-    if (-not (Test-Path "$rdcmanapath\$rdcmanexe")) {
-
-        try {
-            $ProgressPreference = 'SilentlyContinue'
-            Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination "$newrdcmanpath\$rdcmanexe" -ErrorAction SilentlyContinue
-        }
-        catch {
-            Write-Log "New-RDCManFile: Could not download latest RDCMan.exe. $_" -Warning -LogOnly
-        }
-        finally {
-            $ProgressPreference = 'Continue'
-        }
-    }
-    else {
-        Copy-Item -Path "$rdcmanpath\$rdcmanexe" -Destination "$newrdcmanpath\$rdcmanexe" -Force -ErrorAction SilentlyContinue
-    }
+    Install-RDCman
 
     if (Test-Path "$newrdcmanpath\$rdcmanexe") {
         $encryptedPass = Get-RDCManPassword $newrdcmanpath
@@ -78,7 +87,7 @@ function New-RDCManFile {
         }
     }
     else {
-        Write-Log "New-RDCManFile: Cound not located $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
+        Write-Log "New-RDCManFile: Could not locate $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
         return
     }
 
@@ -112,18 +121,123 @@ function New-RDCManFile {
         }
     }
 
+
+    # Add new group
+    [void]$file.AppendChild($findgroup)
+
+
     # If the original file was a template, remove the templated group.
     if ($group.properties.Name -eq "VMASTEMPLATE") {
         [void]$file.RemoveChild($group)
     }
 
-    # Add new group
-    [void]$file.AppendChild($findgroup)
+    # Save to desired filename
+    if ($shouldSave) {
+        Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success
+        Get-Process -Name rdcman -ea Ignore | Stop-Process
+        Start-Sleep 1
+        $existing.save($rdcmanfile) | Out-Null
+    }
+    else {
+        Write-Log "New-RDCManFile: No Changes. Not Saving resultant XML to $rdcmanfile" -Success
+    }
+}
 
-    # set file associations
-    & cmd /c assoc .rdg=rdcman | Out-Null
-    & cmd /c ftype rdcman=$newrdcmanpath\$rdcmanexe | Out-Null
+function New-RDCManFileFromHyperV {
+    param(
+        [string]$rdcmanfile
+    )
 
+
+    if (test-path $rdcmanfile) {
+        Write-Log "New-RDCManFile: Killing RDCMan, and Deleting $rdcmanfile."
+        Get-Process -Name rdcman -ea Ignore | Stop-Process
+        Start-Sleep 1
+        Remove-Item $rdcmanfile | out-null
+    }
+    $templatefile = Join-Path $PSScriptRoot "template.rdg"
+
+    # Gets the blank template
+    [xml]$template = Get-Content -Path $templatefile
+    if ($null -eq $template) {
+        Write-Log "New-RDCManFile: Could not locate $templatefile" -Failure
+        return
+    }
+
+    # Gets the blank template, or returns the existing rdg xml if available.
+    $existing = $template
+    if (Test-Path $rdcmanfile) {
+        [xml]$existing = Get-Content -Path $rdcmanfile
+    }
+
+    # This is the bulk of the data.
+    $file = $existing.RDCMan.file
+    if ($null -eq $file) {
+        Write-Log "New-RDCManFile: Could not load File section from $rdcmanfile" -Failure
+        return
+    }
+
+    $group = $file.group
+    if ($null -eq $group) {
+        Write-Log "New-RDCManFile: Could not load group section from $rdcmanfile" -Failure
+        return
+    }
+
+    $groupFromTemplate = $template.RDCMan.file.group
+    if ($null -eq $groupFromTemplate) {
+        Write-Log "New-RDCManFile: Could not load group section from $templatefile" -Failure
+        return
+    }
+
+    Install-RDCman
+
+    foreach ($domain in (Get-List -Type UniqueDomain)) {
+        Write-Host "Adding all machines from Domain $domain"
+        $findGroup = Get-RDCManGroupToModify $domain $group $findGroup $groupFromTemplate $existing
+        if ($findGroup -eq $false -or $null -eq $findGroup) {
+            Write-Log "New-RDCManFile: Failed to find group to modify" -Failure
+            return
+        }
+
+        # Set user/pass on the group
+        $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -first 1).DomainAdmin
+
+        if (Test-Path "$Global:newrdcmanpath\$rdcmanexe") {
+            $encryptedPass = Get-RDCManPassword $Global:newrdcmanpath
+            if ($null -eq $encryptedPass) {
+                Write-Log "New-RDCManFile: Password was not generated correctly." -Failure
+                return
+            }
+        }
+        else {
+            Write-Log "New-RDCManFile: Cound not located $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
+            return
+        }
+
+        $findGroup.logonCredentials.password = $encryptedPass
+        if ($findGroup.logonCredentials.username -ne $username) {
+            $findGroup.logonCredentials.userName = $username
+            $shouldSave = $true
+        }
+
+        $vmList = (Get-List -Type VM -domain $domain).VmName
+        foreach ($vm in $vmList) {
+            Write-Verbose "Adding VM $vm"
+            if (Add-RDCManServerToGroup $vm $findgroup $groupFromTemplate $existing -eq $True) {
+                $shouldSave = $true
+            }
+        }
+
+        # Add new group
+        [void]$file.AppendChild($findgroup)
+
+    }
+
+
+    # If the original file was a template, remove the templated group.
+    if ($group.properties.Name -eq "VMASTEMPLATE") {
+        [void]$file.RemoveChild($group)
+    }
     # Save to desired filename
     if ($shouldSave) {
         Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success
@@ -146,7 +260,6 @@ function Add-RDCManServerToGroup {
     )
 
     $findserver = $findgroup.server | Where-Object { $_.properties.name -eq $serverName } | Select-Object -First 1
-
     if ($null -eq $findserver) {
         Write-Log "Add-RDCManServerToGroup: Added $serverName to RDG Group" -LogOnly
         $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
@@ -167,7 +280,7 @@ function Add-RDCManServerToGroup {
 # If a new one is created, the <server> nodes will not exist.
 function Get-RDCManGroupToModify {
     param(
-        $domain,
+        [string]$domain,
         $group,
         $findGroup,
         $groupFromTemplate,
@@ -203,6 +316,7 @@ function Get-RDCManPassword {
         copy-item "$($rdcmanpath)\rdcman.exe" "$($env:temp)\rdcman.dll" -Force
         unblock-file "$($env:temp)\rdcman.dll"
     }
+
 
     if (-not(test-path "$($env:temp)\rdcman.dll")) {
         Write-Log "Get-RDCManPassword: Rdcman.dll was not copied." -Failure

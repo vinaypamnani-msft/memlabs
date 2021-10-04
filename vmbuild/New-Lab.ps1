@@ -54,6 +54,8 @@ if (-not $NoWindowResize.IsPresent) {
     }
 }
 
+Set-QuickEdit -DisableQuickEdit
+
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Main: Critical Failure! $($Common.FatalError)" -Failure
@@ -376,6 +378,7 @@ $VM_Create = {
         else {
             # Don't wait, if we're not creating a new VM and running DSC on an existing VM
             Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+            Start-Sleep -Seconds 60 # Wait for DSC Status to do tests, and wait on the latest action
         }
 
     }
@@ -464,6 +467,17 @@ $VM_Create = {
         }
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
+    # NLA Service starts before domain is ready sometimes, and causes RDP to fail because network is considered public by firewall.
+    $Trust_Ethernet = {
+        Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse `
+        | ForEach-Object { $_.PSChildName } `
+        | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 2 }
+    }
+
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -DisplayName "Set Ethernet as Trusted" -WhatIf:$WhatIf
+    if ($result.ScriptBlockFailed) {
+        Write-Log "PSJOB: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
+    }
 
     if (-not $complete) {
         $worked = $false
@@ -475,8 +489,10 @@ $VM_Create = {
         Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
 
-    # Set VM Note
-    New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $worked
+    if ($createVM) {
+        # Set VM Note
+        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $worked
+    }
 }
 
 Clear-Host
@@ -545,11 +561,13 @@ try {
     }
     else {
         Write-Log "Main: Config validation failed. `r`n$($testConfigResult.Message)" -Failure
+        Write-Host
         return
     }
 }
 catch {
     Write-Log "Main: Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
+    Write-Host
     return
 }
 
@@ -606,9 +624,7 @@ if ($existingJobs) {
 }
 
 Write-Log "Main: Creating RDCMan file for specified config" -Activity
-$desktopPath = [Environment]::GetFolderPath("Desktop")
-$rdcManFilePath = Join-Path $DesktopPath "memlabs.rdg"
-New-RDCManFile $deployConfig $rdcManFilePath
+New-RDCManFile $deployConfig $global:Common.RdcManFilePath
 
 Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
@@ -717,4 +733,5 @@ Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
 if (Test-Path "C:\tools\rdcman.exe") {
     Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
 }
+
 Write-Host

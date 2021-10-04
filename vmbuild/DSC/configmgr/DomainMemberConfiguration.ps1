@@ -30,8 +30,12 @@
     if ($ThisVM.sqlVersion) {
         $installSQL = $true
         $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
+        $SQLInstanceName = "MSSQLSERVER"
         if ($ThisVM.sqlInstanceDir) {
             $SQLInstanceDir = $ThisVM.sqlInstanceDir
+        }
+        if ($ThisVM.sqlInstanceName) {
+            $SQLInstanceName = $ThisVM.sqlInstanceName
         }
     }
 
@@ -138,11 +142,11 @@
 
             WriteStatus InstallSQL {
                 DependsOn = '[OpenFirewallPortForSCCM]OpenFirewall'
-                Status    = "Installing SQL Server (default instance)"
+                Status    = "Installing SQL Server ($SQLInstanceName instance)"
             }
 
             SqlSetup InstallSQL {
-                InstanceName        = 'MSSQLSERVER'
+                InstanceName        = $SQLInstanceName
                 InstanceDir         = $SQLInstanceDir
                 SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
                 Features            = 'SQLENGINE,CONN,BC'
@@ -161,7 +165,7 @@
                 DynamicAlloc = $false
                 MinMemory    = 2048
                 MaxMemory    = 8192
-                InstanceName = 'MSSQLSERVER'
+                InstanceName = $SQLInstanceName
             }
 
             WriteStatus SSMS {

@@ -26,8 +26,9 @@
             "role": "Primary",
             "siteCode": "PRI",
             "operatingSystem": "Server 2022",
-            "sqlVersion": "SQL Server 2019",
             "cmInstallDir": "E:\\ConfigMgr",
+            "sqlVersion": "SQL Server 2019",
+            "sqlInstanceName": "MSSQLSERVER",
             "sqlInstanceDir": "F:\\SQL",
             "additionalDisks": {
                 "E": "250GB",

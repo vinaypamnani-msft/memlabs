@@ -7,7 +7,7 @@ param(
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get reguired values from config
-$Config = $deployConfig.parameters.Scenario
+$scenario = $deployConfig.parameters.Scenario
 $CurrentRole = $deployConfig.parameters.ThisMachineRole
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
@@ -37,7 +37,6 @@ $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
 # Reset upgrade action (in case called again in add to existing scenario)
-# Set Install action as Running
 $Configuration.UpgradeSCCM.Status = 'NotStart'
 $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
@@ -67,8 +66,8 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
         }
     }
 
-    Write-DscStatus "Creating $Config.ini file" # Standalone or Hierarchy
-    $CMINIPath = "c:\$CM\$Config.ini"
+    Write-DscStatus "Creating $scenario.ini file" # Standalone or Hierarchy
+    $CMINIPath = "c:\$CM\$scenario.ini"
 
     $cmini = @'
 [Identification]
@@ -505,6 +504,7 @@ if ($UpdateToLatest) {
             }
 
             #Get if there are any other updates need to be installed
+            Write-DscStatus "Checking if another update is available..."
             $updatepack = getupdate
             if ($updatepack -ne "") {
                 Write-DscStatus "Found another update: '$($updatepack.Name)'."

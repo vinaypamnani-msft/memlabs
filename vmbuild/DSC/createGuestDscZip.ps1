@@ -1,7 +1,7 @@
 param(
-    $vmName,
     $configPath,
     [System.Management.Automation.PSCredential]$creds,
+    $vmName,
     [switch]$force
 )
 
@@ -82,7 +82,7 @@ Write-Host "Adding $dscFolder TemplateHelpDSC to DSC.ZIP.."
 Compress-Archive -Path .\$dscFolder\TemplateHelpDSC -Update -DestinationPath .\$dscFolder\DSC.zip
 
 # install templatehelpdsc module on this machine
-Write-Host "Installing $dscFolder TemlateHelpDSC on this machine.."
+Write-Host "Installing $dscFolder TemplateHelpDSC on this machine.."
 Copy-Item .\$dscFolder\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
 
 # Create test config, for testing if the config definition is good.

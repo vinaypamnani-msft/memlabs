@@ -553,23 +553,30 @@ function New-VmNote {
         $ProgressPreference = 'SilentlyContinue'
         if ($InProgress.IsPresent) {
             $vmNote = [PSCustomObject]@{
-                inProgress = $true
-                role       = $Role
-                domain     = $DeployConfig.vmoptions.domainName
-                network    = $DeployConfig.vmoptions.network
-                prefix     = $DeployConfig.vmoptions.prefix
-                lastUpdate = (Get-Date -format "MM/dd/yyyy HH:mm")
+                inProgress  = $true
+                role        = $Role
+                domain      = $DeployConfig.vmoptions.domainName
+                domainAdmin = $DeployConfig.vmOptions.domainAdminName
+                network     = $DeployConfig.vmoptions.network
+                prefix      = $DeployConfig.vmoptions.prefix
+                lastUpdate  = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
         }
         else {
             $vmNote = [PSCustomObject]@{
-                success    = $Successful
-                role       = $Role
-                domain     = $DeployConfig.vmoptions.domainName
-                network    = $DeployConfig.vmoptions.network
-                prefix     = $DeployConfig.vmoptions.prefix
-                lastUpdate = (Get-Date -format "MM/dd/yyyy HH:mm")
+                success     = $Successful
+                role        = $Role
+                domain      = $DeployConfig.vmoptions.domainName
+                domainAdmin = $DeployConfig.vmOptions.domainAdminName
+                network     = $DeployConfig.vmoptions.network
+                prefix      = $DeployConfig.vmoptions.prefix
+                lastUpdate  = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
+        }
+
+        if ($Role -eq "CAS" -or $Role -eq "Primary") {
+            $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
+            $vmNote | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $ThisVM.SiteCode
         }
 
         $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
@@ -1108,7 +1115,84 @@ function Get-FileFromStorage {
 
     return $success
 }
+$QuickEditCodeSnippet = @" 
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 
+
+public static class DisableConsoleQuickEdit
+{
+    const uint ENABLE_QUICK_EDIT = 0x0040;
+
+    // STD_INPUT_HANDLE (DWORD): -10 is the standard input device.
+    const int STD_INPUT_HANDLE = -10;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll")]
+    static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll")]
+    static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    public static bool SetQuickEdit(bool SetEnabled)
+    {
+
+        IntPtr consoleHandle = GetStdHandle(STD_INPUT_HANDLE);
+
+        // get current console mode
+        uint consoleMode;
+        if (!GetConsoleMode(consoleHandle, out consoleMode))
+        {
+            // ERROR: Unable to get console mode.
+            return false;
+        }
+
+        // Clear the quick edit bit in the mode flags
+        if (SetEnabled)
+        {
+            consoleMode &= ~ENABLE_QUICK_EDIT;
+        }
+        else
+        {
+            consoleMode |= ENABLE_QUICK_EDIT;
+        }
+
+        if (!SetConsoleMode(consoleHandle, consoleMode))
+        {
+            return false;
+        }
+
+        return true;
+    }
+}
+"@
+
+if ($null -eq $QuickEditMode) {
+    try{
+    $QuickEditMode = add-type -TypeDefinition $QuickEditCodeSnippet -Language CSharp -ErrorAction SilentlyContinue
+    }catch{}
+}
+
+function Set-QuickEdit() {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false, HelpMessage = "This switch will disable Console QuickEdit option")]
+        [switch]$DisableQuickEdit = $false
+    )
+
+    if ([DisableConsoleQuickEdit]::SetQuickEdit($DisableQuickEdit)) {
+        Write-Verbose "QuickEdit settings has been updated."
+    }
+    else {
+        Write-Verbose "Something went wrong changing QuickEdit settings."
+    }
+}
 function Set-SupportedOptions {
 
     $roles = @(
@@ -1121,6 +1205,7 @@ function Set-SupportedOptions {
 
     $rolesForExisting = @(
         "DPMP",
+        "CAS",
         "Primary",
         "DomainMember"
     )
@@ -1162,6 +1247,7 @@ if (-not $Common.Initialized) {
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
 
     # Common global props
     $global:Common = [PSCustomObject]@{
@@ -1179,6 +1265,7 @@ if (-not $Common.Initialized) {
         StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
         StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
         LogPath               = Join-Path $PSScriptRoot "VMBuild.log"                                     # Log File
+        RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
         VerboseEnabled        = $false                                                                    # Verbose Logging
         Supported             = $null                                                                     # Supported Configs
         AzureFileList         = $null
