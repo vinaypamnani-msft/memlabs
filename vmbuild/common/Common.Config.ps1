@@ -505,13 +505,13 @@ function Test-ValidVmPath {
         }
 
         if ($installDrive -ne "C" -and -not $VM.additionalDisks) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Warning
         }
 
         if ($installDrive -ne "C" -and $VM.additionalDisks) {
             $defined = $VM.additionalDisks | Get-Member -Name $installDrive
             if (-not $defined) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Warning
             }
         }
 
@@ -604,7 +604,7 @@ function Test-ValidRoleCSPS {
 
     # Primary/CAS must contain SQL
     if (-not $VM.sqlVersion) {
-        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
     }
 
     # Site Code
@@ -747,7 +747,7 @@ function Test-Configuration {
 
             # sqlInstanceName
             if (-not $VM.sqlInstanceName) {
-                Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Warning
             }
         }
 
@@ -770,12 +770,12 @@ function Test-Configuration {
 
             # tech preview and CAS
             if ($deployConfig.cmOptions.version -eq "tech-preview") {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
             }
 
             # CAS without Primary
             if (-not $containsPS) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Warning
             }
 
             # Validate CAS role
@@ -813,14 +813,14 @@ function Test-Configuration {
                 $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.State -ne "Running" }
                 $notRunningNames = $notRunning.vmName -join ","
                 if ($notRunning.Count -gt 0) {
-                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Failure
+                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Warning
                 }
             }
 
             # CAS with Primary, without parentSiteCode
             if ($containsCS) {
                 if ($PSVM.parentSiteCode -ne $CSVM.siteCode) {
-                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$($PSVM.parentSiteCode)] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Failure
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$($PSVM.parentSiteCode)] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Warning
                 }
             }
 
@@ -922,7 +922,10 @@ function New-DeployConfig {
     $virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
 
     # create params object
-    $network = $configObject.vmOptions.network.Substring(0, $configObject.vmOptions.network.LastIndexOf("."))
+    try {
+        $network = $configObject.vmOptions.network.Substring(0, $configObject.vmOptions.network.LastIndexOf("."))
+    }
+    catch {}
     $clientsCsv = ($virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
 
     # DCName (prefer name in config over existing)
@@ -1272,69 +1275,118 @@ Function Show-Summary {
         $deployConfig
     )
 
-    $CHECKMARK = ([char]8730)
-    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
+    Function Write-GreenCheck {
+        [CmdletBinding()]
+        param (
+            [Parameter()]
+            [string] $text,
+            [Parameter()]
+            [switch] $NoNewLine
+        )
+        $CHECKMARK = ([char]8730)
 
+        Write-Host "  [" -NoNewLine
+        Write-Host -ForeGroundColor Green "$CHECKMARK" -NoNewline
+        Write-Host "] " -NoNewline
+        Write-Host $text -NoNewline
+        if (!$NoNewLine){
+            Write-Host
+        }
+    }
+
+    Function Write-RedX {
+        [CmdletBinding()]
+        param (
+            [Parameter()]
+            [string] $text,
+            [Parameter()]
+            [switch] $NoNewLine
+        )
+        Write-Host "  [" -NoNewLine
+        Write-Host -ForeGroundColor Red "x" -NoNewline
+        Write-Host "] " -NoNewline
+        Write-Host $text -NoNewline
+        if (!$NoNewLine){
+            Write-Host
+        }
+    }
+
+    #$CHECKMARK = ([char]8730)
+    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
+    $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
+    $containsMember = $deployConfig.virtualMachines.role.Contains("DomainMember")
 
     if ($null -ne $($deployConfig.cmOptions) -and $containsPS -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true) {
-            Write-Host "[$CHECKMARK] ConfigMgr $($deployConfig.cmOptions.version) will be installed and " -NoNewline
+            Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed and " -NoNewline
             if ($deployConfig.cmOptions.updateToLatest -eq $true) {
                 Write-Host "updated to latest"
             }
             else {
                 Write-Host "NOT updated to latest"
             }
-            $PSVM = $deployConfig.virtualMachines | Where-Object {$_.Role -eq "Primary"}
+            $PSVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" }
             if ($PSVM.ParentSiteCode) {
-                Write-Host "[$CHECKMARK] ConfigMgr Primary server Will join a Heirarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
+                Write-GreenCheck "ConfigMgr Primary server Will join a Heirarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
             }
             else {
-                Write-Host "[$CHECKMARK] Primary server with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
+                Write-GreenCheck "Primary server with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
             }
         }
         else {
-            Write-Host "[x] ConfigMgr will not be installed."
+            Write-RedX "ConfigMgr will not be installed."
         }
 
+        
         if ($deployConfig.cmOptions.installDPMPRoles -and $deployConfig.cmOptions.install -eq $true) {
-            Write-Host "[$CHECKMARK] DPMP roles will be pushed from the Configmgr Primary Server"
+
+            If ($containsDPMP) {
+            Write-GreenCheck "DPMP roles will be pushed from the Configmgr Primary Server"        
+            }
+            else
+            {
+                Write-GreenCheck "DP and MP roles will be installed on the Primary Server"
+            }
         }
         else {
-            Write-Host "[x] DPMP roles will not be installed"
+            Write-RedX "DPMP roles will not be installed"
         }
 
+        if ($containsMember) {
         if ($deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-            Write-Host "[$CHECKMARK] ConfigMgr Clients will be installed on domain members"
+            Write-GreenCheck "ConfigMgr Clients will be installed on domain members"
         }
         else {
-            Write-Host "[x] ConfigMgr Clients will NOT be installed on domain members"
+            Write-RedX "ConfigMgr Clients will NOT be installed on domain members"
+        }}
+        else {
+            Write-RedX "No Domain Member roles defined (No ConfigMgr Clients to install)"
         }
 
     }
     else {
-        Write-Host "[x] ConfigMgr will not be installed."
+        Write-RedX "ConfigMgr will not be installed."
     }
 
     if (-not $null -eq $($deployConfig.vmOptions)) {
 
         if ($null -eq $deployConfig.parameters.ExistingDCName) {
-            Write-Host "[$CHECKMARK] Domain: $($deployConfig.vmOptions.domainName) will be created."
+            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be created."
         }
         else {
-            Write-Host "[$CHECKMARK] Domain: $($deployConfig.vmOptions.domainName) will be joined."
+            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be joined."
         }
 
-        Write-Host "[$CHECKMARK] Network: $($deployConfig.vmOptions.network)"
-        Write-Host "[$CHECKMARK] Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
+        Write-GreenCheck "Network: $($deployConfig.vmOptions.network)"
+        Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
 
         $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
         $totalMemory = $totalMemory.Sum / 1GB
         $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
         $availableMemory = $availableMemory * 1KB / 1GB
-        Write-Host "[$CHECKMARK] This configuration will use $($totalMemory)GB out of $([math]::Round($availableMemory,2))GB Available RAM on host machine"
+        Write-GreenCheck "This configuration will use $($totalMemory)GB out of $([math]::Round($availableMemory,2))GB Available RAM on host machine"
     }
-    Write-Host "[$CHECKMARK] Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
+    Write-GreenCheck "Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
     $out = $deployConfig.virtualMachines | Where-Object { -not $_.hidden } `
     | Format-table vmName, role, operatingSystem, memory, @{Label = "Procs"; Expression = { $_.virtualProcs } }, @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } }, @{Label = "SQL"; Expression = { if ($null -ne $_.SqlVersion) { "YES" } } } `
     | Out-String
