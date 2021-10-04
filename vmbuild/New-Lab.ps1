@@ -54,8 +54,6 @@ if (-not $NoWindowResize.IsPresent) {
     }
 }
 
-Set-QuickEdit -DisableQuickEdit
-
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Main: Critical Failure! $($Common.FatalError)" -Failure
@@ -495,243 +493,251 @@ $VM_Create = {
     }
 }
 
+Set-QuickEdit -DisableQuickEdit
 Clear-Host
 
-if ($Configuration) {
-    # Get user configuration
-    $configResult = Get-UserConfiguration -Configuration $Configuration
-    if ($configResult.Loaded) {
-        $userConfig = $configResult.Config
-        Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
-        Write-Log "### START." -Success
-        Write-Log "Main: Validating specified configuration: $Configuration" -Activity
-    }
-    else {
-        Write-Log "### START." -Success
-        Write-Log "Main: Validating specified configuration: $Configuration" -Activity
-        Write-Log $configResult.Message -Failure
-        Write-Host
-        return
-    }
-
-}
-else {
-    Write-Log "Main: No Configuration specified. Calling genconfig." -Activity
-    Set-Location $PSScriptRoot
-    $result = ./genconfig.ps1 -InternalUseOnly
-
-    if (-not $result.DeployNow) {
-        return
-    }
-
-    if ($result.ForceNew) {
-        $ForceNew = $true
-    }
-
-    $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
-
-    if ($configResult.Loaded) {
-        $userConfig = $configResult.Config
-        Clear-Host
-        Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
-        Write-Log "### START." -Success
-        Write-Log "Main: Using $($result.ConfigFileName) provided by genconfig" -Activity
-        Write-Log "Main: genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
-    }
-    else {
-        Write-Log "### START." -Success
-        Write-Log "Main: Validating specified configuration: $Configuration" -Activity
-        Write-Log $configResult.Message -Failure
-        Write-Host
-        return
-    }
-
-}
-
-# Timer
-$timer = New-Object -TypeName System.Diagnostics.Stopwatch
-$timer.Start()
-
-# Load configuration
 try {
-    $testConfigResult = Test-Configuration -InputObject $userConfig
-    if ($testConfigResult.Valid) {
-        $deployConfig = $testConfigResult.DeployConfig
-        Write-Log "Main: Config validated successfully." -Success
+    if ($Configuration) {
+        # Get user configuration
+        $configResult = Get-UserConfiguration -Configuration $Configuration
+        if ($configResult.Loaded) {
+            $userConfig = $configResult.Config
+            Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
+            Write-Log "### START." -Success
+            Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+        }
+        else {
+            Write-Log "### START." -Success
+            Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+            Write-Log $configResult.Message -Failure
+            Write-Host
+            return
+        }
+
     }
     else {
-        Write-Log "Main: Config validation failed. `r`n$($testConfigResult.Message)" -Failure
+        Write-Log "Main: No Configuration specified. Calling genconfig." -Activity
+        Set-Location $PSScriptRoot
+        $result = ./genconfig.ps1 -InternalUseOnly
+
+        if (-not $result.DeployNow) {
+            return
+        }
+
+        if ($result.ForceNew) {
+            $ForceNew = $true
+        }
+
+        $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
+
+        if ($configResult.Loaded) {
+            $userConfig = $configResult.Config
+            Clear-Host
+            Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
+            Write-Log "### START." -Success
+            Write-Log "Main: Using $($result.ConfigFileName) provided by genconfig" -Activity
+            Write-Log "Main: genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
+        }
+        else {
+            Write-Log "### START." -Success
+            Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+            Write-Log $configResult.Message -Failure
+            Write-Host
+            return
+        }
+
+    }
+
+    # Timer
+    $timer = New-Object -TypeName System.Diagnostics.Stopwatch
+    $timer.Start()
+
+    # Load configuration
+    try {
+        $testConfigResult = Test-Configuration -InputObject $userConfig
+        if ($testConfigResult.Valid) {
+            $deployConfig = $testConfigResult.DeployConfig
+            Write-Log "Main: Config validated successfully." -Success
+        }
+        else {
+            Write-Log "Main: Config validation failed. `r`n$($testConfigResult.Message)" -Failure
+            Write-Host
+            return
+        }
+    }
+    catch {
+        Write-Log "Main: Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
         Write-Host
         return
     }
-}
-catch {
-    Write-Log "Main: Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
-    Write-Host
-    return
-}
 
-# Download required files
-$success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
-if (-not $success) {
-    Write-Host
-    Write-Log "Main: Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
-    Start-Sleep -Seconds 120
+    # Download required files
     $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
     if (-not $success) {
+        Write-Host
+        Write-Log "Main: Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
+        Start-Sleep -Seconds 120
+        $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
+        if (-not $success) {
+            $timer.Stop()
+            Write-Log "Main: Failed to download all required files. Exiting." -Failure
+            return
+        }
+    }
+
+    if ($DownloadFilesOnly.IsPresent) {
         $timer.Stop()
-        Write-Log "Main: Failed to download all required files. Exiting." -Failure
+        Write-Host
+        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
+        Write-Host
         return
     }
-}
 
-if ($DownloadFilesOnly.IsPresent) {
+    # Test if hyper-v switch exists, if not create it
+    Write-Log "Main: Creating/verifying whether a Hyper-V switch for specified network exists." -Activity
+    $switch = Test-NetworkSwitch -Network $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
+    if (-not $switch) {
+        Write-Log "Main: Failed to verify/create Hyper-V switch for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
+        return
+    }
+
+    # Test if DHCP scope exists, if not create it
+    Write-Log "Main: Creating/verifying DHCP scope options for specified network." -Activity
+    $worked = Test-DHCPScope -ConfigParams $deployConfig.parameters
+    if (-not $worked) {
+        Write-Log "Main: Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
+        return
+    }
+
+    # DSC Folder
+    $cmDscFolder = "configmgr"
+
+    # Remove existing jobs
+    $existingJobs = Get-Job
+    if ($existingJobs) {
+        Write-Log "Main: Stopping and removing existing jobs." -Verbose -LogOnly
+        foreach ($job in $existingJobs) {
+            Write-Log "Main: Removing job $($job.Id) with name $($job.Name)" -Verbose -LogOnly
+            $job | Stop-Job -ErrorAction SilentlyContinue
+            $job | Remove-Job -ErrorAction SilentlyContinue
+        }
+    }
+
+    Write-Log "Main: Creating RDCMan file for specified config" -Activity
+    New-RDCManFile $deployConfig $global:Common.RdcManFilePath
+
+    Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
+
+    # Array to store PS jobs
+    [System.Collections.ArrayList]$jobs = @()
+    $job_created_yes = 0
+    $job_created_no = 0
+
+    # Existing DC scenario
+    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
+    $existingDC = $deployConfig.parameters.ExistingDCName
+    if ($existingDC -and $containsPS) {
+        # create a dummy VM object for the existingDC
+        $deployConfig.virtualMachines += [PSCustomObject]@{
+            vmName = $existingDC
+            role   = "DC"
+            hidden = $true
+        }
+    }
+
+    # Existing CAS scenario
+    $existingCAS = $deployConfig.parameters.ExistingCASName
+    if ($existingCAS -and $containsPS) {
+        # create a dummy VM object for the existingCAS
+        $deployConfig.virtualMachines += [PSCustomObject]@{
+            vmName = $existingCAS
+            role   = "CAS"
+            hidden = $true
+        }
+    }
+
+    # New scenario
+    $CreateVM = $true
+    foreach ($currentItem in $deployConfig.virtualMachines) {
+
+        if ($WhatIf) {
+            Write-Log "Main: Will start a job for VM $($currentItem.vmName)"
+            continue
+        }
+
+        # Existing DC scenario
+        $CreateVM = $true
+        if ($currentItem.vmName -eq $existingDC) { $CreateVM = $false }
+        if ($currentItem.vmName -eq $existingCAS) { $CreateVM = $false }
+
+        $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+
+        if ($Err.Count -ne 0) {
+            Write-Log "Main: Failed to start job for VM $($currentItem.vmName). $Err" -Failure
+            $job_created_no++
+        }
+        else {
+            Write-Log "Main: Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
+            $jobs += $job
+            $job_created_yes++
+        }
+    }
+    if ($job_created_no -eq 0) {
+        Write-Log "Main: Created $job_created_yes jobs for VM deployment."
+    }
+    else {
+        Write-Log "Main: Created $job_created_yes jobs for VM deployment. Failed to create $job_created_no jobs."
+    }
+
+    Write-Log "Deployment Summary" -Activity -HostOnly
+    Write-Host
+    Show-Summary -deployConfig $deployConfig
+
+    Write-Log "Main: Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
+    $failedCount = 0
+    $successCount = 0
+    do {
+        $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
+        foreach ($job in $runningJobs) {
+            Write-JobProgress($job)
+        }
+
+        $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
+        foreach ($job in $completedJobs) {
+            Write-JobProgress($job)
+            Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
+            $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
+            $jobOutput
+            if ($jobOutPut.StartsWith("ERROR")) {
+                $failedCount++
+            }
+            else {
+                $successCount++
+            }
+
+            #$job | Remove-Job -Force -Confirm:$false
+            $jobs.Remove($job)
+        }
+
+        # Sleep
+        Start-Sleep -Seconds 1
+
+    } until ($runningJobs.Count -eq 0)
+
+    Write-Log "Main: Job Completion Status." -Activity
+    Write-Log "Main: $successCount jobs completed successfully, $failedCount failed."
+
     $timer.Stop()
     Write-Host
     Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
-    Write-Host
-    return
-}
-
-# Test if hyper-v switch exists, if not create it
-Write-Log "Main: Creating/verifying whether a Hyper-V switch for specified network exists." -Activity
-$switch = Test-NetworkSwitch -Network $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
-if (-not $switch) {
-    Write-Log "Main: Failed to verify/create Hyper-V switch for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
-    return
-}
-
-# Test if DHCP scope exists, if not create it
-Write-Log "Main: Creating/verifying DHCP scope options for specified network." -Activity
-$worked = Test-DHCPScope -ConfigParams $deployConfig.parameters
-if (-not $worked) {
-    Write-Log "Main: Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
-    return
-}
-
-# DSC Folder
-$cmDscFolder = "configmgr"
-
-# Remove existing jobs
-$existingJobs = Get-Job
-if ($existingJobs) {
-    Write-Log "Main: Stopping and removing existing jobs." -Verbose -LogOnly
-    foreach ($job in $existingJobs) {
-        Write-Log "Main: Removing job $($job.Id) with name $($job.Name)" -Verbose -LogOnly
-        $job | Stop-Job -ErrorAction SilentlyContinue
-        $job | Remove-Job -ErrorAction SilentlyContinue
-    }
-}
-
-Write-Log "Main: Creating RDCMan file for specified config" -Activity
-New-RDCManFile $deployConfig $global:Common.RdcManFilePath
-
-Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
-
-# Array to store PS jobs
-[System.Collections.ArrayList]$jobs = @()
-$job_created_yes = 0
-$job_created_no = 0
-
-# Existing DC scenario
-$containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
-$existingDC = $deployConfig.parameters.ExistingDCName
-if ($existingDC -and $containsPS) {
-    # create a dummy VM object for the existingDC
-    $deployConfig.virtualMachines += [PSCustomObject]@{
-        vmName = $existingDC
-        role   = "DC"
-        hidden = $true
-    }
-}
-
-# Existing CAS scenario
-$existingCAS = $deployConfig.parameters.ExistingCASName
-if ($existingCAS -and $containsPS) {
-    # create a dummy VM object for the existingCAS
-    $deployConfig.virtualMachines += [PSCustomObject]@{
-        vmName = $existingCAS
-        role   = "CAS"
-        hidden = $true
-    }
-}
-
-# New scenario
-$CreateVM = $true
-foreach ($currentItem in $deployConfig.virtualMachines) {
-
-    if ($WhatIf) {
-        Write-Log "Main: Will start a job for VM $($currentItem.vmName)"
-        continue
+    if (Test-Path "C:\tools\rdcman.exe") {
+        Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
     }
 
-    # Existing DC scenario
-    $CreateVM = $true
-    if ($currentItem.vmName -eq $existingDC) { $CreateVM = $false }
-    if ($currentItem.vmName -eq $existingCAS) { $CreateVM = $false }
-
-    $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
-
-    if ($Err.Count -ne 0) {
-        Write-Log "Main: Failed to start job for VM $($currentItem.vmName). $Err" -Failure
-        $job_created_no++
-    }
-    else {
-        Write-Log "Main: Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
-        $jobs += $job
-        $job_created_yes++
-    }
 }
-if ($job_created_no -eq 0) {
-    Write-Log "Main: Created $job_created_yes jobs for VM deployment."
-}
-else {
-    Write-Log "Main: Created $job_created_yes jobs for VM deployment. Failed to create $job_created_no jobs."
-}
-
-Write-Log "Deployment Summary" -Activity -HostOnly
-Write-Host
-Show-Summary -deployConfig $deployConfig
-
-Write-Log "Main: Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
-$failedCount = 0
-$successCount = 0
-do {
-    $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
-    foreach ($job in $runningJobs) {
-        Write-JobProgress($job)
-    }
-
-    $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
-    foreach ($job in $completedJobs) {
-        Write-JobProgress($job)
-        Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
-        $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
-        $jobOutput
-        if ($jobOutPut.StartsWith("ERROR")) {
-            $failedCount++
-        }
-        else {
-            $successCount++
-        }
-
-        #$job | Remove-Job -Force -Confirm:$false
-        $jobs.Remove($job)
-    }
-
-    # Sleep
-    Start-Sleep -Seconds 1
-
-} until ($runningJobs.Count -eq 0)
-
-Write-Log "Main: Job Completion Status." -Activity
-Write-Log "Main: $successCount jobs completed successfully, $failedCount failed."
-
-$timer.Stop()
-Write-Host
-Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
-if (Test-Path "C:\tools\rdcman.exe") {
-    Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
+finally {
+    # Ctrl + C brings us here :)
+    Set-QuickEdit
 }
 
 Write-Host
