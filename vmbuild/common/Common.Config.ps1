@@ -1188,7 +1188,20 @@ function Get-List {
             $virtualMachines = Get-VM
             foreach ($vm in $virtualMachines) {
 
-                $vmNoteObject = $vm.Notes | ConvertFrom-Json
+                try {
+                    if ($vm.Notes -like "*lastUpdate*") {
+                        $vmNoteObject = $vm.Notes | ConvertFrom-Json
+                    }
+                    else {
+                        Write-Log "Get-List: VM Properties for '$($vm.Name) does not contain values. Assume this was not deployed by vmbuild'. $_" -Warning -LogOnly
+                        continue
+                    }
+                }
+                catch {
+                    Write-Log "Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
+                    continue
+                }
+
                 if ($vmNoteObject) {
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
                     $vmObject = [PSCustomObject]@{
@@ -1289,7 +1302,7 @@ Function Show-Summary {
         Write-Host -ForeGroundColor Green "$CHECKMARK" -NoNewline
         Write-Host "] " -NoNewline
         Write-Host $text -NoNewline
-        if (!$NoNewLine){
+        if (!$NoNewLine) {
             Write-Host
         }
     }
@@ -1306,7 +1319,7 @@ Function Show-Summary {
         Write-Host -ForeGroundColor Red "x" -NoNewline
         Write-Host "] " -NoNewline
         Write-Host $text -NoNewline
-        if (!$NoNewLine){
+        if (!$NoNewLine) {
             Write-Host
         }
     }
@@ -1341,10 +1354,9 @@ Function Show-Summary {
         if ($deployConfig.cmOptions.installDPMPRoles -and $deployConfig.cmOptions.install -eq $true) {
 
             If ($containsDPMP) {
-            Write-GreenCheck "DPMP roles will be pushed from the Configmgr Primary Server"
+                Write-GreenCheck "DPMP roles will be pushed from the Configmgr Primary Server"
             }
-            else
-            {
+            else {
                 Write-GreenCheck "DP and MP roles will be installed on the Primary Server"
             }
         }
@@ -1353,12 +1365,13 @@ Function Show-Summary {
         }
 
         if ($containsMember) {
-        if ($deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-            Write-GreenCheck "ConfigMgr Clients will be installed on domain members"
+            if ($deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
+                Write-GreenCheck "ConfigMgr Clients will be installed on domain members"
+            }
+            else {
+                Write-RedX "ConfigMgr Clients will NOT be installed on domain members"
+            }
         }
-        else {
-            Write-RedX "ConfigMgr Clients will NOT be installed on domain members"
-        }}
         else {
             Write-RedX "No Domain Member roles defined (No ConfigMgr Clients to install)"
         }
