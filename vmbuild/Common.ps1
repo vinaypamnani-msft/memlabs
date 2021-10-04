@@ -694,6 +694,9 @@ function New-VirtualMachine {
         return $false
     }
 
+    Write-Log "New-VirtualMachine: $VmName`: Enabling Hyper-V Guest Services"
+    Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
+
     Write-Log "New-VirtualMachine: $VmName`: Setting Processor count to $Processors"
     Set-VM -Name $vmName -ProcessorCount $Processors
 
@@ -1115,7 +1118,7 @@ function Get-FileFromStorage {
 
     return $success
 }
-$QuickEditCodeSnippet = @" 
+$QuickEditCodeSnippet = @"
 using System;
 using System.Collections.Generic;
 using System.Linq;
