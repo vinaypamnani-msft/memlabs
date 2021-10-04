@@ -133,7 +133,7 @@ $VM_Create = {
         New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -InProgress
 
         # Wait for VM to finish OOBE
-        $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
+        $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf -WaitSeconds 90
         if (-not $connected) {
             Write-Log "PSJOB: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
             return

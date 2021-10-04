@@ -221,7 +221,7 @@ if ($createVm) {
 }
 
 Write-Log "Main: Wait for $vmName to be ready to start customization..."
-$connected = Wait-ForVm -VmName $VmName -OobeComplete -WhatIf:$WhatIf
+$connected = Wait-ForVm -VmName $VmName -OobeComplete -WhatIf:$WhatIf -WaitSeconds 90
 if (-not $connected) {
     Write-Log "Main: Could not verify if VM is ready for customization. Exiting!" -Failure
     return
