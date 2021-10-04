@@ -768,11 +768,6 @@ function Test-Configuration {
         # Single CAS
         if (Test-SingleRole -VM $CSVM -ReturnObject $return) {
 
-            # tech preview and CAS
-            if ($deployConfig.cmOptions.version -eq "tech-preview") {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specfied along with Tech-Preview version; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
-            }
-
             # CAS without Primary
             if (-not $containsPS) {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Warning
@@ -852,6 +847,11 @@ function Test-Configuration {
 
     if ($deployConfig.parameters.scenario -eq "Hierarchy" -and -not $deployConfig.parameters.CSName) {
         Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
+    }
+
+    # tech preview and hierarchy
+    if ($deployConfig.parameters.scenario -eq "Hierarchy" -and $deployConfig.cmOptions.version -eq "tech-preview") {
+        Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with a Hierarchy; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
     }
 
     # Total Memory
@@ -1337,11 +1337,11 @@ Function Show-Summary {
             Write-RedX "ConfigMgr will not be installed."
         }
 
-        
+
         if ($deployConfig.cmOptions.installDPMPRoles -and $deployConfig.cmOptions.install -eq $true) {
 
             If ($containsDPMP) {
-            Write-GreenCheck "DPMP roles will be pushed from the Configmgr Primary Server"        
+            Write-GreenCheck "DPMP roles will be pushed from the Configmgr Primary Server"
             }
             else
             {
