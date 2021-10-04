@@ -1157,7 +1157,7 @@ Function Get-TestResult {
         if (!$NoNewLine) {
             write-host
         }
-        $MyInvocation | Out-Host
+       # $MyInvocation | Out-Host
 
     }
     if ($SuccessOnWarning.IsPresent) {
