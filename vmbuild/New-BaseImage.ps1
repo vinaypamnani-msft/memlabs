@@ -13,6 +13,8 @@ param (
     [switch]$ForceNewVm,
     [Parameter(Mandatory = $false, HelpMessage = "Force recreating golden image, if it already exists.")]
     [switch]$ForceNewGoldImage,
+    [Parameter(Mandatory = $false, HelpMessage = "Delete VM after importing golden image successfully.")]
+    [switch]$DeleteVM,
     [Parameter(Mandatory = $false, HelpMessage = "Indicate if existing VM should be re-used. Not recommended. Use only for test/dev to save time.")]
     [switch]$UseExistingVm,
     [Parameter(Mandatory = $false, HelpMessage = "Force re-download of tools to inject in the image.")]
@@ -231,8 +233,8 @@ if (-not $connected) {
 ### GET CUSTOM
 #################
 
-Write-Log "Main: Preparing $vmName for customization..." -Activity
-
+Write-Log "Main: Sleep for 45 seconds before preparing $vmName for customization..." -Activity
+Start-Sleep -Seconds 45
 Write-Log "Main: Restarting $vmName in Audit-Mode..."
 
 $worked = Invoke-VmCommand -VmName $vmName -ScriptBlock { Remove-Item -Path "C:\staging\Customization.txt" -Force -ErrorAction SilentlyContinue } -WhatIf:$WhatIf # Sleep for a bit to make sure VM is at login screen.
@@ -291,12 +293,23 @@ if ($purgeGoldImage) {
 Write-Log "Main: Copying the 'golden' image..."
 
 $worked = Get-File -Source $osDiskPath -Destination $goldImagePath -DisplayName "Copying the 'golden' image to $($Common.AzureImagePath)" -Action "Copying" -WhatIf:$WhatIf
-Write-Host
 if (-not $WhatIf -and -not $worked) {
     Write-Log "### Something went wrong copying the 'golden' image $osDiskPath to $($Common.AzureImagePath). Please copy manually." -Warning
 }
 else {
-    Write-Log "### Success! The 'golden' image $vhdxFile was copied to $($Common.AzureImagePath)..." -Success
+    Write-Log "The 'golden' image $vhdxFile was copied to $($Common.AzureImagePath)..." -Success
+
+    # Delete VM
+    $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    if ($vmTest -and $DeleteVM.IsPresent) {
+        if ($vmTest.State -ne "Off") {
+            Write-Log "Main: $VmName`: Turning the VM off forcefully..."
+            $vmTest | Stop-VM -TurnOff -Force
+        }
+        $vmTest | Remove-VM -Force
+        Write-Log "Main: $VmName`: Purging $($vmTest.Path) folder..."
+        Remove-Item -Path $($vmTest.Path) -Force -Recurse
+    }
 }
 
 $timer.Stop()
