@@ -19,7 +19,18 @@
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
-    $IsDPMP = $deployConfig.parameters.ThisMachineRole -eq "DPMP"
+
+    # Server OS?
+    $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($os) {
+        $IsServerOS = $true
+        if ($os.ProductType -eq 1) {
+            $IsServerOS = $false
+        }
+    }
+    else {
+        $IsServerOS = $false
+    }
 
     # Domain Admin Name
     $DomainAdminName = $deployConfig.vmOptions.domainAdminName
@@ -79,7 +90,7 @@
             MaximumSize = '8192'
         }
 
-        if ($IsDPMP) {
+        if ($IsServerOS) {
 
             WriteStatus InstallFeature {
                 DependsOn = "[SetCustomPagingFile]PagingSettings"
