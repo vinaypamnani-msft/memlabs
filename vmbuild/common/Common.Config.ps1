@@ -1188,7 +1188,7 @@ function Get-List {
 
         if ($null -eq $global:vm_List) {
 
-            Write-Log "Get-List: Obtaining '$Type' list and caching it." -LogOnly
+            Write-Log "Get-List: Obtaining '$Type' list and caching it." -Verbose
             $return = @()
             $virtualMachines = Get-VM
             foreach ($vm in $virtualMachines) {
