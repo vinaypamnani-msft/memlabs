@@ -555,10 +555,10 @@ function New-VmNote {
             $vmNote = [PSCustomObject]@{
                 inProgress  = $true
                 role        = $Role
-                domain      = $DeployConfig.vmoptions.domainName
+                domain      = $DeployConfig.vmOptions.domainName
                 domainAdmin = $DeployConfig.vmOptions.domainAdminName
-                network     = $DeployConfig.vmoptions.network
-                prefix      = $DeployConfig.vmoptions.prefix
+                network     = $DeployConfig.vmOptions.network
+                prefix      = $DeployConfig.vmOptions.prefix
                 lastUpdate  = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
         }
@@ -566,15 +566,15 @@ function New-VmNote {
             $vmNote = [PSCustomObject]@{
                 success     = $Successful
                 role        = $Role
-                domain      = $DeployConfig.vmoptions.domainName
+                domain      = $DeployConfig.vmOptions.domainName
                 domainAdmin = $DeployConfig.vmOptions.domainAdminName
-                network     = $DeployConfig.vmoptions.network
-                prefix      = $DeployConfig.vmoptions.prefix
+                network     = $DeployConfig.vmOptions.network
+                prefix      = $DeployConfig.vmOptions.prefix
                 lastUpdate  = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
         }
 
-        if ($Role -eq "CAS" -or $Role -eq "Primary") {
+        if ($DeployConfig.cmOptions.install -and ($Role -eq "CAS" -or $Role -eq "Primary")) {
             $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
             $vmNote | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $ThisVM.SiteCode
         }
@@ -630,7 +630,7 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $false)]
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
-        [switch]$ForceNew,        
+        [switch]$ForceNew,
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
@@ -1126,6 +1126,7 @@ function Get-FileFromStorage {
 
     return $success
 }
+
 $QuickEditCodeSnippet = @"
 using System;
 using System.Collections.Generic;
@@ -1205,6 +1206,7 @@ function Set-QuickEdit() {
         Write-Verbose "Something went wrong changing QuickEdit settings."
     }
 }
+
 function Set-SupportedOptions {
 
     $roles = @(
