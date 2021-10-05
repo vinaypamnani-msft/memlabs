@@ -235,10 +235,9 @@ function Get-NewMachineName {
     }
 
     if ($role -eq "DPMP") {
-        $PSVM = $ConfigToCheck.VirtualMachines | Where-Object {$_.Role -eq "Primary"} | Select-Object -First 1
-        if ($PSVM -and $PSVM.SiteCode)
-        {
-            return $($PSVM.SiteCode)+$role
+        $PSVM = $ConfigToCheck.VirtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1
+        if ($PSVM -and $PSVM.SiteCode) {
+            return $($PSVM.SiteCode) + $role
         }
     }
 
@@ -538,8 +537,29 @@ function Show-ExistingNetwork {
     return Generate-ExistingConfig $domain $subnet $role -ParentSiteCode $ParentSiteCode
 }
 function Select-RolesForExisting {
-    $existingRoles =  $Common.Supported.RolesForExisting | Where-Object { $_ -ne "DPMP" }
-    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
+    $existingRoles = $Common.Supported.RolesForExisting | Where-Object { $_ -ne "DPMP" }
+
+    $existingRoles2 = @()
+
+    foreach ($item in $existingRoles) {
+        
+        switch ($item) {
+            "CAS" { $existingRoles2 += "CAS and Primary" }
+            "DomainMember" {
+                $existingRoles2 += "DomainMember (Server)"
+                $existingRoles2 += "DomainMember (Client)"
+            }
+            Default { $existingRoles2 += $item }
+        }        
+    }
+
+
+    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue "DomainMember"
+
+    if ($role -eq "CAS and Primary")
+    {
+        $role = "CAS"
+    }
 
     return $role
 
@@ -547,7 +567,7 @@ function Select-RolesForExisting {
 
 
 function Select-RolesForNew {
-    $existingRoles =  $Common.Supported.Roles
+    $existingRoles = $Common.Supported.Roles
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
     return $role
 }
@@ -1257,7 +1277,7 @@ function Add-NewVMForRole {
 
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify"
     if ([string]::IsNullOrWhiteSpace($Name)) {
-        $machineName = Get-NewMachineName $Domain $Role
+        $machineName = Get-NewMachineName $Domain ($Role -split " ")[0]
         Write-Verbose "Machine Name Generated $machineName"
     }
     else {
@@ -1266,7 +1286,7 @@ function Add-NewVMForRole {
 
     $virtualMachine = [PSCustomObject]@{
         vmName          = $machineName
-        role            = $Role
+        role            = ($Role -split " ")[0]
         operatingSystem = "Server 2022"
         memory          = "2GB"
         virtualProcs    = 2
@@ -1311,6 +1331,10 @@ function Add-NewVMForRole {
             
         }
         "DomainMember" { }
+        "DomainMember (Server)" { }
+        "DomainMember (Client)" {
+            $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
+         }
         "DPMP" {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
