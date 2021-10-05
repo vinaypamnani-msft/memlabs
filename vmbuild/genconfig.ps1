@@ -234,6 +234,14 @@ function Get-NewMachineName {
         return $newSiteCode + "SITE"
     }
 
+    if ($role -eq "DPMP") {
+        $PSVM = $ConfigToCheck.VirtualMachines | Where-Object {$_.Role -eq "Primary"} | Select-Object -First 1
+        if ($PSVM -and $PSVM.SiteCode)
+        {
+            return $($PSVM.SiteCode)+$role
+        }
+    }
+
     $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     Write-Verbose "[Get-NewMachineName] found $ConfigCount machines in Config with role $Role"
     $TotalCount = [int]$RoleCount + [int]$ConfigCount
@@ -535,6 +543,13 @@ function Select-RolesForExisting {
 
     return $role
 
+}
+
+
+function Select-RolesForNew {
+    $existingRoles =  $Common.Supported.Roles
+    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
+    return $role
 }
 
 function Select-ExistingSubnets {
@@ -1356,7 +1371,7 @@ function Select-VirtualMachines {
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
-                $role = Select-RolesForExisting
+                $role = Select-RolesForNew
                 $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config
                 Get-TestResult -SuccessOnError | out-null               
             }
