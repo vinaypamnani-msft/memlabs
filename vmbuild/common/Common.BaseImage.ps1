@@ -177,6 +177,7 @@ function New-VhdxFile {
     }
 
     $wimPath = Join-Path $Common.StagingWimPath $WimName
+    $unattendFile = $WimName -replace ".wim", ".xml"
 
     try {
         Write-Log "New-VhdxFile: Obtaining image from $wimPath."
@@ -188,6 +189,9 @@ function New-VhdxFile {
 
         if ($WimName -like "WIN10-*") {
             $selectedImage = $windowsImage | Where-Object { $_.ImageName -eq "Windows 10 Enterprise" }
+            if ($WimName -like "WIN10-*-64.wim") {
+                $unattendFile = "WIN10-64.xml"
+            }
         }
 
         if ($WimName -like "WIN11-*") {
@@ -212,7 +216,6 @@ function New-VhdxFile {
     Install-Module -Name WindowsImageTools
     Import-Module WindowsImageTools
 
-    $unattendFile = $WimName -replace ".wim", ".xml"
     $unattendPath = Join-Path $Common.StagingAnswerFilePath $unattendFile
     $unattendPathToInject = Join-Path $Common.TempPath $unattendFile
 
