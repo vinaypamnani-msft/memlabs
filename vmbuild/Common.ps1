@@ -767,7 +767,7 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false)]
         [int]$TimeoutMinutes = 10,
         [Parameter(Mandatory = $false)]
-        [int]$WaitSeconds = 60,
+        [int]$WaitSeconds = 15,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false)]
@@ -801,8 +801,11 @@ function Wait-ForVm {
     }
 
     if ($OobeComplete.IsPresent) {
-        Write-Log "Wait-ForVm: $VmName`: Waiting for VM to complete OOBE..."
+        $status = "Waiting for OOBE to complete. "
+        Write-Log "Wait-ForVm: $VmName`: $status"
+        Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         $readyOobe = $false
+        $wwahostrunning = $false
         $readySmb = $false
 
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
@@ -811,18 +814,20 @@ function Wait-ForVm {
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
 
             # Wait until OOBE is ready
-            $status = "Waiting for OOBE to complete. "
+
             if ($null -ne $out.ScriptBlockOutput -and -not $readyOobe) {
                 Write-Log "Wait-ForVm: $VmName`: OOBE State is $($out.ScriptBlockOutput)"
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
             }
 
-            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-            Start-Sleep -Seconds 5
+            if (-not $readyOobe) {
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Start-Sleep -Seconds 5
+            }
 
             # Wait until \\localhost\c$ is accessible
-            if ($readyOobe) {
+            if (-not $readySmb -and $readyOobe) {
                 Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 15
                 $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
@@ -830,10 +835,26 @@ function Wait-ForVm {
                 $readySmb = $true -eq $out.ScriptBlockOutput
             }
 
-            # OOBE and SMB ready, buffer wait to ensure we're at login screen. Bad things happen if you reboot the machine before it really finished OOBE.
+            # Wait until wwahost.exe is not found, or not longer running
             if ($readySmb) {
-                Write-Log "Wait-ForVm: $VmName`: OOBE complete, and SMB available. Waiting $WaitSeconds seconds before continuing."
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete, and SMB available. Waiting $WaitSeconds seconds before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+
+                if ($wwahost.ScriptBlockOutput) {
+                    $wwahostrunning = $true
+                    Write-Log "Wait-ForVm: $VmName`: OOBE complete. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
+                    Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete, and SMB available. Waiting for WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) to stop before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                    Start-Sleep -Seconds 15
+                }
+                else {
+                    Write-Log "Wait-ForVm: $VmName`: OOBE complete. WWAHost not running."
+                    $wwahostrunning = $false
+                }
+            }
+
+            # OOBE and SMB ready, buffer wait to ensure we're at login screen. Bad things happen if you reboot the machine before it really finished OOBE.
+            if (-not $wwahostrunning -and $readySmb) {
+                Write-Log "Wait-ForVm: $VmName`: VM is ready. Waiting $WaitSeconds seconds before continuing."
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "VM is ready. Waiting $WaitSeconds seconds before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds $WaitSeconds
                 $ready = $true
             }
