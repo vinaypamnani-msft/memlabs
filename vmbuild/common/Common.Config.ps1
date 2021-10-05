@@ -828,11 +828,16 @@ function Test-Configuration {
 
         $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
 
-        # DPMP VM count -eq 1
-        if (Test-SingleRole -VM $DPMPVM -ReturnObject $return) {
+        if ($containsPS) {
+            # DPMP VM count -eq 1
+            if (Test-SingleRole -VM $DPMPVM -ReturnObject $return) {
 
-            # Server OS
-            Test-ValidVmServerOS -VM $DPMPVM -ReturnObject $return
+                # Server OS
+                Test-ValidVmServerOS -VM $DPMPVM -ReturnObject $return
+            }
+        }
+        else {
+            Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site. DPMP Role can only be deployed with a Primary Site." -ReturnObject $return -Warning
         }
 
     }
@@ -1332,8 +1337,8 @@ Function Show-Summary {
     if ($null -ne $($deployConfig.cmOptions) -and $containsPS -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
-            
-            
+
+
             if ($deployConfig.cmOptions.updateToLatest -eq $true) {
                 Write-GreenCheck "ConfigMgr will be updated to latest"
             }
