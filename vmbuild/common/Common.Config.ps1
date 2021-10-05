@@ -1331,12 +1331,14 @@ Function Show-Summary {
 
     if ($null -ne $($deployConfig.cmOptions) -and $containsPS -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true) {
-            Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed and " -NoNewline
+            Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+            
+            
             if ($deployConfig.cmOptions.updateToLatest -eq $true) {
-                Write-Host "updated to latest"
+                Write-GreenCheck "ConfigMgr will be updated to latest"
             }
             else {
-                Write-Host "NOT updated to latest"
+                Write-RedX "ConfigMgr will NOT updated to latest"
             }
             $PSVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" }
             if ($PSVM.ParentSiteCode) {
@@ -1351,29 +1353,31 @@ Function Show-Summary {
         }
 
 
-        if ($deployConfig.cmOptions.installDPMPRoles -and $deployConfig.cmOptions.install -eq $true) {
+        if (($deployConfig.cmOptions.installDPMPRoles -or $deployConfig.cmOptions.pushClientToDomainMembers) -and $deployConfig.cmOptions.install -eq $true) {
 
             If ($containsDPMP) {
-                Write-GreenCheck "DPMP roles will be pushed from the Configmgr Primary Server"
+                $DPMP = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName)" -NoNewLine
             }
             else {
-                Write-GreenCheck "DP and MP roles will be installed on the Primary Server"
+                $PSVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" }
+                Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
             }
         }
         else {
-            Write-RedX "DPMP roles will not be installed"
+            Write-RedX "DPMP roles will not be installed" -NoNewLine
         }
 
         if ($containsMember) {
             if ($deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                Write-GreenCheck "ConfigMgr Clients will be installed on domain members"
+                Write-Host " [Client Push: Yes]"
             }
             else {
-                Write-RedX "ConfigMgr Clients will NOT be installed on domain members"
+                Write-Host " [Client Push: No]"
             }
         }
         else {
-            Write-RedX "No Domain Member roles defined (No ConfigMgr Clients to install)"
+            Write-Host " [Client Push: N/A]"
         }
 
     }
@@ -1384,13 +1388,13 @@ Function Show-Summary {
     if (-not $null -eq $($deployConfig.vmOptions)) {
 
         if ($null -eq $deployConfig.parameters.ExistingDCName) {
-            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be created."
+            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be created." -NoNewLine
         }
         else {
-            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be joined."
+            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be joined." -NoNewLine
         }
 
-        Write-GreenCheck "Network: $($deployConfig.vmOptions.network)"
+        Write-Host " [Network $($deployConfig.vmOptions.network)]"
         Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
 
         $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
