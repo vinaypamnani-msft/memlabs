@@ -229,9 +229,15 @@ function Get-NewMachineName {
         $RoleName = "Member"
     }
 
+    if (($role -eq "Primary") -or ($role -eq "CAS")) {
+        $newSiteCode = Get-NewSiteCode $Domain -Role $Role
+        return $newSiteCode + "SITE"
+    }
+
     $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     Write-Verbose "[Get-NewMachineName] found $ConfigCount machines in Config with role $Role"
     $TotalCount = [int]$RoleCount + [int]$ConfigCount
+
     [int]$i = 1
     while ($true) {
         $NewName = $RoleName + ($TotalCount + $i)
@@ -259,12 +265,12 @@ function Get-NewSiteCode {
 
     if ($Role -eq "CAS") {
         $NumberOfCAS = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
-        if ($NumberOfCAS -eq 0) {
-            return "CAS"
-        }
-        else {
-            return "CS" + ($NumberOfCAS + 1)
-        }
+        #     if ($NumberOfCAS -eq 0) {
+        #         return "CAS"
+        #     }
+        #else {
+        return "CS" + ($NumberOfCAS + 1)
+        #}
     }
     $NumberOfPrimaries = (Get-ExistingForDomain -DomainName $Domain -Role Primary | Measure-Object).Count
     #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
@@ -524,8 +530,8 @@ function Show-ExistingNetwork {
     return Generate-ExistingConfig $domain $subnet $role -ParentSiteCode $ParentSiteCode
 }
 function Select-RolesForExisting {
-
-    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($Common.Supported.RolesForExisting) -CurrentValue "DomainMember"
+    $existingRoles =  $Common.Supported.RolesForExisting | Where-Object { $_ -ne "DPMP" }
+    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
 
     return $role
 
@@ -1157,7 +1163,7 @@ Function Get-TestResult {
         if (!$NoNewLine) {
             write-host
         }
-       # $MyInvocation | Out-Host
+        # $MyInvocation | Out-Host
 
     }
     if ($SuccessOnWarning.IsPresent) {
@@ -1258,7 +1264,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB";"F" = "100GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $role
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -1280,7 +1286,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB";"F" = "100GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $role
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -1292,7 +1298,7 @@ function Add-NewVMForRole {
         "DomainMember" { }
         "DPMP" {
             $virtualMachine.memory = "3GB"
-            $disk = [PSCustomObject]@{"E" = "250GB"}
+            $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
         "DC" { }
