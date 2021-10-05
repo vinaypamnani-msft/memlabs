@@ -186,8 +186,12 @@ function New-VhdxFile {
             $selectedImage = $windowsImage | Where-Object { $_.ImageName -like "*DATACENTER*Desktop*" }
         }
 
-        if ($WimName -like "W10-*") {
+        if ($WimName -like "WIN10-*") {
             $selectedImage = $windowsImage | Where-Object { $_.ImageName -eq "Windows 10 Enterprise" }
+        }
+
+        if ($WimName -like "WIN11-*") {
+            $selectedImage = $windowsImage | Where-Object { $_.ImageName -eq "Windows 11 Enterprise" }
         }
 
         if (-not $selectedImage) {
