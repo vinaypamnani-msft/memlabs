@@ -1086,7 +1086,7 @@ function Get-StorageConfig {
         $username = "vmbuildadmin"
         $item = $Common.AzureFileList.OS | Where-Object { $_.id -eq $username }
         $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)?$($StorageConfig.StorageToken)"
-        $response = Invoke-WebRequest -Uri $fileUrl -ErrorAction Stop
+        $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
         $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
         $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
 
