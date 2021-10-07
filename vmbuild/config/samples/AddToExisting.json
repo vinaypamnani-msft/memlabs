@@ -1,7 +1,7 @@
 
 {
     "vmOptions": {
-        "prefix": "PS-",
+        "prefix": "CM-",
         "basePath": "E:\\VirtualMachines",
         "domainName": "contoso.com",
         "domainAdminName": "admin",
@@ -9,18 +9,18 @@
     },
     "virtualMachines": [
         {
-            "vmName": "MP2",
+            "vmName": "W22Server1",
             "operatingSystem": "Server 2022",
-            "role": "DPMP",
+            "role": "DomainMember",
             "memory": "3GB",
             "virtualProcs": 4
         },
         {
-            "vmName": "W10-3",
+            "vmName": "W10Client3",
             "operatingSystem": "Windows 10 Latest (64-bit)",
             "role": "DomainMember",
             "memory": "2GB",
-            "virtualProcs": 4
+            "virtualProcs": 2
         }
     ]
 }

@@ -551,33 +551,48 @@ function New-VmNote {
 
     try {
         $ProgressPreference = 'SilentlyContinue'
+
+        $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
+
         if ($InProgress.IsPresent) {
             $vmNote = [PSCustomObject]@{
                 inProgress  = $true
                 role        = $Role
+                deployedOS  = $ThisVM.operatingSystem
                 domain      = $DeployConfig.vmOptions.domainName
                 domainAdmin = $DeployConfig.vmOptions.domainAdminName
                 network     = $DeployConfig.vmOptions.network
                 prefix      = $DeployConfig.vmOptions.prefix
-                lastUpdate  = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
         }
         else {
             $vmNote = [PSCustomObject]@{
                 success     = $Successful
                 role        = $Role
+                deployedOS  = $ThisVM.operatingSystem
                 domain      = $DeployConfig.vmOptions.domainName
                 domainAdmin = $DeployConfig.vmOptions.domainAdminName
                 network     = $DeployConfig.vmOptions.network
                 prefix      = $DeployConfig.vmOptions.prefix
-                lastUpdate  = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
         }
 
         if ($DeployConfig.cmOptions.install -and ($Role -eq "CAS" -or $Role -eq "Primary")) {
-            $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
-            $vmNote | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $ThisVM.SiteCode
+            $vmNote | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $ThisVM.siteCode
+            $vmNote | Add-Member -MemberType NoteProperty -Name "cmInstallDir" -Value $ThisVM.cmInstallDir
         }
+
+        if ($ThisVM.parentSiteCode) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "parentSiteCode" -Value $ThisVM.parentSiteCode
+        }
+
+        if ($ThisVM.sqlVersion) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlVersion" -Value $ThisVM.sqlVersion
+            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlInstanceName" -Value $ThisVM.sqlInstanceName
+            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlInstanceDir" -Value $ThisVM.sqlInstanceDir
+        }
+
+        $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
 
         $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
         $vm = Get-Vm $VmName -ErrorAction Stop

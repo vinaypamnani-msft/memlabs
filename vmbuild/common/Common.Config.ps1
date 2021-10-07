@@ -1210,33 +1210,45 @@ function Get-List {
                 if ($vmNoteObject) {
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
                     $vmObject = [PSCustomObject]@{
-                        VmName      = $vm.Name
-                        Role        = $vmNoteObject.role
-                        SiteCode    = $vmNoteObject.SiteCode
-                        MemoryGB    = $vm.MemoryAssigned / 1GB
-                        State       = $vm.State
-                        Domain      = $vmNoteObject.domain
-                        DomainAdmin = $vmNoteObject.domainAdmin
-                        Subnet      = $vmNoteObject.network
-                        Prefix      = $vmNoteObject.prefix
-                        Success     = $vmNoteObject.success
-                        InProgress  = $inProgress
+                        VmName          = $vm.Name
+                        Role            = $vmNoteObject.role
+                        DeployedOS      = $vmNoteObject.deployedOS
+                        MemoryGB        = $vm.MemoryAssigned / 1GB
+                        State           = $vm.State
+                        Domain          = $vmNoteObject.domain
+                        DomainAdmin     = $vmNoteObject.domainAdmin
+                        Subnet          = $vmNoteObject.network
+                        Prefix          = $vmNoteObject.prefix
+                        Success         = $vmNoteObject.success
+                        SiteCode        = $vmNoteObject.SiteCode
+                        ParentSiteCode  = $vmNoteObject.parentSiteCode
+                        CMInstallDir    = $vmNoteObject.cmInstallDir
+                        SQLVersion      = $vmNoteObject.sqlVersion
+                        SQLInstanceName = $vmNoteObject.sqlInstanceName
+                        SQLInstanceDir  = $vmNoteObject.sqlInstanceDir
+                        InProgress      = $inProgress
                     }
                 }
                 else {
                     $vmNet = $vm | Get-VMNetworkAdapter
                     $vmObject = [PSCustomObject]@{
-                        VmName      = $vm.Name
-                        Subnet      = $vmNet.SwitchName
-                        MemoryGB    = $vm.MemoryAssigned / 1GB
-                        State       = $vm.State
-                        Role        = $null
-                        SiteCode    = $null
-                        Domain      = $null
-                        DomainAdmin = $null
-                        Prefix      = $null
-                        Success     = $null
-                        InProgress  = $null
+                        VmName          = $vm.Name
+                        Subnet          = $vmNet.SwitchName
+                        MemoryGB        = $vm.MemoryAssigned / 1GB
+                        State           = $vm.State
+                        Role            = $null
+                        DeployedOS      = $null
+                        SiteCode        = $null
+                        ParentSiteCode  = $null
+                        CMInstallDir    = $null
+                        SQLVersion      = $null
+                        SQLInstanceName = $null
+                        SQLInstanceDir  = $null
+                        Domain          = $null
+                        DomainAdmin     = $null
+                        Prefix          = $null
+                        Success         = $null
+                        InProgress      = $null
                     }
                 }
 

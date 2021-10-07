@@ -1,10 +1,10 @@
 {
     "vmOptions": {
-        "prefix": "NC-",
+        "prefix": "NOCM-",
         "basePath": "E:\\VirtualMachines",
-        "domainName": "adatum.com",
+        "domainName": "fabrikam.com",
         "domainAdminName": "admin",
-        "network": "192.168.3.0"
+        "network": "192.168.9.0"
     },
     "virtualMachines": [
         {
@@ -13,20 +13,20 @@
             "operatingSystem": "Server 2022",
             "memory": "2GB",
             "virtualProcs": 4
-        },              
+        },
         {
-            "vmName": "W10-1",
+            "vmName": "W22Server1",
+            "operatingSystem": "Server 2022",
             "role": "DomainMember",
-            "operatingSystem": "Windows 10 Latest (64-bit)",
-            "memory": "2GB",
+            "memory": "3GB",
             "virtualProcs": 4
         },
         {
-            "vmName": "W10-2",
-            "role": "DomainMember",
+            "vmName": "W10Client1",
             "operatingSystem": "Windows 10 Latest (64-bit)",
+            "role": "DomainMember",
             "memory": "2GB",
-            "virtualProcs": 4
+            "virtualProcs": 2
         }
     ]
 }
