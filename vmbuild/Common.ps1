@@ -698,10 +698,14 @@ function New-VirtualMachine {
     Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
 
     Write-Log "New-VirtualMachine: $VmName`: Enabling TPM"
-    $HGOwner = Get-HgsGuardian UntrustedGuardian
+    if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
+        New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
+    }
+    $HGOwner = Get-HgsGuardian MemLabsGuardian
     $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
     Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
     Enable-VMTPM $VmName -ErrorAction SilentlyContinue ## Only required for Win11
+
 
     Write-Log "New-VirtualMachine: $VmName`: Setting Processor count to $Processors"
     Set-VM -Name $vmName -ProcessorCount $Processors
