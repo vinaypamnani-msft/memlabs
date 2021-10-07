@@ -219,14 +219,60 @@ function Get-NewMachineName {
         [String] $Domain,
         [Parameter(Mandatory = $true, HelpMessage = "Role of the new machine")]
         [String] $Role,
+        [Parameter(Mandatory = $false, HelpMessage = "OS of the new machine")]
+        [String] $OS,
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
         [Object] $ConfigToCheck = $global:config
     )
     $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
+    $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
     $RoleName = $Role
     if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role)) {
         $RoleName = "Member"
+
+        if ($OS -like "*Server*") {            
+            $RoleName = "Server"
+            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -like "*Server*") | Measure-Object).Count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -like "*Server*") | Measure-Object).count
+        }
+        else {
+            $RoleName = "Client"
+            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object (-not ($_.deployedOS -like "*Server*")) | Measure-Object).Count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object (-not ($_.OperatingSystem -like "*Server*")) | Measure-Object).count
+            if ($OS -like "Windows 10*") {
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -like "Windows 10*") | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -like "Windows 10*") | Measure-Object).count
+                $RoleName = "W10Client"
+            }
+            if ($OS -like "Windows 11*") {
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -like "Windows 11*") | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -like "Windows 11*") | Measure-Object).count
+                $RoleName = "W11Client"
+            }
+        }
+
+        switch ($OS) {
+            "Server 2022" { 
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -eq "Server 2022") | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -eq "Server 2022") | Measure-Object).count
+                $RoleName = "W22Server" 
+            }
+            "Server 2019" { 
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -eq "Server 2019") | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -eq "Server 2019") | Measure-Object).count
+                $RoleName = "W19Server" 
+            }
+            "Server 2016" { 
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -eq "Server 2016") | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -eq  "Server 2016") | Measure-Object).count
+                $RoleName = "W16Server" 
+            }
+            Default {}
+        }
+
+
+
     }
 
     if (($role -eq "Primary") -or ($role -eq "CAS")) {
@@ -241,7 +287,7 @@ function Get-NewMachineName {
         }
     }
 
-    $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
+   
     Write-Verbose "[Get-NewMachineName] found $ConfigCount machines in Config with role $Role"
     $TotalCount = [int]$RoleCount + [int]$ConfigCount
 
@@ -556,8 +602,7 @@ function Select-RolesForExisting {
 
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue "DomainMember"
 
-    if ($role -eq "CAS and Primary")
-    {
+    if ($role -eq "CAS and Primary") {
         $role = "CAS"
     }
 
@@ -1087,6 +1132,10 @@ function Select-Options {
             switch ($name) {
                 "operatingSystem" {
                     Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
+                    if ($property.role -eq "DomainMember")
+                    {
+                        $property.vmName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config
+                    }
                     continue MainLoop
                 }
                 "ParentSiteCode" {
@@ -1276,16 +1325,10 @@ function Add-NewVMForRole {
     )
 
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify"
-    if ([string]::IsNullOrWhiteSpace($Name)) {
-        $machineName = Get-NewMachineName $Domain ($Role -split " ")[0]
-        Write-Verbose "Machine Name Generated $machineName"
-    }
-    else {
-        $machineName = $Name
-    }
+   
 
     $virtualMachine = [PSCustomObject]@{
-        vmName          = $machineName
+        vmName          = $null
         role            = ($Role -split " ")[0]
         operatingSystem = "Server 2022"
         memory          = "2GB"
@@ -1334,7 +1377,7 @@ function Add-NewVMForRole {
         "DomainMember (Server)" { }
         "DomainMember (Client)" {
             $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
-         }
+        }
         "DPMP" {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
@@ -1342,6 +1385,15 @@ function Add-NewVMForRole {
         }
         "DC" { }
     }
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        $machineName = Get-NewMachineName $Domain ($Role -split " ")[0] -OS $virtualMachine.OperatingSystem
+        Write-Verbose "Machine Name Generated $machineName"
+    }
+    else {
+        $machineName = $Name
+    }
+    $virtualMachine.vmName = $machineName
 
     if ($null -eq $ConfigToModify.VirtualMachines) {
         $ConfigToModify.virtualMachines = @()
@@ -1363,7 +1415,7 @@ function Add-NewVMForRole {
     }
 
     if ($existingPrimary -eq 0) {
-        $ConfigToModify = Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify
+        $ConfigToModify = Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify -Op
     }
 
     if ($existingPrimary -gt 0) {
