@@ -664,6 +664,22 @@ function Select-RolesForNew {
     return $role
 }
 
+function Select-OSForNew {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Role")]
+        [String] $Role
+    )
+    if (($Role -eq "DomainMember") -or ($null -eq $Role)) {
+        $OSList = $Common.Supported.OperatingSystems
+    }
+    else {
+        $OSList = $Common.Supported.OperatingSystems | Where-Object { $_ -like "*Server*" }
+    }
+    $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue "Server 2022"
+    return $role
+}
+
 function Select-ExistingSubnets {
     [CmdletBinding()]
     param (
@@ -966,6 +982,7 @@ function get-ValidResponse {
     #Write-Host "Returning: $response"
     return $response
 }
+
 
 Function Get-OperatingSystemMenu {
     [CmdletBinding()]
@@ -1378,16 +1395,21 @@ function Add-NewVMForRole {
         [Parameter(Mandatory = $false, HelpMessage = "Force VM Name. Otherwise auto-generated")]
         [string] $Name = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary in a Heirarchy")]
-        [string] $ParentSiteCode = $null
+        [string] $ParentSiteCode = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Override default OS")]
+        [string] $OperatingSystem = $null
     )
 
-    Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify"
+    Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem"
    
+    if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
+        $OperatingSystem = "Server 2022"
+    }
 
     $virtualMachine = [PSCustomObject]@{
         vmName          = $null
         role            = ($Role -split " ")[0]
-        operatingSystem = "Server 2022"
+        operatingSystem = $OperatingSystem
         memory          = "2GB"
         virtualProcs    = 2
     }
@@ -1404,7 +1426,7 @@ function Add-NewVMForRole {
             $newSiteCode = Get-NewSiteCode $Domain -Role $role
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine.Memory = "12GB"
-            $virtualMachine.operatingSystem = "Server 2022"
+            $virtualMachine.operatingSystem = $OperatingSystem
             $existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count          
             
         }
@@ -1426,14 +1448,19 @@ function Add-NewVMForRole {
             $newSiteCode = Get-NewSiteCode $Domain -Role $role
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine.Memory = "12GB"
-            $virtualMachine.operatingSystem = "Server 2022"
+            $virtualMachine.operatingSystem = $OperatingSystem
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count            
             
         }
         "DomainMember" { }
         "DomainMember (Server)" { }
         "DomainMember (Client)" {
-            $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
+            if ($OperatingSystem -like "*Server*") {
+                $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
+            }
+            else {
+                $virtualMachine.operatingSystem = $OperatingSystem
+            }
         }
         "DPMP" {
             $virtualMachine.memory = "3GB"
@@ -1472,7 +1499,7 @@ function Add-NewVMForRole {
     }
 
     if ($existingPrimary -eq 0) {
-        $ConfigToModify = Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify -Op
+        $ConfigToModify = Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
     }
 
     if ($existingPrimary -gt 0) {
@@ -1486,6 +1513,8 @@ function Add-NewVMForRole {
     Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
     return $ConfigToModify
 }
+
+
 
 
 function Select-VirtualMachines {
@@ -1505,7 +1534,10 @@ function Select-VirtualMachines {
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
                 $role = Select-RolesForNew
-                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config
+                $os = Select-OSForNew -Role $role
+
+
+                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os
                 Get-TestResult -SuccessOnError | out-null               
             }
             $i = 0
