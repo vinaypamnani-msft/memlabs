@@ -203,6 +203,43 @@ function Get-ValidSubnets {
         }
         if (-not $found) {
             $subnetlist += $newSubnet
+            if ($subnetlist.Count -gt 2) {
+                break
+            }
+
+        }
+        
+    }
+
+    for ($i = 1; $i -lt 254; $i++) {
+        $newSubnet = "172.16." + $i + ".0"
+        $found = $false
+        foreach ($subnet in (Get-SubnetList)) {
+            if ($subnet.Subnet -eq $newSubnet) {
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) {
+            $subnetlist += $newSubnet
+            if ($subnetlist.Count -gt 5) {
+                break
+            }
+
+        }
+    }
+
+    for ($i = 1; $i -lt 254; $i++) {
+        $newSubnet = "10.0." + $i + ".0"
+        $found = $false
+        foreach ($subnet in (Get-SubnetList)) {
+            if ($subnet.Subnet -eq $newSubnet) {
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) {
+            $subnetlist += $newSubnet
             if ($subnetlist.Count -gt 8) {
                 break
             }
@@ -234,20 +271,20 @@ function Get-NewMachineName {
         if ($OS -like "*Server*") {            
             $RoleName = "Server"
             $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -like "*Server*") | Measure-Object).Count
-            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -like "*Server*") | Measure-Object).count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -like "*Server*") | Measure-Object).count
         }
         else {
             $RoleName = "Client"
             $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object (-not ($_.deployedOS -like "*Server*")) | Measure-Object).Count
-            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object (-not ($_.OperatingSystem -like "*Server*")) | Measure-Object).count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object (-not ($_.OperatingSystem -like "*Server*")) | Measure-Object).count
             if ($OS -like "Windows 10*") {
                 $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -like "Windows 10*") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -like "Windows 10*") | Measure-Object).count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -like "Windows 10*") | Measure-Object).count
                 $RoleName = "W10Client"
             }
             if ($OS -like "Windows 11*") {
                 $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -like "Windows 11*") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -like "Windows 11*") | Measure-Object).count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -like "Windows 11*") | Measure-Object).count
                 $RoleName = "W11Client"
             }
         }
@@ -255,17 +292,17 @@ function Get-NewMachineName {
         switch ($OS) {
             "Server 2022" { 
                 $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -eq "Server 2022") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -eq "Server 2022") | Measure-Object).count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -eq "Server 2022") | Measure-Object).count
                 $RoleName = "W22Server" 
             }
             "Server 2019" { 
                 $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -eq "Server 2019") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -eq "Server 2019") | Measure-Object).count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -eq "Server 2019") | Measure-Object).count
                 $RoleName = "W19Server" 
             }
             "Server 2016" { 
                 $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -eq "Server 2016") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } |Where-Object ($_.OperatingSystem -eq  "Server 2016") | Measure-Object).count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -eq "Server 2016") | Measure-Object).count
                 $RoleName = "W16Server" 
             }
             Default {}
@@ -373,36 +410,46 @@ function Select-NewDomainConfig {
     Write-Verbose "Prefix = $prefix"
     $subnetlist = Get-ValidSubnets
 
-    while (-not $network) {
-        $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
-    }
-
-    $customOptions = [ordered]@{ "1" = "CAS and Primary"; "2" = "Primary Site only"; "3" = "Tech Preview (NO CAS)" ; "4" = "No ConfigMgr"; }
-    $response = $null
-    while (-not $response) {
-        $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
-    }
-
-    $CASJson = Join-Path $sampleDir "Hierarchy.json"
-    $PRIJson = Join-Path $sampleDir "Standalone.json"
-    $NoCMJson = Join-Path $sampleDir "NoConfigMgr.json"
-    $TPJson = Join-Path $sampleDir "TechPreview.json"
-    switch ($response.ToLowerInvariant()) {
-        "1" { $newConfig = Get-Content $CASJson -Force | ConvertFrom-Json }
-        "2" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }
-        "3" {
-            $newConfig = Get-Content $TPJson -Force | ConvertFrom-Json
-            $usedPrefixes = Get-List -Type UniquePrefix
-            if ("CTP-" -notin $usedPrefixes) {
-                $prefix = "CTP-"
+    $valid = $false
+    while ($valid -eq $false) {
+        $customOptions = @{ "C" = "Custom Subnet" }
+        $network = $null
+        while (-not $network) {
+            $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions
+            if ($network.ToLowerInvariant() -eq "c") {
+                $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
             }
         }
-        "4" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
-    }
+        
 
-    $newConfig.vmOptions.domainName = $domain
-    $newConfig.vmOptions.network = $network
-    $newConfig.vmOptions.prefix = $prefix
+        $customOptions = [ordered]@{ "1" = "CAS and Primary"; "2" = "Primary Site only"; "3" = "Tech Preview (NO CAS)" ; "4" = "No ConfigMgr"; }
+        $response = $null
+        while (-not $response) {
+            $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
+        }
+
+        $CASJson = Join-Path $sampleDir "Hierarchy.json"
+        $PRIJson = Join-Path $sampleDir "Standalone.json"
+        $NoCMJson = Join-Path $sampleDir "NoConfigMgr.json"
+        $TPJson = Join-Path $sampleDir "TechPreview.json"
+        switch ($response.ToLowerInvariant()) {
+            "1" { $newConfig = Get-Content $CASJson -Force | ConvertFrom-Json }
+            "2" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }
+            "3" {
+                $newConfig = Get-Content $TPJson -Force | ConvertFrom-Json
+                $usedPrefixes = Get-List -Type UniquePrefix
+                if ("CTP-" -notin $usedPrefixes) {
+                    $prefix = "CTP-"
+                }
+            }
+            "4" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
+        }
+
+        $newConfig.vmOptions.domainName = $domain
+        $newConfig.vmOptions.network = $network
+        $newConfig.vmOptions.prefix = $prefix
+        $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+    }
     return $newConfig
 }
 
@@ -659,25 +706,36 @@ function Select-ExistingSubnets {
             }            
         }
 
-        [string]$response = $null
-        $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions
-        write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
-        if ([string]::IsNullOrWhiteSpace($response)) {
-            Write-Verbose "[Select-ExistingSubnets] Subnet response = null"
-            return
-        }
-        write-Verbose "response $response"
-        $response = $response -Split " " | Select-Object -First 1
-        write-Verbose "Sanitized response $response"
-        if ($response.ToLowerInvariant() -eq "n") {
-
-            $subnetlist = Get-ValidSubnets
-
-            while (-not $network) {
-                $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist
+        while ($true) {
+            [string]$response = $null
+            $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false
+            write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
+            if ([string]::IsNullOrWhiteSpace($response)) {
+                Write-Verbose "[Select-ExistingSubnets] Subnet response = null"                
             }
-            $response = [string]$network
+            write-Verbose "response $response"
+            $response = $response -Split " " | Select-Object -First 1
+            write-Verbose "Sanitized response '$response'"
+       
+            if ($response.ToLowerInvariant() -eq "n") {
 
+                $subnetlist = Get-ValidSubnets
+                $customOptions = @{ "C" = "Custom Subnet" }
+                $network = $null
+                while (-not $network) {
+                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false
+                    if ($network.ToLowerInvariant() -eq "c") {
+                        $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
+                    }
+                }
+                $response = [string]$network
+                break
+
+            }
+            else {
+                write-Verbose "Sanitized response was not 'N' it was '$response'"
+                break
+            }
         }
         $valid = Get-TestResult -Config (Generate-ExistingConfig -Domain $Domain -Subnet $response -Role $Role) -SuccessOnWarning
     }
@@ -1132,8 +1190,7 @@ function Select-Options {
             switch ($name) {
                 "operatingSystem" {
                     Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
-                    if ($property.role -eq "DomainMember")
-                    {
+                    if ($property.role -eq "DomainMember") {
                         $property.vmName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config
                     }
                     continue MainLoop
