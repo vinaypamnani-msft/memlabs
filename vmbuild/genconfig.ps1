@@ -1246,6 +1246,9 @@ Function Get-remoteSQLVM {
                 Set-SiteServerRemoteSQL $property $name
             }
             Default {
+                if ([string]::IsNullOrWhiteSpace($result)){
+                    continue
+                }
                 Set-SiteServerRemoteSQL $property $result
             }
         }
