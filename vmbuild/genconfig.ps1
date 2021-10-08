@@ -1151,6 +1151,9 @@ Function Set-SiteServerRemoteSQL {
     if ($null -ne $virtualMachine.additionalDisks.F) {
         $virtualMachine.additionalDisks.PsObject.Members.Remove('F')
     }
+    if ($null -ne $virtualMachine.remoteSQLVM) {
+        $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
+    }
     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteSQLVM' -Value $vmName
 }
 
