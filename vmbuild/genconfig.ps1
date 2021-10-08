@@ -1149,7 +1149,7 @@ Function Set-SiteServerLocalSql {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
     }
-    
+    $virtualMachine.virtualProcs = 8
     $virtualMachine.memory = "10GB"
 
 
@@ -1191,6 +1191,7 @@ Function Set-SiteServerRemoteSQL {
         $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
     }
     $virtualMachine.memory = "4GB"
+    $virtualMachine.virtualProcs = 4
     if ($null -ne $virtualMachine.additionalDisks.F) {
         $virtualMachine.additionalDisks.PsObject.Members.Remove('F')
     }
