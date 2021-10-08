@@ -1463,7 +1463,18 @@ Function Show-Summary {
     }
     Write-GreenCheck "Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
     $out = $deployConfig.virtualMachines | Where-Object { -not $_.hidden } `
-    | Format-table vmName, role, operatingSystem, memory, @{Label = "Procs"; Expression = { $_.virtualProcs } }, @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } }, @{Label = "SQL"; Expression = { if ($null -ne $_.SqlVersion) { "YES" } } } `
+    | Format-table vmName, role, operatingSystem, memory, 
+    @{Label = "Procs"; Expression = { $_.virtualProcs } }, 
+    @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } }, 
+    @{Label = "SQL"; Expression = { 
+        if ($null -ne $_.SqlVersion) { 
+            $_.SqlVersion 
+        } else {
+            if ($null -ne $_.remoteSQLVM){
+                ("Remote -> " +$($_.remoteSQLVM))
+            }
+        } 
+    } } `
     | Out-String
     Write-Host
     $out.Trim() | Out-Host
