@@ -131,6 +131,12 @@ function Select-DeleteDomain {
         $domainList += "$($item.PadRight(22," ")) $stats"
     }
 
+    if ($domainList.Count -eq 0){
+        Write-Host -ForegroundColor Red "No Domains found. Please delete VM's manually from hyper-v"
+        Write-Host
+        return
+    }
+
     $domainExpanded = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList
     if ([string]::isnullorwhitespace($domainExpanded)) {
         return $null
