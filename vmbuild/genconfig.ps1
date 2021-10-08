@@ -1111,11 +1111,8 @@ Function Set-SiteServerLocalSql {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
     }
     
-    $virtualMachine.memory = "12GB"
+    $virtualMachine.memory = "10GB"
 
-    if ($null -ne $virtualMachine.remoteSQLVM) {
-        $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
-    }
 
     if ($null -eq $virtualMachine.additionalDisks) {
         $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
@@ -1129,6 +1126,13 @@ Function Set-SiteServerLocalSql {
         if ($null -eq $virtualMachine.additionalDisks.F) {
             $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "F" -Value "100GB"
         }
+    }
+
+    if ($null -ne $virtualMachine.remoteSQLVM) {
+        $SQLVM = $virtualMachine.remoteSQLVM
+        $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
+        Remove-VMFromConfig -vmName $SQLVM -Config $global:config
+        
     }
 
 }
