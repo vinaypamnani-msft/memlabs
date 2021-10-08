@@ -180,8 +180,8 @@ function Select-MainMenu {
             continue
         }
         switch ($response.ToLowerInvariant()) {
-            "1" { Select-Options $($Global:Config.vmOptions) "Select Global Property to modify" }
-            "2" { Select-Options $($Global:Config.cmOptions) "Select ConfigMgr Property to modify" }
+            "1" { Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" }
+            "2" { Select-Options -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" }
             "3" { Select-VirtualMachines }
             "d" { return $true }
             "s" { return $false }
@@ -450,8 +450,8 @@ function Select-NewDomainConfig {
                     }
                 }
                 $prefix = $($ValidDomainNames[$domain])
-                if ([String]::IsNullOrWhiteSpace($prefix)){
-                    $prefix = $domain.ToUpper().SubString(0,3)+"-"
+                if ([String]::IsNullOrWhiteSpace($prefix)) {
+                    $prefix = $domain.ToUpper().SubString(0, 3) + "-"
                 }
                 Write-Verbose "Prefix = $prefix"
                 $newConfig.vmOptions.domainName = $domain
@@ -1097,6 +1097,125 @@ Function Get-SqlVersionMenu {
     }
 }
 
+
+Function Set-SiteServerLocalSql {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Site Server VM Object")]
+        [Object] $virtualMachine
+    )
+
+    if ($null -eq $virtualMachine.sqlVersion) {
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
+    }
+    
+    $virtualMachine.memory = "12GB"
+
+    if ($null -ne $virtualMachine.remoteSQLVM) {
+        $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
+    }
+
+    if ($null -eq $virtualMachine.additionalDisks) {
+        $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+    }
+    else {
+
+        if ($null -eq $virtualMachine.additionalDisks.E) {
+            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "250GB"
+        }
+        if ($null -eq $virtualMachine.additionalDisks.F) {
+            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "F" -Value "100GB"
+        }
+    }
+
+}
+
+Function Set-SiteServerRemoteSQL {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Site Server VM Object")]
+        [Object] $virtualMachine,
+        [Parameter(Mandatory = $true, HelpMessage = "VmName")]
+        [string] $vmName
+    )
+
+    if ($null -ne $virtualMachine.sqlVersion) {
+        $virtualMachine.PsObject.Members.Remove('sqlVersion')
+        $virtualMachine.PsObject.Members.Remove('sqlInstanceName')
+        $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
+    }
+    $virtualMachine.memory = "4GB"
+    if ($null -ne $virtualMachine.additionalDisks.F) {
+        $virtualMachine.additionalDisks.PsObject.Members.Remove('F')
+    }
+    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteSQLVM' -Value $vmName
+}
+
+Function Get-remoteSQLVM {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $false, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+
+    $valid = $false
+    while ($valid -eq $false) {
+        $additionalOptions = @{ "L" = "Local SQL" }
+    
+        $validVMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Select-Object -ExpandProperty vmName
+
+        $CASVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
+        $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
+
+        if ($Property.Role -eq "CAS") {
+            if ($null -ne $PRIVM.remoteSQLVM) {
+                $validVMs = $validVMs | Where-Object { -not $_ -eq $PRIVM.remoteSQLVM }
+            }
+        }
+        if ($Property.Role -eq "Primary") {
+            if ($null -ne $CASVM.remoteSQLVM) {
+                $validVMs = $validVMs | Where-Object { -not $_ -eq $CASVM.remoteSQLVM }
+            }
+        }
+
+        if (($validVMs | Measure-Object).Count -eq 0) {
+            $additionalOptions += @{ "N" = "Create a New SQL VM" }
+        }
+        $result = Get-Menu "Select Remote SQL VM, or Select Local" $($validVMs) $CurrentValue -Test:$false -additionalOptions $additionalOptions
+
+        switch ($result.ToLowerInvariant()) {
+            "l" { 
+                Set-SiteServerLocalSql $property
+            }
+            "n" {
+                $name = $($property.SiteCode) + "SQL"
+                Add-NewVMForRole -Role "SQLServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name
+                Set-SiteServerRemoteSQL $property $name
+            }
+            Default {
+                Set-SiteServerRemoteSQL $property $result
+            }
+        }
+        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+            return
+        }
+        else {
+            if ($null -ne $name) {
+                if ($property."$name" -eq $CurrentValue) {
+                    return
+                }
+            }
+        }
+    }
+}
+
 Function Get-CMVersionMenu {
     [CmdletBinding()]
     param (
@@ -1166,8 +1285,14 @@ Function Get-RoleMenu {
 function Select-Options {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Property to Enumerate and automatically display a menu")]
-        [object] $property,
+        [Parameter(Mandatory = $false, HelpMessage = "Root of Property to Enumerate and automatically display a menu")]
+        [object] $Rootproperty,
+        [Parameter(Mandatory = $false, HelpMessage = "Property name")]
+        [object] $propertyName,
+        [Parameter(Mandatory = $false, HelpMessage = "Property to enumerate.. Can be used instead of RootProperty and propertyName")]
+        [object] $propertyEnum,
+        [Parameter(Mandatory = $false, HelpMessage = "If Property is an array.. find this element to work on (Base = 1).")]
+        [object] $propertyNum,
         [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
         [string] $prompt,
         [Parameter(Mandatory = $false, HelpMessage = "Append additional Items to menu.. Eg X = Exit")]
@@ -1176,7 +1301,24 @@ function Select-Options {
         [bool] $Test = $true
     )
 
+
+
     :MainLoop   while ($true) {
+        if ($null -eq $property) {
+            $property = $Rootproperty."$propertyName"
+        }
+
+        if ($null -ne $propertyNum) {
+            $i = 0;
+            while ($true) {                
+                if ($i -eq [int]($propertyNum - 1)) {
+                    $property = $propertyEnum[$i]
+                    break
+                }
+                $i = $i + 1
+            }
+        }
+
         Write-Host
         Write-Verbose "6 Select-Options"
         $i = 0
@@ -1249,6 +1391,10 @@ function Select-Options {
                     Get-SqlVersionMenu -property $property -name $name -CurrentValue $value
                     continue MainLoop
                 }
+                "remoteSQLVM" {
+                    Get-remoteSQLVM -property $property -name $name -CurrentValue $value
+                    return "REFRESH"
+                }
                 "role" {                           
                     if (Get-RoleMenu -property $property -name $name -CurrentValue $value) {
                         Write-Host -ForegroundColor Yellow "VirtualMachine object was re-created with new role. Taking you back to VM Menu."
@@ -1268,7 +1414,7 @@ function Select-Options {
             # If the property is another PSCustomObject, recurse, and call this function again with the inner object.
             # This is currently only used for AdditionalDisks
             if ($value -is [System.Management.Automation.PSCustomObject]) {
-                Select-Options $value "Select data to modify" | out-null
+                Select-Options -Rootproperty $property -PropertyName "$($item.Name)" "Select data to modify" | out-null
             }
             else {
                 #The option was not a known name with its own menu, and it wasnt another PSCustomObject.. We can edit it directly.   
@@ -1400,6 +1546,11 @@ function get-VMString {
         $name += "  CM [SiteCode $SiteCode]"
     }
 
+    if ($virtualMachine.remoteSQLVM) {        
+        $name += "  Remote SQL [$($virtualMachine.remoteSQLVM)]"
+    }
+
+
     if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
         $name += "  SQL [$($virtualMachine.sqlVersion)]"
     }
@@ -1434,10 +1585,15 @@ function Add-NewVMForRole {
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
         $OperatingSystem = "Server 2022"
     }
+    $actualRoleName = ($Role -split " ")[0]
+
+    if ($role -eq "SQLServer") {
+        $actualRoleName = "DomainMember"
+    }
 
     $virtualMachine = [PSCustomObject]@{
         vmName          = $null
-        role            = ($Role -split " ")[0]
+        role            = $actualRoleName
         operatingSystem = $OperatingSystem
         memory          = "2GB"
         virtualProcs    = 2
@@ -1445,16 +1601,25 @@ function Add-NewVMForRole {
     $existingPrimary = $null
     $existingDPMP = $null
     switch ($Role) {
+        "SQLServer" {
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
+            $disk = [PSCustomObject]@{"E" = "100GB" }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine.Memory = "8GB"
+            $virtualMachine.operatingSystem = $OperatingSystem
+        }
         "CAS" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
             $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $newSiteCode = Get-NewSiteCode $Domain -Role $role
+            $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
-            $virtualMachine.Memory = "12GB"
+            $virtualMachine.Memory = "10GB"
             $virtualMachine.operatingSystem = $OperatingSystem
             $existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count          
             
@@ -1474,9 +1639,9 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
             $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $newSiteCode = Get-NewSiteCode $Domain -Role $role
+            $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
-            $virtualMachine.Memory = "12GB"
+            $virtualMachine.Memory = "10GB"
             $virtualMachine.operatingSystem = $OperatingSystem
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count            
             
@@ -1500,7 +1665,7 @@ function Add-NewVMForRole {
     }
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
-        $machineName = Get-NewMachineName $Domain ($Role -split " ")[0] -OS $virtualMachine.OperatingSystem
+        $machineName = Get-NewMachineName $Domain actualRoleName -OS $virtualMachine.OperatingSystem
         Write-Verbose "Machine Name Generated $machineName"
     }
     else {
@@ -1569,91 +1734,106 @@ function Select-VirtualMachines {
                 $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os
                 Get-TestResult -SuccessOnError | out-null               
             }
-            $i = 0
-            foreach ($virtualMachine in $global:config.virtualMachines) {
-                $i = $i + 1
-                if ($i -eq $response) {
-                    $newValue = "Start"
-                    while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
-                        Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                        $customOptions = @{ "A" = "Add Additional Disk" }
-                        if ($null -eq $virtualMachine.additionalDisks) {
-                        }
-                        else {
-                            $customOptions["R"] = "Remove Last Additional Disk"
-                        }
-                        if ($null -eq $virtualMachine.sqlVersion) {
-                            $customOptions["S"] = "Add SQL"
-                        }
-                        else {
-                            $customOptions["X"] = "Remove SQL"
-                        }
-                        $customOptions["D"] = "Delete this VM"
-                        $newValue = Select-Options $virtualMachine "Which VM property to modify" $customOptions -Test:$false
-                        if (([string]::IsNullOrEmpty($newValue))) {
-                            break
-                        }
-                        if ($newValue -eq "DELETED") {
-                            break
-                        }
-                        if ($null -ne $newValue -and $newValue -is [string]) {
-                            $newValue = [string]$newValue.Trim()
-                            #Write-Host "NewValue = '$newValue'"
-                            $newValue = [string]$newValue.ToUpper()
-                        }
-                        if (([string]::IsNullOrEmpty($newValue))) {
-                            break
-                        }
-                        if ($newValue -eq "S") {
-                            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
-                            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
-                            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
-                        }
-                        if ($newValue -eq "X") {
-                            $virtualMachine.psobject.properties.remove('sqlversion')
-                            $virtualMachine.psobject.properties.remove('sqlInstanceDir')
-                            $virtualMachine.psobject.properties.remove('sqlInstanceName')
-                        }
-                        if ($newValue -eq "A") {
+            :VMLoop while ($true) {
+                $i = 0
+                foreach ($virtualMachine in $global:config.virtualMachines) {
+                    $i = $i + 1
+                    if ($i -eq $response) {
+                        $newValue = "Start"
+                        while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
+                            Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
+                            $customOptions = @{ "A" = "Add Additional Disk" }
                             if ($null -eq $virtualMachine.additionalDisks) {
-                                $disk = [PSCustomObject]@{"E" = "100GB" }
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
                             }
                             else {
-                                $letters = 69
-                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                    $letters++
-                                }
-                                if ($letters -lt 90) {
-                                    $letter = $([char]$letters).ToString()
-                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
-                                }
+                                $customOptions["R"] = "Remove Last Additional Disk"
                             }
-                        }
-                        if ($newValue -eq "R") {
-                            $diskscount = 0
-                            $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                $diskscount++
-                            }
-                            if ($diskscount -eq 1) {
-                                $virtualMachine.psobject.properties.remove('additionalDisks')
+                            if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
+                                $customOptions["S"] = "Configure SQL (Set local or remote SQL)"
                             }
                             else {
-                                $i = 0
-                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                    $i = $i + 1
-                                    if ($i -eq $diskscount) {
-                                        $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
+                                if ($null -eq $virtualMachine.sqlVersion) {
+                                    $customOptions["S"] = "Add SQL"
+                                }
+                                else {
+                                    $customOptions["X"] = "Remove SQL"
+                                }
+                            }
+
+                            $customOptions["D"] = "Delete this VM"
+                            $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $i -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false
+                            if (([string]::IsNullOrEmpty($newValue))) {
+                                break VMLoop
+                            }
+                            if ($newValue -eq "REFRESH") {
+                                continue VMLoop
+                            }
+                            if ($null -ne $newValue -and $newValue -is [string]) {
+                                $newValue = [string]$newValue.Trim()
+                                #Write-Host "NewValue = '$newValue'"
+                                $newValue = [string]$newValue.ToUpper()
+                            }
+                            if (([string]::IsNullOrEmpty($newValue))) {
+                                break VMLoop
+                            }
+                            if ($newValue -eq "S") {
+                                if ($virtualMachine.Role -eq "Primary" -or $virtualMachine.Role -eq "CAS") {
+                                    Get-remoteSQLVM -property $virtualMachine
+                                    continue VMLoop
+                                }
+                                else {
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
+                                }
+                            }
+                            if ($newValue -eq "X") {
+                                $virtualMachine.psobject.properties.remove('sqlversion')
+                                $virtualMachine.psobject.properties.remove('sqlInstanceDir')
+                                $virtualMachine.psobject.properties.remove('sqlInstanceName')
+                            }
+                            if ($newValue -eq "A") {
+                                if ($null -eq $virtualMachine.additionalDisks) {
+                                    $disk = [PSCustomObject]@{"E" = "100GB" }
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                                }
+                                else {
+                                    $letters = 69
+                                    $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                        $letters++
+                                    }
+                                    if ($letters -lt 90) {
+                                        $letter = $([char]$letters).ToString()
+                                        $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
                                     }
                                 }
                             }
-                            if ($diskscount -eq 1) {
-                                $virtualMachine.psobject.properties.remove('additionalDisks')
+                            if ($newValue -eq "R") {
+                                $diskscount = 0
+                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                    $diskscount++
+                                }
+                                if ($diskscount -eq 1) {
+                                    $virtualMachine.psobject.properties.remove('additionalDisks')
+                                }
+                                else {
+                                    $i = 0
+                                    $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                        $i = $i + 1
+                                        if ($i -eq $diskscount) {
+                                            $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
+                                        }
+                                    }
+                                }
+                                if ($diskscount -eq 1) {
+                                    $virtualMachine.psobject.properties.remove('additionalDisks')
+                                }
+                            }
+                            if (-not ($newValue -eq "D")) {
+                                Get-TestResult -SuccessOnError | out-null
                             }
                         }
-                        if (-not ($newValue -eq "D")) {
-                            Get-TestResult -SuccessOnError | out-null
-                        }
+                        break VMLoop
                     }
                 }
             }
