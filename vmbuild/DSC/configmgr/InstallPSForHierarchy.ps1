@@ -18,6 +18,17 @@ if ($ThisVM.cmInstallDir) {
     $SMSInstallDir = $ThisVM.cmInstallDir
 }
 
+# SQL FQDN
+if ($ThisVM.remoteSQLVM) {
+    $sqlServerName = $ThisVM.remoteSQLVM
+    $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
+    $sqlInstanceName = $SQLVM.sqlInstanceName
+}
+else {
+    $sqlServerName = $env:COMPUTERNAME
+    $sqlInstanceName = $ThisVM.sqlInstanceName
+}
+
 # Set Site Code
 if ($ThisVM.siteCode) {
     $SiteCode = $ThisVM.siteCode
@@ -106,8 +117,6 @@ JoinCEIP=0
 SQLServerName=%SQLMachineFQDN%
 DatabaseName=%SQLInstance%CM_%SiteCode%
 SQLSSBPort=4022
-SQLDataFilePath=%SQLDataFilePath%
-SQLLogFilePath=%SQLLogFilePath%
 
 [CloudConnectorOptions]
 CloudConnector=0
@@ -125,9 +134,9 @@ CCARSiteServer=%CASMachineFQDN%
 '@
 
 # Get SQL instance info
-$inst = (get-itemproperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server').InstalledInstances[0]
-$p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').$inst
-$sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
+#$inst = (get-itemproperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server').InstalledInstances[0]
+#$p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').$inst
+#$sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
 
 # Set CM Source Path
 $csShare = Invoke-Command -ComputerName $CSName -ScriptBlock { Get-SmbShare | Where-Object {$_.Name -like 'SMS_*' -and $_.Path -notlike '*despoolr.box*' -and $_.Description -like 'SMS Site *'} }
@@ -136,21 +145,19 @@ $cmsourcepath = "\\$CSName\$($csShare.Name)\cd.latest"
 # Set ini values
 $cmini = $cmini.Replace('%InstallDir%',$SMSInstallDir)
 $cmini = $cmini.Replace('%MachineFQDN%',"$env:computername.$DomainFullName")
-$cmini = $cmini.Replace('%SQLMachineFQDN%',"$env:computername.$DomainFullName")
+$cmini = $cmini.Replace('%SQLMachineFQDN%',"$sqlServerName.$DomainFullName")
 $cmini = $cmini.Replace('%SiteCode%',$SiteCode)
 $cmini = $cmini.Replace('%SiteName%',"ConfigMgr Primary Site")
-$cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
-$cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
+# $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
+# $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
 $cmini = $cmini.Replace('%CASMachineFQDN%',"$CSName.$DomainFullName")
 $cmini = $cmini.Replace('%REdistPath%',"$cmsourcepath\REdist")
 
-if($inst.ToUpper() -eq "MSSQLSERVER")
-{
+if($sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
     $cmini = $cmini.Replace('%SQLInstance%',"")
 }
-else
-{
-    $tinstance = $inst.ToUpper() + "\"
+else {
+    $tinstance = $sqlInstanceName.ToUpper() + "\"
     $cmini = $cmini.Replace('%SQLInstance%',$tinstance)
 }
 

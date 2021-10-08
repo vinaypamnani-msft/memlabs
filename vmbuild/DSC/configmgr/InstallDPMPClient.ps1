@@ -61,20 +61,21 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 # Set the current location to be the site code.
 Set-Location "$($SiteCode):\" @initParams
 
-# Add cm_svc user as a CM Account
+
 $cm_svc_file = "$LogPath\cm_svc.txt"
 if (Test-Path $cm_svc_file) {
+    # Add cm_svc user as a CM Account
     $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
     Write-DscStatus "Adding cm_svc domain account as CM account"
     Start-Sleep -Seconds 5
     New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode | Out-File $global:StatusLog -Append
     Remove-Item -Path $cm_svc_file -Force -Confirm:$false
-}
 
-# Set client push account
-Write-DscStatus "Setting the Client Push Account"
-Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
-Start-Sleep -Seconds 5
+    # Set client push account
+    Write-DscStatus "Setting the Client Push Account"
+    Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
+    Start-Sleep -Seconds 5
+}
 
 # Enable EHTTP, some components are still installing and they reset it to Disabled.
 # Keep setting it every 30 seconds, 10 times and bail...
@@ -106,6 +107,11 @@ if (-not $installDPMPRoles -and -not $pushClients) {
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return
 }
+
+# Restart services to make sure push account is acknowledged by CCM
+Write-DscStatus "Restarting services"
+Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
 
 # Create Site system Server
 #============
@@ -203,11 +209,6 @@ do {
         Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://DC=$DomainName,DC=$lastdomainname" -Recursive
     }
 } until ($adiscovery.Value1.ToLower() -eq "active")
-
-# Restart services to make sure push account is acknowledged by CCM
-Write-DscStatus "Restarting services"
-Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
 
 # Run discovery
 Write-DscStatus "Invoking AD system discovery"
