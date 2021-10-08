@@ -52,7 +52,46 @@ function Write-Option {
     write-host "[" -NoNewline
     Write-Host -ForegroundColor $color2 $option -NoNewline
     Write-Host "] ".PadRight(4 - $option.Length) -NoNewLine
-    Write-Host -ForegroundColor $color "$text"
+    
+    while (-not [string]::IsNullOrWhiteSpace($text)) {
+        #write-host $text
+        $indexLeft = $text.IndexOf('[')
+        $indexRight = $text.IndexOf(']')
+        if ($indexRight -eq -1 -and $indexLeft -eq -1){
+        Write-Host -ForegroundColor $color "$text" -NoNewline
+        break
+        }
+        else{
+
+            if ($indexRight -eq -1){
+                $indexRight = 100000000
+            }
+            if ($indexLeft -eq -1){
+                $indexLeft = 10000000
+            }
+
+            if ($indexRight -lt $indexLeft){
+                $text2Display = $text.Substring(0,$indexRight)
+                Write-Host -ForegroundColor $color "$text2Display" -NoNewline
+                #write-host "Text2Display $text2Display"
+                Write-Host -ForegroundColor DarkGray "]" -NoNewline
+                $text = $text.Substring($indexRight)
+                $text = $text.Substring(1)
+            }
+            if ($indexLeft -lt $indexRight){
+                $text2Display = $text.Substring(0,$indexLeft)
+                Write-Host -ForegroundColor $color "$text2Display" -NoNewline
+                Write-Host -ForegroundColor DarkGray "[" -NoNewline
+                $text = $text.Substring($indexLeft)
+                $text = $text.Substring(1)
+            }
+            #Write-Host "Right $indexRight Left $indexLeft"
+           # Write-Host -ForegroundColor $color "$text2Display" -NoNewline
+        }
+        
+    }
+    write-host
+
 
 }
 function Select-ConfigMenu {
@@ -117,7 +156,7 @@ function get-VMOptionsSummary {
 
     $options = $Global:Config.vmOptions
     $domainName = "[$($options.domainName)]".PadRight(21)
-    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.domainAdminName)] [Location [$($options.basePath)]"
+    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.domainAdminName)] [Location $($options.basePath)]"
     return $Output
 }
 
@@ -450,8 +489,8 @@ function Select-NewDomainConfig {
                     }
                 }
                 $prefix = $($ValidDomainNames[$domain])
-                if ([String]::IsNullOrWhiteSpace($prefix)){
-                    $prefix = $domain.ToUpper().SubString(0,3)+"-"
+                if ([String]::IsNullOrWhiteSpace($prefix)) {
+                    $prefix = $domain.ToUpper().SubString(0, 3) + "-"
                 }
                 Write-Verbose "Prefix = $prefix"
                 $newConfig.vmOptions.domainName = $domain
