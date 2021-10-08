@@ -575,10 +575,10 @@ Function Get-DomainStatsLine {
         $stats += "[CAS VMs: $ExistingCasCount] "
     }
     if ($ExistingPriCount -gt 0) {
-        $stats += "[Primary VMs: $ExistingCasCount] "
+        $stats += "[Primary VMs: $ExistingPriCount] "
     }
     if ($ExistingDPMPCount -gt 0) {
-        $stats += "[DPMP Vms: $ExistingCasCount] "
+        $stats += "[DPMP Vms: $ExistingDPMPCount] "
     }
 
     if ([string]::IsNullOrWhiteSpace($stats)) {
