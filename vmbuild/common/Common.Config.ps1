@@ -438,7 +438,7 @@ function Test-ValidVmProcs {
     $vmName = $VM.vmName
     $vmRole = $VM.role
 
-    if (-not $VM.virtualProcs -or $VM.virtualProcs -isnot [int]) {
+    if (-not $VM.virtualProcs -or -not $VM.virtualProcs -is [int]) {
         Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid virtualProcs [$($vm.virtualProcs)]. Specify desired virtualProcs; For example: 2" -ReturnObject $ReturnObject -Failure
     }
     else {
