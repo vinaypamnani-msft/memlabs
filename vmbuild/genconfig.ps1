@@ -1654,6 +1654,7 @@ function Add-NewVMForRole {
             $disk = [PSCustomObject]@{"E" = "100GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.Memory = "8GB"
+            $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
         }
         "CAS" {
