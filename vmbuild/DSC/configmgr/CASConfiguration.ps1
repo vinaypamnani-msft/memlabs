@@ -29,13 +29,20 @@
     $InstallConfigMgr = $deployConfig.cmOptions.install
 
     # SQL Instance Location
-    $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
-    $SQLInstanceName = "MSSQLSERVER"
-    if ($ThisVM.sqlInstanceDir) {
-        $SQLInstanceDir = $ThisVM.sqlInstanceDir
+    if ($ThisVM.remoteSQLVM) {
+        $installSQL = $false
     }
-    if ($ThisVM.sqlInstanceName) {
-        $SQLInstanceName = $ThisVM.sqlInstanceName
+    else {
+        # SQL Instance Location
+        $installSQL = $true
+        $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
+        $SQLInstanceName = "MSSQLSERVER"
+        if ($ThisVM.sqlInstanceDir) {
+            $SQLInstanceDir = $ThisVM.sqlInstanceDir
+        }
+        if ($ThisVM.sqlInstanceName) {
+            $SQLInstanceName = $ThisVM.sqlInstanceName
+        }
     }
 
     # Log share
@@ -154,57 +161,88 @@
             DependsOn    = "[OpenFirewallPortForSCCM]OpenFirewall"
         }
 
-        WriteStatus InstallSQL {
-            DependsOn = '[InstallADK]ADKInstall'
-            Status    = "Installing SQL Server ($SQLInstanceName instance)"
-        }
+        if ($installSQL) {
 
-        SqlSetup InstallSQL {
-            InstanceName        = $SQLInstanceName
-            InstanceDir         = $SQLInstanceDir
-            SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
-            Features            = 'SQLENGINE,CONN,BC'
-            SourcePath          = 'C:\temp\SQL'
-            UpdateEnabled       = 'True'
-            UpdateSource        = "C:\temp\SQL_CU"
-            SQLSysAdminAccounts = @('Administrators', $cm_admin)
-            TcpEnabled          = $true
-            UseEnglish          = $true
-            DependsOn           = '[InstallADK]ADKInstall'
-        }
+            WriteStatus InstallSQL {
+                DependsOn = '[InstallADK]ADKInstall'
+                Status    = "Installing SQL Server ($SQLInstanceName instance)"
+            }
 
-        SqlMemory SetSqlMemory {
-            DependsOn    = '[SqlSetup]InstallSQL'
-            Ensure       = 'Present'
-            DynamicAlloc = $false
-            MinMemory    = 2048
-            MaxMemory    = 8192
-            InstanceName = $SQLInstanceName
+            SqlSetup InstallSQL {
+                InstanceName        = $SQLInstanceName
+                InstanceDir         = $SQLInstanceDir
+                SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
+                Features            = 'SQLENGINE,CONN,BC'
+                SourcePath          = 'C:\temp\SQL'
+                UpdateEnabled       = 'True'
+                UpdateSource        = "C:\temp\SQL_CU"
+                SQLSysAdminAccounts = @('Administrators', $cm_admin)
+                TcpEnabled          = $true
+                UseEnglish          = $true
+                DependsOn           = '[InstallADK]ADKInstall'
+            }
+
+            SqlMemory SetSqlMemory {
+                DependsOn    = '[SqlSetup]InstallSQL'
+                Ensure       = 'Present'
+                DynamicAlloc = $false
+                MinMemory    = 8192
+                MaxMemory    = 8192
+                InstanceName = $SQLInstanceName
+            }
+
+            WriteStatus ChangeToLocalSystem {
+                DependsOn = "[SqlMemory]SetSqlMemory"
+                Status    = "Configuring SQL services to use LocalSystem"
+            }
+
+            ChangeSqlInstancePort SqlInstancePort {
+                SQLInstanceName = $SQLInstanceName
+                SQLInstancePort = 2433
+                Ensure          = "Present"
+                DependsOn       = "[SqlMemory]SetSqlMemory"
+            }
+
+            ChangeSQLServicesAccount ChangeToLocalSystem {
+                SQLInstanceName = $SQLInstanceName
+                Ensure          = "Present"
+                DependsOn       = "[ChangeSqlInstancePort]SqlInstancePort"
+            }
+
+            File ShareFolder {
+                DestinationPath = $LogPath
+                Type            = 'Directory'
+                Ensure          = 'Present'
+                DependsOn       = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+            }
+
+        }
+        else {
+
+            File ShareFolder {
+                DestinationPath = $LogPath
+                Type            = 'Directory'
+                Ensure          = 'Present'
+                DependsOn       = '[InstallADK]ADKInstall'
+            }
+
         }
 
         WriteStatus SSMS {
-            DependsOn = '[SqlMemory]SetSqlMemory'
+            DependsOn = "[File]ShareFolder"
             Status    = "Downloading and installing SQL Management Studio"
         }
 
         InstallSSMS SSMS {
             DownloadUrl = "https://aka.ms/ssmsfullsetup"
             Ensure      = "Present"
-            DependsOn   = '[SqlMemory]SetSqlMemory'
-        }
-
-
-        File ShareFolder {
-            DestinationPath = $LogPath
-            Type            = 'Directory'
-            Ensure          = 'Present'
-            DependsOn       = "[InstallSSMS]SSMS"
+            DependsOn   = "[File]ShareFolder"
         }
 
         FileReadAccessShare DomainSMBShare {
             Name      = $LogFolder
             Path      = $LogPath
-            DependsOn = "[File]ShareFolder"
+            DependsOn = "[InstallSSMS]SSMS"
         }
 
         WriteStatus DownLoadSCCM {
@@ -260,29 +298,39 @@
             DependsOn     = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
         }
 
-        WriteStatus ChangeToLocalSystem {
-            DependsOn = "[WaitForConfigurationFile]DelegateControl"
-            Status    = "Configuring SQL services to use LocalSystem"
-        }
-
-        ChangeSqlInstancePort SqlInstancePort {
-            SQLInstanceName = $SQLInstanceName
-            SQLInstancePort = 2433
-            Ensure          = "Present"
-            DependsOn       = "[WaitForConfigurationFile]DelegateControl"
-        }
-
-        ChangeSQLServicesAccount ChangeToLocalSystem {
-            SQLInstanceName = $SQLInstanceName
-            Ensure          = "Present"
-            DependsOn       = "[ChangeSqlInstancePort]SqlInstancePort"
-        }
-
         if ($InstallConfigMgr) {
 
-            WriteStatus RunScriptWorkflow {
-                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-                Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
+            if ($installSQL) {
+
+                WriteStatus RunScriptWorkflow {
+                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
+                    Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
+                }
+
+            }
+            else {
+
+                # Wait for SQLVM
+                WriteStatus WaitSQL {
+                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
+                    Status    = "Waiting for remote SQL VM $($ThisVM.remoteSQLVM) to finish configuration."
+                }
+
+                WaitForConfigurationFile WaitSQL {
+                    Role          = "DomainMember"
+                    MachineName   = $ThisVM.remoteSQLVM
+                    LogFolder     = $LogFolder
+                    ReadNode      = "DomainMemberFinished"
+                    ReadNodeValue = "Passed"
+                    Ensure        = "Present"
+                    DependsOn     = "[WaitForConfigurationFile]DelegateControl"
+                }
+
+                WriteStatus RunScriptWorkflow {
+                    DependsOn = "[WaitForConfigurationFile]WaitSQL"
+                    Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
+                }
+
             }
 
             RegisterTaskScheduler RunScriptWorkflow {
@@ -292,7 +340,7 @@
                 ScriptArgument = "$ConfigFilePath $LogPath"
                 AdminCreds     = $CMAdmin
                 Ensure         = "Present"
-                DependsOn      = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+                DependsOn      = "[WriteStatus]RunScriptWorkflow"
             }
 
             WaitForConfigurationFile WorkflowComplete {

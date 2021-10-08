@@ -184,24 +184,13 @@
                 DependsOn    = '[SqlSetup]InstallSQL'
                 Ensure       = 'Present'
                 DynamicAlloc = $false
-                MinMemory    = 2048
+                MinMemory    = 8192
                 MaxMemory    = 8192
                 InstanceName = $SQLInstanceName
             }
 
-            WriteStatus SSMS {
-                DependsOn = '[SqlMemory]SetSqlMemory'
-                Status    = "Downloading and installing SQL Management Studio"
-            }
-
-            InstallSSMS SSMS {
-                DownloadUrl = "https://aka.ms/ssmsfullsetup"
-                Ensure      = "Present"
-                DependsOn   = '[SqlMemory]SetSqlMemory'
-            }
-
             WriteStatus ChangeToLocalSystem {
-                DependsOn = "[InstallSSMS]SSMS"
+                DependsOn = "[SqlMemory]SetSqlMemory"
                 Status    = "Configuring SQL services to use LocalSystem"
             }
 
@@ -209,7 +198,7 @@
                 SQLInstanceName = $SQLInstanceName
                 SQLInstancePort = 2433
                 Ensure          = "Present"
-                DependsOn       = "[InstallSSMS]SSMS"
+                DependsOn       = "[SqlMemory]SetSqlMemory"
             }
 
             ChangeSQLServicesAccount ChangeToLocalSystem {
@@ -237,11 +226,22 @@
 
         }
 
+        WriteStatus SSMS {
+            DependsOn = "[File]ShareFolder"
+            Status    = "Downloading and installing SQL Management Studio"
+        }
+
+        InstallSSMS SSMS {
+            DownloadUrl = "https://aka.ms/ssmsfullsetup"
+            Ensure      = "Present"
+            DependsOn   = "[File]ShareFolder"
+        }
+
 
         if ($Scenario -eq "Standalone") {
 
             WriteStatus DownLoadSCCM {
-                DependsOn = "[File]ShareFolder"
+                DependsOn = "[InstallSSMS]SSMS"
                 Status    = $CMDownloadStatus
             }
 
@@ -268,7 +268,7 @@
             # Hierarchy
 
             WriteStatus WaitCS {
-                DependsOn = "[File]ShareFolder"
+                DependsOn = "[InstallSSMS]SSMS"
                 Status    = "Waiting for CAS Server $CSName to join domain"
             }
 
@@ -305,7 +305,6 @@
             DependsOn     = "[FileReadAccessShare]DomainSMBShare"
         }
 
-
         if ($InstallConfigMgr) {
 
             if ($installSQL) {
@@ -321,7 +320,7 @@
                 # Wait for SQLVM
                 WriteStatus WaitSQL {
                     DependsOn = "[WaitForConfigurationFile]DelegateControl"
-                    Status    = "Waiting for SQL Virtual Machine $($ThisVM.remoteSQLVM) to finish configuration."
+                    Status    = "Waiting for remote SQL VM $($ThisVM.remoteSQLVM) to finish configuration."
                 }
 
                 WaitForConfigurationFile WaitSQL {

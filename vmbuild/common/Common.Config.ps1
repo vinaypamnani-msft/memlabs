@@ -590,6 +590,8 @@ function Test-ValidRoleCSPS {
         [object]
         $VM,
         [object]
+        $ConfigObject,
+        [object]
         $ReturnObject
     )
 
@@ -600,14 +602,34 @@ function Test-ValidRoleCSPS {
     $vmName = $VM.vmName
     $vmRole = $VM.role
 
-    # Minimum Memory
-    if ($VM.memory / 1 -lt 6GB) {
-        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 6GB memory." -ReturnObject $ReturnObject -Failure
-    }
-
     # Primary/CAS must contain SQL
     if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
+    }
+
+    # Remote SQL
+    if ($VM.remoteSQLVM) {
+        $sqlServerName = $VM.remoteSQLVM
+        $SQLVM = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
+
+        # Remote SQL must contain sqlVersion
+        if (-not $SQLVM -or -not $SQLVM.sqlVersion) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$sqlServerName] does not contain sqlVersion; When deploying $vmRole Role with remote SQL, you must specify the SQL Version for SQL VM." -ReturnObject $ReturnObject -Warning
+        }
+
+        # Minimum Memory
+        if ($VM.memory / 1 -lt 4GB) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using remote SQL." -ReturnObject $ReturnObject -Failure
+        }
+
+    }
+    else {
+        # Local SQL
+
+        # Minimum Memory
+        if ($VM.memory / 1 -lt 6GB) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 6GB memory when using local SQL." -ReturnObject $ReturnObject -Failure
+        }
     }
 
     # Site Code
@@ -777,7 +799,7 @@ function Test-Configuration {
             }
 
             # Validate CAS role
-            Test-ValidRoleCSPS -VM $CSVM -ReturnObject $return
+            Test-ValidRoleCSPS -VM $CSVM -ConfigObject $deployConfig -ReturnObject $return
 
         }
 
@@ -795,7 +817,7 @@ function Test-Configuration {
 
         if (Test-SingleRole -VM $PSVM -ReturnObject $return) {
 
-            Test-ValidRoleCSPS -VM $PSVM -ReturnObject $return
+            Test-ValidRoleCSPS -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
 
             # Valid parent Site Code
             if ($psParentSiteCode) {
@@ -953,14 +975,22 @@ function New-DeployConfig {
         if (-not $CSName) {
             $CSName = $existingCSName
         }
+
+        # Add prefix to remote SQL
+        if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+            $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
+        }
     }
 
-    if ($PSVM.remoteSQLVM) {
-        $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
-    }
 
-    if ($CSVM.remoteSQLVM) {
-        $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
+
+    if ($containsCS) {
+        $CSVM = $virtualMachines | Where-Object { $_.role -eq "CAS" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+
+        # Add prefix to remote SQL
+        if ($CSVM.remoteSQLVM -and -not $CSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+            $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
+        }
     }
 
     if ($existingCSName -and $containsPS) {
