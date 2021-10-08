@@ -1778,7 +1778,8 @@ function Select-VirtualMachines {
 
 
                 $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os
-                Get-TestResult -SuccessOnError | out-null               
+                Get-TestResult -SuccessOnError | out-null     
+                continue          
             }
             :VMLoop while ($true) {
                 $i = 0
