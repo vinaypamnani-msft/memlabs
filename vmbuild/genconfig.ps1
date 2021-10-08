@@ -57,36 +57,36 @@ function Write-Option {
         #write-host $text
         $indexLeft = $text.IndexOf('[')
         $indexRight = $text.IndexOf(']')
-        if ($indexRight -eq -1 -and $indexLeft -eq -1){
-        Write-Host -ForegroundColor $color "$text" -NoNewline
-        break
+        if ($indexRight -eq -1 -and $indexLeft -eq -1) {
+            Write-Host -ForegroundColor $color "$text" -NoNewline
+            break
         }
-        else{
+        else {
 
-            if ($indexRight -eq -1){
+            if ($indexRight -eq -1) {
                 $indexRight = 100000000
             }
-            if ($indexLeft -eq -1){
+            if ($indexLeft -eq -1) {
                 $indexLeft = 10000000
             }
 
-            if ($indexRight -lt $indexLeft){
-                $text2Display = $text.Substring(0,$indexRight)
+            if ($indexRight -lt $indexLeft) {
+                $text2Display = $text.Substring(0, $indexRight)
                 Write-Host -ForegroundColor $color "$text2Display" -NoNewline
                 #write-host "Text2Display $text2Display"
                 Write-Host -ForegroundColor DarkGray "]" -NoNewline
                 $text = $text.Substring($indexRight)
                 $text = $text.Substring(1)
             }
-            if ($indexLeft -lt $indexRight){
-                $text2Display = $text.Substring(0,$indexLeft)
+            if ($indexLeft -lt $indexRight) {
+                $text2Display = $text.Substring(0, $indexLeft)
                 Write-Host -ForegroundColor $color "$text2Display" -NoNewline
                 Write-Host -ForegroundColor DarkGray "[" -NoNewline
                 $text = $text.Substring($indexLeft)
                 $text = $text.Substring(1)
             }
             #Write-Host "Right $indexRight Left $indexLeft"
-           # Write-Host -ForegroundColor $color "$text2Display" -NoNewline
+            # Write-Host -ForegroundColor $color "$text2Display" -NoNewline
         }
         
     }
@@ -1247,7 +1247,7 @@ Function Get-remoteSQLVM {
                 Set-SiteServerRemoteSQL $property $name
             }
             Default {
-                if ([string]::IsNullOrWhiteSpace($result)){
+                if ([string]::IsNullOrWhiteSpace($result)) {
                     continue
                 }
                 Set-SiteServerRemoteSQL $property $result
@@ -1352,9 +1352,9 @@ function Select-Options {
     )
 
 
-
+    $property = $null
     :MainLoop   while ($true) {
-        if ($null -eq $property) {
+        if ($null -eq $property -and $null -ne $Rootproperty) {
             $property = $Rootproperty."$propertyName"
         }
 
@@ -1369,8 +1369,12 @@ function Select-Options {
             }
         }
 
+        if ($null -eq $property) {
+            $property = $propertyEnum
+        }
+
         Write-Host
-        Write-Verbose "6 Select-Options"
+        Write-Verbose "6 Select-Options '$property' Root: '$Rootproperty' Name: '$propertyName' Enum: '$propertyEnum' Num '$propertyNum'"
         $i = 0
         #Write-Host "Trying to get $property"
         if ($null -eq $property) {
@@ -1464,7 +1468,7 @@ function Select-Options {
             # If the property is another PSCustomObject, recurse, and call this function again with the inner object.
             # This is currently only used for AdditionalDisks
             if ($value -is [System.Management.Automation.PSCustomObject]) {
-                Select-Options -Rootproperty $property -PropertyName "$($item.Name)" "Select data to modify" | out-null
+                Select-Options -Rootproperty $property -PropertyName "$Name" -Prompt "Select data to modify" | out-null
             }
             else {
                 #The option was not a known name with its own menu, and it wasnt another PSCustomObject.. We can edit it directly.   
