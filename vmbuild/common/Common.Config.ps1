@@ -718,13 +718,12 @@ function Test-Configuration {
 
     # Contains roles
     if ($deployConfig.virtualMachines) {
-        $containsDC = $deployConfig.virtualMachines.role.Contains("DC")
         $containsCS = $deployConfig.virtualMachines.role.Contains("CAS")
         $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
         $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
     }
     else {
-        $containsDC = $containsCS = $containsPS = $containsDPMP = $false
+        $containsCS = $containsPS = $containsDPMP = $false
     }
 
     $needCMOptions = $containsCS -or $containsPS
