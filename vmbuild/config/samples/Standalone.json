@@ -27,14 +27,24 @@
             "siteCode": "PRI",
             "operatingSystem": "Server 2022",
             "cmInstallDir": "E:\\ConfigMgr",
+            "remoteSQLVM": "PRISQL",
+            "additionalDisks": {
+                "E": "250GB"
+            },
+            "memory": "8GB",
+            "virtualProcs": 8
+        },
+        {
+            "vmName": "PRISQL",
+            "role": "DomainMember",
+            "operatingSystem": "Server 2022",
             "sqlVersion": "SQL Server 2019",
             "sqlInstanceName": "MSSQLSERVER",
-            "sqlInstanceDir": "F:\\SQL",
+            "sqlInstanceDir": "E:\\SQL",
             "additionalDisks": {
-                "E": "250GB",
-                "F": "100GB"
+                "E": "250GB"
             },
-            "memory": "12GB",
+            "memory": "8GB",
             "virtualProcs": 8
         },
         {

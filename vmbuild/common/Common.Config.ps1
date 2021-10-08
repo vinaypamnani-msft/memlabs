@@ -606,7 +606,7 @@ function Test-ValidRoleCSPS {
     }
 
     # Primary/CAS must contain SQL
-    if (-not $VM.sqlVersion) {
+    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
     }
 
@@ -953,6 +953,14 @@ function New-DeployConfig {
         if (-not $CSName) {
             $CSName = $existingCSName
         }
+    }
+
+    if ($PSVM.remoteSQLVM) {
+        $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
+    }
+
+    if ($CSVM.remoteSQLVM) {
+        $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
     }
 
     if ($existingCSName -and $containsPS) {

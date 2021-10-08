@@ -22,6 +22,17 @@ if ($ThisVM.cmInstallDir) {
     $SMSInstallDir = $ThisVM.cmInstallDir
 }
 
+# SQL FQDN
+if ($ThisVM.remoteSQLVM) {
+    $sqlServerName = $ThisVM.remoteSQLVM
+    $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
+    $sqlInstanceName = $SQLVM.sqlInstanceName
+}
+else {
+    $sqlServerName = $env:COMPUTERNAME
+    $sqlInstanceName = $ThisVM.sqlInstanceName
+}
+
 # Set Site Code
 if ($ThisVM.siteCode) {
     $SiteCode = $ThisVM.siteCode
@@ -92,8 +103,6 @@ JoinCEIP=0
 SQLServerName=%SQLMachineFQDN%
 DatabaseName=%SQLInstance%CM_%SiteCode%
 SQLSSBPort=4022
-SQLDataFilePath=%SQLDataFilePath%
-SQLLogFilePath=%SQLLogFilePath%
 
 [CloudConnectorOptions]
 CloudConnector=1
@@ -109,19 +118,19 @@ SysCenterId=
 '@
 
     # Get SQL instance info
-    $inst = (get-itemproperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server').InstalledInstances[0]
-    $p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').$inst
-    $sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
+    #$inst = (get-itemproperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server').InstalledInstances[0]
+    #$p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').$inst
+    #$sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
 
     # Set ini values
     $installAction = if ($CurrentRole -eq "CAS") { "InstallCAS" } else { "InstallPrimarySite" }
     $cmini = $cmini.Replace('%InstallAction%', $installAction)
     $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
     $cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")
-    $cmini = $cmini.Replace('%SQLMachineFQDN%', "$env:computername.$DomainFullName")
+    $cmini = $cmini.Replace('%SQLMachineFQDN%', "$sqlServerName.$DomainFullName")
     $cmini = $cmini.Replace('%SiteCode%', $SiteCode)
-    $cmini = $cmini.Replace('%SQLDataFilePath%', $sqlinfo.DefaultData)
-    $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
+    # $cmini = $cmini.Replace('%SQLDataFilePath%', $sqlinfo.DefaultData)
+    # $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CM%', $CM)
 
     # Remove items not needed on CAS
@@ -145,12 +154,11 @@ SysCenterId=
         }
     }
 
-    # Set sql instance
-    if ($inst.ToUpper() -eq "MSSQLSERVER") {
+    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
         $cmini = $cmini.Replace('%SQLInstance%', "")
     }
     else {
-        $tinstance = $inst.ToUpper() + "\"
+        $tinstance = $sqlInstanceName.ToUpper() + "\"
         $cmini = $cmini.Replace('%SQLInstance%', $tinstance)
     }
 
