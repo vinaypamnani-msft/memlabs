@@ -1132,7 +1132,7 @@ Function Set-SiteServerLocalSql {
         $SQLVM = $virtualMachine.remoteSQLVM
         $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
         Remove-VMFromConfig -vmName $SQLVM -Config $global:config
-        
+
     }
 
 }
@@ -1672,7 +1672,7 @@ function Add-NewVMForRole {
     }
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
-        $machineName = Get-NewMachineName $Domain actualRoleName -OS $virtualMachine.OperatingSystem
+        $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem
         Write-Verbose "Machine Name Generated $machineName"
     }
     else {
