@@ -369,8 +369,7 @@ function Get-NewSiteCode {
 
 }
 
-function Select-NewDomainConfig {
-
+function Get-ValidDomainNames {
     # Old List.. Some have netbios portions longer than 15 chars
     #$ValidDomainNames = [System.Collections.ArrayList]("adatum.com", "adventure-works.com", "alpineskihouse.com", "bellowscollege.com", "bestforyouorganics.com", "contoso.com", "contososuites.com",
     #   "consolidatedmessenger.com", "fabrikam.com", "fabrikamresidences.com", "firstupconsultants.com", "fourthcoffee.com", "graphicdesigninstitute.com", "humongousinsurance.com",
@@ -398,29 +397,16 @@ function Select-NewDomainConfig {
             }
         }
     }
-    $domain = $null
-    $customOptions = @{ "C" = "Custom Domain" }
-    while (-not $domain) {
-        $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions
-        if ($domain.ToLowerInvariant() -eq "c") {
-            $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
-        }
-    }
-    $prefix = $($ValidDomainNames[$domain])
-    Write-Verbose "Prefix = $prefix"
+    return $ValidDomainNames
+}
+
+function Select-NewDomainConfig {
+
+
     $subnetlist = Get-ValidSubnets
 
     $valid = $false
-    while ($valid -eq $false) {
-        $customOptions = @{ "C" = "Custom Subnet" }
-        $network = $null
-        while (-not $network) {
-            $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions
-            if ($network.ToLowerInvariant() -eq "c") {
-                $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
-            }
-        }
-        
+    while ($valid -eq $false) {      
 
         $customOptions = [ordered]@{ "1" = "CAS and Primary"; "2" = "Primary Site only"; "3" = "Tech Preview (NO CAS)" ; "4" = "No ConfigMgr"; }
         $response = $null
@@ -444,11 +430,53 @@ function Select-NewDomainConfig {
             }
             "4" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
         }
-
-        $newConfig.vmOptions.domainName = $domain
-        $newConfig.vmOptions.network = $network
-        $newConfig.vmOptions.prefix = $prefix
+        #Dummy Values that are likely not to be already used to pass intial validation.
+        $newConfig.vmOptions.domainName = "TEMPLATE2222.com"
+        $newConfig.vmOptions.network = "10.234.241.0"
+        $newConfig.vmOptions.prefix = "z4w"
         $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+
+
+        if ($valid) {
+            $valid = $false
+            while ($valid -eq $false) {
+                $domain = $null
+                $customOptions = @{ "C" = "Custom Domain" }
+                $ValidDomainNames = Get-ValidDomainNames
+                while (-not $domain) {
+                    $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions
+                    if ($domain.ToLowerInvariant() -eq "c") {
+                        $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
+                    }
+                }
+                $prefix = $($ValidDomainNames[$domain])
+                if ([String]::IsNullOrWhiteSpace($prefix)){
+                    $prefix = $domain.ToUpper().SubString(0,3)+"-"
+                }
+                Write-Verbose "Prefix = $prefix"
+                $newConfig.vmOptions.domainName = $domain
+                $newConfig.vmOptions.prefix = $prefix
+                $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+            }
+        }
+
+        if ($valid) {
+            $valid = $false
+            while ($valid -eq $false) {
+                $customOptions = @{ "C" = "Custom Subnet" }
+                $network = $null
+                while (-not $network) {
+                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions
+                    if ($network.ToLowerInvariant() -eq "c") {
+                        $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
+                    }
+                }
+                $newConfig.vmOptions.network = $network
+                $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+            }
+        }
+    
+
     }
     return $newConfig
 }
@@ -727,7 +755,8 @@ function Select-ExistingSubnets {
             $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false
             write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
             if ([string]::IsNullOrWhiteSpace($response)) {
-                Write-Verbose "[Select-ExistingSubnets] Subnet response = null"                
+                Write-Verbose "[Select-ExistingSubnets] Subnet response = null"         
+                continue       
             }
             write-Verbose "response $response"
             $response = $response -Split " " | Select-Object -First 1
@@ -1507,7 +1536,7 @@ function Add-NewVMForRole {
     }
 
     if ($existingDPMP -eq 0) {
-        $ConfigToModify = Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify
+        $ConfigToModify = Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
     }
 
     Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
