@@ -592,6 +592,10 @@ function New-VmNote {
             $vmNote | Add-Member -MemberType NoteProperty -Name "sqlInstanceDir" -Value $ThisVM.sqlInstanceDir
         }
 
+        if ($ThisVM.remoteSQLVM) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "remoteSQLVM" -Value $ThisVM.remoteSQLVM
+        }
+
         $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
 
         $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "

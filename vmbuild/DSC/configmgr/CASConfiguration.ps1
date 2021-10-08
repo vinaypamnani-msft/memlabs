@@ -186,8 +186,8 @@
                 DependsOn    = '[SqlSetup]InstallSQL'
                 Ensure       = 'Present'
                 DynamicAlloc = $false
-                MinMemory    = 8192
-                MaxMemory    = 8192
+                MinMemory    = 2048
+                MaxMemory    = 6144
                 InstanceName = $SQLInstanceName
             }
 

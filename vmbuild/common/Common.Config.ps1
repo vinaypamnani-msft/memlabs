@@ -1267,6 +1267,7 @@ function Get-List {
                         SQLVersion      = $vmNoteObject.sqlVersion
                         SQLInstanceName = $vmNoteObject.sqlInstanceName
                         SQLInstanceDir  = $vmNoteObject.sqlInstanceDir
+                        RemoteSQLVM     = $vmNoteObject.remoteSQLVM
                         InProgress      = $inProgress
                     }
                 }
@@ -1285,6 +1286,7 @@ function Get-List {
                         SQLVersion      = $null
                         SQLInstanceName = $null
                         SQLInstanceDir  = $null
+                        RemoteSQLVM     = $null
                         Domain          = $null
                         DomainAdmin     = $null
                         Prefix          = $null
@@ -1463,17 +1465,17 @@ Function Show-Summary {
     }
     Write-GreenCheck "Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
     $out = $deployConfig.virtualMachines | Where-Object { -not $_.hidden } `
-    | Format-table vmName, role, operatingSystem, memory, 
-    @{Label = "Procs"; Expression = { $_.virtualProcs } }, 
-    @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } }, 
-    @{Label = "SQL"; Expression = { 
-        if ($null -ne $_.SqlVersion) { 
-            $_.SqlVersion 
+    | Format-table vmName, role, operatingSystem, memory,
+    @{Label = "Procs"; Expression = { $_.virtualProcs } },
+    @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
+    @{Label = "SQL"; Expression = {
+        if ($null -ne $_.SqlVersion) {
+            $_.SqlVersion
         } else {
             if ($null -ne $_.remoteSQLVM){
                 ("Remote -> " +$($_.remoteSQLVM))
             }
-        } 
+        }
     } } `
     | Out-String
     Write-Host
