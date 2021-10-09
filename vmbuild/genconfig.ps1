@@ -1337,6 +1337,39 @@ Function Get-RoleMenu {
     }
 }
 
+
+function Get-AdditionalValidations{
+    [CmdletBinding()]
+    param (
+    [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+    [Object] $property,
+    [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
+    [string] $name,
+    [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+    [Object] $CurrentValue
+    )
+    $value = $property."$($item.Name)"
+    $name = $($item.Name)
+Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
+    switch ($name) {
+        "vmName" {
+
+            $CASVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
+            $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
+    
+            #This is a SQL Server being renamed.  Lets check if we need to update CAS or PRI
+            if (($Property.Role -eq "DomainMember") -and ($null -ne $Property.sqlVersion)) {
+                if (($null -ne $PRIVM.remoteSQLVM) -and $PRIVM.remoteSQLVM -eq $CurrentValue) {
+                    $PRIVM.remoteSQLVM = $value              
+                }
+                if (($null -ne $CASVM.remoteSQLVM) -and ($CASVM.remoteSQLVM -eq $CurrentValue)) {
+                    $CASVM.remoteSQLVM = $value              
+                }
+            }
+        }
+    }
+}
+
 # Displays a Menu based on a property, offers options in [1], [2],[3] format
 # With additional options passed in via additionalOptions
 function Select-Options {
@@ -1509,8 +1542,9 @@ function Select-Options {
 
                             }
 
-                            Write-Verbose ("$_ name = $($_.Name) or $name = $response2")
+                            Write-Verbose ("$_ name = $($_.Name) or $name = $response2 value = '$value'")
                             $property."$($Name)" = $response2
+                            Get-AdditionalValidations -property $property -name $Name -CurrentValue $value
                         }
                         if ($Test) {
                             $valid = Get-TestResult -SuccessOnWarning
