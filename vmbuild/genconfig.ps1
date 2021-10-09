@@ -91,8 +91,6 @@ function Write-Option {
         
     }
     write-host
-
-
 }
 function Select-ConfigMenu {
     while ($true) {
@@ -118,7 +116,6 @@ function Select-ConfigMenu {
         if ($SelectedConfig) {
             return $SelectedConfig
         }
-
     }
 }
 
@@ -288,7 +285,6 @@ function Get-ValidSubnets {
             if ($subnetlist.Count -gt 8) {
                 break
             }
-
         }
     }
     return $subnetlist
@@ -352,9 +348,6 @@ function Get-NewMachineName {
             }
             Default {}
         }
-
-
-
     }
 
     if (($role -eq "Primary") -or ($role -eq "CAS")) {
@@ -368,7 +361,6 @@ function Get-NewMachineName {
             return $($PSVM.SiteCode) + $role
         }
     }
-
    
     Write-Verbose "[Get-NewMachineName] found $ConfigCount machines in Config with role $Role"
     $TotalCount = [int]$RoleCount + [int]$ConfigCount
@@ -385,9 +377,7 @@ function Get-NewMachineName {
         $i++
     }
     return $NewName
-
 }
-
 
 function Get-NewSiteCode {
     [CmdletBinding()]
@@ -411,7 +401,6 @@ function Get-NewSiteCode {
     #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
 
     return "PS" + ($NumberOfPrimaries + 1)
-
 }
 
 function Get-ValidDomainNames {
@@ -447,7 +436,6 @@ function Get-ValidDomainNames {
 
 function Select-NewDomainConfig {
 
-
     $subnetlist = Get-ValidSubnets
 
     $valid = $false
@@ -480,7 +468,6 @@ function Select-NewDomainConfig {
         $newConfig.vmOptions.network = "10.234.241.0"
         $newConfig.vmOptions.prefix = "z4w"
         $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
-
 
         if ($valid) {
             $valid = $false
@@ -520,8 +507,6 @@ function Select-NewDomainConfig {
                 $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
             }
         }
-    
-
     }
     return $newConfig
 }
@@ -544,6 +529,7 @@ function Select-Config {
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json"
     $responseValid = $false
+
     while ($responseValid -eq $false) {
         $i = 0
         foreach ($file in $files) {
@@ -555,8 +541,7 @@ function Select-Config {
             Write-Option "E" "Expand existing network" -color DarkGreen -Color2 Green
 
         }
-        #    $responseValid = $false
-        #    while ($responseValid -eq $false) {
+
         Write-Host
         Write-Verbose "3 Select-Config"
         $response = Read-Host2 -Prompt "Which config do you want to deploy"
@@ -730,7 +715,6 @@ function Select-RolesForExisting {
 
 }
 
-
 function Select-RolesForNew {
     $existingRoles = $Common.Supported.Roles
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
@@ -833,9 +817,6 @@ function Select-ExistingSubnets {
     return [string]$response
 }
 
-
-
-
 function Generate-ExistingConfig {
     [CmdletBinding()]
     param (
@@ -901,7 +882,6 @@ function Read-Host2 {
     $response = Read-Host
     return $response
 }
-
 
 # Offers a menu for any array passed in.
 # This is used for Sql Versions, Roles, Etc
@@ -975,7 +955,6 @@ function Get-Menu {
         Write-Verbose "[Get-Menu] Returned (CV) '$CurrentValue'"
         return $CurrentValue
     }
-
 }
 
 #Checks if the response from the menu was valid.
@@ -1057,7 +1036,6 @@ function get-ValidResponse {
     return $response
 }
 
-
 Function Get-OperatingSystemMenu {
     [CmdletBinding()]
     param (
@@ -1082,7 +1060,6 @@ Function Get-OperatingSystemMenu {
         }
     }
 }
-
 
 Function Get-ParentSideCodeMenu {
     [CmdletBinding()]
@@ -1157,7 +1134,6 @@ Function Set-SiteServerLocalSql {
     }
     $virtualMachine.virtualProcs = 8
     $virtualMachine.memory = "10GB"
-
 
     if ($null -eq $virtualMachine.additionalDisks) {
         $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
@@ -1337,7 +1313,6 @@ Function Get-RoleMenu {
     }
 }
 
-
 function Get-AdditionalValidations {
     [CmdletBinding()]
     param (
@@ -1391,7 +1366,6 @@ function Select-Options {
         [bool] $Test = $true
     )
 
-
     $property = $null
     :MainLoop   while ($true) {
         if ($null -eq $property -and $null -ne $Rootproperty) {
@@ -1421,7 +1395,6 @@ function Select-Options {
             return $null
         }
         
-
         # Get the Property Names and Values.. Present as Options.
         $property | Get-Member -MemberType NoteProperty | ForEach-Object {
             $i = $i + 1
@@ -1649,7 +1622,6 @@ function get-VMString {
     if ($virtualMachine.remoteSQLVM) {        
         $name += "  Remote SQL [$($virtualMachine.remoteSQLVM)]"
     }
-
 
     if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
         $name += "  SQL [$($virtualMachine.sqlVersion)]"
