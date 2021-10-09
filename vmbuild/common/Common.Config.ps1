@@ -616,8 +616,13 @@ function Test-ValidRoleCSPS {
         $SQLVM = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
 
         # Remote SQL must contain sqlVersion
-        if (-not $SQLVM -or -not $SQLVM.sqlVersion) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$sqlServerName] does not contain sqlVersion; When deploying $vmRole Role with remote SQL, you must specify the SQL Version for SQL VM." -ReturnObject $ReturnObject -Warning
+        if ($SQLVM) {
+            if (-not $SQLVM.sqlVersion) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$sqlServerName] does not contain sqlVersion; When deploying $vmRole Role with remote SQL, you must specify the SQL Version for SQL VM." -ReturnObject $ReturnObject -Warning
+            }
+        }
+        else {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$sqlServerName] does not exist; When deploying $vmRole Role with remote SQL, you must include the remote SQL VM." -ReturnObject $ReturnObject -Warning
         }
 
         # Minimum Memory
@@ -852,7 +857,7 @@ function Test-Configuration {
 
             # CAS with Primary, without parentSiteCode
             if ($containsCS) {
-                if ($psParentSiteCode-ne $CSVM.siteCode) {
+                if ($psParentSiteCode -ne $CSVM.siteCode) {
                     Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$psParentSiteCode] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Warning
                 }
             }
