@@ -177,8 +177,8 @@ function get-VMSummary {
     $numDPMP = ($vms | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $numPri = ($vms | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $numCas = ($vms | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-    $numMember = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion} | Measure-Object).Count
-    $numSQL = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion} | Measure-Object).Count
+    $numMember = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion } | Measure-Object).Count
+    $numSQL = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
     $RoleList = ""
     if ($numDCs -gt 0 ) {
         $RoleList += "[DC]"
