@@ -1277,6 +1277,7 @@ function Get-List {
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
                     $vmObject = [PSCustomObject]@{
                         VmName          = $vm.Name
+                        VmId            = $vm.Id
                         Role            = $vmNoteObject.role
                         DeployedOS      = $vmNoteObject.deployedOS
                         MemoryGB        = $vm.MemoryAssigned / 1GB
@@ -1302,6 +1303,7 @@ function Get-List {
                     $vmNet = $vm | Get-VMNetworkAdapter
                     $vmObject = [PSCustomObject]@{
                         VmName          = $vm.Name
+                        VmId            = $vm.Id
                         Subnet          = $vmNet.SwitchName
                         MemoryGB        = $vm.MemoryAssigned / 1GB
                         MemoryStartupGB = $vm.MemoryStartup / 1GB
