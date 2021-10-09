@@ -1229,12 +1229,13 @@ Function Get-remoteSQLVM {
 
         if ($Property.Role -eq "CAS") {
             if ($null -ne $PRIVM.remoteSQLVM) {
-                $validVMs = $validVMs | Where-Object { -not $_ -eq $PRIVM.remoteSQLVM }
+                #Write-Verbose "Checking "
+                $validVMs = $validVMs | Where-Object {$_ -ne $PRIVM.remoteSQLVM }
             }
         }
         if ($Property.Role -eq "Primary") {
             if ($null -ne $CASVM.remoteSQLVM) {
-                $validVMs = $validVMs | Where-Object { -not $_ -eq $CASVM.remoteSQLVM }
+                $validVMs = $validVMs | Where-Object { $_ -ne $CASVM.remoteSQLVM }
             }
         }
 
