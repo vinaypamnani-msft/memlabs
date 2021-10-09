@@ -206,12 +206,13 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName value [$($ConfigObject.vmOptions.domainName)] contains invalid characters, is too long, or too short. You must specify a valid Domain name. For example: contoso.com." -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainName.Length -gt 63) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too long. Must be less than 63 chars" -ReturnObject $ReturnObject -Failure
+        $netBiosDomain = $ConfigObject.vmOptions.domainName.Split(".")[0]
+        if ($netBiosDomain.Length -gt 15) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName [$($ConfigObject.vmOptions.domainName)] is too long. Netbios domain name [$netBiosDomain] must be less than 15 chars." -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainName.Length -lt 5) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too short. Must be at least 5 chars" -ReturnObject $ReturnObject -Failure
+        if ($netBiosDomain.Length -lt 1) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too short. Must be at least 1 chars." -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -309,7 +310,7 @@ function Test-ValidVmSupported {
     #prefix + vmName combined name validation
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
     if ($($ConfigObject.vmOptions.prefix + $vm.vmName) -match $pattern) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has an invalid name." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters." -ReturnObject $ReturnObject -Failure
     }
 
     # Supported OS
@@ -644,12 +645,13 @@ function Test-ValidRoleCSPS {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code [$($VM.parentSiteCode)] Must be exactly 3 chars." -ReturnObject $ReturnObject -Failure
     }
 
+    # invalid site codes
     $pattern = "^[a-zA-Z0-9]+$"
     if (-not ($VM.siteCode -match $pattern)) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code (Must be AlphaNumeric) [$($VM.siteCode)]." -ReturnObject $ReturnObject -Failure
     }
 
-    # invalid site codes
+    # reserved site codes
     if ($VM.siteCode.ToUpperInvariant() -in "AUX", "CON", "NUL", "PRN", "SMS", "ENV") {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
