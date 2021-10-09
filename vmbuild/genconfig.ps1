@@ -73,7 +73,6 @@ function Write-Option {
             if ($indexRight -lt $indexLeft) {
                 $text2Display = $text.Substring(0, $indexRight)
                 Write-Host -ForegroundColor $color "$text2Display" -NoNewline
-                #write-host "Text2Display $text2Display"
                 Write-Host -ForegroundColor DarkGray "]" -NoNewline
                 $text = $text.Substring($indexRight)
                 $text = $text.Substring(1)
@@ -85,8 +84,6 @@ function Write-Option {
                 $text = $text.Substring($indexLeft)
                 $text = $text.Substring(1)
             }
-            #Write-Host "Right $indexRight Left $indexLeft"
-            # Write-Host -ForegroundColor $color "$text2Display" -NoNewline
         }
         
     }
