@@ -674,7 +674,12 @@ function Test-SingleRole {
     # Single Role
     if ($VM -is [object[]] -and $VM.Count -ne 1) {
         $vmRole = $VM.role | Select-Object -Unique
-        Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Warning
+        if ($vmRole -eq "DC") {
+            Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Warning
+        }
+        else {
+            Add-ValidationMessage -Message "$vmRole Validation: Multiple machines with $vmRole role can not be deployed at the same time. You can add more $vmRole machines to your domain after it is deployed." -ReturnObject $ReturnObject -Warning
+        }
         return $false
     }
 
@@ -1470,14 +1475,16 @@ Function Show-Summary {
     @{Label = "Procs"; Expression = { $_.virtualProcs } },
     @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
     @{Label = "SQL"; Expression = {
-        if ($null -ne $_.SqlVersion) {
-            $_.SqlVersion
-        } else {
-            if ($null -ne $_.remoteSQLVM){
-                ("Remote -> " +$($_.remoteSQLVM))
+            if ($null -ne $_.SqlVersion) {
+                $_.SqlVersion
+            }
+            else {
+                if ($null -ne $_.remoteSQLVM) {
+                ("Remote -> " + $($_.remoteSQLVM))
+                }
             }
         }
-    } } `
+    } `
     | Out-String
     Write-Host
     $out.Trim() | Out-Host
