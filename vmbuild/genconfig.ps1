@@ -1230,7 +1230,7 @@ Function Get-remoteSQLVM {
         if ($Property.Role -eq "CAS") {
             if ($null -ne $PRIVM.remoteSQLVM) {
                 #Write-Verbose "Checking "
-                $validVMs = $validVMs | Where-Object {$_ -ne $PRIVM.remoteSQLVM }
+                $validVMs = $validVMs | Where-Object { $_ -ne $PRIVM.remoteSQLVM }
             }
         }
         if ($Property.Role -eq "Primary") {
@@ -1338,19 +1338,19 @@ Function Get-RoleMenu {
 }
 
 
-function Get-AdditionalValidations{
+function Get-AdditionalValidations {
     [CmdletBinding()]
     param (
-    [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
-    [Object] $property,
-    [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
-    [string] $name,
-    [Parameter(Mandatory = $true, HelpMessage = "Current value")]
-    [Object] $CurrentValue
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [Object] $CurrentValue
     )
     $value = $property."$($item.Name)"
     $name = $($item.Name)
-Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
+    Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
     switch ($name) {
         "vmName" {
 
