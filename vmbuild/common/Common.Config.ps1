@@ -364,17 +364,17 @@ function Test-ValidVmMemory {
         }
 
         # memory doesn't contain MB/GB
-        if ($vmMemory -is [string] -and -not ($vmMemory.EndsWith("MB") -or $vmMemory.EndsWith("GB"))) {
+        if ($vmMemory -is [string] -and -not ($vmMemory.ToUpperInvariant().EndsWith("MB") -or $vmMemory.ToUpperInvariant().EndsWith("GB"))) {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory with MB/GB; For example: 4GB" -ReturnObject $ReturnObject -Failure
         }
 
         # memory less than 512MB
-        if ($vmMemory.EndsWith("MB") -and $([int]$vmMemory.Replace("MB", "")) -lt 512 ) {
+        if ($vmMemory.ToUpperInvariant().EndsWith("MB") -and $([int]$vmMemory.ToUpperInvariant().Replace("MB", "")) -lt 512 ) {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be more than 512MB" -ReturnObject $ReturnObject -Failure
         }
 
         # memory greater than 64GB
-        if ($vmMemory.EndsWith("GB") -and $([int]$vmMemory.Replace("GB", "")) -gt 64 ) {
+        if ($vmMemory.ToUpperInvariant().EndsWith("GB") -and $([int]$vmMemory.ToUpperInvariant().Replace("GB", "")) -gt 64 ) {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be less than 64GB" -ReturnObject $ReturnObject -Failure
         }
     }
@@ -409,15 +409,15 @@ function Test-ValidVmDisks {
 
             $size = $($vm.additionalDisks."$($_.Name)")
 
-            if (-not $size.EndsWith("GB")) {
+            if (-not $size.ToUpperInvariant().EndsWith("GB")) {
                 Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Specify desired size in GB; For example: 200GB" -ReturnObject $ReturnObject -Failure
             }
 
-            if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -lt 10 ) {
+            if ($size.ToUpperInvariant().EndsWith("GB") -and $([int]$size.ToUpperInvariant().Replace("GB", "")) -lt 10 ) {
                 Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must be larger than 10GB" -ReturnObject $ReturnObject -Failure
             }
 
-            if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -gt 1000 ) {
+            if ($size.ToUpperInvariant().EndsWith("GB") -and $([int]$size.ToUpperInvariant().Replace("GB", "")) -gt 1000 ) {
                 Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must be less than 1000GB" -ReturnObject $ReturnObject -Failure
             }
         }
