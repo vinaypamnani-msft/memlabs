@@ -1272,6 +1272,7 @@ function Get-List {
                     continue
                 }
 
+                $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
                 if ($vmNoteObject) {
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
                     $vmObject = [PSCustomObject]@{
@@ -1280,6 +1281,7 @@ function Get-List {
                         DeployedOS      = $vmNoteObject.deployedOS
                         MemoryGB        = $vm.MemoryAssigned / 1GB
                         MemoryStartupGB = $vm.MemoryStartup / 1GB
+                        DiskUsedGB      = $diskSize / 1GB
                         State           = $vm.State
                         Domain          = $vmNoteObject.domain
                         DomainAdmin     = $vmNoteObject.domainAdmin
@@ -1303,6 +1305,7 @@ function Get-List {
                         Subnet          = $vmNet.SwitchName
                         MemoryGB        = $vm.MemoryAssigned / 1GB
                         MemoryStartupGB = $vm.MemoryStartup / 1GB
+                        DiskUsedGB      = $diskSize / 1GB
                         State           = $vm.State
                         Role            = $null
                         DeployedOS      = $null
