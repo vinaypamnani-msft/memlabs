@@ -771,7 +771,7 @@ function New-VirtualMachine {
     catch {
         try {
             Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message). Retrying once..." -Warning
-            Start-Sleep -Seconds 15
+            Start-Sleep -Seconds 60
             Start-VM -Name $VmName -ErrorAction Stop
         }
         catch {
