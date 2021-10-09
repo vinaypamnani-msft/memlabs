@@ -510,7 +510,7 @@ function Test-ValidVmPath {
         }
 
         if ($installDrive -ne "C" -and -not $VM.additionalDisks) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must be defined." -ReturnObject $ReturnObject -Warning
         }
 
         if ($installDrive -ne "C" -and $VM.additionalDisks) {
@@ -647,6 +647,11 @@ function Test-ValidRoleCSPS {
     $pattern = "^[a-zA-Z0-9]+$"
     if (-not ($VM.siteCode -match $pattern)) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code (Must be AlphaNumeric) [$($VM.siteCode)]." -ReturnObject $ReturnObject -Failure
+    }
+
+    # invalid site codes
+    if ($VM.siteCode.ToUpperInvariant() -in "AUX", "CON", "NUL", "PRN", "SMS", "ENV") {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
 
     # Server OS
