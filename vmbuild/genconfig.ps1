@@ -92,11 +92,11 @@ function Write-Option {
 function Select-ConfigMenu {
     while ($true) {
         $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration";
-            "4" = "Load saved config from File"; "R" = "Regenerate Rdcman file from Hyper-V config" ; "D" = "Delete an existing domain%Red%Yellow"; 
+            "4" = "Load saved config from File"; "R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config" ; "D" = "Delete an existing domain%Red%Yellow"; 
         }
-        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
-        #write-host
-        #write-Verbose "1 response $response"
+        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions        
+        
+        write-Verbose "1 response $response"
         if (-not $response) {
             continue
         }
@@ -177,8 +177,8 @@ function get-VMSummary {
     $numDPMP = ($vms | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $numPri = ($vms | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $numCas = ($vms | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-    $numMember = ($vms | Where-Object { $_.Role -eq "DomainMember" } | Measure-Object).Count
-
+    $numMember = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion} | Measure-Object).Count
+    $numSQL = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion} | Measure-Object).Count
     $RoleList = ""
     if ($numDCs -gt 0 ) {
         $RoleList += "[DC]"
@@ -191,6 +191,9 @@ function get-VMSummary {
     }
     if ($numDPMP -gt 0 ) {
         $RoleList += "[DPMP]"
+    }
+    if ($numSQL -gt 0 ) {
+        $RoleList += "[SQL]"
     }
     if ($numMember -gt 0 ) {
         $RoleList += "[$numMember Members]"
@@ -594,6 +597,7 @@ Function Get-DomainStatsLine {
     $ExistingCasCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
     $ExistingPriCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $ExistingDPMPCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
+    $ExistingSQLCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
     $ExistingSubnetCount = (Get-List -Type VM -Domain $DomainName | Select-Object -Property Subnet -unique | measure-object).Count
     $TotalVMs = (Get-List -Type VM -Domain $DomainName  | Measure-Object).Count
     $TotalRunningVMs = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
@@ -606,6 +610,9 @@ Function Get-DomainStatsLine {
     }
     if ($ExistingPriCount -gt 0) {
         $stats += "[Primary VMs: $ExistingPriCount] "
+    }
+    if ($ExistingSQLCount -gt 0) {
+        $stats += "[SQL VMs: $ExistingSQLCount] "
     }
     if ($ExistingDPMPCount -gt 0) {
         $stats += "[DPMP Vms: $ExistingDPMPCount] "
