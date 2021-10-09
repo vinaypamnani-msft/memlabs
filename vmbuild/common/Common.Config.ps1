@@ -808,7 +808,7 @@ function Test-Configuration {
 
             # CAS without Primary
             if (-not $containsPS) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must add a Primary Role as well." -ReturnObject $return -Warning
             }
 
             # Validate CAS role
@@ -837,7 +837,7 @@ function Test-Configuration {
                 $casSiteCodes = Get-ValidCASSiteCodes -Config $deployConfig
                 $parentCodes = $casSiteCodes -join ","
                 if ($psParentSiteCode -notin $casSiteCodes) {
-                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
+                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Parent Site Codes: $parentCodes" -ReturnObject $return -Warning
                 }
             }
 
@@ -852,8 +852,8 @@ function Test-Configuration {
 
             # CAS with Primary, without parentSiteCode
             if ($containsCS) {
-                if ($PSVM.parentSiteCode -ne $CSVM.siteCode) {
-                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$($PSVM.parentSiteCode)] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Warning
+                if ($psParentSiteCode-ne $CSVM.siteCode) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$psParentSiteCode] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Warning
                 }
             }
 
@@ -888,6 +888,7 @@ function Test-Configuration {
         Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified but a new/existing DC was not found; CAS/Primary roles require a DC." -ReturnObject $return -Warning
     }
 
+    # Primary site without CAS
     if ($deployConfig.parameters.scenario -eq "Hierarchy" -and -not $deployConfig.parameters.CSName) {
         Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
     }
@@ -927,7 +928,7 @@ function Test-Configuration {
     $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
     if (-not $compare -and $compare2) {
         $duplicates = $compare2.InputObject -join ","
-        Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V." -ReturnObject $return -Warning
+        Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
     }
 
     # Return if validation failed
