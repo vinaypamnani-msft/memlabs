@@ -1128,6 +1128,8 @@ function Get-FileFromStorage {
         [object]$File,
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
         [switch]$ForceDownloadFiles,
+        [Parameter(Mandatory = $false, HelpMessage = "Ignore Hash Failures on file downloads.")]
+        [switch]$IgnoreHashFailure,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
     )
@@ -1141,22 +1143,58 @@ function Get-FileFromStorage {
     }
 
     $success = $true
-    foreach ($filename in $File.filename) {
+    $hashAlg = "MD5"
+    $i = 0
+    foreach ($fileItem in $File.filename) {
+
+        $isArray = $File.filename -is [array]
+
+        if ($isArray) {
+            $fileName = $File.filename[$i]
+            $fileHash = $File.($hashAlg)[$i]
+            $i++
+        }
+        else {
+            $fileName = $fileItem
+            $fileHash = $File.($hashAlg)
+        }
+
         $imageUrl = "$($StorageConfig.StorageLocation)/$($filename)"
         $imageFileName = Split-Path $filename -Leaf
         $localImagePath = Join-Path $Common.AzureFilesPath $filename
+        $localImageHashPath = "$localImagePath.$hashAlg"
 
         $download = $true
         if (Test-Path $localImagePath) {
-            Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath)."
-            if ($ForceDownloadFiles.IsPresent) {
-                Write-Log "Get-FileFromStorage: ForceDownloadFiles switch present. Removing pre-existing $imageFileName file..." -Warning
-                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+
+            if (Test-Path $localImageHashPath) {
+                # Read hash from local hash file
+                $localFileHash = Get-Content $localImageHashPath
             }
             else {
-                Write-Log "Get-FileFromStorage: ForceDownloadFiles switch not present. Skip downloading '$imageFileName'." -LogOnly
-                $download = $false
-                continue
+                # Calculate file hash, save to local hash file
+                Write-Log "Get-FileFromStorage: Calculating $hashAlg hash for $filename in $($Common.AzureFilesPath)..."
+                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+                $localFileHash = $hashFileResult.Hash
+                $localFileHash | Out-File -FilePath $localImageHashPath -Force
+            }
+
+            if ($localFileHash -eq $fileHash) {
+                Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath) with expected hash $fileHash."
+                if ($ForceDownloadFiles.IsPresent) {
+                    Write-Log "Get-FileFromStorage: ForceDownloadFiles switch present. Removing pre-existing $imageFileName file..." -Warning
+                    Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                }
+                else {
+                    Write-Log "Get-FileFromStorage: ForceDownloadFiles switch not present. Skip downloading '$imageFileName'." -LogOnly
+                    $download = $false
+                    continue
+                }
+            }
+            else {
+                Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $fileHash. Redownloading..."
+                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                $download = $true
             }
         }
 
@@ -1164,6 +1202,23 @@ function Get-FileFromStorage {
             $worked = Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
             if (-not $worked) {
                 $success = $false
+            }
+            else {
+                # Calculate file hash, save to local hash file
+                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+                $localFileHash = $hashFileResult.Hash
+                if ($localFileHash -eq $fileHash) {
+                    $localFileHash | Out-File -FilePath $localImageHashPath -Force
+                }
+                else {
+                    if ($IgnoreHashFailure) {
+                        $success = $true
+                    }
+                    else {
+                        Write-Log "Get-FileFromStorage: Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $fileHash." -Failure
+                        $success = $false
+                    }
+                }
             }
         }
     }

@@ -84,6 +84,8 @@ function Get-FilesForConfiguration {
         [object]$InputObject,
         [Parameter(Mandatory = $false, ParameterSetName = "All", HelpMessage = "Get all files.")]
         [switch]$DownloadAll,
+        [Parameter(Mandatory = $false, HelpMessage = "Skip Hash Testing of downloaded files.")]
+        [switch]$IgnoreHashFailure,
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
         [switch]$ForceDownloadFiles,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
@@ -117,7 +119,7 @@ function Get-FilesForConfiguration {
 
         if ($file.id -eq "vmbuildadmin") { continue }
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file.id) { continue }
-        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
+        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
             $allSuccess = $false
         }
@@ -125,7 +127,7 @@ function Get-FilesForConfiguration {
 
     foreach ($file in $Common.AzureFileList.ISO) {
         if (-not $DownloadAll -and $sqlVersionsToGet -notcontains $file.id) { continue }
-        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
+        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
             $allSuccess = $false
         }
