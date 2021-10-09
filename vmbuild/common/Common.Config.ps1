@@ -1279,6 +1279,7 @@ function Get-List {
                         Role            = $vmNoteObject.role
                         DeployedOS      = $vmNoteObject.deployedOS
                         MemoryGB        = $vm.MemoryAssigned / 1GB
+                        MemoryStartupGB = $vm.MemoryStartup / 1GB
                         State           = $vm.State
                         Domain          = $vmNoteObject.domain
                         DomainAdmin     = $vmNoteObject.domainAdmin
@@ -1301,6 +1302,7 @@ function Get-List {
                         VmName          = $vm.Name
                         Subnet          = $vmNet.SwitchName
                         MemoryGB        = $vm.MemoryAssigned / 1GB
+                        MemoryStartupGB = $vm.MemoryStartup / 1GB
                         State           = $vm.State
                         Role            = $null
                         DeployedOS      = $null
