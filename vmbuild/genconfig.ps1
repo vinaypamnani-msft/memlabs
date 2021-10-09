@@ -596,8 +596,11 @@ Function Get-DomainStatsLine {
     $ExistingDPMPCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $ExistingSubnetCount = (Get-List -Type VM -Domain $DomainName | Select-Object -Property Subnet -unique | measure-object).Count
     $TotalVMs = (Get-List -Type VM -Domain $DomainName  | Measure-Object).Count
+    $TotalRunningVMs = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
     $TotalMem = (Get-List -Type VM -Domain $DomainName | Measure-Object -Sum MemoryGB).Sum
-    $stats += "[$TotalVMs VMs, $($TotalMem.ToString().PadLeft(2," "))GB]"
+    $TotalMaxMem = (Get-List -Type VM -Domain $DomainName | Measure-Object -Sum MemoryStartupGB).Sum
+    $TotalDiskUsed = (Get-List -Type VM -Domain $DomainName | Measure-Object -Sum DiskUsedGB).Sum
+    $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
     if ($ExistingCasCount -gt 0) {
         $stats += "[CAS VMs: $ExistingCasCount] "
     }
