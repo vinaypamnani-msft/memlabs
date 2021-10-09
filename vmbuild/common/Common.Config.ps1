@@ -626,8 +626,8 @@ function Test-ValidRoleCSPS {
         }
 
         # Minimum Memory
-        if ($VM.memory / 1 -lt 4GB) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using remote SQL." -ReturnObject $ReturnObject -Failure
+        if ($VM.memory / 1 -lt 3GB) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 3GB memory when using remote SQL." -ReturnObject $ReturnObject -Failure
         }
 
     }
@@ -789,8 +789,13 @@ function Test-Configuration {
             Test-ValidVmPath -VM $vm -PathProperty "sqlInstanceDir" -ValidPathExample "F:\SQL" -ReturnObject $return
 
             # sqlInstanceName
-            if (-not $VM.sqlInstanceName) {
+            if (-not $vm.sqlInstanceName) {
                 Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Warning
+            }
+
+            # Minimum SQL Memory
+            if ($VM.memory / 1 -lt 4GB) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using SQL." -ReturnObject $ReturnObject -Failure
             }
         }
 
