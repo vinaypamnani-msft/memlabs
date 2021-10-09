@@ -131,7 +131,7 @@ function Select-DeleteDomain {
         $domainList += "$($item.PadRight(22," ")) $stats"
     }
 
-    if ($domainList.Count -eq 0){
+    if ($domainList.Count -eq 0) {
         Write-Host -ForegroundColor Red "No Domains found. Please delete VM's manually from hyper-v"
         Write-Host
         return
@@ -1549,23 +1549,28 @@ Function Get-TestResult {
     if ($null -eq $config) {
         return $true
     }
-    $c = Test-Configuration -InputObject $Config
-    $valid = $c.Valid
-    if ($valid -eq $false) {
-        Write-Host -ForegroundColor Red "`r`n$($c.Message)"
-        if (!$NoNewLine) {
-            write-host
-        }
-        # $MyInvocation | Out-Host
+    try {
+        $c = Test-Configuration -InputObject $Config
+        $valid = $c.Valid
+        if ($valid -eq $false) {
+            Write-Host -ForegroundColor Red "`r`n$($c.Message)"
+            if (!$NoNewLine) {
+                write-host
+            }
+            # $MyInvocation | Out-Host
 
-    }
-    if ($SuccessOnWarning.IsPresent) {
-        if ( $c.Failures -eq 0) {
+        }
+        if ($SuccessOnWarning.IsPresent) {
+            if ( $c.Failures -eq 0) {
+                $valid = $true
+            }
+        }
+        if ($SuccessOnError.IsPresent) {
             $valid = $true
         }
     }
-    if ($SuccessOnError.IsPresent) {
-        $valid = $true
+    catch {
+        return $true
     }
     return $valid
 }
@@ -1823,7 +1828,7 @@ function Select-VirtualMachines {
                             }
 
                             $customOptions["D"] = "Delete this VM"
-                            $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $i -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false
+                            $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $i -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
                             if (([string]::IsNullOrEmpty($newValue))) {
                                 break VMLoop
                             }
