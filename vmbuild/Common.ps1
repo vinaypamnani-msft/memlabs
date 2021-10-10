@@ -551,33 +551,52 @@ function New-VmNote {
 
     try {
         $ProgressPreference = 'SilentlyContinue'
+
+        $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
+
         if ($InProgress.IsPresent) {
             $vmNote = [PSCustomObject]@{
                 inProgress  = $true
                 role        = $Role
+                deployedOS  = $ThisVM.operatingSystem
                 domain      = $DeployConfig.vmOptions.domainName
                 domainAdmin = $DeployConfig.vmOptions.domainAdminName
                 network     = $DeployConfig.vmOptions.network
                 prefix      = $DeployConfig.vmOptions.prefix
-                lastUpdate  = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
         }
         else {
             $vmNote = [PSCustomObject]@{
                 success     = $Successful
                 role        = $Role
+                deployedOS  = $ThisVM.operatingSystem
                 domain      = $DeployConfig.vmOptions.domainName
                 domainAdmin = $DeployConfig.vmOptions.domainAdminName
                 network     = $DeployConfig.vmOptions.network
                 prefix      = $DeployConfig.vmOptions.prefix
-                lastUpdate  = (Get-Date -format "MM/dd/yyyy HH:mm")
             }
         }
 
         if ($DeployConfig.cmOptions.install -and ($Role -eq "CAS" -or $Role -eq "Primary")) {
-            $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
-            $vmNote | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $ThisVM.SiteCode
+            $vmNote | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $ThisVM.siteCode
+            $vmNote | Add-Member -MemberType NoteProperty -Name "cmInstallDir" -Value $ThisVM.cmInstallDir
         }
+
+        if ($ThisVM.parentSiteCode) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "parentSiteCode" -Value $ThisVM.parentSiteCode
+        }
+
+        if ($ThisVM.sqlVersion) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlVersion" -Value $ThisVM.sqlVersion
+            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlInstanceName" -Value $ThisVM.sqlInstanceName
+            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlInstanceDir" -Value $ThisVM.sqlInstanceDir
+        }
+
+        if ($ThisVM.remoteSQLVM) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "remoteSQLVM" -Value $ThisVM.remoteSQLVM
+        }
+
+        $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
 
         $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
         $vm = Get-Vm $VmName -ErrorAction Stop
@@ -698,10 +717,14 @@ function New-VirtualMachine {
     Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
 
     Write-Log "New-VirtualMachine: $VmName`: Enabling TPM"
-    $HGOwner = Get-HgsGuardian UntrustedGuardian
+    if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
+        New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
+    }
+    $HGOwner = Get-HgsGuardian MemLabsGuardian
     $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
     Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
     Enable-VMTPM $VmName -ErrorAction SilentlyContinue ## Only required for Win11
+
 
     Write-Log "New-VirtualMachine: $VmName`: Setting Processor count to $Processors"
     Set-VM -Name $vmName -ProcessorCount $Processors
@@ -746,8 +769,15 @@ function New-VirtualMachine {
         Start-VM -Name $VmName -ErrorAction Stop
     }
     catch {
-        Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message)"
-        return $false
+        try {
+            Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message). Retrying once..." -Warning
+            Start-Sleep -Seconds 60
+            Start-VM -Name $VmName -ErrorAction Stop
+        }
+        catch {
+            Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message)" -Failure
+            return $false
+        }
     }
 
     return $true
@@ -1105,6 +1135,8 @@ function Get-FileFromStorage {
         [object]$File,
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
         [switch]$ForceDownloadFiles,
+        [Parameter(Mandatory = $false, HelpMessage = "Ignore Hash Failures on file downloads.")]
+        [switch]$IgnoreHashFailure,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
     )
@@ -1118,22 +1150,58 @@ function Get-FileFromStorage {
     }
 
     $success = $true
-    foreach ($filename in $File.filename) {
+    $hashAlg = "MD5"
+    $i = 0
+    foreach ($fileItem in $File.filename) {
+
+        $isArray = $File.filename -is [array]
+
+        if ($isArray) {
+            $fileName = $File.filename[$i]
+            $fileHash = $File.($hashAlg)[$i]
+            $i++
+        }
+        else {
+            $fileName = $fileItem
+            $fileHash = $File.($hashAlg)
+        }
+
         $imageUrl = "$($StorageConfig.StorageLocation)/$($filename)"
         $imageFileName = Split-Path $filename -Leaf
         $localImagePath = Join-Path $Common.AzureFilesPath $filename
+        $localImageHashPath = "$localImagePath.$hashAlg"
 
         $download = $true
         if (Test-Path $localImagePath) {
-            Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath)."
-            if ($ForceDownloadFiles.IsPresent) {
-                Write-Log "Get-FileFromStorage: ForceDownloadFiles switch present. Removing pre-existing $imageFileName file..." -Warning
-                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+
+            if (Test-Path $localImageHashPath) {
+                # Read hash from local hash file
+                $localFileHash = Get-Content $localImageHashPath
             }
             else {
-                Write-Log "Get-FileFromStorage: ForceDownloadFiles switch not present. Skip downloading '$imageFileName'." -LogOnly
-                $download = $false
-                continue
+                # Calculate file hash, save to local hash file
+                Write-Log "Get-FileFromStorage: Calculating $hashAlg hash for $filename in $($Common.AzureFilesPath)..."
+                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+                $localFileHash = $hashFileResult.Hash
+                $localFileHash | Out-File -FilePath $localImageHashPath -Force
+            }
+
+            if ($localFileHash -eq $fileHash) {
+                Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath) with expected hash $fileHash."
+                if ($ForceDownloadFiles.IsPresent) {
+                    Write-Log "Get-FileFromStorage: ForceDownloadFiles switch present. Removing pre-existing $imageFileName file..." -Warning
+                    Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                }
+                else {
+                    Write-Log "Get-FileFromStorage: ForceDownloadFiles switch not present. Skip downloading '$imageFileName'." -LogOnly
+                    $download = $false
+                    continue
+                }
+            }
+            else {
+                Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $fileHash. Redownloading..."
+                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                $download = $true
             }
         }
 
@@ -1141,6 +1209,23 @@ function Get-FileFromStorage {
             $worked = Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
             if (-not $worked) {
                 $success = $false
+            }
+            else {
+                # Calculate file hash, save to local hash file
+                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+                $localFileHash = $hashFileResult.Hash
+                if ($localFileHash -eq $fileHash) {
+                    $localFileHash | Out-File -FilePath $localImageHashPath -Force
+                }
+                else {
+                    if ($IgnoreHashFailure) {
+                        $success = $true
+                    }
+                    else {
+                        Write-Log "Get-FileFromStorage: Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $fileHash." -Failure
+                        $success = $false
+                    }
+                }
             }
         }
     }

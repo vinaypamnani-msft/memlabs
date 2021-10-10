@@ -19,6 +19,8 @@
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
+    $PSName = $deployConfig.parameters.PSName
+    $CSName = $deployConfig.parameters.CSName
 
     # Server OS?
     $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
@@ -175,7 +177,7 @@
                 Ensure       = 'Present'
                 DynamicAlloc = $false
                 MinMemory    = 2048
-                MaxMemory    = 8192
+                MaxMemory    = 6144
                 InstanceName = $SQLInstanceName
             }
 
@@ -190,9 +192,43 @@
                 DependsOn   = '[SqlMemory]SetSqlMemory'
             }
 
-            WriteStatus AddLocalAdmin {
+            WriteStatus ChangeToLocalSystem {
                 DependsOn = "[InstallSSMS]SSMS"
+                Status    = "Configuring SQL services to use LocalSystem"
+            }
+
+            ChangeSqlInstancePort SqlInstancePort {
+                SQLInstanceName = $SQLInstanceName
+                SQLInstancePort = 2433
+                Ensure          = "Present"
+                DependsOn       = "[InstallSSMS]SSMS"
+            }
+
+            ChangeSQLServicesAccount ChangeToLocalSystem {
+                SQLInstanceName = $SQLInstanceName
+                Ensure          = "Present"
+                DependsOn       = "[ChangeSqlInstancePort]SqlInstancePort"
+            }
+
+            WriteStatus AddLocalAdmin {
+                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
                 Status    = "Adding cm_svc domain account to Local Administrators group"
+            }
+
+            if ($PSName) {
+                AddUserToLocalAdminGroup AddPSLocalAdmin {
+                    Name       = "$PSName$"
+                    DomainName = $DomainName
+                    DependsOn  = "[WriteStatus]AddLocalAdmin"
+                }
+            }
+
+            if ($CSName) {
+                AddUserToLocalAdminGroup AddCSLocalAdmin {
+                    Name       = "$CSName$"
+                    DomainName = $DomainName
+                    DependsOn  = "[WriteStatus]AddLocalAdmin"
+                }
             }
 
         }

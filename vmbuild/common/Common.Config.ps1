@@ -84,6 +84,8 @@ function Get-FilesForConfiguration {
         [object]$InputObject,
         [Parameter(Mandatory = $false, ParameterSetName = "All", HelpMessage = "Get all files.")]
         [switch]$DownloadAll,
+        [Parameter(Mandatory = $false, HelpMessage = "Skip Hash Testing of downloaded files.")]
+        [switch]$IgnoreHashFailure,
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
         [switch]$ForceDownloadFiles,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
@@ -117,7 +119,7 @@ function Get-FilesForConfiguration {
 
         if ($file.id -eq "vmbuildadmin") { continue }
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file.id) { continue }
-        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
+        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
             $allSuccess = $false
         }
@@ -125,7 +127,7 @@ function Get-FilesForConfiguration {
 
     foreach ($file in $Common.AzureFileList.ISO) {
         if (-not $DownloadAll -and $sqlVersionsToGet -notcontains $file.id) { continue }
-        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf
+        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
             $allSuccess = $false
         }
@@ -204,12 +206,13 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName value [$($ConfigObject.vmOptions.domainName)] contains invalid characters, is too long, or too short. You must specify a valid Domain name. For example: contoso.com." -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainName.Length -gt 63) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too long. Must be less than 63 chars" -ReturnObject $ReturnObject -Failure
+        $netBiosDomain = $ConfigObject.vmOptions.domainName.Split(".")[0]
+        if ($netBiosDomain.Length -gt 15) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName [$($ConfigObject.vmOptions.domainName)] is too long. Netbios domain name [$netBiosDomain] must be less than 15 chars." -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainName.Length -lt 5) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too short. Must be at least 5 chars" -ReturnObject $ReturnObject -Failure
+        if ($netBiosDomain.Length -lt 1) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName  [$($ConfigObject.vmOptions.domainName)] is too short. Must be at least 1 chars." -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -238,8 +241,11 @@ function Test-ValidVmOptions {
         Add-ValidationMessage -Message "VM Options Validation: vmOptions.network not present in vmOptions. You must specify the Network subnet for the environment." -ReturnObject $ReturnObject -Failure
     }
     else {
-        $pattern = "^(192.168)(.([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]).0)$"
-        if (-not ($ConfigObject.vmOptions.network -match $pattern)) {
+        $pattern1 = "^(192.168)(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]).0)$"
+        $pattern2 = "^(10)(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])){2,2}.0$"
+        $pattern3 = "^(172).(1[6-9]|2[0-9]|3[0-1])(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])).0$"
+
+        if (-not ($ConfigObject.vmOptions.network -match $pattern1 -or $ConfigObject.vmOptions.network -match $pattern2 -or $ConfigObject.vmOptions.network -match $pattern3)) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
         }
     }
@@ -304,7 +310,7 @@ function Test-ValidVmSupported {
     #prefix + vmName combined name validation
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
     if ($($ConfigObject.vmOptions.prefix + $vm.vmName) -match $pattern) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has an invalid name." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters." -ReturnObject $ReturnObject -Failure
     }
 
     # Supported OS
@@ -359,17 +365,17 @@ function Test-ValidVmMemory {
         }
 
         # memory doesn't contain MB/GB
-        if ($vmMemory -is [string] -and -not ($vmMemory.EndsWith("MB") -or $vmMemory.EndsWith("GB"))) {
+        if ($vmMemory -is [string] -and -not ($vmMemory.ToUpperInvariant().EndsWith("MB") -or $vmMemory.ToUpperInvariant().EndsWith("GB"))) {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory with MB/GB; For example: 4GB" -ReturnObject $ReturnObject -Failure
         }
 
         # memory less than 512MB
-        if ($vmMemory.EndsWith("MB") -and $([int]$vmMemory.Replace("MB", "")) -lt 512 ) {
+        if ($vmMemory.ToUpperInvariant().EndsWith("MB") -and $([int]$vmMemory.ToUpperInvariant().Replace("MB", "")) -lt 512 ) {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be more than 512MB" -ReturnObject $ReturnObject -Failure
         }
 
         # memory greater than 64GB
-        if ($vmMemory.EndsWith("GB") -and $([int]$vmMemory.Replace("GB", "")) -gt 64 ) {
+        if ($vmMemory.ToUpperInvariant().EndsWith("GB") -and $([int]$vmMemory.ToUpperInvariant().Replace("GB", "")) -gt 64 ) {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be less than 64GB" -ReturnObject $ReturnObject -Failure
         }
     }
@@ -404,15 +410,15 @@ function Test-ValidVmDisks {
 
             $size = $($vm.additionalDisks."$($_.Name)")
 
-            if (-not $size.EndsWith("GB")) {
+            if (-not $size.ToUpperInvariant().EndsWith("GB")) {
                 Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Specify desired size in GB; For example: 200GB" -ReturnObject $ReturnObject -Failure
             }
 
-            if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -lt 10 ) {
+            if ($size.ToUpperInvariant().EndsWith("GB") -and $([int]$size.ToUpperInvariant().Replace("GB", "")) -lt 10 ) {
                 Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must be larger than 10GB" -ReturnObject $ReturnObject -Failure
             }
 
-            if ($size.EndsWith("GB") -and $([int]$size.Replace("GB", "")) -gt 1000 ) {
+            if ($size.ToUpperInvariant().EndsWith("GB") -and $([int]$size.ToUpperInvariant().Replace("GB", "")) -gt 1000 ) {
                 Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must be less than 1000GB" -ReturnObject $ReturnObject -Failure
             }
         }
@@ -435,7 +441,7 @@ function Test-ValidVmProcs {
     $vmName = $VM.vmName
     $vmRole = $VM.role
 
-    if (-not $VM.virtualProcs -or $VM.virtualProcs -isnot [int]) {
+    if (-not $VM.virtualProcs -or -not $VM.virtualProcs -is [int]) {
         Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid virtualProcs [$($vm.virtualProcs)]. Specify desired virtualProcs; For example: 2" -ReturnObject $ReturnObject -Failure
     }
     else {
@@ -505,7 +511,7 @@ function Test-ValidVmPath {
         }
 
         if ($installDrive -ne "C" -and -not $VM.additionalDisks) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must be defined." -ReturnObject $ReturnObject -Warning
         }
 
         if ($installDrive -ne "C" -and $VM.additionalDisks) {
@@ -587,6 +593,8 @@ function Test-ValidRoleCSPS {
         [object]
         $VM,
         [object]
+        $ConfigObject,
+        [object]
         $ReturnObject
     )
 
@@ -597,14 +605,39 @@ function Test-ValidRoleCSPS {
     $vmName = $VM.vmName
     $vmRole = $VM.role
 
-    # Minimum Memory
-    if ($VM.memory / 1 -lt 6GB) {
-        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 6GB memory." -ReturnObject $ReturnObject -Failure
+    # Primary/CAS must contain SQL
+    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
     }
 
-    # Primary/CAS must contain SQL
-    if (-not $VM.sqlVersion) {
-        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
+    # Remote SQL
+    if ($VM.remoteSQLVM) {
+        $sqlServerName = $VM.remoteSQLVM
+        $SQLVM = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
+
+        # Remote SQL must contain sqlVersion
+        if ($SQLVM) {
+            if (-not $SQLVM.sqlVersion) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$sqlServerName] does not contain sqlVersion; When deploying $vmRole Role with remote SQL, you must specify the SQL Version for SQL VM." -ReturnObject $ReturnObject -Warning
+            }
+        }
+        else {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$sqlServerName] does not exist; When deploying $vmRole Role with remote SQL, you must include the remote SQL VM." -ReturnObject $ReturnObject -Warning
+        }
+
+        # Minimum Memory
+        if ($VM.memory / 1 -lt 3GB) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 3GB memory when using remote SQL." -ReturnObject $ReturnObject -Failure
+        }
+
+    }
+    else {
+        # Local SQL
+
+        # Minimum Memory
+        if ($VM.memory / 1 -lt 6GB) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 6GB memory when using local SQL." -ReturnObject $ReturnObject -Failure
+        }
     }
 
     # Site Code
@@ -617,9 +650,15 @@ function Test-ValidRoleCSPS {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code [$($VM.parentSiteCode)] Must be exactly 3 chars." -ReturnObject $ReturnObject -Failure
     }
 
+    # invalid site codes
     $pattern = "^[a-zA-Z0-9]+$"
     if (-not ($VM.siteCode -match $pattern)) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid Site Code (Must be AlphaNumeric) [$($VM.siteCode)]." -ReturnObject $ReturnObject -Failure
+    }
+
+    # reserved site codes
+    if ($VM.siteCode.ToUpperInvariant() -in "AUX", "CON", "NUL", "PRN", "SMS", "ENV") {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
 
     # Server OS
@@ -647,7 +686,12 @@ function Test-SingleRole {
     # Single Role
     if ($VM -is [object[]] -and $VM.Count -ne 1) {
         $vmRole = $VM.role | Select-Object -Unique
-        Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Warning
+        if ($vmRole -eq "DC") {
+            Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Warning
+        }
+        else {
+            Add-ValidationMessage -Message "$vmRole Validation: Multiple machines with $vmRole role can not be deployed at the same time. You can add more $vmRole machines to your domain after it is deployed." -ReturnObject $ReturnObject -Warning
+        }
         return $false
     }
 
@@ -693,13 +737,12 @@ function Test-Configuration {
 
     # Contains roles
     if ($deployConfig.virtualMachines) {
-        $containsDC = $deployConfig.virtualMachines.role.Contains("DC")
         $containsCS = $deployConfig.virtualMachines.role.Contains("CAS")
         $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
         $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
     }
     else {
-        $containsDC = $containsCS = $containsPS = $containsDPMP = $false
+        $containsCS = $containsPS = $containsDPMP = $false
     }
 
     $needCMOptions = $containsCS -or $containsPS
@@ -746,8 +789,13 @@ function Test-Configuration {
             Test-ValidVmPath -VM $vm -PathProperty "sqlInstanceDir" -ValidPathExample "F:\SQL" -ReturnObject $return
 
             # sqlInstanceName
-            if (-not $VM.sqlInstanceName) {
+            if (-not $vm.sqlInstanceName) {
                 Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Warning
+            }
+
+            # Minimum SQL Memory
+            if ($VM.memory / 1 -lt 4GB) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using SQL." -ReturnObject $ReturnObject -Failure
             }
         }
 
@@ -770,11 +818,11 @@ function Test-Configuration {
 
             # CAS without Primary
             if (-not $containsPS) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must specify a Primary Role as well." -ReturnObject $return -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified without Primary Site; When deploying CAS Role, you must add a Primary Role as well." -ReturnObject $return -Warning
             }
 
             # Validate CAS role
-            Test-ValidRoleCSPS -VM $CSVM -ReturnObject $return
+            Test-ValidRoleCSPS -VM $CSVM -ConfigObject $deployConfig -ReturnObject $return
 
         }
 
@@ -792,14 +840,14 @@ function Test-Configuration {
 
         if (Test-SingleRole -VM $PSVM -ReturnObject $return) {
 
-            Test-ValidRoleCSPS -VM $PSVM -ReturnObject $return
+            Test-ValidRoleCSPS -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
 
             # Valid parent Site Code
             if ($psParentSiteCode) {
                 $casSiteCodes = Get-ValidCASSiteCodes -Config $deployConfig
                 $parentCodes = $casSiteCodes -join ","
                 if ($psParentSiteCode -notin $casSiteCodes) {
-                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Site Codes: $parentCodes" -ReturnObject $return -Warning
+                    Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Parent Site Codes: $parentCodes" -ReturnObject $return -Warning
                 }
             }
 
@@ -814,8 +862,8 @@ function Test-Configuration {
 
             # CAS with Primary, without parentSiteCode
             if ($containsCS) {
-                if ($PSVM.parentSiteCode -ne $CSVM.siteCode) {
-                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$($PSVM.parentSiteCode)] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Warning
+                if ($psParentSiteCode -ne $CSVM.siteCode) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$psParentSiteCode] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Warning
                 }
             }
 
@@ -850,6 +898,7 @@ function Test-Configuration {
         Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified but a new/existing DC was not found; CAS/Primary roles require a DC." -ReturnObject $return -Warning
     }
 
+    # Primary site without CAS
     if ($deployConfig.parameters.scenario -eq "Hierarchy" -and -not $deployConfig.parameters.CSName) {
         Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
     }
@@ -889,7 +938,7 @@ function Test-Configuration {
     $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
     if (-not $compare -and $compare2) {
         $duplicates = $compare2.InputObject -join ","
-        Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V." -ReturnObject $return -Warning
+        Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
     }
 
     # Return if validation failed
@@ -949,6 +998,22 @@ function New-DeployConfig {
         $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
         if (-not $CSName) {
             $CSName = $existingCSName
+        }
+
+        # Add prefix to remote SQL
+        if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+            $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
+        }
+    }
+
+
+
+    if ($containsCS) {
+        $CSVM = $virtualMachines | Where-Object { $_.role -eq "CAS" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+
+        # Add prefix to remote SQL
+        if ($CSVM.remoteSQLVM -and -not $CSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+            $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
         }
     }
 
@@ -1207,36 +1272,57 @@ function Get-List {
                     continue
                 }
 
+                $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
                 if ($vmNoteObject) {
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
                     $vmObject = [PSCustomObject]@{
-                        VmName      = $vm.Name
-                        Role        = $vmNoteObject.role
-                        SiteCode    = $vmNoteObject.SiteCode
-                        MemoryGB    = $vm.MemoryAssigned / 1GB
-                        State       = $vm.State
-                        Domain      = $vmNoteObject.domain
-                        DomainAdmin = $vmNoteObject.domainAdmin
-                        Subnet      = $vmNoteObject.network
-                        Prefix      = $vmNoteObject.prefix
-                        Success     = $vmNoteObject.success
-                        InProgress  = $inProgress
+                        VmName          = $vm.Name
+                        VmId            = $vm.Id
+                        Role            = $vmNoteObject.role
+                        DeployedOS      = $vmNoteObject.deployedOS
+                        MemoryGB        = $vm.MemoryAssigned / 1GB
+                        MemoryStartupGB = $vm.MemoryStartup / 1GB
+                        DiskUsedGB      = $diskSize / 1GB
+                        State           = $vm.State
+                        Domain          = $vmNoteObject.domain
+                        DomainAdmin     = $vmNoteObject.domainAdmin
+                        Subnet          = $vmNoteObject.network
+                        Prefix          = $vmNoteObject.prefix
+                        Success         = $vmNoteObject.success
+                        SiteCode        = $vmNoteObject.SiteCode
+                        ParentSiteCode  = $vmNoteObject.parentSiteCode
+                        CMInstallDir    = $vmNoteObject.cmInstallDir
+                        SQLVersion      = $vmNoteObject.sqlVersion
+                        SQLInstanceName = $vmNoteObject.sqlInstanceName
+                        SQLInstanceDir  = $vmNoteObject.sqlInstanceDir
+                        RemoteSQLVM     = $vmNoteObject.remoteSQLVM
+                        InProgress      = $inProgress
                     }
                 }
                 else {
                     $vmNet = $vm | Get-VMNetworkAdapter
                     $vmObject = [PSCustomObject]@{
-                        VmName      = $vm.Name
-                        Subnet      = $vmNet.SwitchName
-                        MemoryGB    = $vm.MemoryAssigned / 1GB
-                        State       = $vm.State
-                        Role        = $null
-                        SiteCode    = $null
-                        Domain      = $null
-                        DomainAdmin = $null
-                        Prefix      = $null
-                        Success     = $null
-                        InProgress  = $null
+                        VmName          = $vm.Name
+                        VmId            = $vm.Id
+                        Subnet          = $vmNet.SwitchName
+                        MemoryGB        = $vm.MemoryAssigned / 1GB
+                        MemoryStartupGB = $vm.MemoryStartup / 1GB
+                        DiskUsedGB      = $diskSize / 1GB
+                        State           = $vm.State
+                        Role            = $null
+                        DeployedOS      = $null
+                        SiteCode        = $null
+                        ParentSiteCode  = $null
+                        CMInstallDir    = $null
+                        SQLVersion      = $null
+                        SQLInstanceName = $null
+                        SQLInstanceDir  = $null
+                        RemoteSQLVM     = $null
+                        Domain          = $null
+                        DomainAdmin     = $null
+                        Prefix          = $null
+                        Success         = $null
+                        InProgress      = $null
                     }
                 }
 
@@ -1410,7 +1496,20 @@ Function Show-Summary {
     }
     Write-GreenCheck "Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
     $out = $deployConfig.virtualMachines | Where-Object { -not $_.hidden } `
-    | Format-table vmName, role, operatingSystem, memory, @{Label = "Procs"; Expression = { $_.virtualProcs } }, @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } }, @{Label = "SQL"; Expression = { if ($null -ne $_.SqlVersion) { "YES" } } } `
+    | Format-table vmName, role, operatingSystem, memory,
+    @{Label = "Procs"; Expression = { $_.virtualProcs } },
+    @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
+    @{Label = "SQL"; Expression = {
+            if ($null -ne $_.SqlVersion) {
+                $_.SqlVersion
+            }
+            else {
+                if ($null -ne $_.remoteSQLVM) {
+                ("Remote -> " + $($_.remoteSQLVM))
+                }
+            }
+        }
+    } `
     | Out-String
     Write-Host
     $out.Trim() | Out-Host

@@ -2,12 +2,12 @@
     "cmOptions" : {
         "version": "current-branch",
         "install": true,
-        "updateToLatest": true,
+        "updateToLatest": false,
         "installDPMPRoles": true,
         "pushClientToDomainMembers": true
     },
     "vmOptions": {
-        "prefix": "PS-",
+        "prefix": "CM-",
         "basePath": "E:\\VirtualMachines",
         "domainName": "contoso.com",
         "domainAdminName": "admin",
@@ -22,19 +22,29 @@
             "virtualProcs": 4
         },
         {
-            "vmName": "PRI",
+            "vmName": "PRISITE",
             "role": "Primary",
             "siteCode": "PRI",
             "operatingSystem": "Server 2022",
             "cmInstallDir": "E:\\ConfigMgr",
+            "remoteSQLVM": "PRISQL",
+            "additionalDisks": {
+                "E": "250GB"
+            },
+            "memory": "8GB",
+            "virtualProcs": 8
+        },
+        {
+            "vmName": "PRISQL",
+            "role": "DomainMember",
+            "operatingSystem": "Server 2022",
             "sqlVersion": "SQL Server 2019",
             "sqlInstanceName": "MSSQLSERVER",
-            "sqlInstanceDir": "F:\\SQL",
+            "sqlInstanceDir": "E:\\SQL",
             "additionalDisks": {
-                "E": "250GB",
-                "F": "100GB"
+                "E": "250GB"
             },
-            "memory": "12GB",
+            "memory": "8GB",
             "virtualProcs": 8
         },
         {
@@ -48,18 +58,18 @@
             "virtualProcs": 4
         },
         {
-            "vmName": "W10-1",
+            "vmName": "W10Client1",
             "role": "DomainMember",
             "operatingSystem": "Windows 10 Latest (64-bit)",
             "memory": "2GB",
-            "virtualProcs": 4
+            "virtualProcs": 2
         },
         {
-            "vmName": "W10-2",
+            "vmName": "W11Client2",
             "role": "DomainMember",
-            "operatingSystem": "Windows 10 Latest (64-bit)",
+            "operatingSystem": "Windows 11 Latest",
             "memory": "2GB",
-            "virtualProcs": 4
+            "virtualProcs": 2
         }
     ]
 }

@@ -40,11 +40,77 @@
         <redirectSmartCards>True</redirectSmartCards>
         <redirectPnpDevices>True</redirectPnpDevices>
       </localResources>
-      <server>
+      <smartGroup>
         <properties>
-          <name>TEMPLATE</name>
+          <expanded>True</expanded>
+          <name>DC</name>
         </properties>
-      </server>
+        <ruleGroup operator="All">
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"DC"</value>
+          </rule>
+        </ruleGroup>
+      </smartGroup>
+      <smartGroup>
+        <properties>
+          <expanded>True</expanded>
+          <name>DomainMembers</name>
+        </properties>
+        <ruleGroup operator="All">
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"DomainMember"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>DoesNotMatch</operator>
+            <value>"sqlVersion"</value>
+          </rule>
+        </ruleGroup>
+      </smartGroup>
+      <smartGroup>
+        <properties>
+          <expanded>True</expanded>
+          <name>MECMServers</name>
+        </properties>
+        <ruleGroup operator="Any">
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"CAS"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"Primary"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"DPMP"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"sqlVersion"</value>
+          </rule>
+        </ruleGroup>
+      </smartGroup>
+      <group>
+        <properties>
+          <expanded>False</expanded>
+          <name>zAllVirtualMachines</name>
+        </properties>
+        <server>
+          <properties>
+            <name>TESTSERVER</name>
+	          <comment>TESTCOMMENT</comment>
+          </properties>
+        </server>
+      </group>
     </group>
   </file>
   <connected />

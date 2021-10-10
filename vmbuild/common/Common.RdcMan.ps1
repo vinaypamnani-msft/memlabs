@@ -116,7 +116,8 @@ function New-RDCManFile {
     }
 
     foreach ($vm in $DeployConfig.virtualMachines) {
-        if (Add-RDCManServerToGroup $vm.vmName $findgroup $groupFromTemplate $existing -eq $True) {
+        $comment = $vm | ConvertTo-Json
+        if (Add-RDCManServerToGroup $vm.vmName $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
             $shouldSave = $true
         }
     }
@@ -220,10 +221,14 @@ function New-RDCManFileFromHyperV {
             $shouldSave = $true
         }
 
-        $vmList = (Get-List -Type VM -domain $domain).VmName
-        foreach ($vm in $vmList) {
-            Write-Verbose "Adding VM $vm"
-            if (Add-RDCManServerToGroup $vm $findgroup $groupFromTemplate $existing -eq $True) {
+       # $vmList = (Get-List -Type VM -domain $domain).VmName
+        $vmListFull = (Get-List -Type VM -domain $domain)
+        foreach ($vm in $vmListFull) {
+            Write-Verbose "Adding VM $($vm.VmName)"
+            $c = [PsCustomObject]@{}    
+            foreach ($item in $vm |get-member -memberType NoteProperty | Where-Object {$vm."$($_.Name)"-ne $null} ) {$c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)")}
+            $comment = $c | ConvertTo-Json
+            if (Add-RDCManServerToGroup $($vm.VmName) $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
                 $shouldSave = $true
             }
         }
@@ -256,17 +261,20 @@ function Add-RDCManServerToGroup {
         [string]$serverName,
         $findgroup,
         $groupFromTemplate,
-        $existing
+        $existing,
+        $comment
     )
 
-    $findserver = $findgroup.server | Where-Object { $_.properties.name -eq $serverName } | Select-Object -First 1
+    $findserver = $findgroup.group.server | Where-Object { $_.properties.name -eq $serverName } | Select-Object -First 1
     if ($null -eq $findserver) {
         Write-Log "Add-RDCManServerToGroup: Added $serverName to RDG Group" -LogOnly
+        $subgroup = $groupFromTemplate.group        
         $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
         $newserver = $server.clone()
         $newserver.properties.name = $serverName
+        $newserver.properties.comment = $comment
         $clonedNode = $existing.ImportNode($newserver, $true)
-        $findgroup.AppendChild($clonedNode)
+        $findgroup.group.AppendChild($clonedNode)
         return $True
     }
     else {
@@ -294,7 +302,8 @@ function Get-RDCManGroupToModify {
         $findGroup = $groupFromTemplate.Clone()
         $findGroup.properties.name = $domain
         $findGroup.logonCredentials.domain = $domain
-        $ChildNodes = $findGroup.SelectNodes('//server')
+        $subgroup = $findGroup.group
+        $ChildNodes = $subgroup.SelectNodes('//server')
         foreach ($Child in $ChildNodes) {
             [void]$Child.ParentNode.RemoveChild($Child)
         }
