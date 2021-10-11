@@ -311,39 +311,39 @@ function Get-NewMachineName {
 
         if ($OS -like "*Server*") {            
             $RoleName = "Server"
-            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -like "*Server*") | Measure-Object).Count
-            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -like "*Server*") | Measure-Object).count
+            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -like "*Server*"} | Measure-Object).Count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -like "*Server*"} | Measure-Object).count
         }
         else {
             $RoleName = "Client"
-            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object (-not ($_.deployedOS -like "*Server*")) | Measure-Object).Count
-            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object (-not ($_.OperatingSystem -like "*Server*")) | Measure-Object).count
+            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {-not ($_.deployedOS -like "*Server*")} | Measure-Object).Count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {-not ($_.OperatingSystem -like "*Server*")} | Measure-Object).count
             if ($OS -like "Windows 10*") {
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -like "Windows 10*") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -like "Windows 10*") | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -like "Windows 10*"} | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -like "Windows 10*"} | Measure-Object).count
                 $RoleName = "W10Client"
             }
             if ($OS -like "Windows 11*") {
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -like "Windows 11*") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -like "Windows 11*") | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -like "Windows 11*"} | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -like "Windows 11*"} | Measure-Object).count
                 $RoleName = "W11Client"
             }
         }
 
         switch ($OS) {
             "Server 2022" { 
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -eq "Server 2022") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -eq "Server 2022") | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -eq "Server 2022"} | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -eq "Server 2022"} | Measure-Object).count
                 $RoleName = "W22Server" 
             }
             "Server 2019" { 
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -eq "Server 2019") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -eq "Server 2019") | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -eq "Server 2019"} | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -eq "Server 2019"} | Measure-Object).count
                 $RoleName = "W19Server" 
             }
             "Server 2016" { 
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object ($_.deployedOS -eq "Server 2016") | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object ($_.OperatingSystem -eq "Server 2016") | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -eq "Server 2016"} | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -eq "Server 2016"} | Measure-Object).count
                 $RoleName = "W16Server" 
             }
             Default {}
@@ -372,7 +372,10 @@ function Get-NewMachineName {
             break
         }
         if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName } | Measure-Object).Count -eq 0) {
-            break
+            $newNameWithPrefix = ($global:config.vmOptions.prefix) + $NewName
+            if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {            
+                break
+            }
         }
         $i++
     }
