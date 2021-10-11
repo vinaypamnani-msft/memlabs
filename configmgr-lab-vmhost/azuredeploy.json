@@ -4,6 +4,8 @@
   "parameters": {
     "virtualMachineName": {
       "type": "string",
+      "minLength": 2,
+      "maxLength": 15,
       "defaultValue": "LABHOST",
       "metadata": {
         "description": "Name of the VM"
