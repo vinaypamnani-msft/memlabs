@@ -583,6 +583,12 @@ function Test-ValidRoleDC {
                     # VM Not running, cannot validate network
                     Add-ValidationMessage -Message "$vmRole Validation: Existing DC [$existingDC] found but VM is not Running." -ReturnObject $ReturnObject -Warning
                 }
+
+                # Account validation
+                $vmNote = $vm.Notes | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($vmNote.domainAdmin -ne $ConfigObject.vmOptions.domainAdminName) {
+                    Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] found but new configuration is using a different admin name [$($ConfigObject.vmOptions.domainAdminName)] for deployment. You muse use the existing admin user [$($vmNote.domainAdmin)]." -ReturnObject $ReturnObject -Warning
+                }
             }
         }
     }

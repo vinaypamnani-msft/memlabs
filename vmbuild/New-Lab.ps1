@@ -626,8 +626,6 @@ try {
     Write-Log "Main: Creating RDCMan file for specified config" -Activity
     New-RDCManFile $deployConfig $global:Common.RdcManFilePath
 
-    Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
-
     # Array to store PS jobs
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
@@ -636,6 +634,16 @@ try {
     # Existing DC scenario
     $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
     $existingDC = $deployConfig.parameters.ExistingDCName
+
+    # Remove DNS records for VM's in this config, if existing DC
+    if ($existingDC) {
+        Write-Log "Main: Attempting to remove existing DNS Records" -Activity -HostOnly
+        foreach($item in $deployConfig.virtualMachines) {
+            Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
+        }
+    }
+
+    # Add exising DC to list
     if ($existingDC -and $containsPS) {
         # create a dummy VM object for the existingDC
         $deployConfig.virtualMachines += [PSCustomObject]@{
@@ -655,6 +663,8 @@ try {
             hidden = $true
         }
     }
+
+    Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
     # New scenario
     $CreateVM = $true
