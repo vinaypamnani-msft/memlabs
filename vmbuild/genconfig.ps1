@@ -840,6 +840,13 @@ function Generate-ExistingConfig {
         [string] $ParentSiteCode = $null
     )
 
+
+    $adminUser = (Get-List -Type vm -DomainName $Domain | Where-Object {$_.Role -eq "DC" }).domainAdmin
+
+    if ([string]::IsNullOrWhiteSpace($adminUser)){
+        $adminUser = "admin"
+    }
+
     Write-Verbose "Generating $Domain $Subnet $role $ParentSiteCode"
 
     $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
@@ -851,7 +858,7 @@ function Generate-ExistingConfig {
         prefix          = $prefix
         basePath        = "E:\VirtualMachines"
         domainName      = $Domain
-        domainAdminName = "admin"
+        domainAdminName = $adminUser
         network         = $Subnet
     }
 
