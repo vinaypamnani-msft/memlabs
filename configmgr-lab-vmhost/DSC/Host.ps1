@@ -1,10 +1,6 @@
 Configuration Host {
 
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xHyper-V', 'xDhcpServer', 'xDscDiagnostics'
-
-    $phsyicalNic = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
-    $phsyicalInterface = $phsyicalNic.Name
-    $externalSwitchName = "External"
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'xDscDiagnostics'
 
     Node LOCALHOST {
 
@@ -43,14 +39,6 @@ Configuration Host {
             Name                 = 'RSAT-DHCP'
             Ensure               = 'Present'
             IncludeAllSubFeature = $true
-        }
-
-        xVMSwitch ExternalSwitch {
-            DependsOn      = '[WindowsFeature]RSAT-DHCP'
-            Ensure         = 'Present'
-            Name           = $externalSwitchName
-            Type           = 'External'
-            NetAdapterName = $phsyicalInterface
         }
 
     }
