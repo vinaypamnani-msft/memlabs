@@ -138,6 +138,8 @@ function Get-File {
         [switch]$RemoveIfPresent,
         [Parameter(Mandatory = $false)]
         [switch]$ForceDownload,
+        [Parameter(Mandatory = $false)]
+        [switch]$ResumeDownload,
         [Parameter(Mandatory = $false, ParameterSetName = "WhatIf")]
         [switch]$WhatIf
     )
@@ -180,7 +182,7 @@ function Get-File {
     if ($DisplayName) { $HashArguments.Add("DisplayName", $DisplayName) }
 
     if (-not $Silent) {
-        Write-Log "Get-File: $Action $sourceDisplay using BITS to $Destination... "
+        Write-Log "Get-File: $Action $sourceDisplay using CURL to $Destination... "
         if ($DisplayName) { Write-Log "Get-File: $DisplayName" -LogOnly }
     }
 
@@ -218,12 +220,13 @@ function Get-File {
         }
 
         # Skip re-download if file already exists, dont bother when action is copying
-        if ($Action -eq "Downloading" -and (Test-Path $Destination) -and -not $ForceDownload.IsPresent) {
+        if ($Action -eq "Downloading" -and (Test-Path $Destination) -and -not $ForceDownload.IsPresent -and -not $ResumeDownload.IsPresent) {
             Write-Log "Get-File: Download skipped. $Destination already exists." -LogOnly
             return $true
         }
 
-        Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+        #Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+        Start-CurlTransfer @HashArguments -Silent:$Silent
         if (Test-Path $Destination) {
             return $true
         }
@@ -234,6 +237,48 @@ function Get-File {
         Write-Log "Get-File: $Action $sourceDisplay failed. Error: $($_.ToString().Trim())" -Failure
         return $false
     }
+}
+
+function Start-CurlTransfer {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Source,
+        [Parameter(Mandatory = $true)]
+        [string] $Destination,
+        [Parameter(Mandatory = $false)]
+        [string] $Description,
+        [Parameter(Mandatory = $false)]
+        [string] $DisplayName,
+        [Parameter(Mandatory = $false)]
+        [switch]$Silent
+    )
+
+    $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
+    if (-not (Test-Path $curlPath)) {
+        & choco install curl -y  | Out-Null
+    }
+
+    $retryCount = 0
+    Write-Host
+    do {
+        $retryCount++
+        if ($Silent) {
+            & $curlPath -s -L -o $Destination -C - "$Source"
+        }
+        else {
+            & $curlPath -L -o $Destination -C - "$Source"
+        }
+
+        if ($LASTEXITCODE -eq 0) {
+            break
+        }
+        else {
+            Write-Log "Start-CurlTransfer: Download failed with $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
+        }
+
+    } while ($retryCount -le 20)
+
 }
 
 function New-Directory {
@@ -1218,6 +1263,9 @@ function Get-FileFromStorage {
                 $localFileHash = Get-Content $localImageHashPath
             }
             else {
+                # Download if file present, but hashFile isn't there.
+                Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -ResumeDownload -WhatIf:$WhatIf
+
                 # Calculate file hash, save to local hash file
                 Write-Log "Get-FileFromStorage: Calculating $hashAlg hash for $filename in $($Common.AzureFilesPath)..."
                 $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
@@ -1240,6 +1288,7 @@ function Get-FileFromStorage {
             else {
                 Write-Log "Get-FileFromStorage: Found $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $fileHash. Redownloading..."
                 Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
                 $download = $true
             }
         }
