@@ -146,7 +146,7 @@ function Select-DomainMenu {
     }
     $domain = ($domainExpanded -Split " ")[0]
 
-    Write-Verbose "2 Select-DeleteDomain"
+    Write-Verbose "2 Select-DomainMenu"
     while ($true) {
         Write-Host
         Write-Host "Domain '$domain' contains these resources:"
