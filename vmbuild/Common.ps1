@@ -182,7 +182,7 @@ function Get-File {
     if ($DisplayName) { $HashArguments.Add("DisplayName", $DisplayName) }
 
     if (-not $Silent) {
-        Write-Log "Get-File: $Action $sourceDisplay using CURL to $Destination... "
+        Write-Log "Get-File: $Action $sourceDisplay to $Destination... "
         if ($DisplayName) { Write-Log "Get-File: $DisplayName" -LogOnly }
     }
 
