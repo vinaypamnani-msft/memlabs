@@ -132,11 +132,14 @@ else {
 $Network = "External"
 $phsyicalNic = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
 $phsyicalInterface = $phsyicalNic.Name
-$exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $Network }
+$exists = Get-VMSwitch -SwitchType External | Where-Object { $_.Name -eq $Network }
 if (-not $exists) {
-    Write-HostLog "HyperV Network switch for $Network not found. Creating a new one."
+    Write-HostLog "HyperV Network switch for '$Network' not found. Creating a new one."
     New-VMSwitch -Name $Network  -NetAdapterName $phsyicalInterface -AllowManagementOS $true -Notes $Network | Out-Null
     Start-Sleep -Seconds 10 # Sleep to make sure network adapter is present
+}
+else {
+    Write-HostLog "SKIPPED creating HyperV Network switch for '$Network' since it already exist."
 }
 
 # Install RRAS
