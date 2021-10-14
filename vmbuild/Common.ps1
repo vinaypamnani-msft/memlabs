@@ -612,6 +612,45 @@ function New-VmNote {
     }
 }
 
+function Remove-DnsRecord {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$DCName,
+        [Parameter(Mandatory = $true)]
+        [string]$Domain,
+        [Parameter(Mandatory = $true)]
+        [string]$RecordToDelete
+    )
+
+    # Write-Host "DCName $DCName, Domain $Domain, RecordToDelete $RecordToDelete"
+
+    $scriptBlock1 = {
+        Get-DnsServerResourceRecord -ZoneName $using:Domain -Node $using:RecordToDelete -RRType A
+    }
+
+    $scriptBlock2 = {
+        $NodeDNS = Get-DnsServerResourceRecord -ZoneName $using:Domain -Node $using:RecordToDelete -RRType A -ErrorAction SilentlyContinue
+        if ($NodeDNS) {
+            Remove-DnsServerResourceRecord -ZoneName $using:Domain -InputObject $NodeDNS -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $scriptBlock1 -SuppressLog
+    if ($result.ScriptBlockFailed) {
+        Write-Log "DNS resource record for $RecordToDelete was not found." -HostOnly
+    }
+    else {
+        $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $scriptBlock2 -SuppressLog
+        if ($result.ScriptBlockFailed) {
+            Write-Log "Failed to remove DNS resource record for $RecordToDelete. Please remove the record manually." -Warning
+        }
+        else {
+            Write-Log "Removed DNS resource record for $RecordToDelete"
+        }
+    }
+}
+
 function Get-DhcpScopeDescription {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]

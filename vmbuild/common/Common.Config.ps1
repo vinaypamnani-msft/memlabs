@@ -583,6 +583,12 @@ function Test-ValidRoleDC {
                     # VM Not running, cannot validate network
                     Add-ValidationMessage -Message "$vmRole Validation: Existing DC [$existingDC] found but VM is not Running." -ReturnObject $ReturnObject -Warning
                 }
+
+                # Account validation
+                $vmNote = $vm.Notes | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($vmNote.domainAdmin -ne $ConfigObject.vmOptions.domainAdminName) {
+                    Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] found but new configuration is using a different admin name [$($ConfigObject.vmOptions.domainAdminName)] for deployment. You muse use the existing admin user [$($vmNote.domainAdmin)]." -ReturnObject $ReturnObject -Warning
+                }
             }
         }
     }
@@ -1256,20 +1262,21 @@ function Get-List {
             Write-Log "Get-List: Obtaining '$Type' list and caching it." -Verbose
             $return = @()
             $virtualMachines = Get-VM
-            foreach ($vm in $virtualMachines) {
 
+            foreach ($vm in $virtualMachines) {
+                $vmNoteObject = $null
                 try {
                     if ($vm.Notes -like "*lastUpdate*") {
                         $vmNoteObject = $vm.Notes | ConvertFrom-Json
                     }
                     else {
-                        Write-Log "Get-List: VM Properties for '$($vm.Name) does not contain values. Assume this was not deployed by vmbuild'. $_" -Warning -LogOnly
-                        continue
+                        Write-Log "Get-List: VM Properties for '$($vm.Name) does not contain values. Assume this was not deployed by vmbuild'. $_" -Warning -LogOnly                                            
+                        #continue
                     }
                 }
                 catch {
                     Write-Log "Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
-                    continue
+                    #continue
                 }
 
                 $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum

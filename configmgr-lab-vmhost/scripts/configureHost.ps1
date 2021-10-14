@@ -128,6 +128,20 @@ else {
     Write-HostLog "SKIPPED executing $scriptPath since it was not found."
 }
 
+# Create External Hyper-V Switch
+$Network = "External"
+$phsyicalNic = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
+$phsyicalInterface = $phsyicalNic.Name
+$exists = Get-VMSwitch -SwitchType External | Where-Object { $_.Name -eq $Network }
+if (-not $exists) {
+    Write-HostLog "HyperV Network switch for '$Network' not found. Creating a new one."
+    New-VMSwitch -Name $Network  -NetAdapterName $phsyicalInterface -AllowManagementOS $true -Notes $Network | Out-Null
+    Start-Sleep -Seconds 10 # Sleep to make sure network adapter is present
+}
+else {
+    Write-HostLog "SKIPPED creating HyperV Network switch for '$Network' since it already exist."
+}
+
 # Install RRAS
 Write-HostLog "Installing RRAS"
 Install-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools
@@ -137,9 +151,8 @@ Write-HostLog "Configuring NAT"
 Install-RemoteAccess -VpnType RoutingOnly
 cmd.exe /c netsh routing ip nat install
 
-# External Hyper-V Switch name (created by Host DSC)
-$externalInterface = "vEthernet (External)"
-
+# External Hyper-V Switch NIC
+$externalInterface = "vEthernet ($Network)"
 Write-HostLog "Adding $externalInterface interface to NAT"
 $text = & netsh routing ip nat show interface
 if ($text -like "*$externalInterface*") {

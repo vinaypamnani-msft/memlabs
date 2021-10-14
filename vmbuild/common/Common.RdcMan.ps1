@@ -221,12 +221,12 @@ function New-RDCManFileFromHyperV {
             $shouldSave = $true
         }
 
-       # $vmList = (Get-List -Type VM -domain $domain).VmName
+        # $vmList = (Get-List -Type VM -domain $domain).VmName
         $vmListFull = (Get-List -Type VM -domain $domain)
         foreach ($vm in $vmListFull) {
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}    
-            foreach ($item in $vm |get-member -memberType NoteProperty | Where-Object {$vm."$($_.Name)"-ne $null} ) {$c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)")}
+            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
             $comment = $c | ConvertTo-Json
             if (Add-RDCManServerToGroup $($vm.VmName) $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
                 $shouldSave = $true
@@ -236,6 +236,36 @@ function New-RDCManFileFromHyperV {
         # Add new group
         [void]$file.AppendChild($findgroup)
 
+    }
+
+    $unknownVMs = @()
+    $unknownVMs += get-list -type vm  | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
+    if ($unknownVMs.Count -gt 0) {
+        Write-Host "Adding Unknown VMs"
+        $findGroup = Get-RDCManGroupToModify "UnknownVMs" $group $findGroup $groupFromTemplate $existing
+        if ($findGroup -eq $false -or $null -eq $findGroup) {
+            Write-Log "New-RDCManFile: Failed to find group to modify" -Failure
+            return
+        }
+        $findGroup.group.properties.expanded = "True"
+
+        $smartGroups = $findGroup.SelectNodes('//smartGroup')
+        foreach ($smartGroup in $smartGroups) {
+            $findgroup.RemoveChild($smartGroup)
+        }
+
+        foreach ($vm in $unknownVMs) {
+            Write-Verbose "Adding VM $($vm.VmName)"
+            $c = [PsCustomObject]@{}    
+            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)"  } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
+            $comment = $c | ConvertTo-Json
+            if (Add-RDCManServerToGroup $($vm.VmName) $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
+                $shouldSave = $true
+            }
+        }
+
+        # Add new group
+        [void]$file.AppendChild($findgroup)
     }
 
 
