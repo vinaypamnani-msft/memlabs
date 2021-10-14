@@ -228,17 +228,18 @@ function Select-StartDomain {
     $pri = $vms | Where-Object { $_.Role -eq "Primary" }
     $other = $vms | Where-Object { $_.vmName -notin $dc.vmName -and $_.vmName -notin $sqlServers.vmName -and $_.vmName -notin $cas.vmName -and $_.vmName -notin $pri.vmName }
 
-    $waitSeconds = 15
+    $waitSecondsDC = 20
+    $waitSeconds = 10
     if ($dc -and ($dc.State -ne "Running")) {
-        write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSeconds before continuing"
+        write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
         start-vm $dc.vmName
-        start-Sleep -Seconds $waitSeconds
+        start-Sleep -Seconds $waitSecondsDC
     }
 
     if ($sqlServers) {
         foreach ($sql in $sqlServers) {
             if ($sql.State -ne "Running") {
-                write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds before continuing"
+                write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
                 start-vm $sql.vmName
             }
         }
@@ -248,7 +249,7 @@ function Select-StartDomain {
     if ($cas) {
         foreach ($ss in $cas) {
             if ($ss.State -ne "Running") {
-                write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds before continuing"
+                write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
                 start-vm $ss.vmName
             }
         }
@@ -258,7 +259,7 @@ function Select-StartDomain {
     if ($pri) {
         foreach ($ss in $pri) {
             if ($ss.State -ne "Running") {
-                write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds before continuing"
+                write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
                 start-vm $ss.vmName
             }
         }
@@ -266,7 +267,7 @@ function Select-StartDomain {
     }
     foreach ($vm in $other) {
         if ($vm.State -ne "Running") {
-            write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM and waiting $waitSeconds before continuing"
+            write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
             start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm $vm } -ArgumentList $vm.vmName
         }
     }
@@ -293,16 +294,9 @@ function Select-StopDomain {
     }
 
     foreach ($vm in $vms) {
-        if ($vm.State -ne "Off") {
-            Write-Host "$($vm.vmName) state is [$($vm.State)]. Stopping VM."
-            start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm } -ArgumentList $vm.vmName
-        }
-    }
-    get-job | wait-job
-    foreach ($vm in $vms) {
         $vm2 = Get-VM $vm.vmName -ErrorAction SilentlyContinue
-        if ($vm2.State -ne "Off") {
-            Write-Host "$($vm.vmName) state after attempting 'Stop' is [$($vm2.State)]. Forcefully stopping VM."
+        if ($vm2.State -eq "Running") {
+            Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
             start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName
         }
     }
