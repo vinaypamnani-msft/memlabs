@@ -225,8 +225,13 @@ function Get-File {
             return $true
         }
 
-        #Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
-        Start-CurlTransfer @HashArguments -Silent:$Silent
+        if ($Action -eq "Downloading") {
+            Start-CurlTransfer @HashArguments -Silent:$Silent
+        }
+        else {
+            Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+        }
+
         if (Test-Path $Destination) {
             return $true
         }
