@@ -92,8 +92,15 @@ function Write-Option {
 function Select-ConfigMenu {
     while ($true) {
         $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration";
-            "4" = "Load saved config from File"; "R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config" ; "D" = "Delete an existing domain%Red%Yellow"; 
+            "4" = "Load saved config from File"; "R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow"; 
         }
+
+        $pendingCount = (get-list -type VM | where { $_.InProgress -eq "True" }).Count
+
+        if ($pendingCount -gt 0 ) {
+            $customOptions += @{"P" = "Delete ($($pendingCount)) In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow" }
+        }
+
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions        
         
         write-Verbose "1 response $response"
@@ -107,7 +114,8 @@ function Select-ConfigMenu {
             "3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "4" { $SelectedConfig = Select-Config $configDir -NoMore }
             "r" { New-RDCManFileFromHyperV $Global:Common.RdcManFilePath }
-            "d" { Select-DeleteDomain }
+            "p" { Select-DeletePending }
+            "d" { Select-DomainMenu }
             Default {}
         }
         if ($SelectedConfig) {
@@ -116,30 +124,157 @@ function Select-ConfigMenu {
     }
 }
 
-function Select-DeleteDomain {
 
-    $domainList = @()
-    foreach ($item in (Get-DomainList)) {
-        $stats = Get-DomainStatsLine -DomainName $item
+function Select-DomainMenu {
 
-        $domainList += "$($item.PadRight(22," ")) $stats"
-    }
+        $domainList = @()
+        foreach ($item in (Get-DomainList)) {
+            $stats = Get-DomainStatsLine -DomainName $item
 
-    if ($domainList.Count -eq 0) {
-        Write-Host -ForegroundColor Red "No Domains found. Please delete VM's manually from hyper-v"
+            $domainList += "$($item.PadRight(22," ")) $stats"
+        }
+
+        if ($domainList.Count -eq 0) {
+            Write-Host -ForegroundColor Red "No Domains found. Please delete VM's manually from hyper-v"
+            Write-Host
+            return
+        }
+
+        $domainExpanded = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList
+        if ([string]::isnullorwhitespace($domainExpanded)) {
+            return $null
+        }
+        $domain = ($domainExpanded -Split " ")[0]
         Write-Host
-        return
+        Write-Verbose "2 Select-DeleteDomain"
+        while ($true) {
+        Write-Host "Domain contains these resources:"
+        (get-list -type vm  -DomainName $domain| Select-Object VmName, State, Role, SiteCode,  DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table  | Out-String).Trim() | out-host
+        #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
+
+        write-host 
+        $customOptions = [ordered]@{ "1" = "Stop all VMs in domain"; "2" = "Start all VMs in domain"; "3" = "Compact all VHDX's in domain (requires domain to be stopped)";
+            "D" = "Delete Domain%Yellow%Red"; 
+        }
+
+        $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions        
+        
+        write-Verbose "1 response $response"
+        if (-not $response) {
+            return
+        }
+
+        switch ($response.ToLowerInvariant()) {
+            "1" { Select-StopDomain -domain $domain }
+            "2" { Select-StartDomain -domain $domain }
+            "3" { select-OptimizeDomain -domain $domain}           
+            "d" { Select-DeleteDomain -domain $domain }
+            Default {}
+        }
+    }
+}
+
+function select-OptimizeDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [string] $domain      
+    )
+    select-StopDomain $domain
+
+    $vms = get-list -type vm -DomainName $domain
+
+    $size =(Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
+    write-Host "Total size of VMs in $domain before optimize: $([math]::Round($size,2))GB"
+    foreach ($vm in $vms){
+        Get-VHD -VMId $vm.VmId | Optimize-VHD
     }
 
-    $domainExpanded = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList
-    if ([string]::isnullorwhitespace($domainExpanded)) {
-        return $null
+    get-list -type VM -ResetCache | out-null
+    $sizeAfter =(Get-List -type vm -domain $domain| measure-object -sum DiskUsedGB).sum
+    write-Host "Total size of VMs in $domain after optimize: $([math]::Round($sizeAfter,2))GB"
+    write-host
+    Write-Host "$domain has been stopped and optimized. Make sure to restart the domain if neccessary."
+
+}
+function Select-StartDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [string] $domain      
+    )
+
+    $vms = get-list -type vm -DomainName $domain
+
+    $dc = get-list -type vm -DomainName $domain | Where-Object { $_.Role -eq "DC" }
+
+    $sqlServers = get-list -type vm -DomainName $domain | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
+    $cas = get-list -type vm -DomainName $domain | Where-Object { $_.Role -eq "CAS" }
+    $pri = get-list -type vm -DomainName $domain | Where-Object { $_.Role -eq "Primary" }
+    if ($dc) {
+        write-host "Starting DC"
+        start-vm $dc.vmName
+        start-Sleep -Seconds 15
     }
-    $domain = ($domainExpanded -Split " ")[0]
-    Write-Host
-    Write-Verbose "2 Select-DeleteDomain"
-    Write-Host "Domain contains these resources:"
-    get-list -Type VM -DomainName $domain | Format-Table | Out-Host
+
+    if ($sqlServers) {
+        foreach ($sql in $sqlServers) {
+            write-host "Starting SQL $($sql.vmName)"
+            start-vm $sql.vmName
+        }
+        start-sleep 15
+    }
+    
+    if ($cas) {
+        foreach ($ss in $cas) {
+            write-host "Starting CAS $($ss.vmName)"
+            start-vm $ss.vmName
+        }
+        start-sleep 15
+    }
+
+    if ($pri) {
+        foreach ($ss in $pri) {
+            write-host "Starting Primary $($ss.vmName)"
+            start-vm $ss.vmName
+        }
+        start-sleep 15
+    }
+    write-host "Starting Remaining VMs"
+    foreach ($vm in $vms) {
+        start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm $vm } -ArgumentList $vm.vmName
+    }
+    get-job | wait-job  
+    get-job | remove-job
+    get-list -type VM -ResetCache | out-null
+}
+function Select-StopDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [string] $domain      
+    )
+    Write-host "Safely stopping all VM's.  Please wait."
+    $vms = get-list -type vm -DomainName $domain
+
+    foreach ($vm in $vms) {
+        start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm } -ArgumentList $vm.vmName
+    }
+    get-job | wait-job
+    foreach ($vm in $vms) {
+        start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName
+    }
+    get-job | wait-job
+    get-job | remove-job
+    get-list -type VM -ResetCache | out-null
+}
+function Select-DeleteDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [string] $domain      
+    )
+   
 
     Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
     $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
@@ -152,6 +287,19 @@ function Select-DeleteDomain {
 }
 
 
+function Select-DeletePending {
+
+    get-list -Type VM  | Where-Object { $_.InProgress -eq "True" } | Format-Table | Out-Host
+    Write-Host "Please confirm these VM's are not currently in process of being deployed."
+    Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
+    $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
+    if (-not [String]::IsNullOrWhiteSpace($response)) {
+        if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
+            & "$($PSScriptRoot)\Remove-Lab.ps1" -InProgress
+            Get-List -type VM -ResetCache | Out-Null
+        }
+    }
+}
 function get-VMOptionsSummary {
 
     $options = $Global:Config.vmOptions
@@ -311,39 +459,39 @@ function Get-NewMachineName {
 
         if ($OS -like "*Server*") {            
             $RoleName = "Server"
-            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -like "*Server*"} | Measure-Object).Count
-            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -like "*Server*"} | Measure-Object).count
+            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "*Server*" } | Measure-Object).Count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "*Server*" } | Measure-Object).count
         }
         else {
             $RoleName = "Client"
-            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {-not ($_.deployedOS -like "*Server*")} | Measure-Object).Count
-            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {-not ($_.OperatingSystem -like "*Server*")} | Measure-Object).count
+            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { -not ($_.deployedOS -like "*Server*") } | Measure-Object).Count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { -not ($_.OperatingSystem -like "*Server*") } | Measure-Object).count
             if ($OS -like "Windows 10*") {
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -like "Windows 10*"} | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -like "Windows 10*"} | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "Windows 10*" } | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "Windows 10*" } | Measure-Object).count
                 $RoleName = "W10Client"
             }
             if ($OS -like "Windows 11*") {
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -like "Windows 11*"} | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -like "Windows 11*"} | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "Windows 11*" } | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "Windows 11*" } | Measure-Object).count
                 $RoleName = "W11Client"
             }
         }
 
         switch ($OS) {
             "Server 2022" { 
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -eq "Server 2022"} | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -eq "Server 2022"} | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -eq "Server 2022" } | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -eq "Server 2022" } | Measure-Object).count
                 $RoleName = "W22Server" 
             }
             "Server 2019" { 
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -eq "Server 2019"} | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -eq "Server 2019"} | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -eq "Server 2019" } | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -eq "Server 2019" } | Measure-Object).count
                 $RoleName = "W19Server" 
             }
             "Server 2016" { 
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object {$_.deployedOS -eq "Server 2016"} | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object {$_.OperatingSystem -eq "Server 2016"} | Measure-Object).count
+                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -eq "Server 2016" } | Measure-Object).Count
+                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -eq "Server 2016" } | Measure-Object).count
                 $RoleName = "W16Server" 
             }
             Default {}
@@ -841,9 +989,9 @@ function Generate-ExistingConfig {
     )
 
 
-    $adminUser = (Get-List -Type vm -DomainName $Domain | Where-Object {$_.Role -eq "DC" }).domainAdmin
+    $adminUser = (Get-List -Type vm -DomainName $Domain | Where-Object { $_.Role -eq "DC" }).domainAdmin
 
-    if ([string]::IsNullOrWhiteSpace($adminUser)){
+    if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
     }
 

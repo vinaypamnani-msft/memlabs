@@ -1262,20 +1262,21 @@ function Get-List {
             Write-Log "Get-List: Obtaining '$Type' list and caching it." -Verbose
             $return = @()
             $virtualMachines = Get-VM
-            foreach ($vm in $virtualMachines) {
 
+            foreach ($vm in $virtualMachines) {
+                $vmNoteObject = $null
                 try {
                     if ($vm.Notes -like "*lastUpdate*") {
                         $vmNoteObject = $vm.Notes | ConvertFrom-Json
                     }
                     else {
-                        Write-Log "Get-List: VM Properties for '$($vm.Name) does not contain values. Assume this was not deployed by vmbuild'. $_" -Warning -LogOnly
-                        continue
+                        Write-Log "Get-List: VM Properties for '$($vm.Name) does not contain values. Assume this was not deployed by vmbuild'. $_" -Warning -LogOnly                                            
+                        #continue
                     }
                 }
                 catch {
                     Write-Log "Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
-                    continue
+                    #continue
                 }
 
                 $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
