@@ -11,7 +11,7 @@ function Install-RDCman {
 
     # create C:\tools if not present
     if (-not (Test-Path $Global:newrdcmanpath)) {
-        New-Item -Path $Global:newrdcmanpath -ItemType Directory -Force -ErrorAction SilentlyContinue
+        New-Item -Path $Global:newrdcmanpath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
     }
 
     # Download rdcman, if not present

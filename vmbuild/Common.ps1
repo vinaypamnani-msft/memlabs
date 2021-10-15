@@ -140,6 +140,8 @@ function Get-File {
         [switch]$ForceDownload,
         [Parameter(Mandatory = $false)]
         [switch]$ResumeDownload,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseCDN,
         [Parameter(Mandatory = $false, ParameterSetName = "WhatIf")]
         [switch]$WhatIf
     )
@@ -151,6 +153,12 @@ function Get-File {
     if ($Source -and $Source -like "$($StorageConfig.StorageLocation)*") {
         $Source = "$Source`?$($StorageConfig.StorageToken)"
         $sourceDisplay = Split-Path $sourceDisplay -Leaf
+
+        if ($UseCDN.IsPresent) {
+            $Source = $Source.Replace("blob.core.windows.net", "azureedge.net")
+        }
+
+        #Write-Log "Download Source: $Source"
     }
 
     # What If
@@ -182,7 +190,7 @@ function Get-File {
     if ($DisplayName) { $HashArguments.Add("DisplayName", $DisplayName) }
 
     if (-not $Silent) {
-        Write-Log "Get-File: $Action $sourceDisplay using CURL to $Destination... "
+        Write-Log "Get-File: $Action $sourceDisplay to $Destination... "
         if ($DisplayName) { Write-Log "Get-File: $DisplayName" -LogOnly }
     }
 
@@ -202,9 +210,9 @@ function Get-File {
 
         # Wait for existing download to finish, dont bother when action is copying
         if ($Action -eq "Downloading") {
-            while (Get-BitsTransfer -ErrorAction SilentlyContinue | Where-Object { $_.JobState -eq "Transferring" -and $_.Description -like "*$destinationFile*" }) {
-                Write-Log "Get-File: Download for '$sourceDisplay' waiting on an existing download. Checking again in 1 minute..." -Warning
-                Start-Sleep -Seconds 60
+            while (Get-Process -Name "curl" -ErrorAction SilentlyContinue) {
+                Write-Log "Get-File: Download for '$sourceDisplay' waiting on an existing download. Checking again in 2 minutes..." -Warning
+                Start-Sleep -Seconds 120
 
                 $i++
                 if ($i -gt 5) {
@@ -226,7 +234,11 @@ function Get-File {
         }
 
         if ($Action -eq "Downloading") {
-            Start-CurlTransfer @HashArguments -Silent:$Silent
+            $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
+            if (-not $worked) {
+                Write-Log "Get-File: Failed to download file using curl."
+                return $false
+            }
         }
         else {
             Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
@@ -264,7 +276,13 @@ function Start-CurlTransfer {
         & choco install curl -y  | Out-Null
     }
 
+    if (-not (Test-Path $curlPath)) {
+        Write-Log "Start-CurlTransfer: Curl was not found, and could not be installed." -Failure
+        return $false
+    }
+
     $retryCount = 0
+    $success = $false
     Write-Host
     do {
         $retryCount++
@@ -276,14 +294,19 @@ function Start-CurlTransfer {
         }
 
         if ($LASTEXITCODE -eq 0) {
+            $success = $true
             break
         }
         else {
-            Write-Log "Start-CurlTransfer: Download failed with $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
+            Write-Host
+            Write-Log "Start-CurlTransfer: Download failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."            
+            Write-Host
+            Start-Sleep -Seconds 5
         }
 
-    } while ($retryCount -le 20)
+    } while ($retryCount -le 10)
 
+    return $success
 }
 
 function New-Directory {
@@ -1191,12 +1214,15 @@ function Get-StorageConfig {
         if ($updateList) {
 
             # Get file list
-            $worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
-            if (-not $worked) {
+            #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
+            $fileListUrl = $fileListLocation + "?$($StorageConfig.StorageToken)"
+            $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+            if (-not $response) {
                 $Common.FatalError = "Get-StorageConfig: Failed to download file list."
             }
             else {
-                $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $response.Content.Trim() | Out-File -FilePath $fileListPath -Force -ErrorAction SilentlyContinue
+                $Common.AzureFileList = $response.Content.Trim() | ConvertFrom-Json -ErrorAction Stop
             }
 
         }
@@ -1226,6 +1252,8 @@ function Get-FileFromStorage {
         [switch]$ForceDownloadFiles,
         [Parameter(Mandatory = $false, HelpMessage = "Ignore Hash Failures on file downloads.")]
         [switch]$IgnoreHashFailure,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseCDN,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
     )
@@ -1269,7 +1297,7 @@ function Get-FileFromStorage {
             }
             else {
                 # Download if file present, but hashFile isn't there.
-                Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -ResumeDownload -WhatIf:$WhatIf
+                Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -WhatIf:$WhatIf
 
                 # Calculate file hash, save to local hash file
                 Write-Log "Get-FileFromStorage: Calculating $hashAlg hash for $filename in $($Common.AzureFilesPath)..."
@@ -1299,7 +1327,7 @@ function Get-FileFromStorage {
         }
 
         if ($download) {
-            $worked = Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -WhatIf:$WhatIf
+            $worked = Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -WhatIf:$WhatIf
             if (-not $worked) {
                 $success = $false
             }
