@@ -298,7 +298,9 @@ function Start-CurlTransfer {
             break
         }
         else {
+            Write-Host
             Write-Log "Start-CurlTransfer: Download failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
+            Write-Host
         }
 
     } while ($retryCount -le 20)
