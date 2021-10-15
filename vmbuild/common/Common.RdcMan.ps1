@@ -37,6 +37,67 @@ function Install-RDCman {
 
 }
 
+
+function Save-RdcManSettignsFile {
+    param(
+        [string]$rdcmanfile
+    )
+    $templatefile = Join-Path $PSScriptRoot "RDCMan.settings.template"
+    $existingfile = Join-Path $env:LOCALAPPDATA "\Microsoft\Remote Desktop Connection Manager\RDCMan.settings"
+    # Gets the blank template
+    [xml]$template = Get-Content -Path $templatefile
+    if ($null -eq $template) {
+        Write-Log "New-RDCManFile: Could not locate $templatefile" -Failure
+        return
+    }
+
+    # Gets the blank template, or returns the existing settings xml if available.
+    $file = $template
+    $existingIsPresent = $false
+    write-host "Checking for $existingfile"
+    if (Test-Path $existingfile) {
+        [xml]$file = Get-Content -Path $existingfile
+        write-host "Found existing file at $existingfile"
+        $existingIsPresent = $true
+    }
+
+    $settings = $file.Settings
+    $FilesToOpenFromTemplate = $template.Settings.FilesToOpen
+    
+    $itemTemplate = $FilesToOpenFromTemplate.SelectNodes('//item') | Select-Object -First 1
+
+    $FilesToOpen = $settings.FilesToOpen
+    if (-not $existingIsPresent) {
+        #This is the template.. Fix it up
+        $item = $FilesToOpen.SelectNodes('//item') | Select-Object -First 1
+        $FilesToOpen.RemoveChild($item)
+        $settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName = $env:Username
+        $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain = $env:ComputerName
+        $settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName = ($($env:ComputerName)+"\"+$($env:Username))
+
+    }
+
+    $found = $false
+    foreach ($filexml in $FilesToOpen.SelectNodes('//item')) {
+        write-host "FileXml = $($filexml.InnerText)"
+        if ($filexml.InnerText -eq $rdcmanfile) {
+            $found = $true
+            break
+        }
+    }
+    if (-not $found) {
+        $itemTemplate.InnerText = $rdcmanfile
+        $clonedNode = $file.ImportNode($itemTemplate, $true)
+        $FilesToOpen.AppendChild($clonedNode)
+        Get-Process -Name rdcman -ea Ignore | Stop-Process
+        Start-Sleep 1
+        $file.Save($existingfile)
+    }
+    else{
+        Write-Host "Entry already in settings. Not Saving"
+    }
+}
+
 function New-RDCManFile {
     param(
         [object]$DeployConfig,
@@ -131,7 +192,7 @@ function New-RDCManFile {
     if ($group.properties.Name -eq "VMASTEMPLATE") {
         [void]$file.RemoveChild($group)
     }
-
+    Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
         Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success
@@ -257,7 +318,7 @@ function New-RDCManFileFromHyperV {
         foreach ($vm in $unknownVMs) {
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}    
-            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)"  } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
+            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
             $comment = $c | ConvertTo-Json
             if (Add-RDCManServerToGroup $($vm.VmName) $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
                 $shouldSave = $true
@@ -273,6 +334,7 @@ function New-RDCManFileFromHyperV {
     if ($group.properties.Name -eq "VMASTEMPLATE") {
         [void]$file.RemoveChild($group)
     }
+    Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
         Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success

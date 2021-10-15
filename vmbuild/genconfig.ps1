@@ -191,7 +191,13 @@ function select-OptimizeDomain {
     $size = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
     write-Host "Total size of VMs in $domain before optimize: $([math]::Round($size,2))GB"
     foreach ($vm in $vms) {
-        Get-VHD -VMId $vm.VmId | Optimize-VHD
+        #Get-VHD -VMId $vm.VmId | Optimize-VHD -Mode Full
+        foreach ($hd in Get-VHD -VMId $vm.VmId) {
+        #    Mount-VHD -Path $hd.Path            
+            Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction Stop
+            Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
+            Dismount-VHD -Path $hd.Path
+        }
     }
 
     get-list -type VM -ResetCache | out-null
