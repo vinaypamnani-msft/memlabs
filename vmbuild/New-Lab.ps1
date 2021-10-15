@@ -98,7 +98,15 @@ $VM_Create = {
     $deployConfig = $using:deployConfig
     $forceNew = $using:ForceNew
     $createVM = $using:CreateVM
-    $network = $deployConfig.vmOptions.network
+
+    # VM Network Switch
+    $containsInternetClient = $deployConfig.virtualMachines | Where-Object { $_.role -eq "WorkgroupMember" -and $_.internetClient -eq $true }
+    if ($containsInternetClient) {
+        $network = "Internet"
+    }
+    else {
+        $network = $deployConfig.vmOptions.network
+    }
 
     # Set domain name, depending on whether we need to create new VM or use existing one
     if (-not $createVM -or ($currentItem.role -eq "DC") ) {
@@ -194,6 +202,34 @@ $VM_Create = {
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
+    }
+
+    # Boot To OOBE?
+    $bootToOOBE = $deployConfig.virtualMachines | Where-Object { $_.role -eq "WorkgroupMember" -and $_.bootToOOBE -eq $true }
+    if ($bootToOOBE) {
+       # Run Sysprep
+       $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown } -WhatIf:$WhatIf
+       if ($result.ScriptBlockFailed) {
+           Write-Log "PSJOB: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
+       }
+       else {
+            $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 15 -WhatIf:$WhatIf
+            if (-not $ready) {
+                Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
+            }
+            else {
+                Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
+                $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15 -WhatIf:$WhatIf
+                if ($oobeStarted) {
+                    Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
+                }
+                else {
+                    Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
+                }
+            }
+       }
+
+       return
     }
 
     # Copy DSC files
@@ -468,13 +504,20 @@ $VM_Create = {
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
     # NLA Service starts before domain is ready sometimes, and causes RDP to fail because network is considered public by firewall.
+    if ($currentItem.role -eq "WorkgroupMember") {
+        $netProfile = 1
+    } else {
+        $netProfile = 2
+    } # 1 = Private, 2 = Domain
+
     $Trust_Ethernet = {
+        param ($netProfile)
         Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse `
         | ForEach-Object { $_.PSChildName } `
-        | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 2 }
+        | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value $netProfile }
     }
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -DisplayName "Set Ethernet as Trusted" -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -ArgumentList $netProfile -DisplayName "Set Ethernet as Trusted" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
     }
@@ -597,7 +640,7 @@ try {
 
     # Test if hyper-v switch exists, if not create it
     Write-Log "Main: Creating/verifying whether a Hyper-V switch for specified network exists." -Activity
-    $switch = Test-NetworkSwitch -Network $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
+    $switch = Test-NetworkSwitch -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
     if (-not $switch) {
         Write-Log "Main: Failed to verify/create Hyper-V switch for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
         return
@@ -609,6 +652,35 @@ try {
     if (-not $worked) {
         Write-Log "Main: Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
         return
+    }
+
+    # Internet Client VM Switch and DHCP Scope
+    $containsInternetClient = $deployConfig.virtualMachines | Where-Object { $_.role -eq "WorkgroupMember" -and $_.internetClient -eq $true }
+    if ($containsInternetClient) {
+        Write-Log "Main: Creating/verifying whether a Hyper-V switch for 'Internet' network exists." -Activity
+        $internetSwitchName = "Internet"
+        $internetSubnet = "172.31.250.0"
+        $switch = Test-NetworkSwitch -NetworkName $internetSwitchName -NetworkSubnet $internetSubnet -DomainName $internetSwitchName
+        if (-not $switch) {
+            Write-Log "Main: Failed to verify/create Hyper-V switch for 'Internet' network ($internetSwitchName). Exiting." -Failure
+            return
+        }
+
+        # Test if DHCP scope exists, if not create it
+        Write-Log "Main: Creating/verifying DHCP scope options for the 'Internet' network." -Activity
+        $dummyParams = [PSCustomObject]@{
+            DHCPScopeId        = $internetSubnet
+            DHCPScopeName      = $internetSwitchName
+            DHCPScopeStart     = "172.31.250.20"
+            DHCPScopeEnd       = "172.31.250.199"
+            DHCPDefaultGateway = "172.31.250.200"
+            DHCPDNSAddress     = @("4.4.4.4", "8.8.8.8")
+        }
+        $worked = Test-DHCPScope -ConfigParams $dummyParams
+        if (-not $worked) {
+            Write-Log "Main: Failed to verify/create DHCP Scope for the 'Internet' network. Exiting." -Failure
+            return
+        }
     }
 
     # DSC Folder
@@ -640,7 +712,7 @@ try {
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
         Write-Log "Main: Attempting to remove existing DNS Records" -Activity -HostOnly
-        foreach($item in $deployConfig.virtualMachines) {
+        foreach ($item in $deployConfig.virtualMachines) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
         }
     }

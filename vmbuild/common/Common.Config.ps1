@@ -1045,6 +1045,7 @@ function New-DeployConfig {
         DomainMembers      = $clientsCsv
         Scenario           = $scenario
         DHCPScopeId        = $configObject.vmOptions.Network
+        DHCPScopeName        = $configObject.vmOptions.Network
         DHCPDNSAddress     = $network + ".1"
         DHCPDefaultGateway = $network + ".200"
         DHCPScopeStart     = $network + ".20"

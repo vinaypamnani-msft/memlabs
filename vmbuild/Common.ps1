@@ -299,7 +299,7 @@ function Start-CurlTransfer {
         }
         else {
             Write-Host
-            Write-Log "Start-CurlTransfer: Download failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."            
+            Write-Log "Start-CurlTransfer: Download failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
             Write-Host
             Start-Sleep -Seconds 5
         }
@@ -448,34 +448,36 @@ Function Set-Window {
 
 function Test-NetworkSwitch {
     param (
+        [Parameter(Mandatory = $true, HelpMessage = "Network Name.")]
+        [string]$NetworkName,
         [Parameter(Mandatory = $true, HelpMessage = "Network Subnet.")]
-        [string]$Network,
+        [string]$NetworkSubnet,
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name.")]
         [string]$DomainName
     )
 
-    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $Network }
+    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $NetworkName }
     if (-not $exists) {
-        Write-Log "Get-NetworkSwitch: HyperV Network switch for $Network not found. Creating a new one."
-        New-VMSwitch -Name $Network -SwitchType Internal -Notes $DomainName | Out-Null
+        Write-Log "Get-NetworkSwitch: HyperV Network switch for $NetworkName not found. Creating a new one."
+        New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName | Out-Null
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
     }
 
-    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $Network }
+    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $NetworkName }
     if (-not $exists) {
         Write-Log "Get-NetworkSwitch: HyperV Network switch could not be created."
         return $false
     }
 
-    $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$Network*" }
+    $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
 
     if (-not $adapter) {
-        Write-Log "Get-NetworkSwitch: Network adapter for $Network was not found."
+        Write-Log "Get-NetworkSwitch: Network adapter for $NetworkName was not found."
         return $false
     }
 
     $interfaceAlias = $adapter.InterfaceAlias
-    $desiredIp = $Network.Substring(0, $Network.LastIndexOf(".")) + ".200"
+    $desiredIp = $NetworkSubnet.Substring(0, $NetworkSubnet.LastIndexOf(".")) + ".200"
 
     $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
     if ($currentIp.IPAddress -ne $desiredIp) {
@@ -529,7 +531,13 @@ function Test-DHCPScope {
     )
 
     $scopeID = $ConfigParams.DHCPScopeId
+    $scopeName = $ConfigParams.DHCPScopeName
     $createScope = $false
+
+    $leaseTimespan = New-TimeSpan -Days 16
+    if ($scopeName -eq "Internet") {
+        $leaseTimespan = New-TimeSpan -Days 365
+    }
 
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
@@ -552,7 +560,7 @@ function Test-DHCPScope {
     }
 
     if ($createScope) {
-        Add-DhcpServerv4Scope -Name $scopeID -StartRange $ConfigParams.DHCPScopeStart -EndRange $ConfigParams.DHCPScopeEnd -SubnetMask 255.255.255.0 -ErrorAction SilentlyContinue
+        Add-DhcpServerv4Scope -Name $scopeName -StartRange $ConfigParams.DHCPScopeStart -EndRange $ConfigParams.DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction SilentlyContinue
         $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorVariable ScopeErr -ErrorAction SilentlyContinue
         if ($scope) {
             Write-Log "Test-DHCPScope: '$scopeID' scope added to DHCP."
@@ -564,15 +572,26 @@ function Test-DHCPScope {
     }
 
     try {
-        #New-DhcpScopeDescription -ConfigParams $ConfigParams
-        $dcnet = Get-Vm -Name $ConfigParams.DCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+        $HashArguments = @{
+            ScopeId = $scopeID
+            Router  = $ConfigParams.DHCPDefaultGateway
+        }
+
+        if ($ConfigParams.DCName) {
+            $dcnet = Get-Vm -Name $ConfigParams.DCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+        }
+
         if ($dcnet) {
             $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
+            $HashArguments.Add("DnsServer", $dcIpv4)
+            $HashArguments.Add("WinsServer", $dcIpv4)
+            $HashArguments.Add("DnsDomain", $ConfigParams.DomainName)
         }
         else {
-            $dcIpv4 = $ConfigParams.DHCPDNSAddress
+            $HashArguments.Add("DnsServer", $ConfigParams.DHCPDNSAddress)
         }
-        Set-DhcpServerv4OptionValue -ScopeId $scopeID -DnsServer $dcIpv4 -WinsServer $dcIpv4 -DnsDomain $ConfigParams.DomainName -Router $ConfigParams.DHCPDefaultGateway -Force -ErrorAction Stop
+
+        Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
         Write-Log "Test-DHCPScope: Added/updated scope options for '$scopeID' scope in DHCP." -Success
         return $true
     }
@@ -904,6 +923,8 @@ function Wait-ForVm {
         [string]$VmState,
         [Parameter(Mandatory = $false, ParameterSetName = "OobeComplete")]
         [switch]$OobeComplete,
+        [Parameter(Mandatory = $false, ParameterSetName = "OobeStarted")]
+        [switch]$OobeStarted,
         [Parameter(Mandatory = $false, ParameterSetName = "VmTestPath")]
         [string]$PathToVerify,
         [Parameter(Mandatory = $false)]
@@ -1001,6 +1022,27 @@ function Wait-ForVm {
                 $ready = $true
             }
 
+        } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+    }
+
+    if ($OobeStarted.IsPresent) {
+        $status = "Waiting for OOBE to start "
+        Write-Log "Wait-ForVm: $VmName`: $status"
+        Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+
+        do {
+            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+
+            if ($wwahost.ScriptBlockOutput) {
+                $ready = $true
+                Write-Log "Wait-ForVm: $VmName`: OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            }
+            else {
+                Write-Log "Wait-ForVm: $VmName`: OOBE hasn't started yet. WWAHost not running."
+                $ready = $false
+                Start-Sleep -Seconds $WaitSeconds
+            }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
     }
 
@@ -1441,14 +1483,16 @@ function Set-SupportedOptions {
         "Primary",
         "CAS",
         "DPMP",
-        "DomainMember"
+        "DomainMember",
+        "WorkgroupMember"
     )
 
     $rolesForExisting = @(
         "DPMP",
         "CAS",
         "Primary",
-        "DomainMember"
+        "DomainMember",
+        "WorkgroupMember"
     )
 
     $cmVersions = @(
