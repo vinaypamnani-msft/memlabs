@@ -135,7 +135,7 @@ if ($All.IsPresent) {
 }
 
 
-if ($DomainName.IsPresent) {
+if ($DomainName) {
     Write-Log "Main: Remove Lab called for '$DomainName' domain." -Activity -HostOnly
     $vmsToDelete = Get-List -Type VM -DomainName $DomainName
     $scopesToDelete = Get-SubnetList -DomainName $DomainName
