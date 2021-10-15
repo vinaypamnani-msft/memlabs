@@ -299,11 +299,12 @@ function Start-CurlTransfer {
         }
         else {
             Write-Host
-            Write-Log "Start-CurlTransfer: Download failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
+            Write-Log "Start-CurlTransfer: Download failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."            
             Write-Host
+            Start-Sleep -Seconds 5
         }
 
-    } while ($retryCount -le 20)
+    } while ($retryCount -le 10)
 
     return $success
 }
