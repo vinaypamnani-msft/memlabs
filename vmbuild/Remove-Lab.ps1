@@ -7,6 +7,10 @@ param (
     [switch] $Orphaned,
     [Parameter(Mandatory = $true, ParameterSetName = "InProgress")]
     [switch] $InProgress,
+    [Parameter(Mandatory = $true, ParameterSetName = "VmName")]
+    [string] $VmName,
+    [Parameter(Mandatory = $true, ParameterSetName = "All")]
+    [switch] $All,
     [Parameter()]
     [switch] $WhatIf
 )
@@ -49,8 +53,6 @@ function Remove-DhcpScope {
         $dhcpScope | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
     }
 }
-
-
 
 if ($Orphaned.IsPresent) {
     Write-Log "Main: Remove Lab called for Orphaned objects." -Activity -HostOnly
@@ -115,25 +117,40 @@ if ($InProgress.IsPresent) {
     return
 }
 
+if ($VmName.IsPresent) {
+    Write-Log "Main: Remove Lab called for VM $VmName." -Activity -HostOnly
+    $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    if ($vmTest) {
+        Remove-VirtualMachine -VmName $VmName
+    }
 
-
-Write-Log "Main: Remove Lab called for '$DomainName' domain." -Activity -HostOnly
-
-if ($DomainName) {
-    $vmsToDelete = Get-List -Type VM -DomainName $DomainName
-    $scopesToDelete = Get-SubnetList -DomainName $DomainName
+    Write-Host
+    return
 }
-else {
+
+if ($All.IsPresent) {
+    Write-Log "Main: Remove Lab called for 'ALL' VM's." -Activity -HostOnly
     $vmsToDelete = Get-List -Type VM
     $scopesToDelete = Get-SubnetList
 }
 
-foreach ($vm in $vmsToDelete) {
-    Remove-VirtualMachine -VmName $vm.VmName
+
+if ($DomainName.IsPresent) {
+    Write-Log "Main: Remove Lab called for '$DomainName' domain." -Activity -HostOnly
+    $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+    $scopesToDelete = Get-SubnetList -DomainName $DomainName
 }
 
-foreach ($scope in $scopesToDelete) {
-    Remove-DhcpScope -ScopeId $scope.Subnet
+if ($vmsToDelete) {
+    foreach ($vm in $vmsToDelete) {
+        Remove-VirtualMachine -VmName $vm.VmName
+    }
+}
+
+if ($scopesToDelete) {
+    foreach ($scope in $scopesToDelete) {
+        Remove-DhcpScope -ScopeId $scope.Subnet
+    }
 }
 
 Write-Host
