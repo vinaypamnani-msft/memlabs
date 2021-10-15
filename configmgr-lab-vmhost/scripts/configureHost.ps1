@@ -97,6 +97,10 @@ Write-HostLog "Installing git via choco"
 Write-HostLog "Installing sysinternals via choco"
 & choco install sysinternals -y
 
+# Install sysinternals
+Write-HostLog "Installing curl via choco"
+& choco install curl -y
+
 # Reload PATH
 Write-HostLog "Reloading PATH"
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")

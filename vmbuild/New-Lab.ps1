@@ -11,6 +11,8 @@ param (
     [int]$RoleConfigTimeoutMinutes = 300,
     [Parameter(Mandatory = $false, HelpMessage = "Do not resize PS window.")]
     [switch]$NoWindowResize,
+    [Parameter(Mandatory = $false, HelpMessage = "Use Azure CDN for download.")]
+    [switch]$UseCDN,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
     [switch]$WhatIf
 )
@@ -572,12 +574,12 @@ try {
     }
 
     # Download required files
-    $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
+    $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
     if (-not $success) {
         Write-Host
         Write-Log "Main: Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
         Start-Sleep -Seconds 120
-        $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -ForceDownloadFiles:$ForceDownloadFiles
+        $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
         if (-not $success) {
             $timer.Stop()
             Write-Log "Main: Failed to download all required files. Exiting." -Failure

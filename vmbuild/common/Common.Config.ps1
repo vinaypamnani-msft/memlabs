@@ -88,6 +88,8 @@ function Get-FilesForConfiguration {
         [switch]$IgnoreHashFailure,
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
         [switch]$ForceDownloadFiles,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseCDN,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
     )
@@ -119,7 +121,7 @@ function Get-FilesForConfiguration {
 
         if ($file.id -eq "vmbuildadmin") { continue }
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file.id) { continue }
-        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -IgnoreHashFailure:$IgnoreHashFailure
+        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
             $allSuccess = $false
         }
@@ -127,7 +129,7 @@ function Get-FilesForConfiguration {
 
     foreach ($file in $Common.AzureFileList.ISO) {
         if (-not $DownloadAll -and $sqlVersionsToGet -notcontains $file.id) { continue }
-        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -IgnoreHashFailure:$IgnoreHashFailure
+        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
             $allSuccess = $false
         }
@@ -1270,7 +1272,7 @@ function Get-List {
                         $vmNoteObject = $vm.Notes | ConvertFrom-Json
                     }
                     else {
-                        Write-Log "Get-List: VM Properties for '$($vm.Name) does not contain values. Assume this was not deployed by vmbuild'. $_" -Warning -LogOnly                                            
+                        Write-Log "Get-List: VM Properties for '$($vm.Name) does not contain values. Assume this was not deployed by vmbuild'. $_" -Warning -LogOnly
                         #continue
                     }
                 }
