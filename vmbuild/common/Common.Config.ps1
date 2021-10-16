@@ -1310,6 +1310,12 @@ function Get-List {
                             }
                             Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
                         }
+                        else {
+                            #Update the Notes LastUpdateTime everytime we scan for it
+                            if (-not [string]::IsNullOrWhiteSpace($IPAddress)) {
+                                Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+                            }
+                        }
                     }
                 }
                 $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
