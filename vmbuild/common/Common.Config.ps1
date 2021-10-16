@@ -591,7 +591,7 @@ function Test-ValidRoleDC {
                 }
 
                 # Account validation
-                $vmProps = Get-List -Type VM | Where-Object {$_.VmName -eq "CON-DC1" }
+                $vmProps = Get-List -Type VM | Where-Object { $_.VmName -eq "CON-DC1" }
                 if ($vmProps.AdminName -ne $ConfigObject.vmOptions.adminName) {
                     Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] found but new configuration is using a different admin name [$($ConfigObject.vmOptions.adminName)] for deployment. You muse use the existing admin user [$($vmProps.AdminName)]." -ReturnObject $ReturnObject -Warning
                     Get-List -FlushCache | Out-Null
@@ -753,7 +753,7 @@ function Test-Configuration {
     if ($deployConfig.virtualMachines) {
         $containsCS = $deployConfig.virtualMachines.role -contains "CAS"
         $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
-        $containsDPMP = $deployConfig.virtualMachines.role -contains"DPMP"
+        $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
     }
     else {
         $containsCS = $containsPS = $containsDPMP = $false
@@ -1253,14 +1253,14 @@ function Get-List {
 
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, ParameterSetName="Type")]
+        [Parameter(Mandatory = $true, ParameterSetName = "Type")]
         [ValidateSet("VM", "Subnet", "Prefix", "UniqueDomain", "UniqueSubnet", "UniquePrefix")]
         [string] $Type,
-        [Parameter(Mandatory = $false, ParameterSetName="Type")]
+        [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [string] $DomainName,
-        [Parameter(Mandatory = $false, ParameterSetName="Type")]
+        [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [switch] $ResetCache,
-        [Parameter(Mandatory = $true, ParameterSetName="FlushCache")]
+        [Parameter(Mandatory = $true, ParameterSetName = "FlushCache")]
         [switch] $FlushCache
     )
 
@@ -1296,10 +1296,25 @@ function Get-List {
                     Write-Log "Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
                     #continue
                 }
-
+                if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
+                    $LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
+                    $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
+                    if (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP) {
+                        $IPAddress = (Get-VM -Name $vm.Name | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
+                        if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
+                            if ($null -eq $vmNoteObject.LastKnownIP) {
+                                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $IPAddress
+                            }
+                            else {
+                                $vmNoteObject.LastKnownIP = $IPAddress
+                            }
+                            Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+                        }
+                    }
+                }
                 $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
                 $adminUser = $vmNoteObject.adminName
-                if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin} # we renamed this property, read if it exists
+                if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin } # we renamed this property, read if it exists
                 if ($vmNoteObject) {
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
                     $vmObject = [PSCustomObject]@{

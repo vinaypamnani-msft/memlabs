@@ -688,13 +688,14 @@ function New-VmNote {
             $vmNote | Add-Member -MemberType NoteProperty -Name "remoteSQLVM" -Value $ThisVM.remoteSQLVM
         }
 
-        $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
+        Set-VMNote -vmName $vmName -vmNote $vmNote
+        #$vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
 
-        $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-        $vm = Get-Vm $VmName -ErrorAction Stop
-        if ($vm) {
-            $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
-        }
+        #$vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
+        #$vm = Get-Vm $VmName -ErrorAction Stop
+        #if ($vm) {
+        #    $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
+        #}
     }
     catch {
         Write-Log "New-VmNote: Failed to add a note to the VM '$VmName' in Hyper-V. $_" -Failure
@@ -704,6 +705,26 @@ function New-VmNote {
     }
 }
 
+function Set-VMNote {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$vmName,
+        [Parameter(Mandatory = $true)]
+        [object]$vmNote
+    )
+    if ($null -eq $vmNote.lastUpdate) {
+        $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
+    }
+    else {
+        $vmNote.lastUpdate = (Get-Date -format "MM/dd/yyyy HH:mm")
+    }
+    $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
+    $vm = Get-Vm $VmName -ErrorAction Stop
+    if ($vm) {
+        $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
+    }
+}
 function Remove-DnsRecord {
     [CmdletBinding()]
     param (
@@ -1254,7 +1275,7 @@ function Get-StorageConfig {
         }
 
         # Update file list
-        if ($updateList) {
+        if ($updateList -and ((Test-Path $fileListPath) -and -not $in_job)) {
 
             # Get file list
             #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
@@ -1281,6 +1302,7 @@ function Get-StorageConfig {
     }
     catch {
         $Common.FatalError = "Get-StorageConfig: Storage Config found, but storage access failed. $_"
+        Write-Host $_.ScriptStackTrace | Out-Host
     }
     finally {
         $ProgressPreference = 'Continue'
