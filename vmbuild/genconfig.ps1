@@ -870,10 +870,10 @@ function Show-ExistingNetwork {
 
     }
 
-    $TotalStoppedVMs = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.State -eq "Off" } | Measure-Object).Count
+    $TotalStoppedVMs = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.State -ne "Running" } | Measure-Object).Count
 
     if ($TotalStoppedVMs -gt 0) {
-        $response = Read-Host2 -Prompt "Some of the VM's in this domain are stopped. Do you wish to start them now? (Y/n)" -HideHelp
+        $response = Read-Host2 -Prompt "$TotalStoppedVMs VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp
         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
         }
         else {
@@ -954,7 +954,7 @@ function Select-OSForNew {
         [Parameter(Mandatory = $false, HelpMessage = "Role")]
         [String] $Role
     )
-    if (($Role -eq "DomainMember") -or ($null -eq $Role)) {
+    if (($Role -eq "DomainMember") -or ($null -eq $Role) -or  ($Role -eq "WorkgroupMember") -or ($Role -eq "InternetClient") -or ($Role -eq "AADClient")) {
         $OSList = $Common.Supported.OperatingSystems
     }
     else {
