@@ -160,10 +160,10 @@ function Select-DomainMenu {
         #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
 
         $customOptions = [ordered]@{
-            "1" = "Stop all VMs in domain";
-            "2" = "Start all VMs in domain";
+            "1" = "Stop VMs in domain";
+            "2" = "Start VMs in domain";
             "3" = "Compact all VHDX's in domain (requires domain to be stopped)";
-            "D" = "Delete Domain%Yellow%Red";
+            "D" = "Delete VMs in Domain%Yellow%Red";
         }
 
         $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions
@@ -220,71 +220,101 @@ function Select-StartDomain {
         [string] $domain
     )
 
-    Write-Host
+    while ($true) {
+        Write-Host
 
-    $vms = get-list -type vm -DomainName $domain
+        $vms = get-list -type vm -DomainName $domain
 
-    $notRunning = $vms | Where-Object { $_.State -ne "Running" }
-    if ($notRunning -and  ($notRunning | Measure-Object).count -gt 0) {
-        Write-Host "Staring $( ($notRunning | Measure-Object).count) VM's in '$domain' that are not Running"
-    }
-    else {
-        Write-Host "All VM's in '$domain' are already Running"
-        return
-    }
+        $notRunning = $vms | Where-Object { $_.State -ne "Running" }
+        if ($notRunning -and ($notRunning | Measure-Object).count -gt 0) {
+            Write-Host "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
+        }
+        else {
+            Write-Host "All VM's in '$domain' are already Running"
+            return
+        }
 
-    $dc = $vms | Where-Object { $_.Role -eq "DC" }
-    $sqlServers = $vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
-    $cas = $vms | Where-Object { $_.Role -eq "CAS" }
-    $pri = $vms | Where-Object { $_.Role -eq "Primary" }
-    $other = $vms | Where-Object { $_.vmName -notin $dc.vmName -and $_.vmName -notin $sqlServers.vmName -and $_.vmName -notin $cas.vmName -and $_.vmName -notin $pri.vmName }
 
-    $waitSecondsDC = 20
-    $waitSeconds = 10
-    if ($dc -and ($dc.State -ne "Running")) {
-        write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
-        start-vm $dc.vmName
-        start-Sleep -Seconds $waitSecondsDC
-    }
+        $vmsname = $notRunning | Select-Object -ExpandProperty vmName
+        $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" }
+        $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
 
-    if ($sqlServers) {
-        foreach ($sql in $sqlServers) {
-            if ($sql.State -ne "Running") {
-                write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
-                start-vm $sql.vmName
+        if ([string]::IsNullOrWhiteSpace($response)) {
+            return
+        }
+        if ($response -eq "A" -or $response -eq "C") {
+            $CriticalOnly = $false
+            if ($response -eq "C") {
+                $CriticalOnly = $true
+            }
+            $dc = $vms | Where-Object { $_.Role -eq "DC" }
+            $sqlServers = $vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
+            $cas = $vms | Where-Object { $_.Role -eq "CAS" }
+            $pri = $vms | Where-Object { $_.Role -eq "Primary" }
+            $other = $vms | Where-Object { $_.vmName -notin $dc.vmName -and $_.vmName -notin $sqlServers.vmName -and $_.vmName -notin $cas.vmName -and $_.vmName -notin $pri.vmName }
+
+            $waitSecondsDC = 20
+            $waitSeconds = 10
+            if ($dc -and ($dc.State -ne "Running")) {
+                write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
+                start-vm $dc.vmName
+                start-Sleep -Seconds $waitSecondsDC
+            }
+
+            if ($sqlServers) {
+                foreach ($sql in $sqlServers) {
+                    if ($sql.State -ne "Running") {
+                        write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
+                        start-vm $sql.vmName
+                    }
+                }
+                start-sleep $waitSeconds
+            }
+
+            if ($cas) {
+                foreach ($ss in $cas) {
+                    if ($ss.State -ne "Running") {
+                        write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
+                        start-vm $ss.vmName
+                    }
+                }
+                start-sleep $waitSeconds
+            }
+
+            if ($pri) {
+                foreach ($ss in $pri) {
+                    if ($ss.State -ne "Running") {
+                        write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
+                        start-vm $ss.vmName
+                    }
+                }
+                start-sleep $waitSeconds
+            }
+            if ($CriticalOnly -eq $false) {
+                foreach ($vm in $other) {
+                    if ($vm.State -ne "Running") {
+                        write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
+                        start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm $vm } -ArgumentList $vm.vmName
+                    }
+                }
+            }
+            get-job | wait-job
+            get-job | remove-job
+            get-list -type VM -ResetCache | out-null
+            if ($CriticalOnly -eq $false) {
+                return
+            }
+            else {
+                continue
             }
         }
-        start-sleep $waitSeconds
-    }
-
-    if ($cas) {
-        foreach ($ss in $cas) {
-            if ($ss.State -ne "Running") {
-                write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
-                start-vm $ss.vmName
-            }
-        }
-        start-sleep $waitSeconds
-    }
-
-    if ($pri) {
-        foreach ($ss in $pri) {
-            if ($ss.State -ne "Running") {
-                write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
-                start-vm $ss.vmName
-            }
-        }
-        start-sleep $waitSeconds
-    }
-    foreach ($vm in $other) {
-        if ($vm.State -ne "Running") {
-            write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
-            start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm $vm } -ArgumentList $vm.vmName
+        else {
+            start-vm $response
+            get-job | wait-job
+            get-job | remove-job
+            get-list -type VM -ResetCache | out-null
         }
     }
-    get-job | wait-job
-    get-job | remove-job
-    get-list -type VM -ResetCache | out-null
 }
 
 function Select-StopDomain {
@@ -293,27 +323,58 @@ function Select-StopDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
         [string] $domain
     )
-    Write-Host
-    $vms = get-list -type vm -DomainName $domain
-    $running = $vms | Where-Object { $_.State -ne "Off" }
-    if ($running -and $running.Count -gt 0) {
-        Write-host "Stopping $($running.Count) VM's in '$domain' that are currently running. Please wait."
-    }
-    else {
-        Write-host "All VM's in '$domain' are already turned off."
-        return
-    }
 
-    foreach ($vm in $vms) {
-        $vm2 = Get-VM $vm.vmName -ErrorAction SilentlyContinue
-        if ($vm2.State -eq "Running") {
-            Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
-            start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName
+
+    While ($true) {
+        Write-Host
+        $vms = get-list -type vm -DomainName $domain
+        $running = $vms | Where-Object { $_.State -ne "Off" }
+        if ($running -and ($running | Measure-Object).count -gt 0) {
+            Write-host "$(($running| Measure-Object).count) VM's in '$domain' are currently running."
         }
+        else {
+            Write-host "All VM's in '$domain' are already turned off."
+            return
+        }
+
+        $vmsname = $running | Select-Object -ExpandProperty vmName
+        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "C" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"}
+        $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
+
+        if ([string]::IsNullOrWhiteSpace($response)) {
+            return
+        }
+        if ($response -eq "A" -or $response -eq "C") {
+
+            $nonCriticalOnly = $false
+            if ($response -eq "C") {
+                $nonCriticalOnly = $true
+            }
+            foreach ($vm in $vms) {
+                if ($nonCriticalOnly -eq $true){
+                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ){
+                        continue
+                    }
+                }
+                $vm2 = Get-VM $vm.vmName -ErrorAction SilentlyContinue
+                if ($vm2.State -eq "Running") {
+                    Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
+                    start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName
+                }
+            }
+            get-job | wait-job
+            get-job | remove-job
+            get-list -type VM -ResetCache | out-null
+            return
+        }
+        else {
+            stop-vm $response -force
+            get-job | wait-job
+            get-job | remove-job
+            get-list -type VM -ResetCache | out-null
+        }
+
     }
-    get-job | wait-job
-    get-job | remove-job
-    get-list -type VM -ResetCache | out-null
 }
 
 function Select-DeleteDomain {
@@ -323,13 +384,35 @@ function Select-DeleteDomain {
         [string] $domain
     )
 
+    while ($true) {
+        $vms = get-list -type vm -DomainName $domain | Select-Object -ExpandProperty vmName
+        $customOptions = [ordered]@{"D" = "Delete All VMs" }
+        $response = Get-Menu -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false
 
-    Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
-    $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
-    if (-not [String]::IsNullOrWhiteSpace($response)) {
-        if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
-            & "$($PSScriptRoot)\Remove-Lab.ps1" -DomainName $domain
-            Get-List -type VM -ResetCache | Out-Null
+        if ([string]::IsNullOrWhiteSpace($response)) {
+            return
+        }
+        if ($response -eq "D") {
+            Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
+            $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
+            if (-not [String]::IsNullOrWhiteSpace($response)) {
+                if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
+                    & "$($PSScriptRoot)\Remove-Lab.ps1" -DomainName $domain
+                    Get-List -type VM -ResetCache | Out-Null
+                }
+            }
+        }
+        else {
+            $response2 = Read-Host2 -Prompt "Delete VM $response? (Y/n)" -HideHelp
+
+            if ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no") {
+                continue
+            }
+            else {
+                & "$($PSScriptRoot)\Remove-Lab.ps1" -VmName $response
+                Get-List -type VM -ResetCache | Out-Null
+                continue
+            }
         }
     }
 }
@@ -372,7 +455,7 @@ function get-VMSummary {
     $numDPMP = ($vms | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $numPri = ($vms | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $numCas = ($vms | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-    $numMember = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion } | Measure-Object).Count
+    $numMember = ($vms | Where-Object { $_Role -eq "WorkgroupMember" -or $_.Role -eq "AADClient" -or $_Role -eq "InternetClient" -or ($_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion) } | Measure-Object).Count
     $numSQL = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
     $RoleList = ""
     if ($numDCs -gt 0 ) {
@@ -388,10 +471,10 @@ function get-VMSummary {
         $RoleList += "[DPMP]"
     }
     if ($numSQL -gt 0 ) {
-        $RoleList += "[SQL]"
+        $RoleList += "[$numSQL SQL]"
     }
     if ($numMember -gt 0 ) {
-        $RoleList += "[$numMember Members]"
+        $RoleList += "[$numMember Other]"
     }
     $num = "[$numVMs VM(s)]".PadRight(21)
     $Output = "$num $RoleList"

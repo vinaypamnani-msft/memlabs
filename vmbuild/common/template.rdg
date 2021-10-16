@@ -107,6 +107,7 @@
         <server>
           <properties>
             <name>TESTSERVER</name>
+            <displayName>TESTSERVER</displayName>
 	          <comment>TESTCOMMENT</comment>
           </properties>
         </server>
