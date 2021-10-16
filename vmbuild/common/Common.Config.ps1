@@ -587,13 +587,13 @@ function Test-ValidRoleDC {
                 else {
                     # VM Not running, cannot validate network
                     Add-ValidationMessage -Message "$vmRole Validation: Existing DC [$existingDC] found but VM is not Running." -ReturnObject $ReturnObject -Warning
-                    Get-List -FlushCache | Out-Null
                 }
 
                 # Account validation
                 $vmProps = Get-List -Type VM | Where-Object {$_.VmName -eq "CON-DC1" }
                 if ($vmProps.AdminName -ne $ConfigObject.vmOptions.adminName) {
                     Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] found but new configuration is using a different admin name [$($ConfigObject.vmOptions.adminName)] for deployment. You muse use the existing admin user [$($vmProps.AdminName)]." -ReturnObject $ReturnObject -Warning
+                    Get-List -FlushCache | Out-Null
                 }
             }
         }
@@ -872,6 +872,7 @@ function Test-Configuration {
                 $notRunningNames = $notRunning.vmName -join ","
                 if ($notRunning.Count -gt 0) {
                     Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Warning
+                    Get-List -FlushCache | Out-Null
                 }
             }
 
@@ -954,6 +955,7 @@ function Test-Configuration {
     if (-not $compare -and $compare2) {
         $duplicates = $compare2.InputObject -join ","
         Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
+        Get-List -FlushCache | Out-Null
     }
 
     # Return if validation failed
