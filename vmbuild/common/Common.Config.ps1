@@ -752,9 +752,6 @@ function Test-Configuration {
         $containsCS = $deployConfig.virtualMachines.role.Contains("CAS")
         $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
         $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
-        $containsWG = $deployConfig.virtualMachines.role.Contains("WorkgroupMember")
-        $containsIN = $deployConfig.virtualMachines | Where-Object { $_.role -eq "WorkgroupMember" -and $_.internetClient -eq $true }
-
     }
     else {
         $containsCS = $containsPS = $containsDPMP = $false

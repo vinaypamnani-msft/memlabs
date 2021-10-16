@@ -1485,7 +1485,9 @@ function Set-SupportedOptions {
         "CAS",
         "DPMP",
         "DomainMember",
-        "WorkgroupMember"
+        "WorkgroupMember",
+        "InternetClient",
+        "AADClient"
     )
 
     $rolesForExisting = @(
@@ -1493,7 +1495,9 @@ function Set-SupportedOptions {
         "CAS",
         "Primary",
         "DomainMember",
-        "WorkgroupMember"
+        "WorkgroupMember",
+        "InternetClient",
+        "AADClient"
     )
 
     $cmVersions = @(

@@ -100,8 +100,8 @@ $VM_Create = {
     $createVM = $using:CreateVM
 
     # VM Network Switch
-    $containsInternetClient = $deployConfig.virtualMachines | Where-Object { $_.role -eq "WorkgroupMember" -and $_.internetClient -eq $true }
-    if ($containsInternetClient) {
+    $isInternet = ($currentItem.role -eq "InternetClient") -or ($currentItem.role -eq "AADClient")
+    if ($isInternet) {
         $network = "Internet"
     }
     else {
@@ -205,7 +205,7 @@ $VM_Create = {
     }
 
     # Boot To OOBE?
-    $bootToOOBE = $deployConfig.virtualMachines | Where-Object { $_.role -eq "WorkgroupMember" -and $_.bootToOOBE -eq $true }
+    $bootToOOBE = $currentItem.role -eq "AADClient"
     if ($bootToOOBE) {
        # Run Sysprep
        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown } -WhatIf:$WhatIf
@@ -221,6 +221,7 @@ $VM_Create = {
                 Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
                 $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15 -WhatIf:$WhatIf
                 if ($oobeStarted) {
+                    Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
                     Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
                 }
                 else {
@@ -316,6 +317,7 @@ $VM_Create = {
 
         # Set current role
         $dscRole = if ($currentItem.role -eq "DPMP") { "DomainMember" } else { $currentItem.role }
+        $dscRole = if ($currentItem.role -eq "InternetClient" -or $currentItem.role -eq "AADClient") { "WorkgroupMember" } else { $currentItem.role }
 
         # Define DSC variables
         $dscConfigScript = "C:\staging\DSC\$cmDscFolder\$($dscRole)Configuration.ps1"
@@ -504,7 +506,7 @@ $VM_Create = {
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
     # NLA Service starts before domain is ready sometimes, and causes RDP to fail because network is considered public by firewall.
-    if ($currentItem.role -eq "WorkgroupMember") {
+    if ($currentItem.role -eq "WorkgroupMember" -or $currentItem.role -eq "InternetClient" -or $currentItem.role -eq "AADClient") {
         $netProfile = 1
     } else {
         $netProfile = 2
@@ -655,8 +657,8 @@ try {
     }
 
     # Internet Client VM Switch and DHCP Scope
-    $containsInternetClient = $deployConfig.virtualMachines | Where-Object { $_.role -eq "WorkgroupMember" -and $_.internetClient -eq $true }
-    if ($containsInternetClient) {
+    $containsIN = $deployConfig.virtualMachines.role.Contains("InternetClient") -or $deployConfig.virtualMachines.role.Contains("AADClient")
+    if ($containsIN) {
         Write-Log "Main: Creating/verifying whether a Hyper-V switch for 'Internet' network exists." -Activity
         $internetSwitchName = "Internet"
         $internetSubnet = "172.31.250.0"
