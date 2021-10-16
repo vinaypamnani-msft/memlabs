@@ -1534,6 +1534,9 @@ function Set-SupportedOptions {
 
 if (-not $Common.Initialized) {
 
+    # Write progress
+    Write-Progress "Loading required modules." -Status "Please wait..." -PercentComplete -1
+
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
@@ -1579,5 +1582,8 @@ if (-not $Common.Initialized) {
 
     # Retrieve VM List, and cache results
     Get-List -Type VM -ResetCache | Out-Null
+
+    # Write progress
+    Write-Progress "Loading required modules." -Completed
 
 }
