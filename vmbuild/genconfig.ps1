@@ -954,11 +954,15 @@ function Select-OSForNew {
         [Parameter(Mandatory = $false, HelpMessage = "Role")]
         [String] $Role
     )
-    if (($Role -eq "DomainMember") -or ($null -eq $Role) -or  ($Role -eq "WorkgroupMember") -or ($Role -eq "InternetClient") -or ($Role -eq "AADClient")) {
+    if (($Role -eq "DomainMember") -or ($null -eq $Role) -or  ($Role -eq "WorkgroupMember") -or ($Role -eq "InternetClient") ) {
         $OSList = $Common.Supported.OperatingSystems
     }
     else {
         $OSList = $Common.Supported.OperatingSystems | Where-Object { $_ -like "*Server*" }
+    }
+
+    if ($Role -eq "AADClient") {
+        $OSList = $Common.Supported.OperatingSystems | Where-Object { -not ( $_ -like "*Server*" )}
     }
     $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue "Server 2022"
     return $role
