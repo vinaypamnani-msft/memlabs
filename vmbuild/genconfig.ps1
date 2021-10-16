@@ -496,7 +496,7 @@ function Get-NewMachineName {
     $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
     $RoleName = $Role
-    if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role) -or $Role -eq "WorkgroupMember") {
+    if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role) -or $Role -eq "WorkgroupMember" -or $Role -eq "AADClient" -or $role -eq "InternetClient") {
         $RoleName = "Member"
 
         if ($OS -like "*Server*") {
@@ -521,6 +521,7 @@ function Get-NewMachineName {
         if ($Role -eq "AADClient") {
             $RoleName = "AAD"
         }
+        Write-Verbose "Rolename is now $RoleName"
 
         if ($OS -like "Windows 10*") {
             $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "Windows 10*" } | Measure-Object).Count
