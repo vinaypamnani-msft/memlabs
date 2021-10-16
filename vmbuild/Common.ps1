@@ -996,6 +996,7 @@ function Wait-ForVm {
                 $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "Wait-ForVm: $VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
+                if ($readySmb) { Start-Sleep -Seconds 15 } # Extra 15 second wait to ensure wwahost has had a chance to start
             }
 
             # Wait until wwahost.exe is not found, or not longer running
