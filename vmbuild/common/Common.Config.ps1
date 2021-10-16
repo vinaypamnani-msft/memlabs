@@ -1329,6 +1329,7 @@ function Get-List {
                         Domain          = $vmNoteObject.domain
                         AdminName       = $adminUser
                         Subnet          = $vmNoteObject.network
+                        LastKnownIP     = $vmNoteObject.LastKnownIP
                         Prefix          = $vmNoteObject.prefix
                         Success         = $vmNoteObject.success
                         SiteCode        = $vmNoteObject.SiteCode
@@ -1339,6 +1340,7 @@ function Get-List {
                         SQLInstanceDir  = $vmNoteObject.sqlInstanceDir
                         RemoteSQLVM     = $vmNoteObject.remoteSQLVM
                         InProgress      = $inProgress
+
                     }
                 }
                 else {
@@ -1351,6 +1353,7 @@ function Get-List {
                         MemoryStartupGB = $vm.MemoryStartup / 1GB
                         DiskUsedGB      = $diskSize / 1GB
                         State           = $vm.State
+                        LastKnownIP     = $null
                         Role            = $null
                         DeployedOS      = $null
                         SiteCode        = $null
@@ -1365,6 +1368,7 @@ function Get-List {
                         Prefix          = $null
                         Success         = $null
                         InProgress      = $null
+
                     }
                 }
 
