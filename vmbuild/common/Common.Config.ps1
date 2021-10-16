@@ -587,6 +587,7 @@ function Test-ValidRoleDC {
                 else {
                     # VM Not running, cannot validate network
                     Add-ValidationMessage -Message "$vmRole Validation: Existing DC [$existingDC] found but VM is not Running." -ReturnObject $ReturnObject -Warning
+                    Get-List -FlushCache | Out-Null
                 }
 
                 # Account validation
@@ -1251,16 +1252,23 @@ function Get-List {
 
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName="Type")]
         [ValidateSet("VM", "Subnet", "Prefix", "UniqueDomain", "UniqueSubnet", "UniquePrefix")]
         [string] $Type,
-        [Parameter(Mandatory = $false)]
+        [Parameter(Mandatory = $false, ParameterSetName="Type")]
         [string] $DomainName,
-        [Parameter(Mandatory = $false)]
-        [switch] $ResetCache
+        [Parameter(Mandatory = $false, ParameterSetName="Type")]
+        [switch] $ResetCache,
+        [Parameter(Mandatory = $true, ParameterSetName="FlushCache")]
+        [switch] $FlushCache
     )
 
     try {
+
+        if ($FlushCache.IsPresent) {
+            $global:vm_List = $null
+            return
+        }
 
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null
