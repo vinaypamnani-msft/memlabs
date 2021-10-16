@@ -869,6 +869,18 @@ function Show-ExistingNetwork {
         else { break }
 
     }
+
+    $TotalStoppedVMs = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.State -eq "Off" } | Measure-Object).Count
+
+    if ($TotalStoppedVMs -gt 0) {
+        $response = Read-Host2 -Prompt "Some of the VM's in this domain are stopped. Do you wish to start them now? (Y/n)" -HideHelp
+        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+        }
+        else {
+            Select-StartDomain -domain $domain
+        }
+
+    }
     [string]$role = Select-RolesForExisting
 
     if ($role -eq "Primary") {
@@ -891,7 +903,7 @@ function Show-ExistingNetwork {
         }
     }
 
-    [string]$subnet = (Get-List -type VM | Where-Object {$_.Role -eq "DC"}).Subnet
+    [string]$subnet = (Get-List -type VM -DomainName $domain| Where-Object { $_.Role -eq "DC" }| Select-Object -First 1).Subnet
     if ($role -ne "InternetClient" -and $role -ne "AADClient") {
         $subnet = Select-ExistingSubnets -Domain $domain -Role $role
         Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
