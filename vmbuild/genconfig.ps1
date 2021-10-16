@@ -1888,7 +1888,7 @@ function Add-NewVMForRole {
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem"
 
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
-        if ($role -eq "WorkgroupMember") {
+        if ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
             $operatingSystem = "Windows 10 Latest (64-bit)"
         }
         else {
