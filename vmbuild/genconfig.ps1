@@ -890,15 +890,17 @@ function Show-ExistingNetwork {
             Get-TestResult -SuccessOnError | out-null
         }
     }
-    [string]$subnet = $null
-    $subnet = Select-ExistingSubnets -Domain $domain -Role $role
-    Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
-    if ([string]::IsNullOrWhiteSpace($subnet)) {
-        return $null
-    }
 
+    [string]$subnet = (Get-List -type VM | Where-Object {$_.Role -eq "DC"}).Subnet
+    if ($role -ne "InternetClient" -and $role -ne "AADClient") {
+        $subnet = Select-ExistingSubnets -Domain $domain -Role $role
+        Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
+        if ([string]::IsNullOrWhiteSpace($subnet)) {
+            return $null
+        }
+    }
     Write-verbose "[Show-ExistingNetwork] Calling Generate-ExistingConfig '$domain' '$subnet' '$role'"
-    return Generate-ExistingConfig $domain $subnet $role -ParentSiteCode $ParentSiteCode
+    return Generate-ExistingConfig -Domain $domain -Subnet $subnet -role $role -ParentSiteCode $ParentSiteCode
 }
 function Select-RolesForExisting {
     $existingRoles = $Common.Supported.RolesForExisting | Where-Object { $_ -ne "DPMP" }
