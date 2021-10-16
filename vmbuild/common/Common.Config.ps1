@@ -540,7 +540,7 @@ function Test-ValidRoleDC {
     $DCVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DC" }
     $vmRole = "DC"
 
-    $containsDC = $configObject.virtualMachines.role.Contains("DC")
+    $containsDC = $configObject.virtualMachines.role -contains "DC"
     $existingDC = $configObject.parameters.ExistingDCName
     $domain = $ConfigObject.vmOptions.domainName
 
@@ -550,6 +550,7 @@ function Test-ValidRoleDC {
             Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Warning
         }
 
+        # $MyInvocation.BoundParameters.ConfigObject.VirtualMachines | Out-Host
         if (Test-SingleRole -VM $DCVM -ReturnObject $ReturnObject) {
 
             # Server OS
@@ -690,6 +691,7 @@ function Test-SingleRole {
     )
 
     if (-not $VM) {
+        # $MyInvocation | Out-Host
         throw
     }
 
@@ -749,9 +751,9 @@ function Test-Configuration {
 
     # Contains roles
     if ($deployConfig.virtualMachines) {
-        $containsCS = $deployConfig.virtualMachines.role.Contains("CAS")
-        $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
-        $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
+        $containsCS = $deployConfig.virtualMachines.role -contains "CAS"
+        $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
+        $containsDPMP = $deployConfig.virtualMachines.role -contains"DPMP"
     }
     else {
         $containsCS = $containsPS = $containsDPMP = $false
@@ -975,7 +977,7 @@ function New-DeployConfig {
         $configObject
     )
 
-    $containsCS = $configObject.virtualMachines.role.Contains("CAS")
+    $containsCS = $configObject.virtualMachines.role -contains "CAS"
 
     # Scenario
     if ($containsCS) {
@@ -1004,7 +1006,7 @@ function New-DeployConfig {
     }
 
     # CSName (prefer name in config over existing)
-    $containsPS = $configObject.virtualMachines.role.Contains("Primary")
+    $containsPS = $configObject.virtualMachines.role -contains "Primary"
     if ($containsPS) {
         $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode ($PSVM.parentSiteCode | Select-Object -First 1) # Bypass failures, validation would fail if we had multiple
@@ -1081,7 +1083,7 @@ function Get-ValidCASSiteCodes {
     $existingSiteCodes = @()
     $existingSiteCodes += Get-ExistingSiteServer -DomainName $Config.vmOptions.domainName -Role "CAS" | Select-Object -ExpandProperty SiteCode
 
-    $containsCS = $Config.virtualMachines.role.Contains("CAS")
+    $containsCS = $Config.virtualMachines.role -contains "CAS"
     if ($containsCS) {
         $CSVM = $Config.virtualMachines | Where-Object { $_.role -eq "CAS" }
         $existingSiteCodes += $CSVM.siteCode
@@ -1441,9 +1443,9 @@ Function Show-Summary {
     }
 
     #$CHECKMARK = ([char]8730)
-    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
-    $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
-    $containsMember = $deployConfig.virtualMachines.role.Contains("DomainMember")
+    $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
+    $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
+    $containsMember = $deployConfig.virtualMachines.role -contains "DomainMember"
 
     if ($null -ne $($deployConfig.cmOptions) -and $containsPS -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true) {

@@ -657,7 +657,7 @@ try {
     }
 
     # Internet Client VM Switch and DHCP Scope
-    $containsIN = $deployConfig.virtualMachines.role.Contains("InternetClient") -or $deployConfig.virtualMachines.role.Contains("AADClient")
+    $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
     if ($containsIN) {
         Write-Log "Main: Creating/verifying whether a Hyper-V switch for 'Internet' network exists." -Activity
         $internetSwitchName = "Internet"
@@ -708,7 +708,7 @@ try {
     $job_created_no = 0
 
     # Existing DC scenario
-    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
+    $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
     $existingDC = $deployConfig.parameters.ExistingDCName
 
     # Remove DNS records for VM's in this config, if existing DC
