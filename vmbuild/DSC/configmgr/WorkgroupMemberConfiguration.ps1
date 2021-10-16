@@ -30,7 +30,7 @@
     }
 
     # Admin Name
-    $AdminName = $deployConfig.vmOptions.domainAdminName
+    $AdminName = $deployConfig.vmOptions.adminName
 
     # Log share
     $LogFolder = "DSC"

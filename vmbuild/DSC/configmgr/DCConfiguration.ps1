@@ -40,7 +40,7 @@
     }
 
     # Domain Admin User name
-    $DomainAdminName = $deployConfig.vmOptions.domainAdminName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Define log share
     $LogFolder = "DSC"

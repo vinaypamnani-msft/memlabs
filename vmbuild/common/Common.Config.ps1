@@ -218,23 +218,23 @@ function Test-ValidVmOptions {
         }
     }
 
-    # domainAdminName
-    if (-not $ConfigObject.vmOptions.domainAdminName) {
-        Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName not present in vmOptions. You must specify the Domain Admin user name that will be created." -ReturnObject $ReturnObject -Failure
+    # adminName
+    if (-not $ConfigObject.vmOptions.adminName) {
+        Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName not present in vmOptions. You must specify the Domain Admin user name that will be created." -ReturnObject $ReturnObject -Failure
     }
     else {
 
         $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
-        if ($ConfigObject.vmOptions.domainAdminName -match $pattern) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
+        if ($ConfigObject.vmOptions.adminName -match $pattern) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName [$($ConfigObject.vmoptions.adminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainAdminName.Length -gt 64) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] is too long. Must be less than 64 chars" -ReturnObject $ReturnObject -Failure
+        if ($ConfigObject.vmOptions.adminName.Length -gt 64) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName [$($ConfigObject.vmoptions.adminName)] is too long. Must be less than 64 chars" -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainAdminName.Length -lt 3) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] is too short. Must be at least 3 chars" -ReturnObject $ReturnObject -Failure
+        if ($ConfigObject.vmOptions.adminName.Length -lt 3) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName [$($ConfigObject.vmoptions.adminName)] is too short. Must be at least 3 chars" -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -247,7 +247,10 @@ function Test-ValidVmOptions {
         $pattern2 = "^(10)(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])){2,2}.0$"
         $pattern3 = "^(172).(1[6-9]|2[0-9]|3[0-1])(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])).0$"
 
-        if (-not ($ConfigObject.vmOptions.network -match $pattern1 -or $ConfigObject.vmOptions.network -match $pattern2 -or $ConfigObject.vmOptions.network -match $pattern3)) {
+        if ($ConfigObject.vmOptions.network -eq "172.31.250.0") {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'Internet' clients. Please use a different subnet." -ReturnObject $ReturnObject -Failure
+        }
+        elseif (-not ($ConfigObject.vmOptions.network -match $pattern1 -or $ConfigObject.vmOptions.network -match $pattern2 -or $ConfigObject.vmOptions.network -match $pattern3)) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
         }
     }
@@ -587,9 +590,9 @@ function Test-ValidRoleDC {
                 }
 
                 # Account validation
-                $vmNote = $vm.Notes | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if ($vmNote.domainAdmin -ne $ConfigObject.vmOptions.domainAdminName) {
-                    Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] found but new configuration is using a different admin name [$($ConfigObject.vmOptions.domainAdminName)] for deployment. You muse use the existing admin user [$($vmNote.domainAdmin)]." -ReturnObject $ReturnObject -Warning
+                $vmProps = Get-List -Type VM | Where-Object {$_.VmName -eq "CON-DC1" }
+                if ($vmProps.AdminName -ne $ConfigObject.vmOptions.adminName) {
+                    Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] found but new configuration is using a different admin name [$($ConfigObject.vmOptions.adminName)] for deployment. You muse use the existing admin user [$($vmProps.AdminName)]." -ReturnObject $ReturnObject -Warning
                 }
             }
         }
@@ -748,6 +751,9 @@ function Test-Configuration {
         $containsCS = $deployConfig.virtualMachines.role.Contains("CAS")
         $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
         $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
+        $containsWG = $deployConfig.virtualMachines.role.Contains("WorkgroupMember")
+        $containsIN = $deployConfig.virtualMachines | Where-Object { $_.role -eq "WorkgroupMember" -and $_.internetClient -eq $true }
+
     }
     else {
         $containsCS = $containsPS = $containsDPMP = $false
@@ -1045,7 +1051,7 @@ function New-DeployConfig {
         DomainMembers      = $clientsCsv
         Scenario           = $scenario
         DHCPScopeId        = $configObject.vmOptions.Network
-        DHCPScopeName        = $configObject.vmOptions.Network
+        DHCPScopeName      = $configObject.vmOptions.Network
         DHCPDNSAddress     = $network + ".1"
         DHCPDefaultGateway = $network + ".200"
         DHCPScopeStart     = $network + ".20"
@@ -1283,6 +1289,8 @@ function Get-List {
                 }
 
                 $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
+                $adminUser = $vmNoteObject.adminName
+                if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin} # we renamed this property, read if it exists
                 if ($vmNoteObject) {
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
                     $vmObject = [PSCustomObject]@{
@@ -1295,7 +1303,7 @@ function Get-List {
                         DiskUsedGB      = $diskSize / 1GB
                         State           = $vm.State
                         Domain          = $vmNoteObject.domain
-                        DomainAdmin     = $vmNoteObject.domainAdmin
+                        AdminName       = $adminUser
                         Subnet          = $vmNoteObject.network
                         Prefix          = $vmNoteObject.prefix
                         Success         = $vmNoteObject.success
@@ -1329,7 +1337,7 @@ function Get-List {
                         SQLInstanceDir  = $null
                         RemoteSQLVM     = $null
                         Domain          = $null
-                        DomainAdmin     = $null
+                        AdminName       = $null
                         Prefix          = $null
                         Success         = $null
                         InProgress      = $null
@@ -1504,7 +1512,7 @@ Function Show-Summary {
         $availableMemory = $availableMemory * 1KB / 1GB
         Write-GreenCheck "This configuration will use $($totalMemory)GB out of $([math]::Round($availableMemory,2))GB Available RAM on host machine"
     }
-    Write-GreenCheck "Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
+    Write-GreenCheck "Domain Admin account: $($deployConfig.vmOptions.adminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
     $out = $deployConfig.virtualMachines | Where-Object { -not $_.hidden } `
     | Format-table vmName, role, operatingSystem, memory,
     @{Label = "Procs"; Expression = { $_.virtualProcs } },

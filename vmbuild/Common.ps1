@@ -648,24 +648,24 @@ function New-VmNote {
 
         if ($InProgress.IsPresent) {
             $vmNote = [PSCustomObject]@{
-                inProgress  = $true
-                role        = $Role
-                deployedOS  = $ThisVM.operatingSystem
-                domain      = $DeployConfig.vmOptions.domainName
-                domainAdmin = $DeployConfig.vmOptions.domainAdminName
-                network     = $DeployConfig.vmOptions.network
-                prefix      = $DeployConfig.vmOptions.prefix
+                inProgress = $true
+                role       = $Role
+                deployedOS = $ThisVM.operatingSystem
+                domain     = $DeployConfig.vmOptions.domainName
+                adminName  = $DeployConfig.vmOptions.adminName
+                network    = $DeployConfig.vmOptions.network
+                prefix     = $DeployConfig.vmOptions.prefix
             }
         }
         else {
             $vmNote = [PSCustomObject]@{
-                success     = $Successful
-                role        = $Role
-                deployedOS  = $ThisVM.operatingSystem
-                domain      = $DeployConfig.vmOptions.domainName
-                domainAdmin = $DeployConfig.vmOptions.domainAdminName
-                network     = $DeployConfig.vmOptions.network
-                prefix      = $DeployConfig.vmOptions.prefix
+                success    = $Successful
+                role       = $Role
+                deployedOS = $ThisVM.operatingSystem
+                domain     = $DeployConfig.vmOptions.domainName
+                adminName  = $DeployConfig.vmOptions.adminName
+                network    = $DeployConfig.vmOptions.network
+                prefix     = $DeployConfig.vmOptions.prefix
             }
         }
 

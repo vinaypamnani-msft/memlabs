@@ -35,7 +35,7 @@
     }
 
     # Domain Admin Name
-    $DomainAdminName = $deployConfig.vmOptions.domainAdminName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
     $cm_admin = "$DNAME\$DomainAdminName"
 
     # SQL Setup

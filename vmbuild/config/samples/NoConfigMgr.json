@@ -3,7 +3,7 @@
         "prefix": "NOCM-",
         "basePath": "E:\\VirtualMachines",
         "domainName": "fabrikam.com",
-        "domainAdminName": "admin",
+        "adminName": "admin",
         "network": "192.168.9.0"
     },
     "virtualMachines": [

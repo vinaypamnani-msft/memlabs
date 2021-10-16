@@ -22,7 +22,7 @@
     $PrimarySiteName = "$PSName$"
 
     # Domain Admin User name
-    $DomainAdminName = $deployConfig.vmOptions.domainAdminName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
     $cm_admin = "$DNAME\$DomainAdminName"
 
     # CM Options

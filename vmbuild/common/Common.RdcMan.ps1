@@ -63,7 +63,7 @@ function Save-RdcManSettignsFile {
 
     $settings = $file.Settings
     $FilesToOpenFromTemplate = $template.Settings.FilesToOpen
-    
+
     $itemTemplate = $FilesToOpenFromTemplate.SelectNodes('//item') | Select-Object -First 1
 
     $FilesToOpen = $settings.FilesToOpen
@@ -169,7 +169,7 @@ function New-RDCManFile {
     }
 
     # Set user/pass on the group
-    $username = $DeployConfig.vmOptions.domainAdminName
+    $username = $DeployConfig.vmOptions.adminName
     $findGroup.logonCredentials.password = $encryptedPass
     if ($findGroup.logonCredentials.username -ne $username) {
         $findGroup.logonCredentials.userName = $username
@@ -262,7 +262,7 @@ function New-RDCManFileFromHyperV {
         }
 
         # Set user/pass on the group
-        $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -first 1).DomainAdmin
+        $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -first 1).AdminName
 
         if (Test-Path "$Global:newrdcmanpath\$rdcmanexe") {
             $encryptedPass = Get-RDCManPassword $Global:newrdcmanpath
@@ -286,7 +286,7 @@ function New-RDCManFileFromHyperV {
         $vmListFull = (Get-List -Type VM -domain $domain)
         foreach ($vm in $vmListFull) {
             Write-Verbose "Adding VM $($vm.VmName)"
-            $c = [PsCustomObject]@{}    
+            $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
             $comment = $c | ConvertTo-Json
             if (Add-RDCManServerToGroup $($vm.VmName) $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
@@ -317,7 +317,7 @@ function New-RDCManFileFromHyperV {
 
         foreach ($vm in $unknownVMs) {
             Write-Verbose "Adding VM $($vm.VmName)"
-            $c = [PsCustomObject]@{}    
+            $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
             $comment = $c | ConvertTo-Json
             if (Add-RDCManServerToGroup $($vm.VmName) $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
@@ -360,7 +360,7 @@ function Add-RDCManServerToGroup {
     $findserver = $findgroup.group.server | Where-Object { $_.properties.name -eq $serverName } | Select-Object -First 1
     if ($null -eq $findserver) {
         Write-Log "Add-RDCManServerToGroup: Added $serverName to RDG Group" -LogOnly
-        $subgroup = $groupFromTemplate.group        
+        $subgroup = $groupFromTemplate.group
         $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
         $newserver = $server.clone()
         $newserver.properties.name = $serverName

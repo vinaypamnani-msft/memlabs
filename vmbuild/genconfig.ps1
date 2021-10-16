@@ -193,7 +193,7 @@ function select-OptimizeDomain {
     foreach ($vm in $vms) {
         #Get-VHD -VMId $vm.VmId | Optimize-VHD -Mode Full
         foreach ($hd in Get-VHD -VMId $vm.VmId) {
-        #    Mount-VHD -Path $hd.Path            
+            #    Mount-VHD -Path $hd.Path
             Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction Stop
             Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
             Dismount-VHD -Path $hd.Path
@@ -346,7 +346,7 @@ function get-VMOptionsSummary {
 
     $options = $Global:Config.vmOptions
     $domainName = "[$($options.domainName)]".PadRight(21)
-    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.domainAdminName)] [Location $($options.basePath)]"
+    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.adminName)] [Location $($options.basePath)]"
     return $Output
 }
 
@@ -1031,7 +1031,7 @@ function Generate-ExistingConfig {
     )
 
 
-    $adminUser = (Get-List -Type vm -DomainName $Domain | Where-Object { $_.Role -eq "DC" }).domainAdmin
+    $adminUser = (Get-List -Type vm -DomainName $Domain | Where-Object { $_.Role -eq "DC" }).adminName
 
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
@@ -1045,11 +1045,11 @@ function Generate-ExistingConfig {
         $prefix = "NULL-"
     }
     $vmOptions = [PSCustomObject]@{
-        prefix          = $prefix
-        basePath        = "E:\VirtualMachines"
-        domainName      = $Domain
-        domainAdminName = $adminUser
-        network         = $Subnet
+        prefix     = $prefix
+        basePath   = "E:\VirtualMachines"
+        domainName = $Domain
+        adminName  = $adminUser
+        network    = $Subnet
     }
 
     $configGenerated = $null
