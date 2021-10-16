@@ -954,6 +954,8 @@ function Select-OSForNew {
         [Parameter(Mandatory = $false, HelpMessage = "Role")]
         [String] $Role
     )
+
+    $defaultValue = "Server 2022"
     if (($Role -eq "DomainMember") -or ($null -eq $Role) -or  ($Role -eq "WorkgroupMember") -or ($Role -eq "InternetClient") ) {
         $OSList = $Common.Supported.OperatingSystems
     }
@@ -963,8 +965,9 @@ function Select-OSForNew {
 
     if ($Role -eq "AADClient") {
         $OSList = $Common.Supported.OperatingSystems | Where-Object { -not ( $_ -like "*Server*" )}
+        $defaultValue = "Windows 10 Latest (64-bit)"
     }
-    $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue "Server 2022"
+    $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue $defaultValue
     return $role
 }
 
