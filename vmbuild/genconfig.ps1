@@ -870,8 +870,7 @@ function Show-ExistingNetwork {
 
     }
 
-    $TotalStoppedVMs = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.State -ne "Running" } | Measure-Object).Count
-
+    $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" } | Measure-Object).Count
     if ($TotalStoppedVMs -gt 0) {
         $response = Read-Host2 -Prompt "$TotalStoppedVMs VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp
         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
