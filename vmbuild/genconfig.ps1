@@ -11,6 +11,9 @@ $return = [PSCustomObject]@{
 }
 
 if (-not $InternalUseOnly.IsPresent) {
+    if ($Common.Initialized) {
+        $Common.Initialized = $false
+    }
     . $PSScriptRoot\Common.ps1
 }
 
@@ -97,7 +100,7 @@ function Select-ConfigMenu {
             "4" = "Load saved config from File"; "R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow";
         }
 
-        $pendingCount = (get-list -type VM | where { $_.InProgress -eq "True" }).Count
+        $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" }).Count
 
         if ($pendingCount -gt 0 ) {
             $customOptions += @{"P" = "Delete ($($pendingCount)) In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow" }
@@ -222,8 +225,8 @@ function Select-StartDomain {
     $vms = get-list -type vm -DomainName $domain
 
     $notRunning = $vms | Where-Object { $_.State -ne "Running" }
-    if ($notRunning -and $notRunning.Count -gt 0) {
-        Write-Host "Staring $($notRunning.Count) VM's in '$domain' that are not Running"
+    if ($notRunning -and  ($notRunning | Measure-Object).count -gt 0) {
+        Write-Host "Staring $( ($notRunning | Measure-Object).count) VM's in '$domain' that are not Running"
     }
     else {
         Write-Host "All VM's in '$domain' are already Running"
