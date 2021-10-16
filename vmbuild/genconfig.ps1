@@ -10,7 +10,9 @@ $return = [PSCustomObject]@{
     ForceNew       = $false
 }
 
-. $PSScriptRoot\Common.ps1
+if (-not $InternalUseOnly.IsPresent) {
+    . $PSScriptRoot\Common.ps1
+}
 
 $configDir = Join-Path $PSScriptRoot "config"
 $sampleDir = Join-Path $PSScriptRoot "config\samples"
@@ -903,7 +905,7 @@ function Show-ExistingNetwork {
         }
     }
 
-    [string]$subnet = (Get-List -type VM -DomainName $domain| Where-Object { $_.Role -eq "DC" }| Select-Object -First 1).Subnet
+    [string]$subnet = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1).Subnet
     if ($role -ne "InternetClient" -and $role -ne "AADClient") {
         $subnet = Select-ExistingSubnets -Domain $domain -Role $role
         Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
@@ -956,7 +958,7 @@ function Select-OSForNew {
     )
 
     $defaultValue = "Server 2022"
-    if (($Role -eq "DomainMember") -or ($null -eq $Role) -or  ($Role -eq "WorkgroupMember") -or ($Role -eq "InternetClient") ) {
+    if (($Role -eq "DomainMember") -or ($null -eq $Role) -or ($Role -eq "WorkgroupMember") -or ($Role -eq "InternetClient") ) {
         $OSList = $Common.Supported.OperatingSystems
     }
     else {
@@ -964,7 +966,7 @@ function Select-OSForNew {
     }
 
     if ($Role -eq "AADClient") {
-        $OSList = $Common.Supported.OperatingSystems | Where-Object { -not ( $_ -like "*Server*" )}
+        $OSList = $Common.Supported.OperatingSystems | Where-Object { -not ( $_ -like "*Server*" ) }
         $defaultValue = "Windows 10 Latest (64-bit)"
     }
     $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue $defaultValue
