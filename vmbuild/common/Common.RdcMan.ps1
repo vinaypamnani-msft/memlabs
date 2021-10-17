@@ -278,7 +278,7 @@ function New-RDCManFileFromHyperV {
 
     Install-RDCman
 
-    foreach ($domain in (Get-List -Type UniqueDomain)) {
+    foreach ($domain in (Get-List -Type UniqueDomain -ResetCache)) {
         Write-Host "Adding all machines from Domain $domain"
         $findGroup = Get-RDCManGroupToModify $domain $group $findGroup $groupFromTemplate $existing
         if ($findGroup -eq $false -or $null -eq $findGroup) {
@@ -448,7 +448,7 @@ function Add-RDCManServerToGroup {
         [bool]$ForceOverwrite
     )
 
-    $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName } | Select-Object -First 1
+    $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName } | Select-Object -First 1
     if ($null -eq $findserver) {
         Write-Log "Add-RDCManServerToGroup: Added $displayName to RDG Group" -LogOnly
         $subgroup = $groupFromTemplate.group

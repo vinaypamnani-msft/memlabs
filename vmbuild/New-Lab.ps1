@@ -825,8 +825,11 @@ try {
     Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
     if (Test-Path "C:\tools\rdcman.exe") {
         Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
+        $roles = $deployConfig.virtualMachines | Select-Object -ExpandProperty Role
+        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient")) {
+            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+        }
     }
-
 }
 finally {
     # Ctrl + C brings us here :)

@@ -2385,6 +2385,7 @@ while ($valid -eq $false) {
         Show-Summary ($c.DeployConfig)
         Write-Host
         Write-verbose "13"
+        Write-Host -ForegroundColor Yellow "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
         Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
         $response = Read-Host2 -Prompt "Everything correct? (Y/n)" -HideHelp
         if (-not [String]::IsNullOrWhiteSpace($response)) {
