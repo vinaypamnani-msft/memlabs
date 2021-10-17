@@ -397,7 +397,7 @@ function Select-DeleteDomain {
             $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
-                    & "$($PSScriptRoot)\Remove-Lab.ps1" -DomainName $domain
+                    Remove-Domain -DomainName $domain
                     Get-List -type VM -ResetCache | Out-Null
                 }
             }
@@ -425,7 +425,7 @@ function Select-DeletePending {
     $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
-            & "$($PSScriptRoot)\Remove-Lab.ps1" -InProgress
+            Remove-InProgress
             Get-List -type VM -ResetCache | Out-Null
         }
     }
