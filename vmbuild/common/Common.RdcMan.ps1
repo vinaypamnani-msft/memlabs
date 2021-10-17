@@ -199,7 +199,7 @@ function New-RDCManFile {
         $comment = $vm | ConvertTo-Json
         $name = $vm.vmName
         $displayName = $vm.vmName
-        if (Add-RDCManServerToGroup $name $displayName $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
+        if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString()) -eq $True) {
             $shouldSave = $true
         }
     }
@@ -227,16 +227,19 @@ function New-RDCManFile {
 }
 
 function New-RDCManFileFromHyperV {
+    [CmdletBinding()]
     param(
-        [string]$rdcmanfile
+        [string]$rdcmanfile,
+        [bool]$OverWrite = $false
     )
 
-
-    if (test-path $rdcmanfile) {
-        Write-Log "New-RDCManFile: Killing RDCMan, and Deleting $rdcmanfile."
-        Get-Process -Name rdcman -ea Ignore | Stop-Process
-        Start-Sleep 1
-        Remove-Item $rdcmanfile | out-null
+    if ($OverWrite) {
+        if (test-path $rdcmanfile) {
+            Write-Log "New-RDCManFile: Killing RDCMan, and Deleting $rdcmanfile."
+            Get-Process -Name rdcman -ea Ignore | Stop-Process
+            Start-Sleep 1
+            Remove-Item $rdcmanfile | out-null
+        }
     }
     $templatefile = Join-Path $PSScriptRoot "template.rdg"
 
@@ -250,6 +253,7 @@ function New-RDCManFileFromHyperV {
     # Gets the blank template, or returns the existing rdg xml if available.
     $existing = $template
     if (Test-Path $rdcmanfile) {
+        Write-Host "Loading config from $rdcmanfile"
         [xml]$existing = Get-Content -Path $rdcmanfile
     }
 
@@ -316,17 +320,24 @@ function New-RDCManFileFromHyperV {
 
             $name = $($vm.VmName)
             $rolename = ""
+            $ForceOverwrite = $false
             switch ($vm.Role) {
                 "DomainMember" { if ($null -eq $vm.SqlVersion) { $rolename = "[AD] " } }
-                "InternetClient" { $rolename = "[Internet] " }
-                "AADClient" { $rolename = "[AAD] " }
+                "InternetClient" {
+                    $ForceOverwrite = $true
+                    $rolename = "[Internet] "
+                }
+                "AADClient" {
+                    $ForceOverwrite = $true
+                    $rolename = "[AAD] "
+                }
                 "WorkgroupMember" { $rolename = "[WG] " }
                 Default {}
             }
             $displayName = $rolename + $($vm.VmName)
             if ($vm.SiteCode) {
                 $displayName += " ($($vm.SiteCode)"
-                if ($vm.ParentSiteCode){
+                if ($vm.ParentSiteCode) {
                     $displayName += "->$($vm.ParentSiteCode)"
                 }
                 $displayName += ")"
@@ -339,33 +350,33 @@ function New-RDCManFileFromHyperV {
                     $displayName = $displayName + "(Missing IP)"
                 }
             }
-            if (Add-RDCManServerToGroup $name $displayName $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
+            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite) -eq $True) {
                 $shouldSave = $true
             }
         }
-        $roles = $vmListFull | Select-Object -ExpandProperty role
-        $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | Select-Object -First 1
-        $ruleToClone = $SmartGroupToClone.ruleGroup.rule
-        $clonedSG = $SmartGroupToClone.clone()
-        if ($roles -contains "InternetClient") {
-            $clonedSG = $SmartGroupToClone.clone()
-            $clonedSG.properties.name = "Members - Internet"
-            $clonedSG.ruleGroup.rule.value = "InternetClient"
-            #    $findgroup.AppendChild($clonedSG)
-        }
-        if ($roles -contains "AADClient") {
-            Write-Host "Adding SmartGroup AAD Clients"
-            $clonedSG = $SmartGroupToClone.clone()
-            $clonedSG.properties.name = "Members - AAD"
-            $clonedSG.ruleGroup.rule.value = "AADClient"
-            #    $findgroup.AppendChild($clonedSG)
-        }
-        if ($roles -contains "WorkgroupMember") {
-            $clonedSG = $SmartGroupToClone.clone()
-            $clonedSG.properties.name = "Members - Workgroup"
-            $clonedSG.ruleGroup.rule.value = "WorkgroupMember"
-            #    $findgroup.AppendChild($clonedSG)
-        }
+        #$roles = $vmListFull | Select-Object -ExpandProperty role
+        #$SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | Select-Object -First 1
+        #$ruleToClone = $SmartGroupToClone.ruleGroup.rule
+        #$clonedSG = $SmartGroupToClone.clone()
+        #if ($roles -contains "InternetClient") {
+        #    $clonedSG = $SmartGroupToClone.clone()
+        #    $clonedSG.properties.name = "Members - Internet"
+        #    $clonedSG.ruleGroup.rule.value = "InternetClient"
+        #    #    $findgroup.AppendChild($clonedSG)
+        #}
+        #if ($roles -contains "AADClient") {
+        #    Write-Host "Adding SmartGroup AAD Clients"
+        #    $clonedSG = $SmartGroupToClone.clone()
+        #    $clonedSG.properties.name = "Members - AAD"
+        #    $clonedSG.ruleGroup.rule.value = "AADClient"
+        #    #    $findgroup.AppendChild($clonedSG)
+        #}
+        #if ($roles -contains "WorkgroupMember") {
+        #    $clonedSG = $SmartGroupToClone.clone()
+        #    $clonedSG.properties.name = "Members - Workgroup"
+        #    $clonedSG.ruleGroup.rule.value = "WorkgroupMember"
+        #    #    $findgroup.AppendChild($clonedSG)
+        #}
         # Add new group
         [void]$file.AppendChild($findgroup)
 
@@ -375,6 +386,7 @@ function New-RDCManFileFromHyperV {
     $unknownVMs += get-list -type vm  | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
         Write-Host "Adding Unknown VMs"
+        $findGroup = $null
         $findGroup = Get-RDCManGroupToModify "UnknownVMs" $group $findGroup $groupFromTemplate $existing
         if ($findGroup -eq $false -or $null -eq $findGroup) {
             Write-Log "New-RDCManFile: Failed to find group to modify" -Failure
@@ -382,8 +394,11 @@ function New-RDCManFileFromHyperV {
         }
         $findGroup.group.properties.expanded = "True"
 
-        $smartGroups = $findGroup.SelectNodes('//smartGroup')
+        $smartGroups = $null
+        $smartGroups = $findGroup.SelectNodes('/smartGroup')
+        $findgroup | Out-Host
         foreach ($smartGroup in $smartGroups) {
+            $smartGroup.properties | out-host
             $findgroup.RemoveChild($smartGroup)
         }
 
@@ -394,7 +409,7 @@ function New-RDCManFileFromHyperV {
             $comment = $c | ConvertTo-Json
             $name = $($vm.VmName)
             $displayName = $($vm.VmName)
-            if (Add-RDCManServerToGroup $name $displayName $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
+            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString()) -eq $True) {
                 $shouldSave = $true
             }
         }
@@ -422,19 +437,20 @@ function New-RDCManFileFromHyperV {
 }
 
 function Add-RDCManServerToGroup {
-
+    [CmdletBinding()]
     param(
         [string]$serverName,
         [string]$displayName,
-        $findgroup,
-        $groupFromTemplate,
-        $existing,
-        $comment
+        [object]$findgroup,
+        [object]$groupFromTemplate,
+        [object]$existing,
+        [string]$comment,
+        [bool]$ForceOverwrite
     )
 
-    $findserver = $findgroup.group.server | Where-Object { $_.properties.name -eq $serverName } | Select-Object -First 1
+    $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName } | Select-Object -First 1
     if ($null -eq $findserver) {
-        Write-Log "Add-RDCManServerToGroup: Added $serverName to RDG Group" -LogOnly
+        Write-Log "Add-RDCManServerToGroup: Added $displayName to RDG Group" -LogOnly
         $subgroup = $groupFromTemplate.group
         $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
         $newserver = $server.clone()
@@ -446,6 +462,19 @@ function Add-RDCManServerToGroup {
         return $True
     }
     else {
+        if ($ForceOverwrite) {
+            $findGroup.group.RemoveChild($findServer)
+            Write-Log "Add-RDCManServerToGroup: Deleted and re-Added $displayName to RDG Group" -LogOnly
+            $subgroup = $groupFromTemplate.group
+            $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
+            $newserver = $server.clone()
+            $newserver.properties.name = $serverName
+            $newserver.properties.displayName = $displayName
+            $newserver.properties.comment = $comment
+            $clonedNode = $existing.ImportNode($newserver, $true)
+            $findgroup.group.AppendChild($clonedNode)
+            return $True
+        }
         Write-Log "Add-RDCManServerToGroup: $serverName already exists in group. Skipped" -LogOnly
         return $False
     }

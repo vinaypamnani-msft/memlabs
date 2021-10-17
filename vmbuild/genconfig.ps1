@@ -123,7 +123,7 @@ function Select-ConfigMenu {
             "2" { $SelectedConfig = Show-ExistingNetwork }
             "3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "4" { $SelectedConfig = Select-Config $configDir -NoMore }
-            "r" { New-RDCManFileFromHyperV $Global:Common.RdcManFilePath }
+            "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
             "p" { Select-DeletePending }
             "d" { Select-DomainMenu }
             Default {}
