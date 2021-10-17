@@ -73,7 +73,7 @@ function Save-RdcManSettignsFile {
         $FilesToOpen.RemoveChild($item)
         $settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName = $env:Username
         $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain = $env:ComputerName
-        $settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName = ($($env:ComputerName)+"\"+$($env:Username))
+        $settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName = ($($env:ComputerName) + "\" + $($env:Username))
 
     }
 
@@ -93,7 +93,7 @@ function Save-RdcManSettignsFile {
         Start-Sleep 1
         $file.Save($existingfile)
     }
-    else{
+    else {
         Write-Host "Entry already in settings. Not Saving"
     }
 }
@@ -178,7 +178,9 @@ function New-RDCManFile {
 
     foreach ($vm in $DeployConfig.virtualMachines) {
         $comment = $vm | ConvertTo-Json
-        if (Add-RDCManServerToGroup $vm.vmName $vm.vmName $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
+        $name = $vm.vmName
+        $displayName = $vm.vmName
+        if (Add-RDCManServerToGroup $name $displayName $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
             $shouldSave = $true
         }
     }
@@ -289,7 +291,18 @@ function New-RDCManFileFromHyperV {
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
             $comment = $c | ConvertTo-Json
-            if (Add-RDCManServerToGroup $($vm.VmName) $($vm.VmName) $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
+
+            $name = $($vm.VmName)
+            $displayName = $($vm.VmName)
+            if ($vm.Role -eq "AADClient" -or $vm.Role -eq "InternetClient") {
+                if (-not [string]::IsNullOrWhiteSpace($vm.LastKnownIP)) {
+                    $name = $vm.LastKnownIP
+                }
+                else{
+                    $displayName = $displayName + "(Missing IP)"
+                }
+            }
+            if (Add-RDCManServerToGroup $name $displayName $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
                 $shouldSave = $true
             }
         }
@@ -320,7 +333,9 @@ function New-RDCManFileFromHyperV {
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
             $comment = $c | ConvertTo-Json
-            if (Add-RDCManServerToGroup $($vm.VmName) $($vm.VmName) $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
+            $name = $($vm.VmName)
+            $displayName = $($vm.VmName)
+            if (Add-RDCManServerToGroup $name $displayName $findgroup $groupFromTemplate $existing $comment.ToString() -eq $True) {
                 $shouldSave = $true
             }
         }
