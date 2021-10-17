@@ -230,7 +230,8 @@ $VM_Create = {
                 }
             }
        }
-
+       # Update VMNote
+       New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $oobeStarted
        return
     }
 
