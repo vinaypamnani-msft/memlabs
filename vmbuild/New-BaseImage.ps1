@@ -25,16 +25,11 @@ param (
     [switch]$WhatIf
 )
 
-# Dot source common
-. $PSScriptRoot\Common.ps1
-
 # Set Verbose
-if ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent) {
-    $Common.VerboseEnabled = $true
-}
-else {
-    $Common.VerboseEnabled = $false
-}
+$enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
+
+# Dot source common
+. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
 # Validate token exists
 if ($Common.FatalError) {

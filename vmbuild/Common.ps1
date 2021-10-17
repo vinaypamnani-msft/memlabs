@@ -1,3 +1,10 @@
+[CmdletBinding()]
+param (
+    [Parameter()]
+    [switch]$InJob,
+    [Parameter()]
+    [switch]$VerboseEnabled
+)
 
 ########################
 ### Common Functions ###
@@ -1275,7 +1282,9 @@ function Get-StorageConfig {
         }
 
         # Update file list
-        if ($updateList -and ((Test-Path $fileListPath) -and -not $in_job)) {
+        if ($updateList -and ((Test-Path $fileListPath) -and -not $InJob.IsPresent)) {
+
+            Write-Log "Updating fileList from azure storage" -LogOnly
 
             # Get file list
             #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
@@ -1289,6 +1298,10 @@ function Get-StorageConfig {
                 $Common.AzureFileList = $response.Content.Trim() | ConvertFrom-Json -ErrorAction Stop
             }
 
+        }
+
+        if ($InJob.IsPresent) {
+            Write-Log "Skipped updating fileList from azure storage, since we're running inside a job." -Verbose
         }
 
         # Get local admin password, regardless of whether we should update file list
@@ -1398,6 +1411,7 @@ function Get-FileFromStorage {
             }
             else {
                 # Calculate file hash, save to local hash file
+                Write-Log "Get-FileFromStorage: Calculating $hashAlg hash for $filename in $($Common.AzureFilesPath)..."
                 $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
                 $localFileHash = $hashFileResult.Hash
                 if ($localFileHash -eq $fileHash) {
@@ -1582,14 +1596,12 @@ if (-not $Common.Initialized) {
         StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
         LogPath               = Join-Path $PSScriptRoot "VMBuild.log"                                     # Log File
         RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
-        VerboseEnabled        = $false                                                                    # Verbose Logging
+        VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
         Supported             = $null                                                                     # Supported Configs
         AzureFileList         = $null
         LocalAdmin            = $null
         FatalError            = $null
     }
-
-    Write-Log "Common: Initializing common..." -LogOnly
 
     # Storage config
     $global:StorageConfig = [PSCustomObject]@{
@@ -1597,14 +1609,18 @@ if (-not $Common.Initialized) {
         StorageToken    = $null
     }
 
+    Write-Log "Loading required modules." -Verbose
+
     ### Test Storage config and access
     Get-StorageConfig
 
     ### Set supported options
     Set-SupportedOptions
 
-    # Retrieve VM List, and cache results
-    Get-List -Type VM -ResetCache | Out-Null
+    if (-not $InJob.IsPresent) {
+        # Retrieve VM List, and cache results
+        Get-List -Type VM -ResetCache | Out-Null
+    }
 
     # Write progress
     Write-Progress "Loading required modules." -Completed

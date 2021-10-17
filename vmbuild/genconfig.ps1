@@ -14,7 +14,12 @@ if (-not $InternalUseOnly.IsPresent) {
     if ($Common.Initialized) {
         $Common.Initialized = $false
     }
-    . $PSScriptRoot\Common.ps1
+
+    # Set Verbose
+    $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
+
+    # Dot source common
+    . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 }
 
 $configDir = Join-Path $PSScriptRoot "config"
@@ -338,7 +343,7 @@ function Select-StopDomain {
         }
 
         $vmsname = $running | Select-Object -ExpandProperty vmName
-        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "C" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"}
+        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "C" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)" }
         $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
 
         if ([string]::IsNullOrWhiteSpace($response)) {
@@ -351,8 +356,8 @@ function Select-StopDomain {
                 $nonCriticalOnly = $true
             }
             foreach ($vm in $vms) {
-                if ($nonCriticalOnly -eq $true){
-                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ){
+                if ($nonCriticalOnly -eq $true) {
+                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
                         continue
                     }
                 }

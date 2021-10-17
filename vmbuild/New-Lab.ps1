@@ -22,16 +22,11 @@ if ($Common.Initialized) {
     $Common.Initialized = $false
 }
 
-# Dot source common
-. $PSScriptRoot\Common.ps1
-
 # Set Verbose
-if ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent) {
-    $Common.VerboseEnabled = $true
-}
-else {
-    $Common.VerboseEnabled = $false
-}
+$enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
+
+# Dot source common
+. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
 if (-not $NoWindowResize.IsPresent) {
     try {
@@ -90,7 +85,7 @@ function Write-JobProgress {
 $VM_Create = {
 
     # Dot source common
-    . $using:PSScriptRoot\Common.ps1
+    . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
 
     # Get required variables from parent scope
     $cmDscFolder = $using:cmDscFolder
@@ -207,13 +202,13 @@ $VM_Create = {
     # Boot To OOBE?
     $bootToOOBE = $currentItem.role -eq "AADClient"
     if ($bootToOOBE) {
-       # Run Sysprep
-       $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false } -WhatIf:$WhatIf
-       $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown } -WhatIf:$WhatIf
-       if ($result.ScriptBlockFailed) {
-           Write-Log "PSJOB: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
-       }
-       else {
+        # Run Sysprep
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false } -WhatIf:$WhatIf
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown } -WhatIf:$WhatIf
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
+        }
+        else {
             $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 15 -WhatIf:$WhatIf
             if (-not $ready) {
                 Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
@@ -229,10 +224,10 @@ $VM_Create = {
                     Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
                 }
             }
-       }
-       # Update VMNote
-       New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $oobeStarted
-       return
+        }
+        # Update VMNote
+        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $oobeStarted
+        return
     }
 
     # Copy DSC files
@@ -510,7 +505,8 @@ $VM_Create = {
     # NLA Service starts before domain is ready sometimes, and causes RDP to fail because network is considered public by firewall.
     if ($currentItem.role -eq "WorkgroupMember" -or $currentItem.role -eq "InternetClient" -or $currentItem.role -eq "AADClient") {
         $netProfile = 1
-    } else {
+    }
+    else {
         $netProfile = 2
     } # 1 = Private, 2 = Domain
 

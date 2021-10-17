@@ -20,8 +20,11 @@ if ($Common.Initialized) {
     $Common.Initialized = $false
 }
 
+# Set Verbose
+$enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
+
 # Dot source common
-. $PSScriptRoot\Common.ps1
+. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
 if ($Orphaned.IsPresent) {
     Remove-Orphaned -WhatIf:$WhatIf
