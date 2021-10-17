@@ -126,7 +126,7 @@
   <ServerTreeAutoHidePopUpDelay>0</ServerTreeAutoHidePopUpDelay>
   <ServerTreeLocation>Left</ServerTreeLocation>
   <ServerTreeVisibility>Dock</ServerTreeVisibility>
-  <ServerTreeWidth>200</ServerTreeWidth>
+  <ServerTreeWidth>250</ServerTreeWidth>
   <ShowConnectedGroup>False</ShowConnectedGroup>
   <ShowFavoritesGroup>False</ShowFavoritesGroup>
   <ShowRecentlyUsedGroup>False</ShowRecentlyUsedGroup>
