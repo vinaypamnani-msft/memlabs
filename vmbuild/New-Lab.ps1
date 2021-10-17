@@ -94,6 +94,10 @@ $VM_Create = {
     $forceNew = $using:ForceNew
     $createVM = $using:CreateVM
 
+    # Change log location
+    $domainName = $using:domainName
+    $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainName.log"
+
     # VM Network Switch
     $isInternet = ($currentItem.role -eq "InternetClient") -or ($currentItem.role -eq "AADClient")
     if ($isInternet) {
@@ -615,6 +619,11 @@ try {
         Write-Host
         return
     }
+
+    # Change log location
+    $domainName = $deployConfig.vmOptions.domainName
+    Write-Log "Starting deployment. Review VMBuild.$domainName.log"
+    $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainName.log"
 
     # Download required files
     $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
