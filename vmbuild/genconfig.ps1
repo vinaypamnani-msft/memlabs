@@ -409,7 +409,7 @@ function Select-DeleteDomain {
                 continue
             }
             else {
-                & "$($PSScriptRoot)\Remove-Lab.ps1" -VmName $response
+                Remove-VirtualMachine -VmName $response
                 Get-List -type VM -ResetCache | Out-Null
                 continue
             }

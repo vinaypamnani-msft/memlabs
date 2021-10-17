@@ -1549,6 +1549,7 @@ function Set-SupportedOptions {
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
 . $PSScriptRoot\common\Common.RdcMan.ps1
+. $PSScriptRoot\common\Common.Remove.ps1
 
 ############################
 ### Common Object        ###
