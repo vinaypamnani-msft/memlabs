@@ -67,6 +67,23 @@ function Save-RdcManSettignsFile {
     $itemTemplate = $FilesToOpenFromTemplate.SelectNodes('//item') | Select-Object -First 1
 
     $FilesToOpen = $settings.FilesToOpen
+    Write-Host "Files to Open = $FilesToOpen"
+    if ($FilesToOpen -is [string]) {
+        Write-Host "Files to Open = String"
+    }
+    if (($FilesToOpen -is [string] -or $null -eq $FilesToOpen) ) {
+        Write-Host "Copying FilesToOpen from template"
+        if ($null -ne $FilesToOpen) {
+            $FilesToOpen = $settings.SelectSingleNode('FilesToOpen')
+            $settings.RemoveChild($FilesToOpen)
+        }
+        $newFiles = $FilesToOpenFromTemplate.Clone()
+        $FilesToOpen = $file.ImportNode($newFiles, $true)
+        $settings.AppendChild($FilesToOpen)
+        $existingIsPresent = $false
+
+    }
+
     if (-not $existingIsPresent) {
         #This is the template.. Fix it up
         $item = $FilesToOpen.SelectNodes('//item') | Select-Object -First 1
@@ -74,8 +91,8 @@ function Save-RdcManSettignsFile {
         $settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName = $env:Username
         $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain = $env:ComputerName
         $settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName = ($($env:ComputerName) + "\" + $($env:Username))
-
     }
+
 
     $found = $false
     foreach ($filexml in $FilesToOpen.SelectNodes('//item')) {
@@ -86,9 +103,11 @@ function Save-RdcManSettignsFile {
         }
     }
     if (-not $found) {
+        Write-Host "Saving $existingfile"
         $itemTemplate.InnerText = $rdcmanfile
         $clonedNode = $file.ImportNode($itemTemplate, $true)
         $FilesToOpen.AppendChild($clonedNode)
+        $FilesToOpen | out-host
         Get-Process -Name rdcman -ea Ignore | Stop-Process
         Start-Sleep 1
         $file.Save($existingfile)
@@ -290,15 +309,33 @@ function New-RDCManFileFromHyperV {
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
+            if ($vm.Role -eq "DomainMember" -and $null -eq $vm.SqlVersion) {
+                $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+            }
             $comment = $c | ConvertTo-Json
 
             $name = $($vm.VmName)
-            $displayName = $($vm.VmName)
+            $rolename = ""
+            switch ($vm.Role) {
+                "DomainMember" { if ($null -eq $vm.SqlVersion) { $rolename = "[AD] " } }
+                "InternetClient" { $rolename = "[Internet] " }
+                "AADClient" { $rolename = "[AAD] " }
+                "WorkgroupMember" { $rolename = "[WG] " }
+                Default {}
+            }
+            $displayName = $rolename + $($vm.VmName)
+            if ($vm.SiteCode) {
+                $displayName += " ($($vm.SiteCode)"
+                if ($vm.ParentSiteCode){
+                    $displayName += "->$($vm.ParentSiteCode)"
+                }
+                $displayName += ")"
+            }
             if ($vm.Role -eq "AADClient" -or $vm.Role -eq "InternetClient") {
                 if (-not [string]::IsNullOrWhiteSpace($vm.LastKnownIP)) {
                     $name = $vm.LastKnownIP
                 }
-                else{
+                else {
                     $displayName = $displayName + "(Missing IP)"
                 }
             }
@@ -306,7 +343,29 @@ function New-RDCManFileFromHyperV {
                 $shouldSave = $true
             }
         }
-
+        $roles = $vmListFull | Select-Object -ExpandProperty role
+        $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | Select-Object -First 1
+        $ruleToClone = $SmartGroupToClone.ruleGroup.rule
+        $clonedSG = $SmartGroupToClone.clone()
+        if ($roles -contains "InternetClient") {
+            $clonedSG = $SmartGroupToClone.clone()
+            $clonedSG.properties.name = "Members - Internet"
+            $clonedSG.ruleGroup.rule.value = "InternetClient"
+            #    $findgroup.AppendChild($clonedSG)
+        }
+        if ($roles -contains "AADClient") {
+            Write-Host "Adding SmartGroup AAD Clients"
+            $clonedSG = $SmartGroupToClone.clone()
+            $clonedSG.properties.name = "Members - AAD"
+            $clonedSG.ruleGroup.rule.value = "AADClient"
+            #    $findgroup.AppendChild($clonedSG)
+        }
+        if ($roles -contains "WorkgroupMember") {
+            $clonedSG = $SmartGroupToClone.clone()
+            $clonedSG.properties.name = "Members - Workgroup"
+            $clonedSG.ruleGroup.rule.value = "WorkgroupMember"
+            #    $findgroup.AppendChild($clonedSG)
+        }
         # Add new group
         [void]$file.AppendChild($findgroup)
 

@@ -98,7 +98,7 @@
   <DimNodesWhenInactive>False</DimNodesWhenInactive>
   <EnablePanning>False</EnablePanning>
   <FilesToOpen>
-    <item>C:\Users\labadmin\Desktop\memlabs.rdg</item>
+    <item>TEMPLATE</item>
   </FilesToOpen>
   <FocusOnClick>False</FocusOnClick>
   <FullScreenWindowIsTopMost>False</FullScreenWindowIsTopMost>

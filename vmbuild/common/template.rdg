@@ -56,18 +56,28 @@
       <smartGroup>
         <properties>
           <expanded>True</expanded>
-          <name>DomainMembers</name>
+          <name>Members</name>
         </properties>
-        <ruleGroup operator="All">
+        <ruleGroup operator="Any">
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
-            <value>"DomainMember"</value>
+            <value>"PlainMemberServer"</value>
           </rule>
           <rule>
             <property>Comment</property>
-            <operator>DoesNotMatch</operator>
-            <value>"sqlVersion"</value>
+            <operator>Matches</operator>
+            <value>"WorkgroupMember"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"AADClient"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"InternetClient"</value>
           </rule>
         </ruleGroup>
       </smartGroup>
