@@ -1223,7 +1223,7 @@ function Get-VmSession {
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
         if ($ps.Availability -eq "Available") {
-            Write-Log "Get-VmSession: $VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
+            # Write-Log "Get-VmSession: $VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
             return $ps
         }
     }
@@ -1244,6 +1244,9 @@ function Get-VmSession {
                 return $null
             }
         }
+        else {
+            return $null
+        }
     }
 
     # Cache & return session
@@ -1262,8 +1265,11 @@ function Get-StorageConfig {
 
     try {
 
-        # Disable Progress UI
+        # Disable Progress and Verbose
+        $pp = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'
+        $vp = $VerbosePreference
+        $VerbosePreference = 'SilentlyContinue'
 
         # Get storage config
         $config = Get-Content -Path $configPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -1318,7 +1324,8 @@ function Get-StorageConfig {
         Write-Host $_.ScriptStackTrace | Out-Host
     }
     finally {
-        $ProgressPreference = 'Continue'
+        $ProgressPreference = $pp
+        $VerbosePreference = $vp
     }
 }
 
