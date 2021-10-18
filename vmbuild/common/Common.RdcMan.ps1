@@ -346,6 +346,7 @@ function New-RDCManFileFromHyperV {
                     $displayName = $displayName + "(Missing IP)"
                 }
             }
+            $ForceOverwrite = $true
             if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite) -eq $True) {
                 $shouldSave = $true
             }
@@ -442,7 +443,19 @@ function Add-RDCManServerToGroup {
         [bool]$ForceOverwrite
     )
 
-    $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName } | Select-Object -First 1
+
+    if ($ForceOverwrite) {
+        #Delete Old Records and let them be regenerated
+
+        $findservers = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName}
+
+        foreach ($item in $findservers) {
+            Write-Log ("Removing $($item.properties.displayName)")
+            $findGroup.group.RemoveChild($item)
+        }
+    }
+
+    $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName} | Select-Object -First 1
     if ($null -eq $findserver) {
         Write-Log "Add-RDCManServerToGroup: Added $displayName to RDG Group" -LogOnly
         $subgroup = $groupFromTemplate.group
@@ -456,19 +469,6 @@ function Add-RDCManServerToGroup {
         return $True
     }
     else {
-        if ($ForceOverwrite) {
-            $findGroup.group.RemoveChild($findServer)
-            Write-Log "Add-RDCManServerToGroup: Deleted and re-Added $displayName to RDG Group" -LogOnly
-            $subgroup = $groupFromTemplate.group
-            $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
-            $newserver = $server.clone()
-            $newserver.properties.name = $serverName
-            $newserver.properties.displayName = $displayName
-            $newserver.properties.comment = $comment
-            $clonedNode = $existing.ImportNode($newserver, $true)
-            $findgroup.group.AppendChild($clonedNode)
-            return $True
-        }
         Write-Log "Add-RDCManServerToGroup: $serverName already exists in group. Skipped" -LogOnly
         return $False
     }
