@@ -1548,9 +1548,9 @@ function Set-SupportedOptions {
         "tech-preview"
     )
 
-    $operatingSystems = $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" }
+    $operatingSystems = $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" } | Sort-Object
 
-    $sqlVersions = $Common.AzureFileList.ISO.id | Select-Object -Unique
+    $sqlVersions = $Common.AzureFileList.ISO.id | Select-Object -Unique | Sort-Object
 
     $supported = [PSCustomObject]@{
         Roles            = $roles

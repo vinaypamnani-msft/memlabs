@@ -99,11 +99,19 @@ function Write-Option {
     }
     write-host
 }
+
 function Select-ConfigMenu {
     while ($true) {
-        $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration";
-            "4" = "Load saved config from File"; "R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow";
-        }
+        $customOptions = [ordered]@{ "1" = "Create New Domain"}
+        $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
+        $customOptions+= [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]"; }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Config Files ($configDir)"; "3" = "Load Sample Configuration"; "4" = "Load saved config from File";"*B3" = ""; }
+        $vmsRunning = (Get-List -Type VM | Where-Object {$_.State -eq "Running"} | Measure-Object).Count
+        $vmsTotal = (Get-List -Type VM | Measure-Object).Count
+        $os = Get-Ciminstance Win32_OperatingSystem| Select-Object @{Name = "FreeGB";Expression = {[math]::Round($_.FreePhysicalMemory/1mb,2)}}, @{Name = "TotalGB";Expression = {[int]($_.TotalVisibleMemorySize/1mb)}}
+        $disk = Get-Volume -DriveLetter E
+        $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($os.FreeGB)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),2))GB/$([math]::Round($($disk.Size/1GB),2))GB] [VMs Running: $vmsRunning/$vmsTotal]"; }
+        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow"}
 
         $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" }).Count
 
@@ -204,9 +212,13 @@ function select-OptimizeDomain {
         #Get-VHD -VMId $vm.VmId | Optimize-VHD -Mode Full
         foreach ($hd in Get-VHD -VMId $vm.VmId) {
             #    Mount-VHD -Path $hd.Path
-            Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction Stop
-            Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
-            Dismount-VHD -Path $hd.Path
+            try {
+                Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction Stop
+                Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
+            }
+            finally {
+                Dismount-VHD -Path $hd.Path
+            }
         }
     }
 
@@ -460,7 +472,7 @@ function get-VMSummary {
     $numDPMP = ($vms | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $numPri = ($vms | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $numCas = ($vms | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-    $numMember = ($vms | Where-Object { $_Role -eq "WorkgroupMember" -or $_.Role -eq "AADClient" -or $_Role -eq "InternetClient" -or ($_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion) } | Measure-Object).Count
+    $numMember = ($vms | Where-Object { $_.Role -eq "WorkgroupMember" -or $_.Role -eq "AADClient" -or $_.Role -eq "InternetClient" -or ($_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion) } | Measure-Object).Count
     $numSQL = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
     $RoleList = ""
     if ($numDCs -gt 0 ) {
@@ -479,10 +491,13 @@ function get-VMSummary {
         $RoleList += "[$numSQL SQL]"
     }
     if ($numMember -gt 0 ) {
-        $RoleList += "[$numMember Other]"
+        $RoleList += "[$numMember Member]"
     }
     $num = "[$numVMs VM(s)]".PadRight(21)
     $Output = "$num $RoleList"
+    if ($numVMs -lt 4) {
+        $Output +=" {$($vms | Select-Object -ExpandProperty vmName)}"
+    }
     return $Output
 }
 
@@ -1056,6 +1071,9 @@ function Select-OSForNew {
         $OSList = $Common.Supported.OperatingSystems | Where-Object { $_ -like "*Server*" }
     }
 
+    if ($Role -eq "InternetClient"){
+        $defaultValue = "Windows 10 Latest (64-bit)"
+    }
     if ($Role -eq "AADClient") {
         $OSList = $Common.Supported.OperatingSystems | Where-Object { -not ( $_ -like "*Server*" ) }
         $defaultValue = "Windows 10 Latest (64-bit)"
@@ -1250,14 +1268,17 @@ function Get-Menu {
     }
 
     if ($null -ne $additionalOptions) {
-        $additionalOptions.keys | ForEach-Object {
-
+        foreach ($item in $additionalOptions.keys) {
+            $value = $additionalOptions."$($item)"
+            if ($item.StartsWith("*")){
+                write-host $value
+                continue
+            }
             $color1 = "DarkGreen"
             $color2 = "Green"
 
-            $value = $additionalOptions."$($_)"
             #Write-Host -ForegroundColor DarkGreen [$_] $value
-            if (-not [String]::IsNullOrWhiteSpace($_)) {
+            if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $value -split "%"
 
                 if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
@@ -1266,7 +1287,7 @@ function Get-Menu {
                 if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
                     $color2 = $TextValue[2]
                 }
-                Write-Option $_ $TextValue[0] -color $color1 -Color2 $color2
+                Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
             }
         }
     }

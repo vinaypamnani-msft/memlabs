@@ -67,12 +67,9 @@ function Save-RdcManSettignsFile {
     $itemTemplate = $FilesToOpenFromTemplate.SelectNodes('//item') | Select-Object -First 1
 
     $FilesToOpen = $settings.FilesToOpen
-    Write-Host "Files to Open = $FilesToOpen"
-    if ($FilesToOpen -is [string]) {
-        Write-Host "Files to Open = String"
-    }
+
     if (($FilesToOpen -is [string] -or $null -eq $FilesToOpen) ) {
-        Write-Host "Copying FilesToOpen from template"
+        Write-Verbose "[Save-RdcManSettignsFile] Copying FilesToOpen from template, since it was missing in existing file"
         if ($null -ne $FilesToOpen) {
             $FilesToOpen = $settings.SelectSingleNode('FilesToOpen')
             $settings.RemoveChild($FilesToOpen)
@@ -96,14 +93,13 @@ function Save-RdcManSettignsFile {
 
     $found = $false
     foreach ($filexml in $FilesToOpen.SelectNodes('//item')) {
-        write-host "FileXml = $($filexml.InnerText)"
         if ($filexml.InnerText -eq $rdcmanfile) {
             $found = $true
             break
         }
     }
     if (-not $found) {
-        Write-Host "Saving $existingfile"
+        Write-Host "Stopping RDCMan and Saving $existingfile"
         $itemTemplate.InnerText = $rdcmanfile
         $clonedNode = $file.ImportNode($itemTemplate, $true)
         $FilesToOpen.AppendChild($clonedNode)
@@ -113,7 +109,7 @@ function Save-RdcManSettignsFile {
         $file.Save($existingfile)
     }
     else {
-        Write-Host "Entry already in settings. Not Saving"
+        Write-Verbose "Entry already in settings. Not Saving"
     }
 }
 
@@ -253,7 +249,7 @@ function New-RDCManFileFromHyperV {
     # Gets the blank template, or returns the existing rdg xml if available.
     $existing = $template
     if (Test-Path $rdcmanfile) {
-        Write-Host "Loading config from $rdcmanfile"
+        Write-Verbose "[New-RDCManFileFromHyperV] Loading config from $rdcmanfile"
         [xml]$existing = Get-Content -Path $rdcmanfile
     }
 
@@ -279,7 +275,7 @@ function New-RDCManFileFromHyperV {
     Install-RDCman
 
     foreach ($domain in (Get-List -Type UniqueDomain -ResetCache)) {
-        Write-Host "Adding all machines from Domain $domain"
+        Write-Verbose "[New-RDCManFileFromHyperV] Adding all machines from Domain $domain"
         $findGroup = Get-RDCManGroupToModify $domain $group $findGroup $groupFromTemplate $existing
         if ($findGroup -eq $false -or $null -eq $findGroup) {
             Write-Log "New-RDCManFile: Failed to find group to modify" -Failure
@@ -385,7 +381,7 @@ function New-RDCManFileFromHyperV {
     $unknownVMs = @()
     $unknownVMs += get-list -type vm  | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
-        Write-Host "Adding Unknown VMs"
+        Write-Verbose "[New-RDCManFileFromHyperV] Adding Unknown VMs"
         $findGroup = $null
         $findGroup = Get-RDCManGroupToModify "UnknownVMs" $group $findGroup $groupFromTemplate $existing
         if ($findGroup -eq $false -or $null -eq $findGroup) {
@@ -396,9 +392,7 @@ function New-RDCManFileFromHyperV {
 
         $smartGroups = $null
         $smartGroups = $findGroup.SelectNodes('/smartGroup')
-        $findgroup | Out-Host
         foreach ($smartGroup in $smartGroups) {
-            $smartGroup.properties | out-host
             $findgroup.RemoveChild($smartGroup)
         }
 
