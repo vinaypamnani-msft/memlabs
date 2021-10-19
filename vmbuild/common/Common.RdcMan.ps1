@@ -92,7 +92,7 @@ function Save-RdcManSettignsFile {
     $FilesToOpenCount = 0
     if (-not ($FilesToOpen -is [string])) {
         foreach ($item in $FilesToOpen.SelectNodes('./item')) {
-            write-host "Inner: $($item.InnerText)"
+            #write-host "Inner: $($item.InnerText)"
             $FilesToOpenCount++
             if ($item.InnerText -eq $rdcmanfile) {
                 $found = $true
@@ -102,10 +102,10 @@ function Save-RdcManSettignsFile {
         }
     }
     #$itemTemplate = $FilesToOpenFromTemplate.item
-    write-host "item: $($FilesToOpenFromTemplate.Item)"
+    #write-host "item: $($FilesToOpenFromTemplate.Item)"
 
 
-    Write-Host "Count: $FilesToOpenCount"
+    #Write-Host "Count: $FilesToOpenCount"
     #FilesToOpen is blank
     if (($FilesToOpenCount -eq 0) ) {
         Write-Verbose "[Save-RdcManSettignsFile] Copying FilesToOpen from template, since it was missing in existing file"
@@ -118,12 +118,8 @@ function Save-RdcManSettignsFile {
     elseif (-not $found) {
         Write-Verbose ("Adding new entry")
         if ($itemTemplate) {
-            $file | out-host
             $clonedNode = $file.ImportNode($itemTemplate, $true)
-            $FilesToOpen | out-host
-            $clonedNode | out-host
             $FilesToOpen.AppendChild($clonedNode)
-            $FilesToOpen | out-host
             #$settings.AppendChild($FilesToOpen)
         }
         else {
