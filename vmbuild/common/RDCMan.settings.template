@@ -68,10 +68,16 @@
         <audioRedirection>Client</audioRedirection>
         <audioRedirectionQuality>Dynamic</audioRedirectionQuality>
         <audioCaptureRedirection>DoNotRecord</audioCaptureRedirection>
-        <keyboardHook>FullScreenClient</keyboardHook>
+        <keyboardHook>Remote</keyboardHook>
         <redirectClipboard>True</redirectClipboard>
-        <redirectDrives>False</redirectDrives>
-        <redirectDrivesList />
+        <redirectDrives>True</redirectDrives>
+        <redirectDrivesList>
+          <item>C:\</item>
+          <item>D:\</item>
+          <item>E:\</item>
+          <item>F:\</item>
+          <item>Z:\</item>
+        </redirectDrivesList>
         <redirectPrinters>False</redirectPrinters>
         <redirectPorts>False</redirectPorts>
         <redirectSmartCards>True</redirectSmartCards>
@@ -79,14 +85,14 @@
       </localResources>
       <displaySettings>
         <liveThumbnailUpdates>True</liveThumbnailUpdates>
-        <allowThumbnailSessionInteraction>False</allowThumbnailSessionInteraction>
+        <allowThumbnailSessionInteraction>True</allowThumbnailSessionInteraction>
         <showDisconnectedThumbnails>True</showDisconnectedThumbnails>
         <thumbnailScale>1</thumbnailScale>
-        <smartSizeDockedWindows>None</smartSizeDockedWindows>
-        <smartSizeUndockedWindows>None</smartSizeUndockedWindows>
+        <smartSizeDockedWindows>Scale</smartSizeDockedWindows>
+        <smartSizeUndockedWindows>Scale</smartSizeUndockedWindows>
       </displaySettings>
       <securitySettings>
-        <authentication>Warn</authentication>
+        <authentication>None</authentication>
       </securitySettings>
       <encryptionSettings>
         <encryptionMethod>LogonCredentials</encryptionMethod>
@@ -122,11 +128,11 @@
     <plugins />
   </PluginSettings>
   <ReconnectOnStartup>True</ReconnectOnStartup>
-  <ServerSortOrder>ByStatus</ServerSortOrder>
+  <ServerSortOrder>ByName</ServerSortOrder>
   <ServerTreeAutoHidePopUpDelay>0</ServerTreeAutoHidePopUpDelay>
   <ServerTreeLocation>Left</ServerTreeLocation>
   <ServerTreeVisibility>Dock</ServerTreeVisibility>
-  <ServerTreeWidth>250</ServerTreeWidth>
+  <ServerTreeWidth>263</ServerTreeWidth>
   <ShowConnectedGroup>False</ShowConnectedGroup>
   <ShowFavoritesGroup>False</ShowFavoritesGroup>
   <ShowRecentlyUsedGroup>False</ShowRecentlyUsedGroup>

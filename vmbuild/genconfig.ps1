@@ -111,12 +111,12 @@ function Select-ConfigMenu {
         $os = Get-Ciminstance Win32_OperatingSystem| Select-Object @{Name = "FreeGB";Expression = {[math]::Round($_.FreePhysicalMemory/1mb,0)}}, @{Name = "TotalGB";Expression = {[int]($_.TotalVisibleMemorySize/1mb)}}
         $disk = Get-Volume -DriveLetter E
         $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($os.FreeGB)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]"; }
-        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow"}
+        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow"; "P" = "Show Passwords"}
 
         $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" }).Count
 
         if ($pendingCount -gt 0 ) {
-            $customOptions += @{"P" = "Delete ($($pendingCount)) In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow" }
+            $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow" }
         }
         Write-Host
         Write-Host "---  Create Config"
@@ -133,8 +133,9 @@ function Select-ConfigMenu {
             "3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "4" { $SelectedConfig = Select-Config $configDir -NoMore }
             "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
-            "p" { Select-DeletePending }
+            "f" { Select-DeletePending }
             "d" { Select-DomainMenu }
+            "P" { Write-Host "Password for all accounts is: $($Common.LocalAdmin.GetNetworkCredential().Password)"}
             Default {}
         }
         if ($SelectedConfig) {
@@ -787,15 +788,21 @@ function Select-NewDomainConfig {
 
         if ($valid) {
             $valid = $false
+            $ValidDomainNames = Get-ValidDomainNames
             while ($valid -eq $false) {
                 $domain = $null
                 $customOptions = @{ "C" = "Custom Domain" }
-                $ValidDomainNames = Get-ValidDomainNames
+
                 while (-not $domain) {
                     $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions
                     if ($domain.ToLowerInvariant() -eq "c") {
                         $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
                     }
+                }
+                if ((get-list -Type UniqueDomain) -contains $domain.ToLowerInvariant()) {
+                    Write-Host
+                    Write-Host -ForegroundColor Red "Domain is already in use. Please use the Expand option to expand the domain"
+                    continue
                 }
                 $prefix = $($ValidDomainNames[$domain])
                 if ([String]::IsNullOrWhiteSpace($prefix)) {
@@ -2101,6 +2108,7 @@ function Add-NewVMForRole {
             else {
                 $virtualMachine.operatingSystem = $OperatingSystem
             }
+            $virtualMachine.Memory = "2GB"
         }
         "DPMP" {
             $virtualMachine.memory = "3GB"

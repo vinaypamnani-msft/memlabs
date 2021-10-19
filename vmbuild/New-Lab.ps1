@@ -822,14 +822,29 @@ try {
 
     $timer.Stop()
     Write-Host
-    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
+    $InstallCertScriptBlock = {
+        param ($vmName)
+        get-childitem 'Cert:\LocalMachine\Remote Desktop' | Where-Object {$_.Subject -like "*$vmName*"}
+        }
+    foreach ($vm in $deployConfig.virtualMachines){
+
+            $out = Invoke-VmCommand -vmname $($vm.vmName) -VmDomainName $($deployConfig.vmOptions.domainName) -ScriptBlock $InstallCertScriptBlock -ArgumentList $($vm.vmName)
+            foreach ($item in $out.ScriptBlockOutput){
+             write-host "Importing RDP Certificate $($item.Subject)"
+             $item | Export-Certificate -FilePath "temp.cer"
+             Import-Certificate ".\temp.cer" -CertStoreLocation Cert:\LocalMachine\Root
+             remove-item ".\temp.cer"
+             }
+    }
+
     if (Test-Path "C:\tools\rdcman.exe") {
         Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
         $roles = $deployConfig.virtualMachines | Select-Object -ExpandProperty Role
-        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient")) {
+        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient") -or ($roles -Contains "DomainMember") -or ($roles -Contains "WorkgroupMember")) {
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         }
     }
+    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
 }
 finally {
     # Ctrl + C brings us here :)

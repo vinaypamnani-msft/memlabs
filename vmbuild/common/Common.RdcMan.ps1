@@ -57,60 +57,85 @@ function Save-RdcManSettignsFile {
     write-host "Checking for $existingfile"
     if (Test-Path $existingfile) {
         [xml]$file = Get-Content -Path $existingfile
-        write-host "Found existing file at $existingfile"
+        write-verbose "Found existing file at $existingfile"
         $existingIsPresent = $true
+    }
+    else {
+        write-verbose "Using Template file at $templatefile"
     }
 
     $settings = $file.Settings
+    $FilesToOpen = $settings.SelectSingleNode('./FilesToOpen')
+
     $FilesToOpenFromTemplate = $template.Settings.FilesToOpen
 
-    $itemTemplate = $FilesToOpenFromTemplate.SelectNodes('//item') | Select-Object -First 1
+    $found = $false
 
-    $FilesToOpen = $settings.FilesToOpen
-
-    if (($FilesToOpen -is [string] -or $null -eq $FilesToOpen) ) {
-        Write-Verbose "[Save-RdcManSettignsFile] Copying FilesToOpen from template, since it was missing in existing file"
-        if ($null -ne $FilesToOpen) {
-            $FilesToOpen = $settings.SelectSingleNode('FilesToOpen')
-            $settings.RemoveChild($FilesToOpen)
-        }
-        $newFiles = $FilesToOpenFromTemplate.Clone()
-        $FilesToOpen = $file.ImportNode($newFiles, $true)
-        $settings.AppendChild($FilesToOpen)
-        $existingIsPresent = $false
-
-    }
-
-    if (-not $existingIsPresent) {
-        #This is the template.. Fix it up
-        $item = $FilesToOpen.SelectNodes('//item') | Select-Object -First 1
-        $FilesToOpen.RemoveChild($item)
+    #Always update the template so we can use it.
+    if ($FilesToOpenFromTemplate.Item -eq "TEMPLATE") {
+        $FilesToOpenFromTemplate.Item = $rdcmanfile
+        $itemTemplate = $template.Settings.FilesToOpen.SelectSingleNode('./item')
         $settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName = $env:Username
         $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain = $env:ComputerName
         $settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName = ($($env:ComputerName) + "\" + $($env:Username))
     }
+    $settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication = "None"
 
+    #FilesToOpen is missing!?
+    if ($null -eq $FilesToOpen) {
+        Write-Verbose "FilesToOpen is missing. Adding from Template"
+        $newFiles = $FilesToOpenFromTemplate.Clone()
+        $FilesToOpen = $file.ImportNode($newFiles, $true)
+        $settings.AppendChild($FilesToOpen)
+    }
 
-    $found = $false
-    foreach ($filexml in $FilesToOpen.SelectNodes('//item')) {
-        if ($filexml.InnerText -eq $rdcmanfile) {
-            $found = $true
-            break
+    $FilesToOpenCount = 0
+    if (-not ($FilesToOpen -is [string])) {
+        foreach ($item in $FilesToOpen.SelectNodes('./item')) {
+            write-host "Inner: $($item.InnerText)"
+            $FilesToOpenCount++
+            if ($item.InnerText -eq $rdcmanfile) {
+                $found = $true
+                Write-Verbose "Found existing entry for $rdcmanfile"
+                break
+            }
         }
     }
-    if (-not $found) {
-        Write-Host "Stopping RDCMan and Saving $existingfile"
-        $itemTemplate.InnerText = $rdcmanfile
-        $clonedNode = $file.ImportNode($itemTemplate, $true)
-        $FilesToOpen.AppendChild($clonedNode)
-        $FilesToOpen | out-host
-        Get-Process -Name rdcman -ea Ignore | Stop-Process
-        Start-Sleep 1
-        $file.Save($existingfile)
+    #$itemTemplate = $FilesToOpenFromTemplate.item
+    write-host "item: $($FilesToOpenFromTemplate.Item)"
+
+
+    Write-Host "Count: $FilesToOpenCount"
+    #FilesToOpen is blank
+    if (($FilesToOpenCount -eq 0) ) {
+        Write-Verbose "[Save-RdcManSettignsFile] Copying FilesToOpen from template, since it was missing in existing file"
+        $settings.RemoveChild($FilesToOpen)
+        $newFiles = $FilesToOpenFromTemplate.Clone()
+        $FilesToOpen = $file.ImportNode($newFiles, $true)
+
+        $settings.AppendChild($FilesToOpen)
     }
-    else {
-        Write-Verbose "Entry already in settings. Not Saving"
+    elseif (-not $found) {
+        Write-Verbose ("Adding new entry")
+        if ($itemTemplate) {
+            $file | out-host
+            $clonedNode = $file.ImportNode($itemTemplate, $true)
+            $FilesToOpen | out-host
+            $clonedNode | out-host
+            $FilesToOpen.AppendChild($clonedNode)
+            $FilesToOpen | out-host
+            #$settings.AppendChild($FilesToOpen)
+        }
+        else {
+            Write-Verbose "itemTemplate was null"
+        }
     }
+
+    Write-Host "Stopping RDCMan and Saving $existingfile"
+    Get-Process -Name rdcman -ea Ignore | Stop-Process
+    Start-Sleep 1
+    $file.Save($existingfile)
+
 }
 
 function New-RDCManFile {
@@ -447,15 +472,15 @@ function Add-RDCManServerToGroup {
     if ($ForceOverwrite) {
         #Delete Old Records and let them be regenerated
 
-        $findservers = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName}
+        $findservers = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName }
 
         foreach ($item in $findservers) {
-            Write-Log ("Removing $($item.properties.displayName)")
+            Write-Log ("Removing $($item.properties.displayName)") -LogOnly
             $findGroup.group.RemoveChild($item)
         }
     }
 
-    $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName} | Select-Object -First 1
+    $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName } | Select-Object -First 1
     if ($null -eq $findserver) {
         Write-Log "Add-RDCManServerToGroup: Added $displayName to RDG Group" -LogOnly
         $subgroup = $groupFromTemplate.group
