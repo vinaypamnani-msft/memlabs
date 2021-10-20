@@ -130,6 +130,13 @@ function Save-RdcManSettignsFile {
     Write-Host "Stopping RDCMan and Saving $existingfile"
     Get-Process -Name rdcman -ea Ignore | Stop-Process
     Start-Sleep 1
+
+    If (-not (test-path $existingfile)) {
+        $existingdir = Split-Path $existingfile
+        if (-not (test-path $existingdir)) {
+            New-Item -ItemType Directory -Force -Path $existingdir
+        }
+    }
     $file.Save($existingfile)
 
 }
