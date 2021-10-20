@@ -309,7 +309,7 @@ function Test-ValidVmSupported {
 
     # vmName characters
     if ($vm.vmName.Length -gt 15) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Warning
     }
 
     #prefix + vmName combined name validation
