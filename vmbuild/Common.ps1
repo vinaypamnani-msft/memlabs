@@ -1288,7 +1288,7 @@ function Get-StorageConfig {
         }
 
         # Update file list
-        if ($updateList -and ((Test-Path $fileListPath) -and -not $InJob.IsPresent)) {
+        if (($updateList -and -not $InJob.IsPresent) -or -not (Test-Path $fileListPath)) {
 
             Write-Log "Updating fileList from azure storage" -LogOnly
 
