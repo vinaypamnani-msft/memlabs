@@ -317,8 +317,14 @@ $VM_Create = {
         $deployConfig = $using:deployConfig
 
         # Set current role
-        $dscRole = if ($currentItem.role -eq "DPMP") { "DomainMember" } else { $currentItem.role }
-        $dscRole = if ($currentItem.role -eq "InternetClient" -or $currentItem.role -eq "AADClient") { "WorkgroupMember" } else { $currentItem.role }
+
+        switch (($currentItem.role)) {
+            "DPMP" { $dscRole = "DomainMember" }
+            "AADClient" { $dscRole = "WorkgroupMember" }
+            "InternetClient" { $dscRole = "WorkgroupMember" }
+            Default { $dscRole = $currentItem.role }
+        }
+
 
         # Define DSC variables
         $dscConfigScript = "C:\staging\DSC\$cmDscFolder\$($dscRole)Configuration.ps1"
@@ -824,17 +830,17 @@ try {
     Write-Host
     $InstallCertScriptBlock = {
         param ($vmName)
-        get-childitem 'Cert:\LocalMachine\Remote Desktop' | Where-Object {$_.Subject -like "*$vmName*"}
-        }
-    foreach ($vm in $deployConfig.virtualMachines){
+        get-childitem 'Cert:\LocalMachine\Remote Desktop' | Where-Object { $_.Subject -like "*$vmName*" }
+    }
+    foreach ($vm in $deployConfig.virtualMachines) {
 
-            $out = Invoke-VmCommand -vmname $($vm.vmName) -VmDomainName $($deployConfig.vmOptions.domainName) -ScriptBlock $InstallCertScriptBlock -ArgumentList $($vm.vmName)
-            foreach ($item in $out.ScriptBlockOutput){
-             write-host "Importing RDP Certificate $($item.Subject)"
-             $item | Export-Certificate -FilePath "temp.cer"
-             Import-Certificate ".\temp.cer" -CertStoreLocation Cert:\LocalMachine\Root
-             remove-item ".\temp.cer"
-             }
+        $out = Invoke-VmCommand -vmname $($vm.vmName) -VmDomainName $($deployConfig.vmOptions.domainName) -ScriptBlock $InstallCertScriptBlock -ArgumentList $($vm.vmName)
+        foreach ($item in $out.ScriptBlockOutput) {
+            write-host "Importing RDP Certificate $($item.Subject)"
+            $item | Export-Certificate -FilePath "temp.cer"
+            Import-Certificate ".\temp.cer" -CertStoreLocation Cert:\LocalMachine\Root
+            remove-item ".\temp.cer"
+        }
     }
 
     if (Test-Path "C:\tools\rdcman.exe") {
