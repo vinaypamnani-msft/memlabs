@@ -1937,7 +1937,6 @@ function Select-Options {
                 }
                 "domainName" {
                     $domain = select-NewDomainName
-                    write-host "1887 - $domain"
                     $property.domainName = $domain
                     $property.prefix = get-PrefixForDomain -Domain $domain
                     continue MainLoop
