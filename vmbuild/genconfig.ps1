@@ -1139,7 +1139,19 @@ function Select-RolesForExisting {
 }
 
 function Select-RolesForNew {
-    $existingRoles = $Common.Supported.Roles
+    [System.Collections.ArrayList]$existingRoles = [System.Collections.ArrayList]($Common.Supported.Roles)
+    if ($global:config.VirtualMachines.role -contains "DC"){
+        $existingRoles.Remove("DC")
+    }
+    if ($global:config.VirtualMachines.role -contains "Primary"){
+        $existingRoles.Remove("Primary")
+    }
+    if ($global:config.VirtualMachines.role -contains "CAS"){
+        $existingRoles.Remove("CAS")
+    }
+    if ($global:config.VirtualMachines.role -contains "DPMP"){
+        $existingRoles.Remove("DPMP")
+    }
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
     return $role
 }
