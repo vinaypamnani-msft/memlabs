@@ -785,7 +785,10 @@ function get-PrefixForDomain {
     $ValidDomainNames = Get-ValidDomainNames
     $prefix = $($ValidDomainNames[$domain])
     if ([String]::IsNullOrWhiteSpace($prefix)) {
-        $prefix = $domain.ToUpper().SubString(0, 3) + "-"
+        $prefix = ($domain.ToUpper().SubString(0, 3) + "-") -replace "\.", ""
+    }
+    if ([string]::IsNullOrWhiteSpace($prefix)) {
+        $prefix = "NULL-"
     }
     return $prefix
 
@@ -804,9 +807,12 @@ function select-NewDomainName {
             $customOptions = @{ "C" = "Custom Domain" }
 
             while (-not $domain) {
-                $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions -CurrentValue ((Get-ValidDomainNames).Keys | sort-object {$_.Length} | Select-Object -first 1)
+                $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions -CurrentValue ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1)
                 if ($domain.ToLowerInvariant() -eq "c") {
                     $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
+                }
+                if ($domain.Length -lt 3) {
+                    $domain = $null
                 }
             }
             if ((get-list -Type UniqueDomain) -contains $domain.ToLowerInvariant()) {
@@ -874,7 +880,9 @@ function Select-NewDomainConfig {
             $valid = $false
             while ($valid -eq $false) {
                 $domain = select-NewDomainName -ConfigToCheck $newConfig
-                $prefix = get-PrefixForDomain -Domain $domain
+                if (-not $prefix) {
+                    $prefix = get-PrefixForDomain -Domain $domain
+                }
                 Write-Verbose "Prefix = $prefix"
                 $newConfig.vmOptions.domainName = $domain
                 $newConfig.vmOptions.prefix = $prefix
@@ -1162,14 +1170,14 @@ function Select-OSForNew {
     return $role
 }
 
-function Select-Subnet{
+function Select-Subnet {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [object] $configToCheck = $global:config
     )
 
-    if ($configToCheck.virtualMachines.role -contains "DC"){
+    if ($configToCheck.virtualMachines.role -contains "DC") {
         $subnetlist = Get-ValidSubnets
         $customOptions = @{ "C" = "Custom Subnet" }
         $network = $null
@@ -1206,11 +1214,10 @@ function Select-ExistingSubnets {
     $valid = $false
 
     if ($ConfigToCheck) {
-        if ($configToCheck.virtualMachines.role -contains "Primary")
-        {
+        if ($configToCheck.virtualMachines.role -contains "Primary") {
             $Role = "Primary"
         }
-        if ($configToCheck.virtualMachines.role -contains "CAS"){
+        if ($configToCheck.virtualMachines.role -contains "CAS") {
             $Role = "CAS"
         }
     }
@@ -1314,8 +1321,8 @@ function Generate-ExistingConfig {
 
     Write-Verbose "Generating $Domain $Subnet $role $ParentSiteCode"
 
-    $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
-
+    #    $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
+    $prefix = get-PrefixForDomain -Domain $Domain
     if ([string]::IsNullOrWhiteSpace($prefix)) {
         $prefix = "NULL-"
     }
