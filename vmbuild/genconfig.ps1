@@ -807,7 +807,7 @@ function select-NewDomainName {
             $customOptions = @{ "C" = "Custom Domain" }
 
             while (-not $domain) {
-                $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions -CurrentValue ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1)
+                $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions -CurrentValue ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1) -Test:$false
                 if ($domain.ToLowerInvariant() -eq "c") {
                     $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
                 }
@@ -833,7 +833,7 @@ function select-NewDomainName {
         }
         $domain = $null
         while (-not $domain) {
-            $domain = Get-Menu -Prompt "Select Domain" -OptionArray $existingDomains -CurrentValue $ConfigToCheck.vmoptions.domainName
+            $domain = Get-Menu -Prompt "Select Domain" -OptionArray $existingDomains -CurrentValue $ConfigToCheck.vmoptions.domainName -test:$false
         }
         return $domain
     }
@@ -2326,6 +2326,10 @@ function Select-VirtualMachines {
 
 
                 $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os
+                if ($role -eq "DC"){
+                    $Global:Config.vmOptions.domainName = select-NewDomainName
+                    $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
+                }
                 Get-TestResult -SuccessOnError | out-null
                 continue
             }
