@@ -1140,16 +1140,16 @@ function Select-RolesForExisting {
 
 function Select-RolesForNew {
     [System.Collections.ArrayList]$existingRoles = [System.Collections.ArrayList]($Common.Supported.Roles)
-    if ($global:config.VirtualMachines.role -contains "DC"){
+    if ($global:config.VirtualMachines.role -contains "DC") {
         $existingRoles.Remove("DC")
     }
-    if ($global:config.VirtualMachines.role -contains "Primary"){
+    if ($global:config.VirtualMachines.role -contains "Primary") {
         $existingRoles.Remove("Primary")
     }
-    if ($global:config.VirtualMachines.role -contains "CAS"){
+    if ($global:config.VirtualMachines.role -contains "CAS") {
         $existingRoles.Remove("CAS")
     }
-    if ($global:config.VirtualMachines.role -contains "DPMP"){
+    if ($global:config.VirtualMachines.role -contains "DPMP") {
         $existingRoles.Remove("DPMP")
     }
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
@@ -1849,6 +1849,94 @@ function Get-AdditionalValidations {
     }
 }
 
+
+function Sort-Properties {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Property to Sort")]
+        [object] $property
+    )
+
+    $Sorted = @()
+    $members = $property | Get-Member -MemberType NoteProperty
+
+    if ($members.Name -contains "domainName") {
+        $sorted += "domainName"
+    }
+    if ($members.Name -contains "prefix") {
+        $sorted += "prefix"
+    }
+    if ($members.Name -contains "network") {
+        $sorted += "network"
+    }
+    if ($members.Name -contains "adminName") {
+        $sorted += "adminName"
+    }
+    if ($members.Name -contains "basePath") {
+        $sorted += "basePath"
+    }
+
+    if ($members.Name -contains "vmName") {
+        $sorted += "vmName"
+    }
+    if ($members.Name -contains "role") {
+        $sorted += "role"
+    }
+    if ($members.Name -contains "memory") {
+        $sorted += "memory"
+    }
+    if ($members.Name -contains "virtualProcs") {
+        $sorted += "virtualProcs"
+    }
+    if ($members.Name -contains "operatingSystem") {
+        $sorted += "operatingSystem"
+    }
+    if ($members.Name -contains "sqlVersion") {
+        $sorted += "sqlVersion"
+    }
+    if ($members.Name -contains "sqlInstanceName") {
+        $sorted += "sqlInstanceName"
+    }
+    if ($members.Name -contains "sqlInstanceDir") {
+        $sorted += "sqlInstanceDir"
+    }
+    if ($members.Name -contains "cmInstallDir") {
+        $sorted += "cmInstallDir"
+    }
+    if ($members.Name -contains "siteCode") {
+        $sorted += "siteCode"
+    }
+    if ($members.Name -contains "parentSiteCode") {
+        $sorted += "parentSiteCode"
+    }
+    if ($members.Name -contains "additionalDisks") {
+        $sorted += "additionalDisks"
+    }
+
+    switch ($members.Name) {
+        "vmName" {  }
+        "role" {  }
+        "memory" { }
+        "virtualProcs" { }
+        "operatingSystem" {  }
+        "siteCode" { }
+        "parentSiteCode" { }
+        "sqlVersion" { }
+        "sqlInstanceName" {  }
+        "sqlInstanceDir" { }
+        "additionalDisks" { }
+        "cmInstallDir" { }
+        "domainName" { }
+        "prefix" { }
+        "network" { }
+        "adminName" { }
+        "basePath" { }
+
+        Default { $sorted += $_ }
+    }
+    return $sorted
+}
+
 # Displays a Menu based on a property, offers options in [1], [2],[3] format
 # With additional options passed in via additionalOptions
 function Select-Options {
@@ -1900,21 +1988,38 @@ function Select-Options {
         }
 
         # Get the Property Names and Values.. Present as Options.
-        $property | Get-Member -MemberType NoteProperty | ForEach-Object {
+        foreach ($item in (Sort-Properties $property)) {
             $i = $i + 1
-            $value = $property."$($_.Name)"
+            $value = $property."$($item)"
             #$padding = 27 - ($i.ToString().Length)
             $padding = 26
-            Write-Option $i "$($($_.Name).PadRight($padding," "")) = $value"
+            Write-Option $i "$($($item).PadRight($padding," "")) = $value"
         }
 
         if ($null -ne $additionalOptions) {
-            $additionalOptions.keys | ForEach-Object {
-                $value = $additionalOptions."$($_)"
-                Write-Option $_ $value -color DarkGreen -Color2 Green
+            foreach ($item in $additionalOptions.keys) {
+                $value = $additionalOptions."$($item)"
+                if ($item.StartsWith("*")) {
+                    write-host $value
+                    continue
+                }
+                $color1 = "DarkGreen"
+                $color2 = "Green"
+
+                #Write-Host -ForegroundColor DarkGreen [$_] $value
+                if (-not [String]::IsNullOrWhiteSpace($item)) {
+                    $TextValue = $value -split "%"
+
+                    if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
+                        $color1 = $TextValue[1]
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
+                        $color2 = $TextValue[2]
+                    }
+                    Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
+                }
             }
         }
-
         $response = get-ValidResponse $prompt $i $null $additionalOptions
         if ([String]::IsNullOrWhiteSpace($response)) {
             return
@@ -1935,7 +2040,7 @@ function Select-Options {
         }
         # We got the [1] Number pressed. Lets match that up to the actual value.
         $i = 0
-        foreach ($item in ($property | Get-Member -MemberType NoteProperty)) {
+        foreach ($item in (Sort-Properties $property)) {
 
             $i = $i + 1
 
@@ -1943,8 +2048,8 @@ function Select-Options {
                 continue
             }
 
-            $value = $property."$($item.Name)"
-            $name = $($item.Name)
+            $value = $property."$($item)"
+            $name = $($item)
 
             switch ($name) {
                 "operatingSystem" {
@@ -2338,7 +2443,7 @@ function Select-VirtualMachines {
 
 
                 $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os
-                if ($role -eq "DC"){
+                if ($role -eq "DC") {
                     $Global:Config.vmOptions.domainName = select-NewDomainName
                     $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
                 }
@@ -2353,25 +2458,27 @@ function Select-VirtualMachines {
                         $newValue = "Start"
                         while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                             Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                            $customOptions = @{ "A" = "Add Additional Disk" }
+                            $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks"; "A" = "Add Additional Disk" }
                             if ($null -eq $virtualMachine.additionalDisks) {
                             }
                             else {
-                                $customOptions["R"] = "Remove Last Additional Disk"
+                                $customOptions += [ordered]@{"R" = "Remove Last Additional Disk" }
                             }
                             if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
-                                $customOptions["S"] = "Configure SQL (Set local or remote SQL)"
+                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr"; "S" = "Configure SQL (Set local or remote SQL)" }
                             }
                             else {
-                                if ($null -eq $virtualMachine.sqlVersion) {
-                                    $customOptions["S"] = "Add SQL"
-                                }
-                                else {
-                                    $customOptions["X"] = "Remove SQL"
+                                if ($virtualMachine.OperatingSystem -contains "Server") {
+                                    if ($null -eq $virtualMachine.sqlVersion) {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL"; "S" = "Add SQL" }
+                                    }
+                                    else {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL"; "X" = "Remove SQL" }
+                                    }
                                 }
                             }
 
-                            $customOptions["D"] = "Delete this VM"
+                            $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management"; "D" = "Delete this VM%Red%Red" }
                             $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $i -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
                             if (([string]::IsNullOrEmpty($newValue))) {
                                 break VMLoop
