@@ -625,10 +625,10 @@ function Get-NewMachineName {
             $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "*Server*" } | Measure-Object).count
         }
         else {
-            if (($global:config.vmOptions.prefix.length) -gt 4){
-            $RoleName = "Cli"
+            if (($global:config.vmOptions.prefix.length) -gt 4) {
+                $RoleName = "Cli"
             }
-            else{
+            else {
                 $RoleName = "Client"
             }
             $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { -not ($_.deployedOS -like "*Server*") } | Measure-Object).Count
@@ -766,6 +766,75 @@ function Get-ValidDomainNames {
     return $ValidDomainNames
 }
 
+
+function get-PrefixForDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [String] $Domain
+    )
+
+    $existingDomains = get-list -Type UniqueDomain
+    if ($existingDomains -contains $Domain) {
+        $existingPrefix = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" }).Prefix
+
+        if (-not [string]::IsNullOrWhiteSpace($existingPrefix)) {
+            return $existingPrefix
+        }
+    }
+    $ValidDomainNames = Get-ValidDomainNames
+    $prefix = $($ValidDomainNames[$domain])
+    if ([String]::IsNullOrWhiteSpace($prefix)) {
+        $prefix = $domain.ToUpper().SubString(0, 3) + "-"
+    }
+    return $prefix
+
+}
+function select-NewDomainName {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
+        [Object] $ConfigToCheck = $global:config
+    )
+    if ($ConfigToCheck.virtualMachines.role -contains "DC") {
+        while ($true) {
+            $ValidDomainNames = Get-ValidDomainNames
+
+            $domain = $null
+            $customOptions = @{ "C" = "Custom Domain" }
+
+            while (-not $domain) {
+                $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions -CurrentValue ((Get-ValidDomainNames).Keys | sort-object {$_.Length} | Select-Object -first 1)
+                if ($domain.ToLowerInvariant() -eq "c") {
+                    $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
+                }
+            }
+            if ((get-list -Type UniqueDomain) -contains $domain.ToLowerInvariant()) {
+                Write-Host
+                Write-Host -ForegroundColor Red "Domain is already in use. Please use the Expand option to expand the domain"
+                continue
+            }
+            return $domain
+        }
+    }
+    else {
+        $existingDomains = @()
+        $existingDomains += get-list -Type UniqueDomain
+        if ($existingDomains.count -eq 0) {
+            Write-Host
+            Write-Host "No DC configured, and no existing domains found. Please Ctrl-C to start over and create a new domain"
+            return
+        }
+        $domain = $null
+        while (-not $domain) {
+            $domain = Get-Menu -Prompt "Select Domain" -OptionArray $existingDomains -CurrentValue $ConfigToCheck.vmoptions.domainName
+        }
+        return $domain
+    }
+}
+
+
+
 function Select-NewDomainConfig {
 
     $subnetlist = Get-ValidSubnets
@@ -803,26 +872,9 @@ function Select-NewDomainConfig {
 
         if ($valid) {
             $valid = $false
-            $ValidDomainNames = Get-ValidDomainNames
             while ($valid -eq $false) {
-                $domain = $null
-                $customOptions = @{ "C" = "Custom Domain" }
-
-                while (-not $domain) {
-                    $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions
-                    if ($domain.ToLowerInvariant() -eq "c") {
-                        $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
-                    }
-                }
-                if ((get-list -Type UniqueDomain) -contains $domain.ToLowerInvariant()) {
-                    Write-Host
-                    Write-Host -ForegroundColor Red "Domain is already in use. Please use the Expand option to expand the domain"
-                    continue
-                }
-                $prefix = $($ValidDomainNames[$domain])
-                if ([String]::IsNullOrWhiteSpace($prefix)) {
-                    $prefix = $domain.ToUpper().SubString(0, 3) + "-"
-                }
+                $domain = select-NewDomainName -ConfigToCheck $newConfig
+                $prefix = get-PrefixForDomain -Domain $domain
                 Write-Verbose "Prefix = $prefix"
                 $newConfig.vmOptions.domainName = $domain
                 $newConfig.vmOptions.prefix = $prefix
@@ -836,7 +888,7 @@ function Select-NewDomainConfig {
                 $customOptions = @{ "C" = "Custom Subnet" }
                 $network = $null
                 while (-not $network) {
-                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions
+                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -CurrentValue ($subnetList | Select-Object -First 1)
                     if ($network.ToLowerInvariant() -eq "c") {
                         $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
                     }
@@ -922,6 +974,11 @@ function Select-Config {
     }
     $Global:configfile = $files[[int]$response - 1]
     $configSelected = Get-Content $Global:configfile -Force | ConvertFrom-Json
+    if ($null -ne $configSelected.vmOptions.domainAdminName) {
+        $configSelected.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configSelected.vmOptions.domainAdminName
+        $configSelected.vmOptions.PsObject.properties.Remove('domainAdminName')
+    }
+
     return $configSelected
 }
 
@@ -1105,16 +1162,58 @@ function Select-OSForNew {
     return $role
 }
 
+function Select-Subnet{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $configToCheck = $global:config
+    )
+
+    if ($configToCheck.virtualMachines.role -contains "DC"){
+        $subnetlist = Get-ValidSubnets
+        $customOptions = @{ "C" = "Custom Subnet" }
+        $network = $null
+        while (-not $network) {
+            $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue ($configToCheck.vmOptions.network)
+            if ($network.ToLowerInvariant() -eq "c") {
+                $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
+            }
+        }
+        $response = [string]$network
+        return $response
+    }
+    else {
+        $domain = $configToCheck.vmOptions.DomainName
+        return Select-ExistingSubnets -Domain $domain -ConfigToCheck $configToCheck
+    }
+
+
+
+}
+
+
 function Select-ExistingSubnets {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [String] $Domain,
-        [Parameter(Mandatory = $true, HelpMessage = "Role")]
-        [String] $Role
+        [Parameter(Mandatory = $false, HelpMessage = "Role")]
+        [String] $Role,
+        [Parameter(Mandatory = $false, HelpMessage = "config")]
+        [object] $ConfigToCheck
     )
 
     $valid = $false
+
+    if ($ConfigToCheck) {
+        if ($configToCheck.virtualMachines.role -contains "Primary")
+        {
+            $Role = "Primary"
+        }
+        if ($configToCheck.virtualMachines.role -contains "CAS"){
+            $Role = "CAS"
+        }
+    }
     while ($valid -eq $false) {
 
         $customOptions = @{ "N" = "add New Subnet to domain" }
@@ -1149,7 +1248,15 @@ function Select-ExistingSubnets {
 
         while ($true) {
             [string]$response = $null
-            $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false
+            if ($subnetListModified.count -eq 0) {
+                Write-Host
+                Write-Host -ForegroundColor Yellow "No valid subnets for the current roles exist in the domain. Please create a new subnet"
+            }
+            $CurrentValue = $null
+            if ($configToCheck) {
+                $Currentvalue = $configToCheck.vmOptions.network
+            }
+            $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue
             write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
             if ([string]::IsNullOrWhiteSpace($response)) {
                 Write-Verbose "[Select-ExistingSubnets] Subnet response = null"
@@ -1826,6 +1933,18 @@ function Select-Options {
                     if ($property.role -eq "DomainMember") {
                         $property.vmName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config
                     }
+                    continue MainLoop
+                }
+                "domainName" {
+                    $domain = select-NewDomainName
+                    write-host "1887 - $domain"
+                    $property.domainName = $domain
+                    $property.prefix = get-PrefixForDomain -Domain $domain
+                    continue MainLoop
+                }
+                "network" {
+                    $network = Select-Subnet
+                    $property.network = $network
                     continue MainLoop
                 }
                 "ParentSiteCode" {

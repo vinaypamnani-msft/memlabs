@@ -977,6 +977,12 @@ function New-DeployConfig {
         $configObject
     )
 
+
+    if ($null -ne $configObject.vmOptions.domainAdminName){
+        $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
+        $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
+    }
+
     $containsCS = $configObject.virtualMachines.role -contains "CAS"
 
     # Scenario
