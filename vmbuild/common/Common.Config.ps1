@@ -258,10 +258,19 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
         }
 
-        $existingSubnet = Get-List -Type Subnet | Where-Object {$_.Subnet -eq $($ConfigObject.vmoptions.network) | Select-Object -First 1}
-        if ($existingSubnet){
-            if ($($ConfigObject.vmoptions.domainName) -ne $($existingSubnet.Domain)){
+        $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) | Select-Object -First 1 }
+        if ($existingSubnet) {
+            if ($($ConfigObject.vmoptions.domainName) -ne $($existingSubnet.Domain)) {
                 Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is in use by Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+            }
+            $CASorPRI = ($ConfigObject.virtualMachines.role -contains "CAS") -or (($ConfigObject.virtualMachines.role -contains "Primary"))
+            if ($CASorPRI) {
+                $existingCASorPRI = @()
+                $existingCASorPRI += Get-List -Type VM | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -eq "CAS") -or ($_.Role -eq "Primary") }
+                if ($existingCASorPRI.Count -gt 0) {
+                    Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                }
+
             }
         }
 
@@ -761,6 +770,14 @@ function Test-Configuration {
     $deployConfig = New-DeployConfig -configObject $configObject
     $return.DeployConfig = $deployConfig
 
+
+    if ($deployConfig.virtualMachines.Count -eq 0) {
+        $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
+        $return.Problems += 1
+        #$return.Failures += 1
+        return $return
+    }
+
     # Contains roles
     if ($deployConfig.virtualMachines) {
         $containsCS = $deployConfig.virtualMachines.role -contains "CAS"
@@ -990,7 +1007,7 @@ function New-DeployConfig {
     )
 
 
-    if ($null -ne $configObject.vmOptions.domainAdminName){
+    if ($null -ne $configObject.vmOptions.domainAdminName) {
         $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
         $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
     }
