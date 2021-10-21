@@ -1900,6 +1900,9 @@ function Sort-Properties {
     if ($members.Name -contains "sqlInstanceDir") {
         $sorted += "sqlInstanceDir"
     }
+    if ($members.Name -contains "remoteSQLVM") {
+        $sorted += "remoteSQLVM"
+    }
     if ($members.Name -contains "cmInstallDir") {
         $sorted += "cmInstallDir"
     }
@@ -1931,6 +1934,7 @@ function Sort-Properties {
         "network" { }
         "adminName" { }
         "basePath" { }
+        "remoteSQLVM" {}
 
         Default { $sorted += $_ }
     }
