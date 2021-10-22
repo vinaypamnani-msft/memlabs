@@ -160,10 +160,8 @@ function Add-ValidationMessage {
 
 function Test-ValidVmOptions {
     param (
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     # prefix
@@ -261,14 +259,14 @@ function Test-ValidVmOptions {
         $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) | Select-Object -First 1 }
         if ($existingSubnet) {
             if ($($ConfigObject.vmoptions.domainName) -ne $($existingSubnet.Domain)) {
-                Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is in use by Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
             }
             $CASorPRI = ($ConfigObject.virtualMachines.role -contains "CAS") -or (($ConfigObject.virtualMachines.role -contains "Primary"))
             if ($CASorPRI) {
                 $existingCASorPRI = @()
                 $existingCASorPRI += Get-List -Type VM | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -eq "CAS") -or ($_.Role -eq "Primary") }
                 if ($existingCASorPRI.Count -gt 0) {
-                    Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                    Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
                 }
 
             }
@@ -279,10 +277,8 @@ function Test-ValidVmOptions {
 
 function Test-ValidCmOptions {
     param (
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     # version
@@ -314,12 +310,9 @@ function Test-ValidCmOptions {
 
 function Test-ValidVmSupported {
     param (
-        [object]
-        $VM,
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -364,10 +357,8 @@ function Test-ValidVmSupported {
 
 function Test-ValidVmMemory {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -410,10 +401,8 @@ function Test-ValidVmMemory {
 
 function Test-ValidVmDisks {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -454,10 +443,8 @@ function Test-ValidVmDisks {
 
 function Test-ValidVmProcs {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -481,10 +468,8 @@ function Test-ValidVmProcs {
 
 function Test-ValidVmServerOS {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -502,14 +487,10 @@ function Test-ValidVmServerOS {
 
 function Test-ValidVmPath {
     param (
-        [object]
-        $VM,
-        [string]
-        $PathProperty,
-        [string]
-        $ValidPathExample,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [string] $PathProperty,
+        [string] $ValidPathExample,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -552,10 +533,8 @@ function Test-ValidVmPath {
 
 function Test-ValidRoleDC {
     param (
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     $DCVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DC" }
@@ -594,7 +573,8 @@ function Test-ValidRoleDC {
         if ($existingDC) {
 
             # Check VM exists in Hyper-V
-            $vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
+            #$vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
+            $vm = Get-List -type VM | Where-Object {$_.vmName -eq $existingDC}
             if (-not $vm) {
                 Add-ValidationMessage -Message "$vmRole Validation: Existing DC found [$existingDC] but VM with the same name was not found in Hyper-V." -ReturnObject $ReturnObject -Warning
             }
@@ -612,9 +592,9 @@ function Test-ValidRoleDC {
                 }
 
                 # Account validation
-                $vmProps = Get-List -Type VM | Where-Object { $_.VmName -eq "CON-DC1" }
+                $vmProps = Get-List -Type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $_.role -eq "DC" }
                 if ($vmProps.AdminName -ne $ConfigObject.vmOptions.adminName) {
-                    Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] found but new configuration is using a different admin name [$($ConfigObject.vmOptions.adminName)] for deployment. You muse use the existing admin user [$($vmProps.AdminName)]." -ReturnObject $ReturnObject -Warning
+                    Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] is using a different admin name [$($ConfigObject.vmOptions.adminName)] for deployment. You must use the existing admin user [$($vmProps.AdminName)]." -ReturnObject $ReturnObject -Warning
                     Get-List -FlushCache | Out-Null
                 }
             }
@@ -624,12 +604,9 @@ function Test-ValidRoleDC {
 
 function Test-ValidRoleCSPS {
     param (
-        [object]
-        $VM,
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -705,10 +682,8 @@ function Test-ValidRoleCSPS {
 
 function Test-SingleRole {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -739,6 +714,8 @@ function Test-Configuration {
         [string]$FilePath,
         [Parameter(Mandatory = $true, ParameterSetName = "ConfigObject", HelpMessage = "Configuration File")]
         [object]$InputObject
+        #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
+        #[bool] $fast = $false
     )
 
     $return = [PSCustomObject]@{
@@ -1002,8 +979,7 @@ function New-DeployConfig {
     [CmdletBinding()]
     param (
         [Parameter()]
-        [object]
-        $configObject
+        [object] $configObject
     )
 
 
@@ -1254,8 +1230,7 @@ function Get-SubnetList {
 
     param(
         [Parameter(Mandatory = $false)]
-        [string]
-        $DomainName
+        [string] $DomainName
     )
     try {
 
@@ -1462,8 +1437,7 @@ Function Show-Summary {
     [CmdletBinding()]
     param (
         [Parameter()]
-        [PsCustomObject]
-        $deployConfig
+        [PsCustomObject] $deployConfig
     )
 
     Function Write-GreenCheck {

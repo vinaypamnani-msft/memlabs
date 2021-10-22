@@ -493,12 +493,12 @@ function get-VMSummary {
         $RoleList += "[$numSQL SQL]"
     }
     if ($numMember -gt 0 ) {
-        $RoleList += "[$numMember Member]"
+        $RoleList += "[$numMember Member(s)]"
     }
     $num = "[$numVMs VM(s)]".PadRight(21)
     $Output = "$num $RoleList"
     if ($numVMs -lt 4) {
-        $Output += " {$($vms | Select-Object -ExpandProperty vmName)}"
+        $Output += " {$(($vms | Select-Object -ExpandProperty vmName) -join ",")}"
     }
     return $Output
 }
@@ -1224,8 +1224,8 @@ function Select-ExistingSubnets {
     )
 
     $valid = $false
-
     if ($ConfigToCheck) {
+        $Role = "DomainMember"
         if ($configToCheck.virtualMachines.role -contains "Primary") {
             $Role = "Primary"
         }
@@ -1906,12 +1906,13 @@ function Sort-Properties {
     if ($members.Name -contains "cmInstallDir") {
         $sorted += "cmInstallDir"
     }
-    if ($members.Name -contains "siteCode") {
-        $sorted += "siteCode"
-    }
     if ($members.Name -contains "parentSiteCode") {
         $sorted += "parentSiteCode"
     }
+    if ($members.Name -contains "siteCode") {
+        $sorted += "siteCode"
+    }
+
     if ($members.Name -contains "additionalDisks") {
         $sorted += "additionalDisks"
     }
@@ -2067,11 +2068,13 @@ function Select-Options {
                     $domain = select-NewDomainName
                     $property.domainName = $domain
                     $property.prefix = get-PrefixForDomain -Domain $domain
+                    Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
                 }
                 "network" {
                     $network = Select-Subnet
                     $property.network = $network
+                    Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
                 }
                 "ParentSiteCode" {
@@ -2114,7 +2117,7 @@ function Select-Options {
                 Write-Verbose "7 Select-Options"
                 while ($valid -eq $false) {
                     if ($value -is [bool]) {
-                        $response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") -NoNewLine
+                        $response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") -NoNewLine -Test:$false
                     }
                     else {
                         $response2 = Read-Host2 -Prompt "Select new Value for $($Name)" $value
@@ -2189,8 +2192,10 @@ Function Get-TestResult {
             if (!$NoNewLine) {
                 write-host
             }
-            # $MyInvocation | Out-Host
-
+            #$MyInvocation | Out-Host
+            if ($enableVerbose) {
+                Get-PSCallStack | out-host
+            }
         }
         if ($SuccessOnWarning.IsPresent) {
             if ( $c.Failures -eq 0) {
@@ -2617,12 +2622,12 @@ function Save-Config {
     Write-Host
     Write-Verbose "9 Save-Config"
 
-    $file = "$($config.vmOptions.prefix)$($config.vmOptions.domainName)"
+    $file = "$($config.vmOptions.domainName)"
     if ($config.vmOptions.existingDCNameWithPrefix) {
-        $file += "-ADD"
+        $file += "-ADD-"
     }
     elseif (-not $config.cmOptions) {
-        $file += "-NOSCCM"
+        $file += "-NOSCCM-"
     }
     elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "cas" }) {
         $file += "-CAS-$($config.cmOptions.version)-"
@@ -2631,9 +2636,9 @@ function Save-Config {
         $file += "-PRI-$($config.cmOptions.version)-"
     }
 
-    $file += "($($config.virtualMachines.Count)VMs)-"
-    $date = Get-Date -Format "MM-dd-yyyy"
-    $file += $date
+    $file += "($($config.virtualMachines.Count)VMs)"
+    $date = Get-Date -Format "yyyy-MM-dd"
+    $file = $date + "-" + $file
 
     $filename = Join-Path $configDir $file
 
@@ -2674,15 +2679,26 @@ while ($valid -eq $false) {
         $valid = $true
     }
     else {
-        Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)`r`n"
-        Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
+        if ($return.DeployNow -eq $false) {
+            Write-Host
+            write-host -ForegroundColor Yellow "WARNING: Configuration is not valid. Saving is not advised. Proceed with caution."
+            Write-Host -ForegroundColor Red "Configuration contains the following errors: `r`n$($c.Message)`r`n"
+            write-host
+            $valid = $true
+        }
+        else {
+            Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)`r`n"
+            Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
+        }
     }
 
     if ($valid) {
         Show-Summary ($c.DeployConfig)
         Write-Host
         Write-verbose "13"
-        Write-Host -ForegroundColor Yellow "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
+        if ($return.DeployNow -eq $true) {
+            Write-Host -ForegroundColor Green "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
+        }
         Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
         $response = Read-Host2 -Prompt "Everything correct? (Y/n)" -HideHelp
         if (-not [String]::IsNullOrWhiteSpace($response)) {
@@ -2696,8 +2712,8 @@ while ($valid -eq $false) {
 Save-Config $Global:Config
 
 if (-not $InternalUseOnly.IsPresent) {
-    Write-Host "You can deploy this configuration by running the following command:"
-    Write-Host "$($PSScriptRoot)\New-Lab.ps1 -Configuration $($return.ConfigFileName)"
+    Write-Host "You may deploy this configuration by running the following command:"
+    Write-Host "$($PSScriptRoot)\New-Lab.ps1 -Configuration ""$($return.ConfigFileName)"""
 }
 
 #================================= NEW LAB SCENERIO ============================================
