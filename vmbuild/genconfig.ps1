@@ -602,6 +602,8 @@ function Get-NewMachineName {
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
         [Object] $ConfigToCheck = $global:config
     )
+
+
     $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
     $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
@@ -2318,7 +2320,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
-            $disk = [PSCustomObject]@{"E" = "100GB" }
+            $disk = [PSCustomObject]@{"E" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.Memory = "8GB"
             $virtualMachine.virtualProcs = 8
@@ -2329,7 +2331,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -2352,7 +2354,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -2513,7 +2515,9 @@ function Select-VirtualMachines {
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
                                     $virtualMachine.virtualProcs = 4
-                                    $virtualMachine.memory = "4GB"
+                                    if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
+                                        $virtualMachine.memory = "4GB"
+                                    }
                                 }
                             }
                             if ($newValue -eq "X") {
@@ -2523,7 +2527,7 @@ function Select-VirtualMachines {
                             }
                             if ($newValue -eq "A") {
                                 if ($null -eq $virtualMachine.additionalDisks) {
-                                    $disk = [PSCustomObject]@{"E" = "100GB" }
+                                    $disk = [PSCustomObject]@{"E" = "120GB" }
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
                                 }
                                 else {
@@ -2533,7 +2537,7 @@ function Select-VirtualMachines {
                                     }
                                     if ($letters -lt 90) {
                                         $letter = $([char]$letters).ToString()
-                                        $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
+                                        $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "120GB"
                                     }
                                 }
                             }

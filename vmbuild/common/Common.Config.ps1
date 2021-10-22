@@ -634,6 +634,7 @@ function Test-ValidRoleCSPS {
         }
         else {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$sqlServerName] does not exist; When deploying $vmRole Role with remote SQL, you must include the remote SQL VM." -ReturnObject $ReturnObject -Warning
+            Write-Verbose "VMs are $($ConfigObject.virtualMachines.vmName)"
         }
 
         # Minimum Memory
