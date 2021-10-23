@@ -746,13 +746,13 @@ try {
     $existingCAS = $deployConfig.parameters.ExistingCASName
 
     if ($existingCAS -and $containsPS) {
-        $existingSQLVM = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS }).RemoteSQLVM
+        $existingSQLVMName = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS }).RemoteSQLVM
         # create a dummy VM object for the existingCAS
         if ($existingSQLVM) {
             $deployConfig.virtualMachines += [PSCustomObject]@{
                 vmName      = $existingCAS
                 role        = "CAS"
-                RemoteSQLVM = $existingSQLVM
+                RemoteSQLVM = $existingSQLVMName
                 hidden      = $true
             }
         }
@@ -760,9 +760,9 @@ try {
             $existingCASVM = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS })
             $deployConfig.virtualMachines += [PSCustomObject]@{
                 vmName = $existingCAS
-                SQLInstanceName = $existingSQLVM.SQLInstanceName
-                SQLVersion = $existingSQLVM.SQLVersion
-                SQLInstanceDir = $existingSQLVM.SQLInstanceDir
+                SQLInstanceName = $existingCASVM.SQLInstanceName
+                SQLVersion = $existingCASVM.SQLVersion
+                SQLInstanceDir = $existingCASVM.SQLInstanceDir
                 role   = "CAS"
                 hidden = $true
             }

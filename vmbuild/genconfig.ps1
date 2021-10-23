@@ -599,6 +599,8 @@ function Get-NewMachineName {
         [String] $Role,
         [Parameter(Mandatory = $false, HelpMessage = "OS of the new machine")]
         [String] $OS,
+        [Parameter(Mandatory = $false, HelpMessage = "Site Code")]
+        [String] $SiteCode,
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
         [Object] $ConfigToCheck = $global:config
     )
@@ -682,7 +684,12 @@ function Get-NewMachineName {
     }
 
     if (($role -eq "Primary") -or ($role -eq "CAS")) {
+        if ([String]::IsNullOrWhiteSpace($SiteCode)){
         $newSiteCode = Get-NewSiteCode $Domain -Role $Role
+        }
+        else{
+            $newSiteCode = $SiteCode
+        }
         return $newSiteCode + "SITE"
     }
 
@@ -1829,8 +1836,8 @@ function Get-AdditionalValidations {
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
         [Object] $CurrentValue
     )
-    $value = $property."$($item.Name)"
-    $name = $($item.Name)
+    $value = $property."$($Name)"
+    #$name = $($item.Name)
     Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
     switch ($name) {
         "vmName" {
@@ -1847,6 +1854,11 @@ function Get-AdditionalValidations {
                     $CASVM.remoteSQLVM = $value
                 }
             }
+        }
+        "siteCode" {
+            $newName =  Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -SiteCode $value
+            $property.vmName = $newName
+            Write-Verbose "New Name: $newName"
         }
     }
 }
@@ -2146,8 +2158,8 @@ function Select-Options {
 
                             Write-Verbose ("$_ name = $($_.Name) or $name = $response2 value = '$value'")
                             $property."$($Name)" = $response2
-                            Get-AdditionalValidations -property $property -name $Name -CurrentValue $value
                         }
+                        Get-AdditionalValidations -property $property -name $Name -CurrentValue $value
                         if ($Test) {
                             $valid = Get-TestResult -SuccessOnWarning
                         }

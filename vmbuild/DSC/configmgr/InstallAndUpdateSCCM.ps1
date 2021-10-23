@@ -248,7 +248,7 @@ Write-DscStatus "Setting PS Drive"
 New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
 
 while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-    Write-DscStatus "Retry in 10s to Set PS Drive"
+    Write-DscStatus "Retry in 10s to Set PS Drive for site $SiteCode on $ProviderMachineName"
     Start-Sleep -Seconds 10
     New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
 }
