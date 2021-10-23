@@ -744,15 +744,30 @@ try {
 
     # Existing CAS scenario
     $existingCAS = $deployConfig.parameters.ExistingCASName
+
     if ($existingCAS -and $containsPS) {
+        $existingSQLVM = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS }).RemoteSQLVM
         # create a dummy VM object for the existingCAS
-        $deployConfig.virtualMachines += [PSCustomObject]@{
-            vmName = $existingCAS
-            role   = "CAS"
-            hidden = $true
+        if ($existingSQLVM) {
+            $deployConfig.virtualMachines += [PSCustomObject]@{
+                vmName      = $existingCAS
+                role        = "CAS"
+                RemoteSQLVM = $existingSQLVM
+                hidden      = $true
+            }
+        }
+        else {
+            $existingCASVM = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS })
+            $deployConfig.virtualMachines += [PSCustomObject]@{
+                vmName = $existingCAS
+                SQLInstanceName = $existingSQLVM.SQLInstanceName
+                SQLVersion = $existingSQLVM.SQLVersion
+                SQLInstanceDir = $existingSQLVM.SQLInstanceDir
+                role   = "CAS"
+                hidden = $true
+            }
         }
     }
-
     Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
     # New scenario
