@@ -942,6 +942,13 @@ function New-VirtualMachine {
     return $true
 }
 
+function Get-AvailableMemoryGB{
+    $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
+    $availableMemory = ($availableMemory-("4GB"/1kB)) * 1KB / 1GB
+    $availableMemory = [Math]::Round($availableMemory,2)
+    return $availableMemory
+}
+
 function Wait-ForVm {
 
     param (
