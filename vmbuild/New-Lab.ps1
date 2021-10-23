@@ -748,7 +748,7 @@ try {
     if ($existingCAS -and $containsPS) {
         $existingSQLVMName = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS }).RemoteSQLVM
         # create a dummy VM object for the existingCAS
-        if ($existingSQLVM) {
+        if ($existingSQLVMName) {
             $deployConfig.virtualMachines += [PSCustomObject]@{
                 vmName      = $existingCAS
                 role        = "CAS"
@@ -855,6 +855,7 @@ try {
 }
 finally {
     # Ctrl + C brings us here :)
+    get-job | stop-job
     Set-QuickEdit
 }
 

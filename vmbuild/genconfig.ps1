@@ -684,10 +684,10 @@ function Get-NewMachineName {
     }
 
     if (($role -eq "Primary") -or ($role -eq "CAS")) {
-        if ([String]::IsNullOrWhiteSpace($SiteCode)){
-        $newSiteCode = Get-NewSiteCode $Domain -Role $Role
+        if ([String]::IsNullOrWhiteSpace($SiteCode)) {
+            $newSiteCode = Get-NewSiteCode $Domain -Role $Role
         }
-        else{
+        else {
             $newSiteCode = $SiteCode
         }
         return $newSiteCode + "SITE"
@@ -1284,7 +1284,14 @@ function Select-ExistingSubnets {
             if ($configToCheck) {
                 $Currentvalue = $configToCheck.vmOptions.network
             }
-            $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue
+            if ($subnetListModified.Length -eq 0) {
+                Write-Host
+                Write-Host -ForegroundColor Yellow "No existing subnets found to support Role(s).  Please select a new subnet:"
+                $response = "n"
+            }
+            else {
+                $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue
+            }
             write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
             if ([string]::IsNullOrWhiteSpace($response)) {
                 Write-Verbose "[Select-ExistingSubnets] Subnet response = null"
@@ -1856,7 +1863,7 @@ function Get-AdditionalValidations {
             }
         }
         "siteCode" {
-            $newName =  Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -SiteCode $value
+            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -SiteCode $value
             $property.vmName = $newName
             Write-Verbose "New Name: $newName"
         }
