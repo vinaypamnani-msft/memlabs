@@ -1116,8 +1116,8 @@ function Show-ExistingNetwork {
             return $null
         }
     }
-    Write-verbose "[Show-ExistingNetwork] Calling Generate-ExistingConfig '$domain' '$subnet' '$role'"
-    return Generate-ExistingConfig -Domain $domain -Subnet $subnet -role $role -ParentSiteCode $ParentSiteCode
+    Write-verbose "[Show-ExistingNetwork] Calling Get-ExistingConfig '$domain' '$subnet' '$role'"
+    return Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -ParentSiteCode $ParentSiteCode
 }
 function Select-RolesForExisting {
     $existingRoles = $Common.Supported.RolesForExisting | Where-Object { $_ -ne "DPMP" }
@@ -1276,17 +1276,14 @@ function Select-ExistingSubnets {
 
         while ($true) {
             [string]$response = $null
-            if ($subnetListModified.count -eq 0) {
-                Write-Host
-                Write-Host -ForegroundColor Yellow "No valid subnets for the current roles exist in the domain. Please create a new subnet"
-            }
+
             $CurrentValue = $null
             if ($configToCheck) {
                 $Currentvalue = $configToCheck.vmOptions.network
             }
             if ($subnetListModified.Length -eq 0) {
                 Write-Host
-                Write-Host -ForegroundColor Yellow "No existing subnets found to support Role(s).  Please select a new subnet:"
+                Write-Host -ForegroundColor Yellow "No valid subnets for the current roles exist in the domain. Please create a new subnet"
                 $response = "n"
             }
             else {
@@ -1307,7 +1304,7 @@ function Select-ExistingSubnets {
                 $customOptions = @{ "C" = "Custom Subnet" }
                 $network = $null
                 while (-not $network) {
-                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue $($subnetList | Select-Object -First 1)
+                    $network = Get-Menu -Prompt "Select New Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue $($subnetList | Select-Object -First 1)
                     if ($network.ToLowerInvariant() -eq "c") {
                         $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
                     }
@@ -1321,13 +1318,13 @@ function Select-ExistingSubnets {
                 break
             }
         }
-        $valid = Get-TestResult -Config (Generate-ExistingConfig -Domain $Domain -Subnet $response -Role $Role) -SuccessOnWarning
+        $valid = Get-TestResult -Config (Get-ExistingConfig -Domain $Domain -Subnet $response -Role $Role) -SuccessOnWarning
     }
     Write-Verbose "[Select-ExistingSubnets] Subnet response = $response"
     return [string]$response
 }
 
-function Generate-ExistingConfig {
+function Get-ExistingConfig {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
@@ -1871,7 +1868,7 @@ function Get-AdditionalValidations {
 }
 
 
-function Sort-Properties {
+function Get-SortedProperties {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Property to Sort")]
@@ -2014,7 +2011,7 @@ function Select-Options {
         }
 
         # Get the Property Names and Values.. Present as Options.
-        foreach ($item in (Sort-Properties $property)) {
+        foreach ($item in (Get-SortedProperties $property)) {
             $i = $i + 1
             $value = $property."$($item)"
             #$padding = 27 - ($i.ToString().Length)
@@ -2066,7 +2063,7 @@ function Select-Options {
         }
         # We got the [1] Number pressed. Lets match that up to the actual value.
         $i = 0
-        foreach ($item in (Sort-Properties $property)) {
+        foreach ($item in (Get-SortedProperties $property)) {
 
             $i = $i + 1
 
