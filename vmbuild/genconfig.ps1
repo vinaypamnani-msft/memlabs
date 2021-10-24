@@ -1860,11 +1860,11 @@ function Get-AdditionalValidations {
             }
         }
         "siteCode" {
-            if ($property.RemoteSQLVM){
+            if ($property.RemoteSQLVM) {
                 $newSQLName = $value + "SQL"
                 #Check if the new name is already in use:
-                $NewSQLVM = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq  $newSQLName }
-                if ($NewSQLVM){
+                $NewSQLVM = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newSQLName }
+                if ($NewSQLVM) {
                     write-host
                     write-host -ForegroundColor Red "Changing Sitecode would rename SQL VM to " -NoNewline
                     write-host -ForegroundColor Yellow $($NewSQLVM.vmName) -NoNewline
@@ -1872,26 +1872,29 @@ function Get-AdditionalValidations {
                     $property.siteCode = $CurrentValue
                     return
                 }
-                $RemoteSQLVM = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq  $($property.RemoteSQLVM) }
-                $RemoteSQLVM.vmName = $newSQLName
-                $property.RemoteSQLVM = $newSQLName
             }
 
             $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -SiteCode $value
-            $NewSSName = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq  $newName }
-                if ($NewSSName){
-                    write-host
-                    write-host -ForegroundColor Red "Changing Sitecode would rename VM to " -NoNewline
-                    write-host -ForegroundColor Yellow $($NewSSName.vmName) -NoNewline
-                    write-host -ForegroundColor Red " which already exists. Unable to change sitecode."
-                    $property.siteCode = $CurrentValue
-                    return
-                }
+            $NewSSName = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newName }
+            if ($NewSSName) {
+                write-host
+                write-host -ForegroundColor Red "Changing Sitecode would rename VM to " -NoNewline
+                write-host -ForegroundColor Yellow $($NewSSName.vmName) -NoNewline
+                write-host -ForegroundColor Red " which already exists. Unable to change sitecode."
+                $property.siteCode = $CurrentValue
+                return
+            }
+            #Set the SQL Name after all checks are done.
+            if ($property.RemoteSQLVM) {
+                $RemoteSQLVM = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $($property.RemoteSQLVM) }
+                $RemoteSQLVM.vmName = $newSQLName
+                $property.RemoteSQLVM = $newSQLName
+            }
             $property.vmName = $newName
             Write-Verbose "New Name: $newName"
-            if ($property.role -eq "CAS"){
+            if ($property.role -eq "CAS") {
                 $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
-                if ($PRIVM){
+                if ($PRIVM) {
                     $PRIVM.ParentSiteCode = $value
                 }
             }
