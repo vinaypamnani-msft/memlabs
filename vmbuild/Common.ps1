@@ -946,6 +946,9 @@ function Get-AvailableMemoryGB{
     $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
     $availableMemory = ($availableMemory-("4GB"/1kB)) * 1KB / 1GB
     $availableMemory = [Math]::Round($availableMemory,2)
+    if ($availableMemory -lt 0){
+        $availableMemory = 0
+    }
     return $availableMemory
 }
 
