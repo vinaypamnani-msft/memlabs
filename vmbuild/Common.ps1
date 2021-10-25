@@ -875,15 +875,22 @@ function New-VirtualMachine {
     Write-Log "New-VirtualMachine: $VmName`: Enabling Hyper-V Guest Services"
     Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
 
-    Write-Log "New-VirtualMachine: $VmName`: Enabling TPM"
     if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
         New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
+        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
     }
-    $HGOwner = Get-HgsGuardian MemLabsGuardian
-    $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
-    Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
-    Enable-VMTPM $VmName -ErrorAction SilentlyContinue ## Only required for Win11
 
+    $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
+    if ($localCASupported -eq 1) {
+        Write-Log "New-VirtualMachine: $VmName`: Enabling TPM"
+        $HGOwner = Get-HgsGuardian MemLabsGuardian
+        $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
+        Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
+        Enable-VMTPM $VmName -ErrorAction SilentlyContinue ## Only required for Win11
+    }
+    else {
+        Write-Log "New-VirtualMachine: $VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
+    }
 
     Write-Log "New-VirtualMachine: $VmName`: Setting Processor count to $Processors"
     Set-VM -Name $vmName -ProcessorCount $Processors

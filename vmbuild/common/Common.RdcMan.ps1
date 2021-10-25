@@ -54,7 +54,7 @@ function Save-RdcManSettignsFile {
     # Gets the blank template, or returns the existing settings xml if available.
     $file = $template
     $existingIsPresent = $false
-    write-host "Checking for $existingfile"
+    Write-Log "Checking for $existingfile" -HostOnly
     if (Test-Path $existingfile) {
         [xml]$file = Get-Content -Path $existingfile
         write-verbose "Found existing file at $existingfile"
@@ -127,14 +127,14 @@ function Save-RdcManSettignsFile {
         }
     }
 
-    Write-Host "Stopping RDCMan and Saving $existingfile"
+    Write-Log "Stopping RDCMan and Saving $existingfile" -HostOnly
     Get-Process -Name rdcman -ea Ignore | Stop-Process
     Start-Sleep 1
 
     If (-not (test-path $existingfile)) {
         $existingdir = Split-Path $existingfile
         if (-not (test-path $existingdir)) {
-            New-Item -ItemType Directory -Force -Path $existingdir
+            New-Item -ItemType Directory -Force -Path $existingdir | Out-Null
         }
     }
     $file.Save($existingfile)
