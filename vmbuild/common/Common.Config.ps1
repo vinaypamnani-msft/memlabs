@@ -672,6 +672,21 @@ function Test-ValidRoleCSPS {
     if ($VM.siteCode.ToUpperInvariant() -in "AUX", "CON", "NUL", "PRN", "SMS", "ENV") {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
+    $otherVMs = $ConfigObject.VirtualMachines | Where-Object {$_.vmName -ne $VM.vmName} | Where-Object {$null -ne $_.Sitecode}
+
+    foreach ($siteServer in $otherVMs){
+        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant()){
+            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+    $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object {$null -ne $_.siteCode}
+    foreach ($siteServer in $otherVMs){
+        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant()){
+            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
 
     # Server OS
     Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
