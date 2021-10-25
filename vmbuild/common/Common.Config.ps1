@@ -160,10 +160,8 @@ function Add-ValidationMessage {
 
 function Test-ValidVmOptions {
     param (
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     # prefix
@@ -218,23 +216,23 @@ function Test-ValidVmOptions {
         }
     }
 
-    # domainAdminName
-    if (-not $ConfigObject.vmOptions.domainAdminName) {
-        Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName not present in vmOptions. You must specify the Domain Admin user name that will be created." -ReturnObject $ReturnObject -Failure
+    # adminName
+    if (-not $ConfigObject.vmOptions.adminName) {
+        Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName not present in vmOptions. You must specify the Domain Admin user name that will be created." -ReturnObject $ReturnObject -Failure
     }
     else {
 
         $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
-        if ($ConfigObject.vmOptions.domainAdminName -match $pattern) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
+        if ($ConfigObject.vmOptions.adminName -match $pattern) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName [$($ConfigObject.vmoptions.adminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainAdminName.Length -gt 64) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] is too long. Must be less than 64 chars" -ReturnObject $ReturnObject -Failure
+        if ($ConfigObject.vmOptions.adminName.Length -gt 64) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName [$($ConfigObject.vmoptions.adminName)] is too long. Must be less than 64 chars" -ReturnObject $ReturnObject -Failure
         }
 
-        if ($ConfigObject.vmOptions.domainAdminName.Length -lt 3) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainAdminName [$($ConfigObject.vmoptions.domainAdminName)] is too short. Must be at least 3 chars" -ReturnObject $ReturnObject -Failure
+        if ($ConfigObject.vmOptions.adminName.Length -lt 3) {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName [$($ConfigObject.vmoptions.adminName)] is too short. Must be at least 3 chars" -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -247,18 +245,40 @@ function Test-ValidVmOptions {
         $pattern2 = "^(10)(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])){2,2}.0$"
         $pattern3 = "^(172).(1[6-9]|2[0-9]|3[0-1])(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])).0$"
 
-        if (-not ($ConfigObject.vmOptions.network -match $pattern1 -or $ConfigObject.vmOptions.network -match $pattern2 -or $ConfigObject.vmOptions.network -match $pattern3)) {
+        if ($ConfigObject.vmOptions.network -eq "10.250.250.0") {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'Cluster'. Please use a different subnet." -ReturnObject $ReturnObject -Warning
+        }
+
+        if ($ConfigObject.vmOptions.network -eq "172.31.250.0") {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'Internet' clients. Please use a different subnet." -ReturnObject $ReturnObject -Warning
+        }
+        elseif (-not ($ConfigObject.vmOptions.network -match $pattern1 -or $ConfigObject.vmOptions.network -match $pattern2 -or $ConfigObject.vmOptions.network -match $pattern3)) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
         }
+
+        $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) | Select-Object -First 1 }
+        if ($existingSubnet) {
+            if ($($ConfigObject.vmoptions.domainName) -ne $($existingSubnet.Domain)) {
+                Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+            }
+            $CASorPRI = ($ConfigObject.virtualMachines.role -contains "CAS") -or (($ConfigObject.virtualMachines.role -contains "Primary"))
+            if ($CASorPRI) {
+                $existingCASorPRI = @()
+                $existingCASorPRI += Get-List -Type VM | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -eq "CAS") -or ($_.Role -eq "Primary") }
+                if ($existingCASorPRI.Count -gt 0) {
+                    Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                }
+
+            }
+        }
+
     }
 }
 
 function Test-ValidCmOptions {
     param (
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     # version
@@ -290,12 +310,9 @@ function Test-ValidCmOptions {
 
 function Test-ValidVmSupported {
     param (
-        [object]
-        $VM,
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -306,7 +323,7 @@ function Test-ValidVmSupported {
 
     # vmName characters
     if ($vm.vmName.Length -gt 15) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Warning
     }
 
     #prefix + vmName combined name validation
@@ -340,10 +357,8 @@ function Test-ValidVmSupported {
 
 function Test-ValidVmMemory {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -386,10 +401,8 @@ function Test-ValidVmMemory {
 
 function Test-ValidVmDisks {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -430,10 +443,8 @@ function Test-ValidVmDisks {
 
 function Test-ValidVmProcs {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -457,10 +468,8 @@ function Test-ValidVmProcs {
 
 function Test-ValidVmServerOS {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -478,14 +487,10 @@ function Test-ValidVmServerOS {
 
 function Test-ValidVmPath {
     param (
-        [object]
-        $VM,
-        [string]
-        $PathProperty,
-        [string]
-        $ValidPathExample,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [string] $PathProperty,
+        [string] $ValidPathExample,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -528,16 +533,14 @@ function Test-ValidVmPath {
 
 function Test-ValidRoleDC {
     param (
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     $DCVM = $configObject.virtualMachines | Where-Object { $_.role -eq "DC" }
     $vmRole = "DC"
 
-    $containsDC = $configObject.virtualMachines.role.Contains("DC")
+    $containsDC = $configObject.virtualMachines.role -contains "DC"
     $existingDC = $configObject.parameters.ExistingDCName
     $domain = $ConfigObject.vmOptions.domainName
 
@@ -547,6 +550,7 @@ function Test-ValidRoleDC {
             Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Warning
         }
 
+        # $MyInvocation.BoundParameters.ConfigObject.VirtualMachines | Out-Host
         if (Test-SingleRole -VM $DCVM -ReturnObject $ReturnObject) {
 
             # Server OS
@@ -569,7 +573,8 @@ function Test-ValidRoleDC {
         if ($existingDC) {
 
             # Check VM exists in Hyper-V
-            $vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
+            #$vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
+            $vm = Get-List -type VM | Where-Object {$_.vmName -eq $existingDC}
             if (-not $vm) {
                 Add-ValidationMessage -Message "$vmRole Validation: Existing DC found [$existingDC] but VM with the same name was not found in Hyper-V." -ReturnObject $ReturnObject -Warning
             }
@@ -587,9 +592,10 @@ function Test-ValidRoleDC {
                 }
 
                 # Account validation
-                $vmNote = $vm.Notes | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if ($vmNote.domainAdmin -ne $ConfigObject.vmOptions.domainAdminName) {
-                    Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] found but new configuration is using a different admin name [$($ConfigObject.vmOptions.domainAdminName)] for deployment. You muse use the existing admin user [$($vmNote.domainAdmin)]." -ReturnObject $ReturnObject -Warning
+                $vmProps = Get-List -Type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $_.role -eq "DC" }
+                if ($vmProps.AdminName -ne $ConfigObject.vmOptions.adminName) {
+                    Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] is using a different admin name [$($ConfigObject.vmOptions.adminName)] for deployment. You must use the existing admin user [$($vmProps.AdminName)]." -ReturnObject $ReturnObject -Warning
+                    Get-List -FlushCache | Out-Null
                 }
             }
         }
@@ -598,12 +604,9 @@ function Test-ValidRoleDC {
 
 function Test-ValidRoleCSPS {
     param (
-        [object]
-        $VM,
-        [object]
-        $ConfigObject,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ConfigObject,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -631,6 +634,7 @@ function Test-ValidRoleCSPS {
         }
         else {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$sqlServerName] does not exist; When deploying $vmRole Role with remote SQL, you must include the remote SQL VM." -ReturnObject $ReturnObject -Warning
+            Write-Verbose "VMs are $($ConfigObject.virtualMachines.vmName)"
         }
 
         # Minimum Memory
@@ -668,6 +672,21 @@ function Test-ValidRoleCSPS {
     if ($VM.siteCode.ToUpperInvariant() -in "AUX", "CON", "NUL", "PRN", "SMS", "ENV") {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
+    $otherVMs = $ConfigObject.VirtualMachines | Where-Object {$_.vmName -ne $VM.vmName} | Where-Object {$null -ne $_.Sitecode}
+
+    foreach ($siteServer in $otherVMs){
+        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant()){
+            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+    $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object {$null -ne $_.siteCode}
+    foreach ($siteServer in $otherVMs){
+        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant()){
+            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
 
     # Server OS
     Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
@@ -679,13 +698,12 @@ function Test-ValidRoleCSPS {
 
 function Test-SingleRole {
     param (
-        [object]
-        $VM,
-        [object]
-        $ReturnObject
+        [object] $VM,
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
+        # $MyInvocation | Out-Host
         throw
     }
 
@@ -712,6 +730,8 @@ function Test-Configuration {
         [string]$FilePath,
         [Parameter(Mandatory = $true, ParameterSetName = "ConfigObject", HelpMessage = "Configuration File")]
         [object]$InputObject
+        #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
+        #[bool] $fast = $false
     )
 
     $return = [PSCustomObject]@{
@@ -743,11 +763,19 @@ function Test-Configuration {
     $deployConfig = New-DeployConfig -configObject $configObject
     $return.DeployConfig = $deployConfig
 
+
+    if ($deployConfig.virtualMachines.Count -eq 0) {
+        $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
+        $return.Problems += 1
+        #$return.Failures += 1
+        return $return
+    }
+
     # Contains roles
     if ($deployConfig.virtualMachines) {
-        $containsCS = $deployConfig.virtualMachines.role.Contains("CAS")
-        $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
-        $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
+        $containsCS = $deployConfig.virtualMachines.role -contains "CAS"
+        $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
+        $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
     }
     else {
         $containsCS = $containsPS = $containsDPMP = $false
@@ -865,6 +893,7 @@ function Test-Configuration {
                 $notRunningNames = $notRunning.vmName -join ","
                 if ($notRunning.Count -gt 0) {
                     Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Warning
+                    Get-List -FlushCache | Out-Null
                 }
             }
 
@@ -920,8 +949,8 @@ function Test-Configuration {
     # =============
     $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
     $totalMemory = $totalMemory.Sum / 1GB
-    $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-    $availableMemory = $availableMemory * 1KB / 1GB
+    $availableMemory = Get-AvailableMemoryGB
+
 
     if ($totalMemory -gt $availableMemory) {
         Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB]." -ReturnObject $return -Warning
@@ -947,6 +976,7 @@ function Test-Configuration {
     if (-not $compare -and $compare2) {
         $duplicates = $compare2.InputObject -join ","
         Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
+        Get-List -FlushCache | Out-Null
     }
 
     # Return if validation failed
@@ -965,11 +995,16 @@ function New-DeployConfig {
     [CmdletBinding()]
     param (
         [Parameter()]
-        [object]
-        $configObject
+        [object] $configObject
     )
 
-    $containsCS = $configObject.virtualMachines.role.Contains("CAS")
+
+    if ($null -ne $configObject.vmOptions.domainAdminName) {
+        $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
+        $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
+    }
+
+    $containsCS = $configObject.virtualMachines.role -contains "CAS"
 
     # Scenario
     if ($containsCS) {
@@ -998,7 +1033,7 @@ function New-DeployConfig {
     }
 
     # CSName (prefer name in config over existing)
-    $containsPS = $configObject.virtualMachines.role.Contains("Primary")
+    $containsPS = $configObject.virtualMachines.role -contains "Primary"
     if ($containsPS) {
         $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode ($PSVM.parentSiteCode | Select-Object -First 1) # Bypass failures, validation would fail if we had multiple
@@ -1045,6 +1080,7 @@ function New-DeployConfig {
         DomainMembers      = $clientsCsv
         Scenario           = $scenario
         DHCPScopeId        = $configObject.vmOptions.Network
+        DHCPScopeName      = $configObject.vmOptions.Network
         DHCPDNSAddress     = $network + ".1"
         DHCPDefaultGateway = $network + ".200"
         DHCPScopeStart     = $network + ".20"
@@ -1074,7 +1110,7 @@ function Get-ValidCASSiteCodes {
     $existingSiteCodes = @()
     $existingSiteCodes += Get-ExistingSiteServer -DomainName $Config.vmOptions.domainName -Role "CAS" | Select-Object -ExpandProperty SiteCode
 
-    $containsCS = $Config.virtualMachines.role.Contains("CAS")
+    $containsCS = $Config.virtualMachines.role -contains "CAS"
     if ($containsCS) {
         $CSVM = $Config.virtualMachines | Where-Object { $_.role -eq "CAS" }
         $existingSiteCodes += $CSVM.siteCode
@@ -1210,8 +1246,7 @@ function Get-SubnetList {
 
     param(
         [Parameter(Mandatory = $false)]
-        [string]
-        $DomainName
+        [string] $DomainName
     )
     try {
 
@@ -1244,16 +1279,23 @@ function Get-List {
 
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = "Type")]
         [ValidateSet("VM", "Subnet", "Prefix", "UniqueDomain", "UniqueSubnet", "UniquePrefix")]
         [string] $Type,
-        [Parameter(Mandatory = $false)]
+        [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [string] $DomainName,
-        [Parameter(Mandatory = $false)]
-        [switch] $ResetCache
+        [Parameter(Mandatory = $false, ParameterSetName = "Type")]
+        [switch] $ResetCache,
+        [Parameter(Mandatory = $true, ParameterSetName = "FlushCache")]
+        [switch] $FlushCache
     )
 
     try {
+
+        if ($FlushCache.IsPresent) {
+            $global:vm_List = $null
+            return
+        }
 
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null
@@ -1272,7 +1314,7 @@ function Get-List {
                         $vmNoteObject = $vm.Notes | ConvertFrom-Json
                     }
                     else {
-                        Write-Log "Get-List: VM Properties for '$($vm.Name) does not contain values. Assume this was not deployed by vmbuild'. $_" -Warning -LogOnly
+                        Write-Log "Get-List: VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
                         #continue
                     }
                 }
@@ -1280,8 +1322,31 @@ function Get-List {
                     Write-Log "Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
                     #continue
                 }
-
+                if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
+                    $LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
+                    $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
+                    if (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP) {
+                        $IPAddress = (Get-VM -Name $vm.Name | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
+                        if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
+                            if ($null -eq $vmNoteObject.LastKnownIP) {
+                                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $IPAddress
+                            }
+                            else {
+                                $vmNoteObject.LastKnownIP = $IPAddress
+                            }
+                            Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+                        }
+                        else {
+                            #Update the Notes LastUpdateTime everytime we scan for it
+                            if (-not [string]::IsNullOrWhiteSpace($IPAddress)) {
+                                Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+                            }
+                        }
+                    }
+                }
                 $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
+                $adminUser = $vmNoteObject.adminName
+                if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin } # we renamed this property, read if it exists
                 if ($vmNoteObject) {
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
                     $vmObject = [PSCustomObject]@{
@@ -1294,8 +1359,9 @@ function Get-List {
                         DiskUsedGB      = $diskSize / 1GB
                         State           = $vm.State
                         Domain          = $vmNoteObject.domain
-                        DomainAdmin     = $vmNoteObject.domainAdmin
+                        AdminName       = $adminUser
                         Subnet          = $vmNoteObject.network
+                        LastKnownIP     = $vmNoteObject.LastKnownIP
                         Prefix          = $vmNoteObject.prefix
                         Success         = $vmNoteObject.success
                         SiteCode        = $vmNoteObject.SiteCode
@@ -1306,6 +1372,7 @@ function Get-List {
                         SQLInstanceDir  = $vmNoteObject.sqlInstanceDir
                         RemoteSQLVM     = $vmNoteObject.remoteSQLVM
                         InProgress      = $inProgress
+
                     }
                 }
                 else {
@@ -1318,6 +1385,7 @@ function Get-List {
                         MemoryStartupGB = $vm.MemoryStartup / 1GB
                         DiskUsedGB      = $diskSize / 1GB
                         State           = $vm.State
+                        LastKnownIP     = $null
                         Role            = $null
                         DeployedOS      = $null
                         SiteCode        = $null
@@ -1328,10 +1396,11 @@ function Get-List {
                         SQLInstanceDir  = $null
                         RemoteSQLVM     = $null
                         Domain          = $null
-                        DomainAdmin     = $null
+                        AdminName       = $null
                         Prefix          = $null
                         Success         = $null
                         InProgress      = $null
+
                     }
                 }
 
@@ -1384,8 +1453,7 @@ Function Show-Summary {
     [CmdletBinding()]
     param (
         [Parameter()]
-        [PsCustomObject]
-        $deployConfig
+        [PsCustomObject] $deployConfig
     )
 
     Function Write-GreenCheck {
@@ -1425,9 +1493,9 @@ Function Show-Summary {
     }
 
     #$CHECKMARK = ([char]8730)
-    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
-    $containsDPMP = $deployConfig.virtualMachines.role.Contains("DPMP")
-    $containsMember = $deployConfig.virtualMachines.role.Contains("DomainMember")
+    $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
+    $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
+    $containsMember = $deployConfig.virtualMachines.role -contains "DomainMember"
 
     if ($null -ne $($deployConfig.cmOptions) -and $containsPS -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true) {
@@ -1499,11 +1567,10 @@ Function Show-Summary {
 
         $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
         $totalMemory = $totalMemory.Sum / 1GB
-        $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-        $availableMemory = $availableMemory * 1KB / 1GB
-        Write-GreenCheck "This configuration will use $($totalMemory)GB out of $([math]::Round($availableMemory,2))GB Available RAM on host machine"
+        $availableMemory = Get-AvailableMemoryGB
+        Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine"
     }
-    Write-GreenCheck "Domain Admin account: $($deployConfig.vmOptions.domainAdminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
+    Write-GreenCheck "Domain Admin account: $($deployConfig.vmOptions.adminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
     $out = $deployConfig.virtualMachines | Where-Object { -not $_.hidden } `
     | Format-table vmName, role, operatingSystem, memory,
     @{Label = "Procs"; Expression = { $_.virtualProcs } },

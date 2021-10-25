@@ -4,7 +4,7 @@
         "prefix": "CM-",
         "basePath": "E:\\VirtualMachines",
         "domainName": "contoso.com",
-        "domainAdminName": "admin",
+        "adminName": "admin",
         "network": "192.168.1.0"
     },
     "virtualMachines": [

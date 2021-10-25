@@ -10,7 +10,7 @@
         "prefix": "CMH-",
         "basePath": "E:\\VirtualMachines",
         "domainName": "adatum.com",
-        "domainAdminName": "admin",
+        "adminName": "admin",
         "network": "192.168.2.0"
     },
     "virtualMachines": [

@@ -10,7 +10,17 @@ $return = [PSCustomObject]@{
     ForceNew       = $false
 }
 
-. $PSScriptRoot\Common.ps1
+if (-not $InternalUseOnly.IsPresent) {
+    if ($Common.Initialized) {
+        $Common.Initialized = $false
+    }
+
+    # Set Verbose
+    $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
+
+    # Dot source common
+    . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
+}
 
 $configDir = Join-Path $PSScriptRoot "config"
 $sampleDir = Join-Path $PSScriptRoot "config\samples"
@@ -89,19 +99,29 @@ function Write-Option {
     }
     write-host
 }
+
 function Select-ConfigMenu {
     while ($true) {
-        $customOptions = [ordered]@{ "1" = "Create New Domain"; "2" = "Expand Existing Domain"; "3" = "Load Sample Configuration";
-            "4" = "Load saved config from File"; "R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow";
-        }
+        $customOptions = [ordered]@{ "1" = "Create New Domain" }
+        $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
+        $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]"; }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)"; "3" = "Load Sample Configuration"; "4" = "Load saved config from File"; "*B3" = ""; }
+        $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
+        $vmsTotal = (Get-List -Type VM | Measure-Object).Count
+        $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
+        $availableMemory = [math]::Round($(Get-AvailableMemoryGB),0)
+        $disk = Get-Volume -DriveLetter E
+        $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]"; }
+        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow"; "P" = "Show Passwords" }
 
-        $pendingCount = (get-list -type VM | where { $_.InProgress -eq "True" }).Count
+        $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" }).Count
 
         if ($pendingCount -gt 0 ) {
-            $customOptions += @{"P" = "Delete ($($pendingCount)) In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow" }
+            $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow" }
         }
-
-        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions
+        Write-Host
+        Write-Host "---  Create Config"
+        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine
 
         write-Verbose "1 response $response"
         if (-not $response) {
@@ -113,9 +133,10 @@ function Select-ConfigMenu {
             "2" { $SelectedConfig = Show-ExistingNetwork }
             "3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "4" { $SelectedConfig = Select-Config $configDir -NoMore }
-            "r" { New-RDCManFileFromHyperV $Global:Common.RdcManFilePath }
-            "p" { Select-DeletePending }
+            "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
+            "f" { Select-DeletePending }
             "d" { Select-DomainMenu }
+            "P" { Write-Host "Password for all accounts is: $($Common.LocalAdmin.GetNetworkCredential().Password)" }
             Default {}
         }
         if ($SelectedConfig) {
@@ -155,10 +176,10 @@ function Select-DomainMenu {
         #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
 
         $customOptions = [ordered]@{
-            "1" = "Stop all VMs in domain";
-            "2" = "Start all VMs in domain";
+            "1" = "Stop VMs in domain";
+            "2" = "Start VMs in domain";
             "3" = "Compact all VHDX's in domain (requires domain to be stopped)";
-            "D" = "Delete Domain%Yellow%Red";
+            "D" = "Delete VMs in Domain%Yellow%Red";
         }
 
         $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions
@@ -191,7 +212,17 @@ function select-OptimizeDomain {
     $size = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
     write-Host "Total size of VMs in $domain before optimize: $([math]::Round($size,2))GB"
     foreach ($vm in $vms) {
-        Get-VHD -VMId $vm.VmId | Optimize-VHD
+        #Get-VHD -VMId $vm.VmId | Optimize-VHD -Mode Full
+        foreach ($hd in Get-VHD -VMId $vm.VmId) {
+            #    Mount-VHD -Path $hd.Path
+            try {
+                Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction Stop
+                Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
+            }
+            finally {
+                Dismount-VHD -Path $hd.Path
+            }
+        }
     }
 
     get-list -type VM -ResetCache | out-null
@@ -209,71 +240,101 @@ function Select-StartDomain {
         [string] $domain
     )
 
-    Write-Host
+    while ($true) {
+        Write-Host
 
-    $vms = get-list -type vm -DomainName $domain
+        $vms = get-list -type vm -DomainName $domain
 
-    $notRunning = $vms | Where-Object { $_.State -ne "Running" }
-    if ($notRunning -and $notRunning.Count -gt 0) {
-        Write-Host "Staring $($notRunning.Count) VM's in '$domain' that are not Running"
-    }
-    else {
-        Write-Host "All VM's in '$domain' are already Running"
-        return
-    }
+        $notRunning = $vms | Where-Object { $_.State -ne "Running" }
+        if ($notRunning -and ($notRunning | Measure-Object).count -gt 0) {
+            Write-Host "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
+        }
+        else {
+            Write-Host "All VM's in '$domain' are already Running"
+            return
+        }
 
-    $dc = $vms | Where-Object { $_.Role -eq "DC" }
-    $sqlServers = $vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
-    $cas = $vms | Where-Object { $_.Role -eq "CAS" }
-    $pri = $vms | Where-Object { $_.Role -eq "Primary" }
-    $other = $vms | Where-Object { $_.vmName -notin $dc.vmName -and $_.vmName -notin $sqlServers.vmName -and $_.vmName -notin $cas.vmName -and $_.vmName -notin $pri.vmName }
 
-    $waitSecondsDC = 20
-    $waitSeconds = 10
-    if ($dc -and ($dc.State -ne "Running")) {
-        write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
-        start-vm $dc.vmName
-        start-Sleep -Seconds $waitSecondsDC
-    }
+        $vmsname = $notRunning | Select-Object -ExpandProperty vmName
+        $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" }
+        $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
 
-    if ($sqlServers) {
-        foreach ($sql in $sqlServers) {
-            if ($sql.State -ne "Running") {
-                write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
-                start-vm $sql.vmName
+        if ([string]::IsNullOrWhiteSpace($response)) {
+            return
+        }
+        if ($response -eq "A" -or $response -eq "C") {
+            $CriticalOnly = $false
+            if ($response -eq "C") {
+                $CriticalOnly = $true
+            }
+            $dc = $vms | Where-Object { $_.Role -eq "DC" }
+            $sqlServers = $vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
+            $cas = $vms | Where-Object { $_.Role -eq "CAS" }
+            $pri = $vms | Where-Object { $_.Role -eq "Primary" }
+            $other = $vms | Where-Object { $_.vmName -notin $dc.vmName -and $_.vmName -notin $sqlServers.vmName -and $_.vmName -notin $cas.vmName -and $_.vmName -notin $pri.vmName }
+
+            $waitSecondsDC = 20
+            $waitSeconds = 10
+            if ($dc -and ($dc.State -ne "Running")) {
+                write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
+                start-vm $dc.vmName
+                start-Sleep -Seconds $waitSecondsDC
+            }
+
+            if ($sqlServers) {
+                foreach ($sql in $sqlServers) {
+                    if ($sql.State -ne "Running") {
+                        write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
+                        start-vm $sql.vmName
+                    }
+                }
+                start-sleep $waitSeconds
+            }
+
+            if ($cas) {
+                foreach ($ss in $cas) {
+                    if ($ss.State -ne "Running") {
+                        write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
+                        start-vm $ss.vmName
+                    }
+                }
+                start-sleep $waitSeconds
+            }
+
+            if ($pri) {
+                foreach ($ss in $pri) {
+                    if ($ss.State -ne "Running") {
+                        write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
+                        start-vm $ss.vmName
+                    }
+                }
+                start-sleep $waitSeconds
+            }
+            if ($CriticalOnly -eq $false) {
+                foreach ($vm in $other) {
+                    if ($vm.State -ne "Running") {
+                        write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
+                        start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm $vm } -ArgumentList $vm.vmName
+                    }
+                }
+            }
+            get-job | wait-job
+            get-job | remove-job
+            get-list -type VM -ResetCache | out-null
+            if ($CriticalOnly -eq $false) {
+                return
+            }
+            else {
+                continue
             }
         }
-        start-sleep $waitSeconds
-    }
-
-    if ($cas) {
-        foreach ($ss in $cas) {
-            if ($ss.State -ne "Running") {
-                write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
-                start-vm $ss.vmName
-            }
-        }
-        start-sleep $waitSeconds
-    }
-
-    if ($pri) {
-        foreach ($ss in $pri) {
-            if ($ss.State -ne "Running") {
-                write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
-                start-vm $ss.vmName
-            }
-        }
-        start-sleep $waitSeconds
-    }
-    foreach ($vm in $other) {
-        if ($vm.State -ne "Running") {
-            write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
-            start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm $vm } -ArgumentList $vm.vmName
+        else {
+            start-vm $response
+            get-job | wait-job
+            get-job | remove-job
+            get-list -type VM -ResetCache | out-null
         }
     }
-    get-job | wait-job
-    get-job | remove-job
-    get-list -type VM -ResetCache | out-null
 }
 
 function Select-StopDomain {
@@ -282,27 +343,58 @@ function Select-StopDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
         [string] $domain
     )
-    Write-Host
-    $vms = get-list -type vm -DomainName $domain
-    $running = $vms | Where-Object { $_.State -ne "Off" }
-    if ($running -and $running.Count -gt 0) {
-        Write-host "Stopping $($running.Count) VM's in '$domain' that are currently running. Please wait."
-    }
-    else {
-        Write-host "All VM's in '$domain' are already turned off."
-        return
-    }
 
-    foreach ($vm in $vms) {
-        $vm2 = Get-VM $vm.vmName -ErrorAction SilentlyContinue
-        if ($vm2.State -eq "Running") {
-            Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
-            start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName
+
+    While ($true) {
+        Write-Host
+        $vms = get-list -type vm -DomainName $domain
+        $running = $vms | Where-Object { $_.State -ne "Off" }
+        if ($running -and ($running | Measure-Object).count -gt 0) {
+            Write-host "$(($running| Measure-Object).count) VM's in '$domain' are currently running."
         }
+        else {
+            Write-host "All VM's in '$domain' are already turned off."
+            return
+        }
+
+        $vmsname = $running | Select-Object -ExpandProperty vmName
+        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "C" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)" }
+        $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
+
+        if ([string]::IsNullOrWhiteSpace($response)) {
+            return
+        }
+        if ($response -eq "A" -or $response -eq "C") {
+
+            $nonCriticalOnly = $false
+            if ($response -eq "C") {
+                $nonCriticalOnly = $true
+            }
+            foreach ($vm in $vms) {
+                if ($nonCriticalOnly -eq $true) {
+                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
+                        continue
+                    }
+                }
+                $vm2 = Get-VM $vm.vmName -ErrorAction SilentlyContinue
+                if ($vm2.State -eq "Running") {
+                    Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
+                    start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName
+                }
+            }
+            get-job | wait-job
+            get-job | remove-job
+            get-list -type VM -ResetCache | out-null
+            return
+        }
+        else {
+            stop-vm $response -force
+            get-job | wait-job
+            get-job | remove-job
+            get-list -type VM -ResetCache | out-null
+        }
+
     }
-    get-job | wait-job
-    get-job | remove-job
-    get-list -type VM -ResetCache | out-null
 }
 
 function Select-DeleteDomain {
@@ -312,13 +404,35 @@ function Select-DeleteDomain {
         [string] $domain
     )
 
+    while ($true) {
+        $vms = get-list -type vm -DomainName $domain | Select-Object -ExpandProperty vmName
+        $customOptions = [ordered]@{"D" = "Delete All VMs" }
+        $response = Get-Menu -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false
 
-    Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
-    $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
-    if (-not [String]::IsNullOrWhiteSpace($response)) {
-        if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
-            & "$($PSScriptRoot)\Remove-Lab.ps1" -DomainName $domain
-            Get-List -type VM -ResetCache | Out-Null
+        if ([string]::IsNullOrWhiteSpace($response)) {
+            return
+        }
+        if ($response -eq "D") {
+            Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
+            $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
+            if (-not [String]::IsNullOrWhiteSpace($response)) {
+                if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
+                    Remove-Domain -DomainName $domain
+                    Get-List -type VM -ResetCache | Out-Null
+                }
+            }
+        }
+        else {
+            $response2 = Read-Host2 -Prompt "Delete VM $response? (Y/n)" -HideHelp
+
+            if ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no") {
+                continue
+            }
+            else {
+                Remove-VirtualMachine -VmName $response
+                Get-List -type VM -ResetCache | Out-Null
+                continue
+            }
         }
     }
 }
@@ -331,7 +445,7 @@ function Select-DeletePending {
     $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
-            & "$($PSScriptRoot)\Remove-Lab.ps1" -InProgress
+            Remove-InProgress
             Get-List -type VM -ResetCache | Out-Null
         }
     }
@@ -340,7 +454,7 @@ function get-VMOptionsSummary {
 
     $options = $Global:Config.vmOptions
     $domainName = "[$($options.domainName)]".PadRight(21)
-    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.domainAdminName)] [Location $($options.basePath)]"
+    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.adminName)] [Location $($options.basePath)]"
     return $Output
 }
 
@@ -361,7 +475,7 @@ function get-VMSummary {
     $numDPMP = ($vms | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $numPri = ($vms | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $numCas = ($vms | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-    $numMember = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion } | Measure-Object).Count
+    $numMember = ($vms | Where-Object { $_.Role -eq "WorkgroupMember" -or $_.Role -eq "AADClient" -or $_.Role -eq "InternetClient" -or ($_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion) } | Measure-Object).Count
     $numSQL = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
     $RoleList = ""
     if ($numDCs -gt 0 ) {
@@ -377,13 +491,16 @@ function get-VMSummary {
         $RoleList += "[DPMP]"
     }
     if ($numSQL -gt 0 ) {
-        $RoleList += "[SQL]"
+        $RoleList += "[$numSQL SQL]"
     }
     if ($numMember -gt 0 ) {
-        $RoleList += "[$numMember Members]"
+        $RoleList += "[$numMember Member(s)]"
     }
     $num = "[$numVMs VM(s)]".PadRight(21)
     $Output = "$num $RoleList"
+    if ($numVMs -lt 4) {
+        $Output += " {$(($vms | Select-Object -ExpandProperty vmName) -join ",")}"
+    }
     return $Output
 }
 
@@ -483,59 +600,97 @@ function Get-NewMachineName {
         [String] $Role,
         [Parameter(Mandatory = $false, HelpMessage = "OS of the new machine")]
         [String] $OS,
+        [Parameter(Mandatory = $false, HelpMessage = "Site Code")]
+        [String] $SiteCode,
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
         [Object] $ConfigToCheck = $global:config
     )
+
+
     $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
     $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
     $RoleName = $Role
-    if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role)) {
-        $RoleName = "Member"
+    if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role) -or $Role -eq "WorkgroupMember" -or $Role -eq "AADClient" -or $role -eq "InternetClient") {
+        if (($global:config.vmOptions.prefix.length) -gt 4) {
+            $RoleName = "Mem"
+        }
+        else {
+            $RoleName = "Member"
+        }
 
         if ($OS -like "*Server*") {
-            $RoleName = "Server"
+            if (($global:config.vmOptions.prefix.length) -gt 4) {
+                $RoleName = "Srv"
+            }
+            else {
+                $RoleName = "Server"
+            }
             $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "*Server*" } | Measure-Object).Count
             $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "*Server*" } | Measure-Object).count
         }
         else {
-            $RoleName = "Client"
+            if (($global:config.vmOptions.prefix.length) -gt 4) {
+                $RoleName = "Cli"
+            }
+            else {
+                $RoleName = "Client"
+            }
             $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { -not ($_.deployedOS -like "*Server*") } | Measure-Object).Count
             $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { -not ($_.OperatingSystem -like "*Server*") } | Measure-Object).count
-            if ($OS -like "Windows 10*") {
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "Windows 10*" } | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "Windows 10*" } | Measure-Object).count
-                $RoleName = "W10Client"
-            }
-            if ($OS -like "Windows 11*") {
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "Windows 11*" } | Measure-Object).Count
-                $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "Windows 11*" } | Measure-Object).count
-                $RoleName = "W11Client"
-            }
+
+        }
+
+
+        if ($Role -eq "WorkgroupMember") {
+            $RoleName = "WG"
+        }
+        if ($Role -eq "InternetClient") {
+            $RoleName = "INT"
+        }
+        if ($Role -eq "AADClient") {
+            $RoleName = "AAD"
+        }
+        Write-Verbose "Rolename is now $RoleName"
+
+        if ($OS -like "Windows 10*") {
+            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "Windows 10*" } | Measure-Object).Count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "Windows 10*" } | Measure-Object).count
+            $RoleName = "W10" + $RoleName
+        }
+        if ($OS -like "Windows 11*") {
+            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "Windows 11*" } | Measure-Object).Count
+            $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "Windows 11*" } | Measure-Object).count
+            $RoleName = "W11" + $RoleName
         }
 
         switch ($OS) {
             "Server 2022" {
                 $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -eq "Server 2022" } | Measure-Object).Count
                 $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -eq "Server 2022" } | Measure-Object).count
-                $RoleName = "W22Server"
+                $RoleName = "W22" + $RoleName
             }
             "Server 2019" {
                 $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -eq "Server 2019" } | Measure-Object).Count
                 $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -eq "Server 2019" } | Measure-Object).count
-                $RoleName = "W19Server"
+                $RoleName = "W19" + $RoleName
             }
             "Server 2016" {
                 $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -eq "Server 2016" } | Measure-Object).Count
                 $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -eq "Server 2016" } | Measure-Object).count
-                $RoleName = "W16Server"
+                $RoleName = "W16" + $RoleName
             }
             Default {}
         }
     }
 
     if (($role -eq "Primary") -or ($role -eq "CAS")) {
-        $newSiteCode = Get-NewSiteCode $Domain -Role $Role
+        if ([String]::IsNullOrWhiteSpace($SiteCode)) {
+            $newSiteCode = Get-NewSiteCode $Domain -Role $Role
+        }
+        else {
+            $newSiteCode = $SiteCode
+        }
         return $newSiteCode + "SITE"
     }
 
@@ -621,6 +776,81 @@ function Get-ValidDomainNames {
     return $ValidDomainNames
 }
 
+
+function get-PrefixForDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [String] $Domain
+    )
+
+    $existingDomains = get-list -Type UniqueDomain
+    if ($existingDomains -contains $Domain) {
+        $existingPrefix = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" }).Prefix
+
+        if (-not [string]::IsNullOrWhiteSpace($existingPrefix)) {
+            return $existingPrefix
+        }
+    }
+    $ValidDomainNames = Get-ValidDomainNames
+    $prefix = $($ValidDomainNames[$domain])
+    if ([String]::IsNullOrWhiteSpace($prefix)) {
+        $prefix = ($domain.ToUpper().SubString(0, 3) + "-") -replace "\.", ""
+    }
+    if ([string]::IsNullOrWhiteSpace($prefix)) {
+        $prefix = "NULL-"
+    }
+    return $prefix
+
+}
+function select-NewDomainName {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
+        [Object] $ConfigToCheck = $global:config
+    )
+    if ($ConfigToCheck.virtualMachines.role -contains "DC") {
+        while ($true) {
+            $ValidDomainNames = Get-ValidDomainNames
+
+            $domain = $null
+            $customOptions = @{ "C" = "Custom Domain" }
+
+            while (-not $domain) {
+                $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions -CurrentValue ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1) -Test:$false
+                if ($domain.ToLowerInvariant() -eq "c") {
+                    $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
+                }
+                if ($domain.Length -lt 3) {
+                    $domain = $null
+                }
+            }
+            if ((get-list -Type UniqueDomain) -contains $domain.ToLowerInvariant()) {
+                Write-Host
+                Write-Host -ForegroundColor Red "Domain is already in use. Please use the Expand option to expand the domain"
+                continue
+            }
+            return $domain
+        }
+    }
+    else {
+        $existingDomains = @()
+        $existingDomains += get-list -Type UniqueDomain
+        if ($existingDomains.count -eq 0) {
+            Write-Host
+            Write-Host "No DC configured, and no existing domains found. Please Ctrl-C to start over and create a new domain"
+            return
+        }
+        $domain = $null
+        while (-not $domain) {
+            $domain = Get-Menu -Prompt "Select Domain" -OptionArray $existingDomains -CurrentValue $ConfigToCheck.vmoptions.domainName -test:$false
+        }
+        return $domain
+    }
+}
+
+
+
 function Select-NewDomainConfig {
 
     $subnetlist = Get-ValidSubnets
@@ -659,18 +889,9 @@ function Select-NewDomainConfig {
         if ($valid) {
             $valid = $false
             while ($valid -eq $false) {
-                $domain = $null
-                $customOptions = @{ "C" = "Custom Domain" }
-                $ValidDomainNames = Get-ValidDomainNames
-                while (-not $domain) {
-                    $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions
-                    if ($domain.ToLowerInvariant() -eq "c") {
-                        $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
-                    }
-                }
-                $prefix = $($ValidDomainNames[$domain])
-                if ([String]::IsNullOrWhiteSpace($prefix)) {
-                    $prefix = $domain.ToUpper().SubString(0, 3) + "-"
+                $domain = select-NewDomainName -ConfigToCheck $newConfig
+                if (-not $prefix) {
+                    $prefix = get-PrefixForDomain -Domain $domain
                 }
                 Write-Verbose "Prefix = $prefix"
                 $newConfig.vmOptions.domainName = $domain
@@ -685,7 +906,7 @@ function Select-NewDomainConfig {
                 $customOptions = @{ "C" = "Custom Subnet" }
                 $network = $null
                 while (-not $network) {
-                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions
+                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -CurrentValue ($subnetList | Select-Object -First 1)
                     if ($network.ToLowerInvariant() -eq "c") {
                         $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
                     }
@@ -771,6 +992,11 @@ function Select-Config {
     }
     $Global:configfile = $files[[int]$response - 1]
     $configSelected = Get-Content $Global:configfile -Force | ConvertFrom-Json
+    if ($null -ne $configSelected.vmOptions.domainAdminName) {
+        $configSelected.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configSelected.vmOptions.domainAdminName
+        $configSelected.vmOptions.PsObject.properties.Remove('domainAdminName')
+    }
+
     return $configSelected
 }
 
@@ -850,6 +1076,17 @@ function Show-ExistingNetwork {
         else { break }
 
     }
+
+    $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" } | Measure-Object).Count
+    if ($TotalStoppedVMs -gt 0) {
+        $response = Read-Host2 -Prompt "$TotalStoppedVMs VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp
+        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+        }
+        else {
+            Select-StartDomain -domain $domain
+        }
+
+    }
     [string]$role = Select-RolesForExisting
 
     if ($role -eq "Primary") {
@@ -871,15 +1108,17 @@ function Show-ExistingNetwork {
             Get-TestResult -SuccessOnError | out-null
         }
     }
-    [string]$subnet = $null
-    $subnet = Select-ExistingSubnets -Domain $domain -Role $role
-    Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
-    if ([string]::IsNullOrWhiteSpace($subnet)) {
-        return $null
-    }
 
-    Write-verbose "[Show-ExistingNetwork] Calling Generate-ExistingConfig '$domain' '$subnet' '$role'"
-    return Generate-ExistingConfig $domain $subnet $role -ParentSiteCode $ParentSiteCode
+    [string]$subnet = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1).Subnet
+    if ($role -ne "InternetClient" -and $role -ne "AADClient") {
+        $subnet = Select-ExistingSubnets -Domain $domain -Role $role
+        Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
+        if ([string]::IsNullOrWhiteSpace($subnet)) {
+            return $null
+        }
+    }
+    Write-verbose "[Show-ExistingNetwork] Calling Get-ExistingConfig '$domain' '$subnet' '$role'"
+    return Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -ParentSiteCode $ParentSiteCode
 }
 function Select-RolesForExisting {
     $existingRoles = $Common.Supported.RolesForExisting | Where-Object { $_ -ne "DPMP" }
@@ -910,7 +1149,19 @@ function Select-RolesForExisting {
 }
 
 function Select-RolesForNew {
-    $existingRoles = $Common.Supported.Roles
+    [System.Collections.ArrayList]$existingRoles = [System.Collections.ArrayList]($Common.Supported.Roles)
+    if ($global:config.VirtualMachines.role -contains "DC") {
+        $existingRoles.Remove("DC")
+    }
+    if ($global:config.VirtualMachines.role -contains "Primary") {
+        $existingRoles.Remove("Primary")
+    }
+    if ($global:config.VirtualMachines.role -contains "CAS") {
+        $existingRoles.Remove("CAS")
+    }
+    if ($global:config.VirtualMachines.role -contains "DPMP") {
+        $existingRoles.Remove("DPMP")
+    }
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
     return $role
 }
@@ -921,26 +1172,77 @@ function Select-OSForNew {
         [Parameter(Mandatory = $false, HelpMessage = "Role")]
         [String] $Role
     )
-    if (($Role -eq "DomainMember") -or ($null -eq $Role)) {
+
+    $defaultValue = "Server 2022"
+    if (($Role -eq "DomainMember") -or ($null -eq $Role) -or ($Role -eq "WorkgroupMember") -or ($Role -eq "InternetClient") ) {
         $OSList = $Common.Supported.OperatingSystems
     }
     else {
         $OSList = $Common.Supported.OperatingSystems | Where-Object { $_ -like "*Server*" }
     }
-    $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue "Server 2022"
+
+    if ($Role -eq "InternetClient") {
+        $defaultValue = "Windows 10 Latest (64-bit)"
+    }
+    if ($Role -eq "AADClient") {
+        $OSList = $Common.Supported.OperatingSystems | Where-Object { -not ( $_ -like "*Server*" ) }
+        $defaultValue = "Windows 10 Latest (64-bit)"
+    }
+    $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue $defaultValue
     return $role
 }
+
+function Select-Subnet {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $configToCheck = $global:config
+    )
+
+    if ($configToCheck.virtualMachines.role -contains "DC") {
+        $subnetlist = Get-ValidSubnets
+        $customOptions = @{ "C" = "Custom Subnet" }
+        $network = $null
+        while (-not $network) {
+            $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue ($configToCheck.vmOptions.network)
+            if ($network.ToLowerInvariant() -eq "c") {
+                $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
+            }
+        }
+        $response = [string]$network
+        return $response
+    }
+    else {
+        $domain = $configToCheck.vmOptions.DomainName
+        return Select-ExistingSubnets -Domain $domain -ConfigToCheck $configToCheck
+    }
+
+
+
+}
+
 
 function Select-ExistingSubnets {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [String] $Domain,
-        [Parameter(Mandatory = $true, HelpMessage = "Role")]
-        [String] $Role
+        [Parameter(Mandatory = $false, HelpMessage = "Role")]
+        [String] $Role,
+        [Parameter(Mandatory = $false, HelpMessage = "config")]
+        [object] $ConfigToCheck
     )
 
     $valid = $false
+    if ($ConfigToCheck) {
+        $Role = "DomainMember"
+        if ($configToCheck.virtualMachines.role -contains "Primary") {
+            $Role = "Primary"
+        }
+        if ($configToCheck.virtualMachines.role -contains "CAS") {
+            $Role = "CAS"
+        }
+    }
     while ($valid -eq $false) {
 
         $customOptions = @{ "N" = "add New Subnet to domain" }
@@ -975,7 +1277,19 @@ function Select-ExistingSubnets {
 
         while ($true) {
             [string]$response = $null
-            $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false
+
+            $CurrentValue = $null
+            if ($configToCheck) {
+                $Currentvalue = $configToCheck.vmOptions.network
+            }
+            if ($subnetListModified.Length -eq 0) {
+                Write-Host
+                Write-Host -ForegroundColor Yellow "No valid subnets for the current roles exist in the domain. Please create a new subnet"
+                $response = "n"
+            }
+            else {
+                $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue
+            }
             write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
             if ([string]::IsNullOrWhiteSpace($response)) {
                 Write-Verbose "[Select-ExistingSubnets] Subnet response = null"
@@ -991,7 +1305,7 @@ function Select-ExistingSubnets {
                 $customOptions = @{ "C" = "Custom Subnet" }
                 $network = $null
                 while (-not $network) {
-                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false
+                    $network = Get-Menu -Prompt "Select New Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue $($subnetList | Select-Object -First 1)
                     if ($network.ToLowerInvariant() -eq "c") {
                         $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
                     }
@@ -1005,13 +1319,13 @@ function Select-ExistingSubnets {
                 break
             }
         }
-        $valid = Get-TestResult -Config (Generate-ExistingConfig -Domain $Domain -Subnet $response -Role $Role) -SuccessOnWarning
+        $valid = Get-TestResult -Config (Get-ExistingConfig -Domain $Domain -Subnet $response -Role $Role) -SuccessOnWarning
     }
     Write-Verbose "[Select-ExistingSubnets] Subnet response = $response"
     return [string]$response
 }
 
-function Generate-ExistingConfig {
+function Get-ExistingConfig {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
@@ -1025,7 +1339,7 @@ function Generate-ExistingConfig {
     )
 
 
-    $adminUser = (Get-List -Type vm -DomainName $Domain | Where-Object { $_.Role -eq "DC" }).domainAdmin
+    $adminUser = (Get-List -Type vm -DomainName $Domain | Where-Object { $_.Role -eq "DC" }).adminName
 
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
@@ -1033,17 +1347,17 @@ function Generate-ExistingConfig {
 
     Write-Verbose "Generating $Domain $Subnet $role $ParentSiteCode"
 
-    $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
-
+    #    $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
+    $prefix = get-PrefixForDomain -Domain $Domain
     if ([string]::IsNullOrWhiteSpace($prefix)) {
         $prefix = "NULL-"
     }
     $vmOptions = [PSCustomObject]@{
-        prefix          = $prefix
-        basePath        = "E:\VirtualMachines"
-        domainName      = $Domain
-        domainAdminName = $adminUser
-        network         = $Subnet
+        prefix     = $prefix
+        basePath   = "E:\VirtualMachines"
+        domainName = $Domain
+        adminName  = $adminUser
+        network    = $Subnet
     }
 
     $configGenerated = $null
@@ -1117,14 +1431,17 @@ function Get-Menu {
     }
 
     if ($null -ne $additionalOptions) {
-        $additionalOptions.keys | ForEach-Object {
-
+        foreach ($item in $additionalOptions.keys) {
+            $value = $additionalOptions."$($item)"
+            if ($item.StartsWith("*")) {
+                write-host $value
+                continue
+            }
             $color1 = "DarkGreen"
             $color2 = "Green"
 
-            $value = $additionalOptions."$($_)"
             #Write-Host -ForegroundColor DarkGreen [$_] $value
-            if (-not [String]::IsNullOrWhiteSpace($_)) {
+            if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $value -split "%"
 
                 if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
@@ -1133,7 +1450,7 @@ function Get-Menu {
                 if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
                     $color2 = $TextValue[2]
                 }
-                Write-Option $_ $TextValue[0] -color $color1 -Color2 $color2
+                Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
             }
         }
     }
@@ -1524,8 +1841,8 @@ function Get-AdditionalValidations {
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
         [Object] $CurrentValue
     )
-    $value = $property."$($item.Name)"
-    $name = $($item.Name)
+    $value = $property."$($Name)"
+    #$name = $($item.Name)
     Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
     switch ($name) {
         "vmName" {
@@ -1543,7 +1860,140 @@ function Get-AdditionalValidations {
                 }
             }
         }
+        "siteCode" {
+            if ($property.RemoteSQLVM) {
+                $newSQLName = $value + "SQL"
+                #Check if the new name is already in use:
+                $NewSQLVM = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newSQLName }
+                if ($NewSQLVM) {
+                    write-host
+                    write-host -ForegroundColor Red "Changing Sitecode would rename SQL VM to " -NoNewline
+                    write-host -ForegroundColor Yellow $($NewSQLVM.vmName) -NoNewline
+                    write-host -ForegroundColor Red " which already exists. Unable to change sitecode."
+                    $property.siteCode = $CurrentValue
+                    return
+                }
+            }
+
+            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -SiteCode $value
+            $NewSSName = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newName }
+            if ($NewSSName) {
+                write-host
+                write-host -ForegroundColor Red "Changing Sitecode would rename VM to " -NoNewline
+                write-host -ForegroundColor Yellow $($NewSSName.vmName) -NoNewline
+                write-host -ForegroundColor Red " which already exists. Unable to change sitecode."
+                $property.siteCode = $CurrentValue
+                return
+            }
+            #Set the SQL Name after all checks are done.
+            if ($property.RemoteSQLVM) {
+                $RemoteSQLVM = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $($property.RemoteSQLVM) }
+                $RemoteSQLVM.vmName = $newSQLName
+                $property.RemoteSQLVM = $newSQLName
+            }
+            $property.vmName = $newName
+            Write-Verbose "New Name: $newName"
+            if ($property.role -eq "CAS") {
+                $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
+                if ($PRIVM) {
+                    $PRIVM.ParentSiteCode = $value
+                }
+            }
+        }
     }
+}
+
+
+function Get-SortedProperties {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Property to Sort")]
+        [object] $property
+    )
+
+    $Sorted = @()
+    $members = $property | Get-Member -MemberType NoteProperty
+
+    if ($members.Name -contains "domainName") {
+        $sorted += "domainName"
+    }
+    if ($members.Name -contains "prefix") {
+        $sorted += "prefix"
+    }
+    if ($members.Name -contains "network") {
+        $sorted += "network"
+    }
+    if ($members.Name -contains "adminName") {
+        $sorted += "adminName"
+    }
+    if ($members.Name -contains "basePath") {
+        $sorted += "basePath"
+    }
+
+    if ($members.Name -contains "vmName") {
+        $sorted += "vmName"
+    }
+    if ($members.Name -contains "role") {
+        $sorted += "role"
+    }
+    if ($members.Name -contains "memory") {
+        $sorted += "memory"
+    }
+    if ($members.Name -contains "virtualProcs") {
+        $sorted += "virtualProcs"
+    }
+    if ($members.Name -contains "operatingSystem") {
+        $sorted += "operatingSystem"
+    }
+    if ($members.Name -contains "sqlVersion") {
+        $sorted += "sqlVersion"
+    }
+    if ($members.Name -contains "sqlInstanceName") {
+        $sorted += "sqlInstanceName"
+    }
+    if ($members.Name -contains "sqlInstanceDir") {
+        $sorted += "sqlInstanceDir"
+    }
+    if ($members.Name -contains "remoteSQLVM") {
+        $sorted += "remoteSQLVM"
+    }
+    if ($members.Name -contains "cmInstallDir") {
+        $sorted += "cmInstallDir"
+    }
+    if ($members.Name -contains "parentSiteCode") {
+        $sorted += "parentSiteCode"
+    }
+    if ($members.Name -contains "siteCode") {
+        $sorted += "siteCode"
+    }
+
+    if ($members.Name -contains "additionalDisks") {
+        $sorted += "additionalDisks"
+    }
+
+    switch ($members.Name) {
+        "vmName" {  }
+        "role" {  }
+        "memory" { }
+        "virtualProcs" { }
+        "operatingSystem" {  }
+        "siteCode" { }
+        "parentSiteCode" { }
+        "sqlVersion" { }
+        "sqlInstanceName" {  }
+        "sqlInstanceDir" { }
+        "additionalDisks" { }
+        "cmInstallDir" { }
+        "domainName" { }
+        "prefix" { }
+        "network" { }
+        "adminName" { }
+        "basePath" { }
+        "remoteSQLVM" {}
+
+        Default { $sorted += $_ }
+    }
+    return $sorted
 }
 
 # Displays a Menu based on a property, offers options in [1], [2],[3] format
@@ -1597,21 +2047,38 @@ function Select-Options {
         }
 
         # Get the Property Names and Values.. Present as Options.
-        $property | Get-Member -MemberType NoteProperty | ForEach-Object {
+        foreach ($item in (Get-SortedProperties $property)) {
             $i = $i + 1
-            $value = $property."$($_.Name)"
+            $value = $property."$($item)"
             #$padding = 27 - ($i.ToString().Length)
             $padding = 26
-            Write-Option $i "$($($_.Name).PadRight($padding," "")) = $value"
+            Write-Option $i "$($($item).PadRight($padding," "")) = $value"
         }
 
         if ($null -ne $additionalOptions) {
-            $additionalOptions.keys | ForEach-Object {
-                $value = $additionalOptions."$($_)"
-                Write-Option $_ $value -color DarkGreen -Color2 Green
+            foreach ($item in $additionalOptions.keys) {
+                $value = $additionalOptions."$($item)"
+                if ($item.StartsWith("*")) {
+                    write-host $value
+                    continue
+                }
+                $color1 = "DarkGreen"
+                $color2 = "Green"
+
+                #Write-Host -ForegroundColor DarkGreen [$_] $value
+                if (-not [String]::IsNullOrWhiteSpace($item)) {
+                    $TextValue = $value -split "%"
+
+                    if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
+                        $color1 = $TextValue[1]
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
+                        $color2 = $TextValue[2]
+                    }
+                    Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
+                }
             }
         }
-
         $response = get-ValidResponse $prompt $i $null $additionalOptions
         if ([String]::IsNullOrWhiteSpace($response)) {
             return
@@ -1632,7 +2099,7 @@ function Select-Options {
         }
         # We got the [1] Number pressed. Lets match that up to the actual value.
         $i = 0
-        foreach ($item in ($property | Get-Member -MemberType NoteProperty)) {
+        foreach ($item in (Get-SortedProperties $property)) {
 
             $i = $i + 1
 
@@ -1640,8 +2107,8 @@ function Select-Options {
                 continue
             }
 
-            $value = $property."$($item.Name)"
-            $name = $($item.Name)
+            $value = $property."$($item)"
+            $name = $($item)
 
             switch ($name) {
                 "operatingSystem" {
@@ -1649,6 +2116,19 @@ function Select-Options {
                     if ($property.role -eq "DomainMember") {
                         $property.vmName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config
                     }
+                    continue MainLoop
+                }
+                "domainName" {
+                    $domain = select-NewDomainName
+                    $property.domainName = $domain
+                    $property.prefix = get-PrefixForDomain -Domain $domain
+                    Get-TestResult -SuccessOnError | out-null
+                    continue MainLoop
+                }
+                "network" {
+                    $network = Select-Subnet
+                    $property.network = $network
+                    Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
                 }
                 "ParentSiteCode" {
@@ -1691,7 +2171,7 @@ function Select-Options {
                 Write-Verbose "7 Select-Options"
                 while ($valid -eq $false) {
                     if ($value -is [bool]) {
-                        $response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") -NoNewLine
+                        $response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") -NoNewLine -Test:$false
                     }
                     else {
                         $response2 = Read-Host2 -Prompt "Select new Value for $($Name)" $value
@@ -1718,8 +2198,8 @@ function Select-Options {
 
                             Write-Verbose ("$_ name = $($_.Name) or $name = $response2 value = '$value'")
                             $property."$($Name)" = $response2
-                            Get-AdditionalValidations -property $property -name $Name -CurrentValue $value
                         }
+                        Get-AdditionalValidations -property $property -name $Name -CurrentValue $value
                         if ($Test) {
                             $valid = Get-TestResult -SuccessOnWarning
                         }
@@ -1766,8 +2246,10 @@ Function Get-TestResult {
             if (!$NoNewLine) {
                 write-host
             }
-            # $MyInvocation | Out-Host
-
+            #$MyInvocation | Out-Host
+            if ($enableVerbose) {
+                Get-PSCallStack | out-host
+            }
         }
         if ($SuccessOnWarning.IsPresent) {
             if ( $c.Failures -eq 0) {
@@ -1792,10 +2274,10 @@ function get-VMString {
     )
 
     $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(15, " ")
-    $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(15, " ")
+    $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(16, " ")
     $mem = $($virtualMachine.memory).PadLEft(4, " ")
     $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
-    $name += "VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)"
+    $name += " VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)"
 
     if ($virtualMachine.additionalDisks) {
         $name += ", $($virtualMachine.additionalDisks.psobject.Properties.Value.count) Extra Disk(s)]"
@@ -1856,7 +2338,12 @@ function Add-NewVMForRole {
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem"
 
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
-        $OperatingSystem = "Server 2022"
+        if ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
+            $operatingSystem = "Windows 10 Latest (64-bit)"
+        }
+        else {
+            $OperatingSystem = "Server 2022"
+        }
     }
     $actualRoleName = ($Role -split " ")[0]
 
@@ -1864,12 +2351,19 @@ function Add-NewVMForRole {
         $actualRoleName = "DomainMember"
     }
 
+    $memory = "2GB"
+    $vprocs = 2
+
+    if ($OperatingSystem.Contains("Server")) {
+        $memory = "4GB"
+        $vprocs = 4
+    }
     $virtualMachine = [PSCustomObject]@{
         vmName          = $null
         role            = $actualRoleName
         operatingSystem = $OperatingSystem
-        memory          = "2GB"
-        virtualProcs    = 2
+        memory          = $memory
+        virtualProcs    = $vprocs
     }
     $existingPrimary = $null
     $existingDPMP = $null
@@ -1878,7 +2372,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
-            $disk = [PSCustomObject]@{"E" = "100GB" }
+            $disk = [PSCustomObject]@{"E" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.Memory = "8GB"
             $virtualMachine.virtualProcs = 8
@@ -1889,7 +2383,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -1912,7 +2406,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -1922,6 +2416,9 @@ function Add-NewVMForRole {
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
 
         }
+        "WorkgroupMember" {}
+        "InternetClient" {}
+        "AADClient" {}
         "DomainMember" { }
         "DomainMember (Server)" { }
         "DomainMember (Client)" {
@@ -1931,6 +2428,7 @@ function Add-NewVMForRole {
             else {
                 $virtualMachine.operatingSystem = $OperatingSystem
             }
+            $virtualMachine.Memory = "2GB"
         }
         "DPMP" {
             $virtualMachine.memory = "3GB"
@@ -2008,6 +2506,10 @@ function Select-VirtualMachines {
 
 
                 $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os
+                if ($role -eq "DC") {
+                    $Global:Config.vmOptions.domainName = select-NewDomainName
+                    $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
+                }
                 Get-TestResult -SuccessOnError | out-null
                 continue
             }
@@ -2019,25 +2521,27 @@ function Select-VirtualMachines {
                         $newValue = "Start"
                         while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                             Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                            $customOptions = @{ "A" = "Add Additional Disk" }
+                            $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks"; "A" = "Add Additional Disk" }
                             if ($null -eq $virtualMachine.additionalDisks) {
                             }
                             else {
-                                $customOptions["R"] = "Remove Last Additional Disk"
+                                $customOptions += [ordered]@{"R" = "Remove Last Additional Disk" }
                             }
                             if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
-                                $customOptions["S"] = "Configure SQL (Set local or remote SQL)"
+                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr"; "S" = "Configure SQL (Set local or remote SQL)" }
                             }
                             else {
-                                if ($null -eq $virtualMachine.sqlVersion) {
-                                    $customOptions["S"] = "Add SQL"
-                                }
-                                else {
-                                    $customOptions["X"] = "Remove SQL"
+                                if ($virtualMachine.OperatingSystem -contains "Server") {
+                                    if ($null -eq $virtualMachine.sqlVersion) {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL"; "S" = "Add SQL" }
+                                    }
+                                    else {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL"; "X" = "Remove SQL" }
+                                    }
                                 }
                             }
 
-                            $customOptions["D"] = "Delete this VM"
+                            $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management"; "D" = "Delete this VM%Red%Red" }
                             $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $i -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
                             if (([string]::IsNullOrEmpty($newValue))) {
                                 break VMLoop
@@ -2063,7 +2567,9 @@ function Select-VirtualMachines {
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
                                     $virtualMachine.virtualProcs = 4
-                                    $virtualMachine.memory = "4GB"
+                                    if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
+                                        $virtualMachine.memory = "4GB"
+                                    }
                                 }
                             }
                             if ($newValue -eq "X") {
@@ -2073,7 +2579,7 @@ function Select-VirtualMachines {
                             }
                             if ($newValue -eq "A") {
                                 if ($null -eq $virtualMachine.additionalDisks) {
-                                    $disk = [PSCustomObject]@{"E" = "100GB" }
+                                    $disk = [PSCustomObject]@{"E" = "120GB" }
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
                                 }
                                 else {
@@ -2083,7 +2589,7 @@ function Select-VirtualMachines {
                                     }
                                     if ($letters -lt 90) {
                                         $letter = $([char]$letters).ToString()
-                                        $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "100GB"
+                                        $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "120GB"
                                     }
                                 }
                             }
@@ -2172,12 +2678,12 @@ function Save-Config {
     Write-Host
     Write-Verbose "9 Save-Config"
 
-    $file = "$($config.vmOptions.prefix)$($config.vmOptions.domainName)"
+    $file = "$($config.vmOptions.domainName)"
     if ($config.vmOptions.existingDCNameWithPrefix) {
-        $file += "-ADD"
+        $file += "-ADD-"
     }
     elseif (-not $config.cmOptions) {
-        $file += "-NOSCCM"
+        $file += "-NOSCCM-"
     }
     elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "cas" }) {
         $file += "-CAS-$($config.cmOptions.version)-"
@@ -2186,9 +2692,9 @@ function Save-Config {
         $file += "-PRI-$($config.cmOptions.version)-"
     }
 
-    $file += "($($config.virtualMachines.Count)VMs)-"
-    $date = Get-Date -Format "MM-dd-yyyy"
-    $file += $date
+    $file += "($($config.virtualMachines.Count)VMs)"
+    $date = Get-Date -Format "yyyy-MM-dd"
+    $file = $date + "-" + $file
 
     $filename = Join-Path $configDir $file
 
@@ -2229,14 +2735,26 @@ while ($valid -eq $false) {
         $valid = $true
     }
     else {
-        Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)`r`n"
-        Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
+        if ($return.DeployNow -eq $false) {
+            Write-Host
+            write-host -ForegroundColor Yellow "WARNING: Configuration is not valid. Saving is not advised. Proceed with caution."
+            Write-Host -ForegroundColor Red "Configuration contains the following errors: `r`n$($c.Message)`r`n"
+            write-host
+            $valid = $true
+        }
+        else {
+            Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)`r`n"
+            Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
+        }
     }
 
     if ($valid) {
         Show-Summary ($c.DeployConfig)
         Write-Host
         Write-verbose "13"
+        if ($return.DeployNow -eq $true) {
+            Write-Host -ForegroundColor Green "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
+        }
         Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
         $response = Read-Host2 -Prompt "Everything correct? (Y/n)" -HideHelp
         if (-not [String]::IsNullOrWhiteSpace($response)) {
@@ -2250,8 +2768,8 @@ while ($valid -eq $false) {
 Save-Config $Global:Config
 
 if (-not $InternalUseOnly.IsPresent) {
-    Write-Host "You can deploy this configuration by running the following command:"
-    Write-Host "$($PSScriptRoot)\New-Lab.ps1 -Configuration $($return.ConfigFileName)"
+    Write-Host "You may deploy this configuration by running the following command:"
+    Write-Host "$($PSScriptRoot)\New-Lab.ps1 -Configuration ""$($return.ConfigFileName)"""
 }
 
 #================================= NEW LAB SCENERIO ============================================

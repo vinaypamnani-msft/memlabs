@@ -22,14 +22,14 @@
     $PrimarySiteName = "$PSName$"
 
     # Domain Admin User name
-    $DomainAdminName = $deployConfig.vmOptions.domainAdminName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
     $cm_admin = "$DNAME\$DomainAdminName"
 
     # CM Options
     $InstallConfigMgr = $deployConfig.cmOptions.install
 
     # SQL Instance Location
-    if ($ThisVM.remoteSQLVM) {
+    if ($ThisVM.remoteSQLVM -or $ThisVM.Hidden) {
         $installSQL = $false
     }
     else {

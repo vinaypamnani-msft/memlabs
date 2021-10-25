@@ -1,0 +1,147 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Settings programVersion="2.83">
+  <AutoSaveFiles>False</AutoSaveFiles>
+  <AutoSaveInterval>0</AutoSaveInterval>
+  <BuiltInGroups>
+    <groups>
+      <connected>
+        <properties>
+          <expanded>False</expanded>
+          <name />
+        </properties>
+      </connected>
+      <favorites>
+        <properties>
+          <expanded>False</expanded>
+          <name />
+        </properties>
+      </favorites>
+      <recentlyUsed>
+        <properties>
+          <maxNumberOfServers>10</maxNumberOfServers>
+          <expanded>False</expanded>
+          <name />
+        </properties>
+      </recentlyUsed>
+    </groups>
+  </BuiltInGroups>
+  <ConnectionBarState>Pinned</ConnectionBarState>
+  <CredentialsProfiles>
+    <credentialsProfiles />
+  </CredentialsProfiles>
+  <DefaultGroupSettings>
+    <defaultSettings>
+      <properties>
+        <expanded>False</expanded>
+        <name />
+      </properties>
+      <logonCredentials>
+        <profileName scope="Local">Custom</profileName>
+        <userName>labadmin</userName>
+        <password />
+        <domain>memlabs-timhe</domain>
+      </logonCredentials>
+      <connectionSettings>
+        <connectToConsole>False</connectToConsole>
+        <startProgram />
+        <workingDir />
+        <port>3389</port>
+        <loadBalanceInfo />
+      </connectionSettings>
+      <gatewaySettings>
+        <enabled>False</enabled>
+        <hostName />
+        <logonMethod>Any</logonMethod>
+        <localBypass>True</localBypass>
+        <credSharing>True</credSharing>
+        <profileName scope="Local">Custom</profileName>
+        <userName />
+        <password />
+        <domain />
+      </gatewaySettings>
+      <remoteDesktop>
+        <sameSizeAsClientArea>False</sameSizeAsClientArea>
+        <fullScreen>True</fullScreen>
+        <colorDepth>24</colorDepth>
+      </remoteDesktop>
+      <localResources>
+        <audioRedirection>Client</audioRedirection>
+        <audioRedirectionQuality>Dynamic</audioRedirectionQuality>
+        <audioCaptureRedirection>DoNotRecord</audioCaptureRedirection>
+        <keyboardHook>Remote</keyboardHook>
+        <redirectClipboard>True</redirectClipboard>
+        <redirectDrives>True</redirectDrives>
+        <redirectDrivesList>
+          <item>C:\</item>
+          <item>D:\</item>
+          <item>E:\</item>
+          <item>F:\</item>
+          <item>Z:\</item>
+        </redirectDrivesList>
+        <redirectPrinters>False</redirectPrinters>
+        <redirectPorts>False</redirectPorts>
+        <redirectSmartCards>True</redirectSmartCards>
+        <redirectPnpDevices>False</redirectPnpDevices>
+      </localResources>
+      <displaySettings>
+        <liveThumbnailUpdates>True</liveThumbnailUpdates>
+        <allowThumbnailSessionInteraction>True</allowThumbnailSessionInteraction>
+        <showDisconnectedThumbnails>True</showDisconnectedThumbnails>
+        <thumbnailScale>1</thumbnailScale>
+        <smartSizeDockedWindows>Scale</smartSizeDockedWindows>
+        <smartSizeUndockedWindows>Scale</smartSizeUndockedWindows>
+      </displaySettings>
+      <securitySettings>
+        <authentication>None</authentication>
+      </securitySettings>
+      <encryptionSettings>
+        <encryptionMethod>LogonCredentials</encryptionMethod>
+        <credentialName>memlabs-timhe\labadmin</credentialName>
+        <credentialData />
+      </encryptionSettings>
+    </defaultSettings>
+  </DefaultGroupSettings>
+  <DimNodesWhenInactive>False</DimNodesWhenInactive>
+  <EnablePanning>False</EnablePanning>
+  <FilesToOpen>
+    <item>TEMPLATE</item>
+  </FilesToOpen>
+  <FocusOnClick>False</FocusOnClick>
+  <FullScreenWindowIsTopMost>False</FullScreenWindowIsTopMost>
+  <GroupSortOrder>ByName</GroupSortOrder>
+  <HideMainMenu>False</HideMainMenu>
+  <HotKeyAltEsc>Insert</HotKeyAltEsc>
+  <HotKeyAltShiftTab>Next</HotKeyAltShiftTab>
+  <HotKeyAltSpace>Delete</HotKeyAltSpace>
+  <HotKeyAltTab>PageUp</HotKeyAltTab>
+  <HotKeyCtrlAltDel>End</HotKeyCtrlAltDel>
+  <HotKeyCtrlEsc>Home</HotKeyCtrlEsc>
+  <HotKeyFocusReleaseLeft>Left</HotKeyFocusReleaseLeft>
+  <HotKeyFocusReleaseRight>Right</HotKeyFocusReleaseRight>
+  <HotKeyFullScreen>Cancel</HotKeyFullScreen>
+  <LastUpdateCheckTimeUtc>2012-06-01 00:00:00Z</LastUpdateCheckTimeUtc>
+  <LockWindowSize>False</LockWindowSize>
+  <PanningAcceleration>1</PanningAcceleration>
+  <PerformanceFlags>0</PerformanceFlags>
+  <PersistentBitmapCaching>True</PersistentBitmapCaching>
+  <PluginSettings>
+    <plugins />
+  </PluginSettings>
+  <ReconnectOnStartup>True</ReconnectOnStartup>
+  <ServerSortOrder>ByName</ServerSortOrder>
+  <ServerTreeAutoHidePopUpDelay>0</ServerTreeAutoHidePopUpDelay>
+  <ServerTreeLocation>Left</ServerTreeLocation>
+  <ServerTreeVisibility>Dock</ServerTreeVisibility>
+  <ServerTreeWidth>263</ServerTreeWidth>
+  <ShowConnectedGroup>False</ShowConnectedGroup>
+  <ShowFavoritesGroup>False</ShowFavoritesGroup>
+  <ShowRecentlyUsedGroup>False</ShowRecentlyUsedGroup>
+  <ShowReconnectGroup>False</ShowReconnectGroup>
+  <ThumbnailPercentage>15</ThumbnailPercentage>
+  <ThumbnailSize>160 x 120</ThumbnailSize>
+  <ThumbnailSizeIsInPixels>True</ThumbnailSizeIsInPixels>
+  <UseMultipleMonitors>False</UseMultipleMonitors>
+  <WindowIsMaximized>False</WindowIsMaximized>
+  <WindowPosition>200, 200</WindowPosition>
+  <WindowSize>1273 x 823</WindowSize>
+</Settings>

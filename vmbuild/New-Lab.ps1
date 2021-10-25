@@ -22,16 +22,11 @@ if ($Common.Initialized) {
     $Common.Initialized = $false
 }
 
-# Dot source common
-. $PSScriptRoot\Common.ps1
-
 # Set Verbose
-if ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent) {
-    $Common.VerboseEnabled = $true
-}
-else {
-    $Common.VerboseEnabled = $false
-}
+$enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
+
+# Dot source common
+. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
 if (-not $NoWindowResize.IsPresent) {
     try {
@@ -90,7 +85,7 @@ function Write-JobProgress {
 $VM_Create = {
 
     # Dot source common
-    . $using:PSScriptRoot\Common.ps1
+    . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
 
     # Get required variables from parent scope
     $cmDscFolder = $using:cmDscFolder
@@ -98,7 +93,19 @@ $VM_Create = {
     $deployConfig = $using:deployConfig
     $forceNew = $using:ForceNew
     $createVM = $using:CreateVM
-    $network = $deployConfig.vmOptions.network
+
+    # Change log location
+    $domainName = $using:domainName
+    $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainName.log"
+
+    # VM Network Switch
+    $isInternet = ($currentItem.role -eq "InternetClient") -or ($currentItem.role -eq "AADClient")
+    if ($isInternet) {
+        $network = "Internet"
+    }
+    else {
+        $network = $deployConfig.vmOptions.network
+    }
 
     # Set domain name, depending on whether we need to create new VM or use existing one
     if (-not $createVM -or ($currentItem.role -eq "DC") ) {
@@ -196,6 +203,37 @@ $VM_Create = {
         return
     }
 
+    # Boot To OOBE?
+    $bootToOOBE = $currentItem.role -eq "AADClient"
+    if ($bootToOOBE) {
+        # Run Sysprep
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false } -WhatIf:$WhatIf
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown } -WhatIf:$WhatIf
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
+        }
+        else {
+            $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 15 -WhatIf:$WhatIf
+            if (-not $ready) {
+                Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
+            }
+            else {
+                Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
+                $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15 -WhatIf:$WhatIf
+                if ($oobeStarted) {
+                    Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
+                    Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
+                }
+                else {
+                    Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
+                }
+            }
+        }
+        # Update VMNote
+        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $oobeStarted
+        return
+    }
+
     # Copy DSC files
     Write-Log "PSJOB: $($currentItem.vmName): Copying required PS modules to the VM."
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force } -WhatIf:$WhatIf
@@ -279,7 +317,14 @@ $VM_Create = {
         $deployConfig = $using:deployConfig
 
         # Set current role
-        $dscRole = if ($currentItem.role -eq "DPMP") { "DomainMember" } else { $currentItem.role }
+
+        switch (($currentItem.role)) {
+            "DPMP" { $dscRole = "DomainMember" }
+            "AADClient" { $dscRole = "WorkgroupMember" }
+            "InternetClient" { $dscRole = "WorkgroupMember" }
+            Default { $dscRole = $currentItem.role }
+        }
+
 
         # Define DSC variables
         $dscConfigScript = "C:\staging\DSC\$cmDscFolder\$($dscRole)Configuration.ps1"
@@ -468,13 +513,21 @@ $VM_Create = {
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
     # NLA Service starts before domain is ready sometimes, and causes RDP to fail because network is considered public by firewall.
+    if ($currentItem.role -eq "WorkgroupMember" -or $currentItem.role -eq "InternetClient" -or $currentItem.role -eq "AADClient") {
+        $netProfile = 1
+    }
+    else {
+        $netProfile = 2
+    } # 1 = Private, 2 = Domain
+
     $Trust_Ethernet = {
+        param ($netProfile)
         Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse `
         | ForEach-Object { $_.PSChildName } `
-        | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 2 }
+        | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value $netProfile }
     }
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -DisplayName "Set Ethernet as Trusted" -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -ArgumentList $netProfile -DisplayName "Set Ethernet as Trusted" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
     }
@@ -573,6 +626,11 @@ try {
         return
     }
 
+    # Change log location
+    $domainName = $deployConfig.vmOptions.domainName
+    Write-Log "Starting deployment. Review VMBuild.$domainName.log"
+    $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainName.log"
+
     # Download required files
     $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
     if (-not $success) {
@@ -597,7 +655,7 @@ try {
 
     # Test if hyper-v switch exists, if not create it
     Write-Log "Main: Creating/verifying whether a Hyper-V switch for specified network exists." -Activity
-    $switch = Test-NetworkSwitch -Network $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
+    $switch = Test-NetworkSwitch -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
     if (-not $switch) {
         Write-Log "Main: Failed to verify/create Hyper-V switch for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
         return
@@ -609,6 +667,35 @@ try {
     if (-not $worked) {
         Write-Log "Main: Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
         return
+    }
+
+    # Internet Client VM Switch and DHCP Scope
+    $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
+    if ($containsIN) {
+        Write-Log "Main: Creating/verifying whether a Hyper-V switch for 'Internet' network exists." -Activity
+        $internetSwitchName = "Internet"
+        $internetSubnet = "172.31.250.0"
+        $switch = Test-NetworkSwitch -NetworkName $internetSwitchName -NetworkSubnet $internetSubnet -DomainName $internetSwitchName
+        if (-not $switch) {
+            Write-Log "Main: Failed to verify/create Hyper-V switch for 'Internet' network ($internetSwitchName). Exiting." -Failure
+            return
+        }
+
+        # Test if DHCP scope exists, if not create it
+        Write-Log "Main: Creating/verifying DHCP scope options for the 'Internet' network." -Activity
+        $dummyParams = [PSCustomObject]@{
+            DHCPScopeId        = $internetSubnet
+            DHCPScopeName      = $internetSwitchName
+            DHCPScopeStart     = "172.31.250.20"
+            DHCPScopeEnd       = "172.31.250.199"
+            DHCPDefaultGateway = "172.31.250.200"
+            DHCPDNSAddress     = @("4.4.4.4", "8.8.8.8")
+        }
+        $worked = Test-DHCPScope -ConfigParams $dummyParams
+        if (-not $worked) {
+            Write-Log "Main: Failed to verify/create DHCP Scope for the 'Internet' network. Exiting." -Failure
+            return
+        }
     }
 
     # DSC Folder
@@ -634,13 +721,13 @@ try {
     $job_created_no = 0
 
     # Existing DC scenario
-    $containsPS = $deployConfig.virtualMachines.role.Contains("Primary")
+    $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
     $existingDC = $deployConfig.parameters.ExistingDCName
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
         Write-Log "Main: Attempting to remove existing DNS Records" -Activity -HostOnly
-        foreach($item in $deployConfig.virtualMachines) {
+        foreach ($item in $deployConfig.virtualMachines) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
         }
     }
@@ -657,15 +744,30 @@ try {
 
     # Existing CAS scenario
     $existingCAS = $deployConfig.parameters.ExistingCASName
+
     if ($existingCAS -and $containsPS) {
+        $existingSQLVMName = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS }).RemoteSQLVM
         # create a dummy VM object for the existingCAS
-        $deployConfig.virtualMachines += [PSCustomObject]@{
-            vmName = $existingCAS
-            role   = "CAS"
-            hidden = $true
+        if ($existingSQLVMName) {
+            $deployConfig.virtualMachines += [PSCustomObject]@{
+                vmName      = $existingCAS
+                role        = "CAS"
+                RemoteSQLVM = $existingSQLVMName
+                hidden      = $true
+            }
+        }
+        else {
+            $existingCASVM = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS })
+            $deployConfig.virtualMachines += [PSCustomObject]@{
+                vmName = $existingCAS
+                SQLInstanceName = $existingCASVM.SQLInstanceName
+                SQLVersion = $existingCASVM.SQLVersion
+                SQLInstanceDir = $existingCASVM.SQLInstanceDir
+                role   = "CAS"
+                hidden = $true
+            }
         }
     }
-
     Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
     # New scenario
@@ -741,14 +843,19 @@ try {
 
     $timer.Stop()
     Write-Host
-    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
+
     if (Test-Path "C:\tools\rdcman.exe") {
         Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
+        $roles = $deployConfig.virtualMachines | Select-Object -ExpandProperty Role
+        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient") -or ($roles -Contains "DomainMember") -or ($roles -Contains "WorkgroupMember")) {
+            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+        }
     }
-
+    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
 }
 finally {
     # Ctrl + C brings us here :)
+    get-job | stop-job
     Set-QuickEdit
 }
 

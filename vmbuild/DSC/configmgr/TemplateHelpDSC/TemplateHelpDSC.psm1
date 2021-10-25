@@ -301,6 +301,11 @@ class WriteConfigurationFile {
                     StartTime = ''
                     EndTime   = ''
                 }
+                WorkgroupMemberFinished   = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
             }
             $Configuration = New-Object -TypeName psobject -Property $Actions
             $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
