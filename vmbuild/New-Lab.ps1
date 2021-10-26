@@ -297,7 +297,7 @@ $VM_Create = {
         # Create init log
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_InstallModules: Started at $time`r`n====="  | Out-File $log -Force
+        "`r`n=====`r`nDSC_InstallModules: Started at $time`r`n=====" | Out-File $log -Force
 
         # Install modules
         "Installing modules" | Out-File $log -Append
@@ -319,6 +319,7 @@ $VM_Create = {
         # Set current role
 
         switch (($currentItem.role)) {
+            "PassiveSite" { $dscRole = "Primary" } # Set to Primary, even if we're doing this for CAS - All we need to do is prep the machine, no CM install.
             "DPMP" { $dscRole = "DomainMember" }
             "AADClient" { $dscRole = "WorkgroupMember" }
             "InternetClient" { $dscRole = "WorkgroupMember" }
@@ -379,7 +380,7 @@ $VM_Create = {
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n====="  | Out-File $log -Append
+        "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n=====" | Out-File $log -Append
 
         # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
         $dscLog = "C:\staging\DSC\DSC_Log.txt"
@@ -723,6 +724,7 @@ try {
     # Existing DC scenario
     $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
     $existingDC = $deployConfig.parameters.ExistingDCName
+    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
@@ -759,15 +761,39 @@ try {
         else {
             $existingCASVM = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS })
             $deployConfig.virtualMachines += [PSCustomObject]@{
-                vmName = $existingCAS
+                vmName          = $existingCAS
                 SQLInstanceName = $existingCASVM.SQLInstanceName
-                SQLVersion = $existingCASVM.SQLVersion
-                SQLInstanceDir = $existingCASVM.SQLInstanceDir
-                role   = "CAS"
-                hidden = $true
+                SQLVersion      = $existingCASVM.SQLVersion
+                SQLInstanceDir  = $existingCASVM.SQLInstanceDir
+                role            = "CAS"
+                hidden          = $true
             }
         }
     }
+
+    # Adding Passive to existing
+    if ($containsPassive) {
+        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+        if ($PassiveVM.Count -ne 1) {
+            Write-Log "Main: Two Passive site servers found in deployment. We only support adding one at a time." -Failure
+            return
+        }
+        else {
+            $existingActive = $deployConfig.parameters.ExistingActiveName
+            $existingActiveVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActive })
+            $deployConfig.virtualMachines += [PSCustomObject]@{
+                vmName          = $existingActiveVM.vmName
+                role            = $existingActiveVM.role
+                siteCode        = $existingActiveVM.siteCode
+                RemoteSQLVM     = $existingActiveVM.remoteSQLVM
+                SQLInstanceName = $existingActiveVM.SQLInstanceName
+                SQLVersion      = $existingActiveVM.SQLVersion
+                SQLInstanceDir  = $existingActiveVM.SQLInstanceDir
+                hidden          = $true
+            }
+        }
+    }
+
     Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
     # New scenario
@@ -783,6 +809,7 @@ try {
         $CreateVM = $true
         if ($currentItem.vmName -eq $existingDC) { $CreateVM = $false }
         if ($currentItem.vmName -eq $existingCAS) { $CreateVM = $false }
+        if ($currentItem.vmName -eq $existingActiveVM) { $CreateVM = $false }
 
         $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
 

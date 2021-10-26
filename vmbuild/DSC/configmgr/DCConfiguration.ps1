@@ -49,6 +49,9 @@
     # CM Files folder/share
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
+    # Contains Passive?
+    $PassiveVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
@@ -242,10 +245,32 @@
             DependsOn = "[File]ShareFolder"
         }
 
+        foreach ($server in $PassiveVMs.vmName) {
+
+            VerifyComputerJoinDomain WaitFor$server {
+                ComputerName = $server
+                Ensure       = "Present"
+                DependsOn    = "[FileReadAccessShare]DomainSMBShare"
+            }
+
+            DelegateControl AddPS$server {
+                Machine        = $server
+                DomainFullName = $DomainName
+                Ensure         = "Present"
+            }
+        }
+
         VerifyComputerJoinDomain WaitForPS {
             ComputerName = $PSName
             Ensure       = "Present"
             DependsOn    = "[FileReadAccessShare]DomainSMBShare"
+        }
+
+        DelegateControl AddPS {
+            Machine        = $PSName
+            DomainFullName = $DomainName
+            Ensure         = "Present"
+            DependsOn      = "[VerifyComputerJoinDomain]WaitForPS"
         }
 
         WriteConfigurationFile WritePSJoinDomain {
@@ -254,14 +279,7 @@
             WriteNode = "PSJoinDomain"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[VerifyComputerJoinDomain]WaitForPS"
-        }
-
-        DelegateControl AddPS {
-            Machine        = $PSName
-            DomainFullName = $DomainName
-            Ensure         = "Present"
-            DependsOn      = "[WriteConfigurationFile]WritePSJoinDomain"
+            DependsOn = "[DelegateControl]AddPS"
         }
 
         if ($Configuration -eq 'Standalone') {
@@ -272,7 +290,7 @@
                 WriteNode = "DelegateControl"
                 Status    = "Passed"
                 Ensure    = "Present"
-                DependsOn = "[DelegateControl]AddPS"
+                DependsOn = "[WriteConfigurationFile]WritePSJoinDomain"
             }
 
         }
@@ -282,7 +300,7 @@
             VerifyComputerJoinDomain WaitForCS {
                 ComputerName = $CSName
                 Ensure       = "Present"
-                DependsOn    = "[FileReadAccessShare]DomainSMBShare"
+                DependsOn = "[WriteConfigurationFile]WritePSJoinDomain"
             }
 
             WriteConfigurationFile WriteCSJoinDomain {

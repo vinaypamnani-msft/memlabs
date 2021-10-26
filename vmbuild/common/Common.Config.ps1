@@ -574,7 +574,7 @@ function Test-ValidRoleDC {
 
             # Check VM exists in Hyper-V
             #$vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
-            $vm = Get-List -type VM | Where-Object {$_.vmName -eq $existingDC}
+            $vm = Get-List -type VM | Where-Object { $_.vmName -eq $existingDC }
             if (-not $vm) {
                 Add-ValidationMessage -Message "$vmRole Validation: Existing DC found [$existingDC] but VM with the same name was not found in Hyper-V." -ReturnObject $ReturnObject -Warning
             }
@@ -672,17 +672,17 @@ function Test-ValidRoleCSPS {
     if ($VM.siteCode.ToUpperInvariant() -in "AUX", "CON", "NUL", "PRN", "SMS", "ENV") {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
-    $otherVMs = $ConfigObject.VirtualMachines | Where-Object {$_.vmName -ne $VM.vmName} | Where-Object {$null -ne $_.Sitecode}
+    $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode }
 
-    foreach ($siteServer in $otherVMs){
-        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant()){
+    foreach ($siteServer in $otherVMs) {
+        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant() -and $siteServer.role -ne "PassiveSite") {
             Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
         }
     }
 
-    $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object {$null -ne $_.siteCode}
-    foreach ($siteServer in $otherVMs){
-        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant()){
+    $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $null -ne $_.siteCode }
+    foreach ($siteServer in $otherVMs) {
+        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant()) {
             Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
         }
     }
@@ -1049,7 +1049,22 @@ function New-DeployConfig {
         }
     }
 
+    # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
+    $containsPassive = $configObject.virtualMachines.role -contains "PassiveSite"
+    if ($containsPassive) {
+        $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+        $ActiveVMinConfig = $virtualMachines | Where-Object { $_.siteCode -eq $PassiveVM.siteCode -and $_.vmName -ne $PassiveVM.vmName }
+        $activeVMName = $ActiveVMinConfig.vmName
+        if (-not $ActiveVMinConfig) {
+            $ActiveVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PassiveVM.siteCode
+            $activeVMName = $ActiveVM.vmName
+        }
 
+        # Add prefix to FS
+        if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
+            $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
+        }
+    }
 
     if ($containsCS) {
         $CSVM = $virtualMachines | Where-Object { $_.role -eq "CAS" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
@@ -1087,15 +1102,19 @@ function New-DeployConfig {
         DHCPScopeEnd       = $network + ".199"
         ExistingDCName     = $existingDCName
         ExistingCASName    = $existingCSName
+        ExistingActiveName = $activeVMName
         ThisMachineName    = $null
         ThisMachineRole    = $null
     }
+
+    $existingVMs = Get-List -Type VM -DomainName $configObject.vmOptions.domainName
 
     $deploy = [PSCustomObject]@{
         cmOptions       = $configObject.cmOptions
         vmOptions       = $configObject.vmOptions
         virtualMachines = $virtualMachines
         parameters      = $params
+        existingVMs     = $existingVMs
     }
 
     return $deploy

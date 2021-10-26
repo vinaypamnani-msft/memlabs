@@ -22,6 +22,9 @@
     $CSName = $deployConfig.parameters.CSName
     $Scenario = $deployConfig.parameters.Scenario
 
+    # This site is passive site server
+    $isPassive = $ThisVM.role -eq "PassiveSite"
+
     # Domain Admin User name
     $DomainAdminName = $deployConfig.vmOptions.adminName
     $cm_admin = "$DNAME\$DomainAdminName"
@@ -43,6 +46,22 @@
         if ($ThisVM.sqlInstanceName) {
             $SQLInstanceName = $ThisVM.sqlInstanceName
         }
+    }
+
+    $SQLSysAdminAccounts = @('Administrators', $cm_admin)
+
+    # Force CM/SQL install to false if we're installing passive server
+    if ($isPassive) {
+        $InstallConfigMgr = $false
+        $installSql = $false
+        $ContentLibVMName = $deployConfig.vmOptions.prefix + $ThisVM.remoteContentLibVM
+        $ActiveVM = $deployConfig.virtualMachines | Where-Object { $_.siteCode -eq $ThisVM.siteCode -and $_.vmName -ne $ThisVm.vmName }
+        $ActiveVMName = $ActiveVM.vmName
+    }
+
+    $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+    if ($PassiveVM) {
+        $SQLSysAdminAccounts += "$DName\$($PassiveVM.vmName)$"
     }
 
     # Log share
@@ -174,7 +193,7 @@
                 SourcePath          = 'C:\temp\SQL'
                 UpdateEnabled       = 'True'
                 UpdateSource        = "C:\temp\SQL_CU"
-                SQLSysAdminAccounts = @('Administrators', $cm_admin)
+                SQLSysAdminAccounts = $SQLSysAdminAccounts
                 TcpEnabled          = $true
                 UseEnglish          = $true
                 DependsOn           = '[InstallADK]ADKInstall'
@@ -264,8 +283,8 @@
             }
 
         }
-        else {
-            # Hierarchy
+
+        if ($Scenario -eq "Hierarchy") {
 
             WriteStatus WaitCS {
                 DependsOn = "[InstallSSMS]SSMS"
@@ -374,9 +393,53 @@
         }
         else {
 
-            WriteStatus Complete {
-                DependsOn = "[WaitForConfigurationFile]DelegateControl"
-                Status    = "Complete!"
+            if ($isPassive) {
+
+                # Wait for SQLVM
+                WriteStatus WaitActive {
+                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
+                    Status    = "Waiting for Site Server $ActiveVMName to finish configuration."
+                }
+
+                AddUserToLocalAdminGroup AddActiveLocalAdmin {
+                    Name       = "$ActiveVMName$"
+                    DomainName = $DomainName
+                    DependsOn  = "[WriteStatus]WaitActive"
+                }
+
+                WaitForConfigurationFile WaitActive {
+                    Role          = "ScriptWorkflow"
+                    MachineName   = $ActiveVMName
+                    LogFolder     = $LogFolder
+                    ReadNode      = "ScriptWorkflow"
+                    ReadNodeValue = "Completed"
+                    Ensure        = "Present"
+                    DependsOn     = "[WriteStatus]WaitActive"
+                }
+
+                WaitForConfigurationFile WaitFS {
+                    Role          = "DomainMember"
+                    MachineName   = $ContentLibVMName
+                    LogFolder     = $LogFolder
+                    ReadNode      = "DomainMemberFinished"
+                    ReadNodeValue = "Passed"
+                    Ensure        = "Present"
+                    DependsOn     = "[WaitForConfigurationFile]WaitSS"
+                }
+
+                WriteStatus Complete {
+                    DependsOn = "[WaitForConfigurationFile]WaitFS"
+                    Status    = "Complete!"
+                }
+
+            }
+            else {
+
+                WriteStatus Complete {
+                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
+                    Status    = "Complete!"
+                }
+
             }
 
         }

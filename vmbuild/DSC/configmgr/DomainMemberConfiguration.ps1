@@ -52,6 +52,12 @@
         }
     }
 
+    $SQLSysAdminAccounts = @('Administrators', $cm_admin)
+    $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+    if ($PassiveVM) {
+        $SQLSysAdminAccounts += "$DName\$($PassiveVM.vmName)$"
+    }
+
     # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
@@ -166,7 +172,7 @@
                 SourcePath          = 'C:\temp\SQL'
                 UpdateEnabled       = 'True'
                 UpdateSource        = "C:\temp\SQL_CU"
-                SQLSysAdminAccounts = @('Administrators', $cm_admin)
+                SQLSysAdminAccounts = $SQLSysAdminAccounts
                 TcpEnabled          = $true
                 UseEnglish          = $true
                 DependsOn           = '[OpenFirewallPortForSCCM]OpenFirewall'
