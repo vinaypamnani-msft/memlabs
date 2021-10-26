@@ -424,7 +424,7 @@
                     ReadNode      = "DomainMemberFinished"
                     ReadNodeValue = "Passed"
                     Ensure        = "Present"
-                    DependsOn     = "[WaitForConfigurationFile]WaitSS"
+                    DependsOn     = "[WaitForConfigurationFile]WaitActive"
                 }
 
                 WriteStatus Complete {
