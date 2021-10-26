@@ -2531,7 +2531,7 @@ function Select-VirtualMachines {
                                 $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr"; "S" = "Configure SQL (Set local or remote SQL)" }
                             }
                             else {
-                                if ($virtualMachine.OperatingSystem -contains "Server") {
+                                if ($virtualMachine.OperatingSystem.Contains("Server")) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL"; "S" = "Add SQL" }
                                     }
