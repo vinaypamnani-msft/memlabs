@@ -774,23 +774,26 @@ try {
     # Adding Passive to existing
     if ($containsPassive) {
         $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-        if ($PassiveVM.Count -ne 1) {
+        if (($PassiveVM | Measure-Object).Count -ne 1) {
             Write-Log "Main: Two Passive site servers found in deployment. We only support adding one at a time." -Failure
             return
         }
         else {
-            $existingActive = $deployConfig.parameters.ExistingActiveName
-            $existingActiveVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActive })
-            $deployConfig.virtualMachines += [PSCustomObject]@{
-                vmName          = $existingActiveVM.vmName
-                role            = $existingActiveVM.role
-                siteCode        = $existingActiveVM.siteCode
-                RemoteSQLVM     = $existingActiveVM.remoteSQLVM
-                SQLInstanceName = $existingActiveVM.SQLInstanceName
-                SQLVersion      = $existingActiveVM.SQLVersion
-                SQLInstanceDir  = $existingActiveVM.SQLInstanceDir
-                hidden          = $true
-            }
+            # Revisit this for adding Passive to existing hierarchy
+            # $existingActive = $deployConfig.parameters.ExistingActiveName
+            # if ($existingActive) {
+            #     $existingActiveVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActive })
+            #     $deployConfig.virtualMachines += [PSCustomObject]@{
+            #         vmName          = $existingActiveVM.vmName
+            #         role            = $existingActiveVM.role
+            #         siteCode        = $existingActiveVM.siteCode
+            #         RemoteSQLVM     = $existingActiveVM.remoteSQLVM
+            #         SQLInstanceName = $existingActiveVM.SQLInstanceName
+            #         SQLVersion      = $existingActiveVM.SQLVersion
+            #         SQLInstanceDir  = $existingActiveVM.SQLInstanceDir
+            #         hidden          = $true
+            #     }
+            # }
         }
     }
 
