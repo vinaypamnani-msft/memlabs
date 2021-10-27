@@ -55,6 +55,11 @@
         $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
     }
 
+    $waitOnServers = @()
+    if ($PSName) { $waitOnServers += $PSName }
+    if ($PassiveVM) { $waitOnServers += $PassiveVM.vmName }
+    if ($CSName) { $waitOnServers += $CSName }
+
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
@@ -233,112 +238,58 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        if ($containsPassive) {
+        $waitOnDependency = @()
+        foreach ($server in $waitOnServers) {
 
-            WriteStatus WaitDomainJoin {
+            WriteStatus "WaitDomainJoin$server" {
                 DependsOn = "[FileReadAccessShare]DomainSMBShare"
-                Status    = "Waiting for $($PassiveVM.vmName) to join the domain"
+                Status    = "Waiting for $server to join the domain"
             }
 
-            VerifyComputerJoinDomain WaitForPassive {
-                ComputerName = $PassiveVM.vmName
+            VerifyComputerJoinDomain "WaitFor$server" {
+                ComputerName = $server
                 Ensure       = "Present"
-                DependsOn    = "[FileReadAccessShare]DomainSMBShare"
+                DependsOn    = "[WriteStatus]WaitDomainJoin$server"
             }
 
-            DelegateControl AddPassive {
-                Machine        = $PassiveVM.vmName
+            DelegateControl "Add$server" {
+                Machine        = $server
                 DomainFullName = $DomainName
                 Ensure         = "Present"
-                DependsOn      = "[VerifyComputerJoinDomain]WaitForPassive"
+                DependsOn      = "[VerifyComputerJoinDomain]WaitFor$server"
             }
 
-            WriteStatus WaitPS {
-                DependsOn = "[DelegateControl]AddPassive"
-                Status    = "Waiting for $PSName to join the domain"
-            }
-
-        }
-        else {
-
-            WriteStatus WaitPS {
-                DependsOn = "[FileReadAccessShare]DomainSMBShare"
-                Status    = "Waiting for $PSName to join the domain"
-            }
-
+            $waitOnDependency += "[DelegateControl]Add$server"
         }
 
-        VerifyComputerJoinDomain WaitForPS {
-            ComputerName = $PSName
-            Ensure       = "Present"
-            DependsOn    = "[WriteStatus]WaitPS"
-        }
-
-        DelegateControl AddPS {
-            Machine        = $PSName
-            DomainFullName = $DomainName
-            Ensure         = "Present"
-            DependsOn      = "[VerifyComputerJoinDomain]WaitForPS"
-        }
-
-        WriteConfigurationFile WritePSJoinDomain {
+        WriteConfigurationFile WriteDelegateControlfinished {
             Role      = "DC"
             LogPath   = $LogPath
-            WriteNode = "PSJoinDomain"
+            WriteNode = "DelegateControl"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[DelegateControl]AddPS"
+            DependsOn = $waitOnDependency
         }
 
-        if ($Configuration -eq 'Standalone') {
-
-            WriteConfigurationFile WriteDelegateControlfinished {
+        if ($PSName) {
+            WriteConfigurationFile WritePSJoinDomain {
                 Role      = "DC"
                 LogPath   = $LogPath
-                WriteNode = "DelegateControl"
+                WriteNode = "PSJoinDomain"
                 Status    = "Passed"
                 Ensure    = "Present"
-                DependsOn = "[WriteConfigurationFile]WritePSJoinDomain"
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
             }
-
         }
-        else {
-            # Hierarchy
 
-            WriteStatus WaitCS {
-                DependsOn = "[WriteConfigurationFile]WritePSJoinDomain"
-                Status    = "Waiting for $CSName to join the domain"
-            }
-
-            VerifyComputerJoinDomain WaitForCS {
-                ComputerName = $CSName
-                Ensure       = "Present"
-                DependsOn    = "[WriteConfigurationFile]WritePSJoinDomain"
-            }
-
+        if ($CSName) {
             WriteConfigurationFile WriteCSJoinDomain {
                 Role      = "DC"
                 LogPath   = $LogPath
                 WriteNode = "CSJoinDomain"
                 Status    = "Passed"
                 Ensure    = "Present"
-                DependsOn = "[VerifyComputerJoinDomain]WaitForCS"
-            }
-
-            DelegateControl AddCS {
-                Machine        = $CSName
-                DomainFullName = $DomainName
-                Ensure         = "Present"
-                DependsOn      = "[WriteConfigurationFile]WriteCSJoinDomain"
-            }
-
-            WriteConfigurationFile WriteDelegateControlfinished {
-                Role      = "DC"
-                LogPath   = $LogPath
-                WriteNode = "DelegateControl"
-                Status    = "Passed"
-                Ensure    = "Present"
-                DependsOn = @("[DelegateControl]AddCS", "[DelegateControl]AddPS")
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
             }
         }
 

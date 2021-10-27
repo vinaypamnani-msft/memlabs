@@ -862,15 +862,17 @@ try {
             Write-JobProgress($job)
             Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
-            $jobOutput
+
             if ($jobOutPut.StartsWith("ERROR")) {
+                Write-Host $jobOutput -ForegroundColor Red
                 $failedCount++
             }
             else {
+                Write-Host $jobOutput -ForegroundColor Green
                 $successCount++
             }
 
-            #$job | Remove-Job -Force -Confirm:$false
+            Write-Progress -Id $job.Id -Completed
             $jobs.Remove($job)
         }
 
