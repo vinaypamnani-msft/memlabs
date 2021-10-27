@@ -54,8 +54,9 @@
     }
 
     $SQLSysAdminAccounts = @($cm_admin)
-    $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-    if ($PassiveVM) {
+    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    if ($containsPassive) {
+        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
         foreach ($vm in $PassiveVM) {
             $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
         }
@@ -191,7 +192,7 @@
                 InstanceName = $SQLInstanceName
             }
 
-            if ($PassiveVM) {
+            if ($containsPassive) {
 
                 WriteStatus WaitPassive {
                     DependsOn = "[SqlMemory]SetSqlMemory"

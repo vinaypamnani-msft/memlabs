@@ -123,7 +123,7 @@ Add-CMPassiveSite -InstallDirectory $SSVM.cmInstallDir -SiteCode $SiteCode -Site
 do {
     $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 2 AND Applicable = 1" | Sort-Object MessageTime | Select-Object -Last 1
     if ($state) {
-        Write-DscStatus "Adding passive site server on $passiveFQDN. Current State: $($state.Description)" -RetrySeconds 60
+        Write-DscStatus "Adding passive site server on $passiveFQDN. Current State: $($state.SubStageName)" -RetrySeconds 60
     }
     Start-Sleep -Seconds 60
 } until ($state.SubStageId -eq 917515)

@@ -87,7 +87,6 @@ Copy-Item .\$dscFolder\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modul
 
 # Create test config, for testing if the config definition is good.
 switch (($role)) {
-    "PassiveSite" { $role = "Primary" } # Set to Primary, even if we're doing this for CAS - All we need to do is prep the machine, no CM install.
     "DPMP" { $role = "DomainMember" }
     "AADClient" { $role = "WorkgroupMember" }
     "InternetClient" { $role = "WorkgroupMember" }
