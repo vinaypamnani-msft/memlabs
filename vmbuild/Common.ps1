@@ -280,7 +280,7 @@ function Start-CurlTransfer {
 
     $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
     if (-not (Test-Path $curlPath)) {
-        & choco install curl -y  | Out-Null
+        & choco install curl -y | Out-Null
     }
 
     if (-not (Test-Path $curlPath)) {
@@ -653,56 +653,23 @@ function New-VmNote {
 
         $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
 
-        if ($InProgress.IsPresent) {
-            $vmNote = [PSCustomObject]@{
-                inProgress = $true
-                role       = $Role
-                deployedOS = $ThisVM.operatingSystem
-                domain     = $DeployConfig.vmOptions.domainName
-                adminName  = $DeployConfig.vmOptions.adminName
-                network    = $DeployConfig.vmOptions.network
-                prefix     = $DeployConfig.vmOptions.prefix
-            }
-        }
-        else {
-            $vmNote = [PSCustomObject]@{
-                success    = $Successful
-                role       = $Role
-                deployedOS = $ThisVM.operatingSystem
-                domain     = $DeployConfig.vmOptions.domainName
-                adminName  = $DeployConfig.vmOptions.adminName
-                network    = $DeployConfig.vmOptions.network
-                prefix     = $DeployConfig.vmOptions.prefix
-            }
+        $vmNote = [PSCustomObject]@{
+            inProgress = $InProgress.IsPresent
+            success    = $Successful
+            role       = $Role
+            deployedOS = $ThisVM.operatingSystem
+            domain     = $DeployConfig.vmOptions.domainName
+            adminName  = $DeployConfig.vmOptions.adminName
+            network    = $DeployConfig.vmOptions.network
+            prefix     = $DeployConfig.vmOptions.prefix
         }
 
-        if ($DeployConfig.cmOptions.install -and ($Role -eq "CAS" -or $Role -eq "Primary")) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $ThisVM.siteCode
-            $vmNote | Add-Member -MemberType NoteProperty -Name "cmInstallDir" -Value $ThisVM.cmInstallDir
-        }
-
-        if ($ThisVM.parentSiteCode) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "parentSiteCode" -Value $ThisVM.parentSiteCode
-        }
-
-        if ($ThisVM.sqlVersion) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlVersion" -Value $ThisVM.sqlVersion
-            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlInstanceName" -Value $ThisVM.sqlInstanceName
-            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlInstanceDir" -Value $ThisVM.sqlInstanceDir
-        }
-
-        if ($ThisVM.remoteSQLVM) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "remoteSQLVM" -Value $ThisVM.remoteSQLVM
+        foreach ($prop in $ThisVM.PSObject.Properties) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
         }
 
         Set-VMNote -vmName $vmName -vmNote $vmNote
-        #$vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
 
-        #$vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-        #$vm = Get-Vm $VmName -ErrorAction Stop
-        #if ($vm) {
-        #    $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
-        #}
     }
     catch {
         Write-Log "New-VmNote: Failed to add a note to the VM '$VmName' in Hyper-V. $_" -Failure
@@ -949,11 +916,11 @@ function New-VirtualMachine {
     return $true
 }
 
-function Get-AvailableMemoryGB{
+function Get-AvailableMemoryGB {
     $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-    $availableMemory = ($availableMemory-("4GB"/1kB)) * 1KB / 1GB
-    $availableMemory = [Math]::Round($availableMemory,2)
-    if ($availableMemory -lt 0){
+    $availableMemory = ($availableMemory - ("4GB" / 1kB)) * 1KB / 1GB
+    $availableMemory = [Math]::Round($availableMemory, 2)
+    if ($availableMemory -lt 0) {
         $availableMemory = 0
     }
     return $availableMemory

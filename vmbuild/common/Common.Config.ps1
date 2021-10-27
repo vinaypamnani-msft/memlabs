@@ -1000,8 +1000,8 @@ function New-DeployConfig {
 
     if ($null -ne ($configObject.vmOptions.domainAdminName)) {
         if ($null -eq ($configObject.vmOptions.adminName)) {
-                $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
-    }
+            $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
+        }
         $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
     }
 
@@ -1343,6 +1343,8 @@ function Get-List {
                     Write-Log "Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
                     #continue
                 }
+
+                # Update LastKnownIP, and timestamp
                 if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
                     $LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
                     $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
@@ -1365,64 +1367,33 @@ function Get-List {
                         }
                     }
                 }
+
                 $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
-                $adminUser = $vmNoteObject.adminName
-                if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin } # we renamed this property, read if it exists
-                if ($vmNoteObject) {
-                    $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
-                    $vmObject = [PSCustomObject]@{
-                        VmName          = $vm.Name
-                        VmId            = $vm.Id
-                        Role            = $vmNoteObject.role
-                        DeployedOS      = $vmNoteObject.deployedOS
-                        MemoryGB        = $vm.MemoryAssigned / 1GB
-                        MemoryStartupGB = $vm.MemoryStartup / 1GB
-                        DiskUsedGB      = $diskSize / 1GB
-                        State           = $vm.State.ToString()
-                        Domain          = $vmNoteObject.domain
-                        AdminName       = $adminUser
-                        Subnet          = $vmNoteObject.network
-                        LastKnownIP     = $vmNoteObject.LastKnownIP
-                        Prefix          = $vmNoteObject.prefix
-                        Success         = $vmNoteObject.success
-                        SiteCode        = $vmNoteObject.SiteCode
-                        ParentSiteCode  = $vmNoteObject.parentSiteCode
-                        CMInstallDir    = $vmNoteObject.cmInstallDir
-                        SQLVersion      = $vmNoteObject.sqlVersion
-                        SQLInstanceName = $vmNoteObject.sqlInstanceName
-                        SQLInstanceDir  = $vmNoteObject.sqlInstanceDir
-                        RemoteSQLVM     = $vmNoteObject.remoteSQLVM
-                        InProgress      = $inProgress
+                $vmNet = $vm | Get-VMNetworkAdapter
 
-                    }
+                $vmObject = [PSCustomObject]@{
+                    vmName          = $vm.Name
+                    vmId            = $vm.Id
+                    subnet          = $vmNet.SwitchName
+                    memoryGB        = $vm.MemoryAssigned / 1GB
+                    memoryStartupGB = $vm.MemoryStartup / 1GB
+                    diskUsedGB      = $diskSize / 1GB
+                    state           = $vm.State.ToString()
                 }
-                else {
-                    $vmNet = $vm | Get-VMNetworkAdapter
-                    $vmObject = [PSCustomObject]@{
-                        VmName          = $vm.Name
-                        VmId            = $vm.Id
-                        Subnet          = $vmNet.SwitchName
-                        MemoryGB        = $vm.MemoryAssigned / 1GB
-                        MemoryStartupGB = $vm.MemoryStartup / 1GB
-                        DiskUsedGB      = $diskSize / 1GB
-                        State           = $vm.State.ToString()
-                        LastKnownIP     = $null
-                        Role            = $null
-                        DeployedOS      = $null
-                        SiteCode        = $null
-                        ParentSiteCode  = $null
-                        CMInstallDir    = $null
-                        SQLVersion      = $null
-                        SQLInstanceName = $null
-                        SQLInstanceDir  = $null
-                        RemoteSQLVM     = $null
-                        Domain          = $null
-                        AdminName       = $null
-                        Prefix          = $null
-                        Success         = $null
-                        InProgress      = $null
 
+                if ($vmNoteObject) {
+
+                    $adminUser = $vmNoteObject.adminName
+                    if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin } # we renamed this property, read if it exists
+                    $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
+
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $adminUser -Force
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
+
+                    foreach ($prop in $vmNoteObject.PSObject.Properties) {
+                        $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
                     }
+
                 }
 
                 $return += $vmObject
