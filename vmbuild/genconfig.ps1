@@ -1851,6 +1851,8 @@ function Get-AdditionalValidations {
             $CASVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
             $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
 
+            $Passive = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+
             #This is a SQL Server being renamed.  Lets check if we need to update CAS or PRI
             if (($Property.Role -eq "DomainMember") -and ($null -ne $Property.sqlVersion)) {
                 if (($null -ne $PRIVM.remoteSQLVM) -and $PRIVM.remoteSQLVM -eq $CurrentValue) {
@@ -1858,6 +1860,12 @@ function Get-AdditionalValidations {
                 }
                 if (($null -ne $CASVM.remoteSQLVM) -and ($CASVM.remoteSQLVM -eq $CurrentValue)) {
                     $CASVM.remoteSQLVM = $value
+                }
+            }
+
+            if ($Property.Role -eq "DomainMember" -and $null -ne $Passive){
+                if ($Passive.remoteContentLibVM -eq $CurrentValue){
+                    $Passive.remoteContentLibVM = $value
                 }
             }
         }
@@ -2117,6 +2125,11 @@ function Select-Options {
                     if ($property.role -eq "DomainMember") {
                         $property.vmName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config
                     }
+                    continue MainLoop
+                }
+                "remoteContentLibVM" {
+                    write-host
+                    write-host -ForegroundColor Yellow "remoteContentLibVM Can not be modified manually, but the VM can be renamed."
                     continue MainLoop
                 }
                 "domainName" {
@@ -2421,7 +2434,7 @@ function Add-NewVMForRole {
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
 
         }
-        "PassiveSite"{
+        "PassiveSite" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SiteCode' -Value $SiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
@@ -2585,11 +2598,17 @@ function Select-VirtualMachines {
                                     Remove-VMFromConfig -vmName $PassiveNode.vmName -ConfigToModify $global:config
                                 }
                                 else {
-                                    Add-NewVMForRole -Role "DomainMember" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.siteCode + "FS")
-                                    Add-NewVMForRole -Role "PassiveSite" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.vmName + "-P")  -SiteCode $virtualMachine.siteCode -RemoteContentLibVM $($virtualMachine.siteCode + "FS")
-                                    $FS = $global:config.virtualMachines | Where-Object { $_.vmName -eq $($virtualMachine.siteCode + "FS") }
-                                    $disk = [PSCustomObject]@{"E" = "400GB" }
-                                    $FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                                    $NewFSServer = $($virtualMachine.siteCode + "FS")
+                                    $FS = $global:config.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
+                                    if (-not $FS) {
+                                        Add-NewVMForRole -Role "DomainMember" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $NewFSServer
+                                        $FS = $global:config.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
+                                        $disk = [PSCustomObject]@{"E" = "400GB" }
+                                        $FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                                    }
+                                    Add-NewVMForRole -Role "PassiveSite" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.vmName + "-P")  -SiteCode $virtualMachine.siteCode -RemoteContentLibVM $NewFSServer
+
+
                                 }
                                 continue VMLoop
 
