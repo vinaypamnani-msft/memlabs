@@ -109,7 +109,7 @@ function Select-ConfigMenu {
         $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
         $vmsTotal = (Get-List -Type VM | Measure-Object).Count
         $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
-        $availableMemory = [math]::Round($(Get-AvailableMemoryGB),0)
+        $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
         $disk = Get-Volume -DriveLetter E
         $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]"; }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow"; "P" = "Show Passwords" }
@@ -1133,6 +1133,7 @@ function Select-RolesForExisting {
                 $existingRoles2 += "DomainMember (Server)"
                 $existingRoles2 += "DomainMember (Client)"
             }
+            "PassiveSite" {}
             Default { $existingRoles2 += $item }
         }
     }
@@ -2331,6 +2332,10 @@ function Add-NewVMForRole {
         [string] $Name = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary in a Heirarchy")]
         [string] $ParentSiteCode = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite")]
+        [string] $SiteCode = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "RemoteContentLibVM if this is a PassiveSite")]
+        [string] $RemoteContentLibVM = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Override default OS")]
         [string] $OperatingSystem = $null
     )
@@ -2414,6 +2419,14 @@ function Add-NewVMForRole {
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
+
+        }
+        "PassiveSite"{
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SiteCode' -Value $SiteCode
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
+            $disk = [PSCustomObject]@{"E" = "250GB" }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $RemoteContentLibVM
 
         }
         "WorkgroupMember" {}
@@ -2529,6 +2542,13 @@ function Select-VirtualMachines {
                             }
                             if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
                                 $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr"; "S" = "Configure SQL (Set local or remote SQL)" }
+                                $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
+                                if ($PassiveNode) {
+                                    $customOptions += [ordered]@{"H" = "Remove HA" }
+                                }
+                                else {
+                                    $customOptions += [ordered]@{"H" = "Enable HA" }
+                                }
                             }
                             else {
                                 if ($virtualMachine.OperatingSystem -contains "Server") {
@@ -2556,6 +2576,23 @@ function Select-VirtualMachines {
                             }
                             if (([string]::IsNullOrEmpty($newValue))) {
                                 break VMLoop
+                            }
+                            if ($newValue -eq "H") {
+                                $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
+                                if ($PassiveNode) {
+                                    Remove-VMFromConfig -vmName $PassiveNode.remoteContentLibVM -ConfigToModify $global:config
+                                    $virtualMachine.psobject.properties.remove('remoteContentLibVM')
+                                    Remove-VMFromConfig -vmName $PassiveNode.vmName -ConfigToModify $global:config
+                                }
+                                else {
+                                    Add-NewVMForRole -Role "DomainMember" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.siteCode + "FS")
+                                    Add-NewVMForRole -Role "PassiveSite" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.vmName + "-P")  -SiteCode $virtualMachine.siteCode -RemoteContentLibVM $($virtualMachine.siteCode + "FS")
+                                    $FS = $global:config.virtualMachines | Where-Object { $_.vmName -eq $($virtualMachine.siteCode + "FS") }
+                                    $disk = [PSCustomObject]@{"E" = "400GB" }
+                                    $FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                                }
+                                continue VMLoop
+
                             }
                             if ($newValue -eq "S") {
                                 if ($virtualMachine.Role -eq "Primary" -or $virtualMachine.Role -eq "CAS") {
