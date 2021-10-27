@@ -238,18 +238,18 @@
             DependsOn = "[File]ShareFolder"
         }
 
+        WriteStatus WaitDomainJoin {
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            Status    = "Waiting for $($waitOnServers -join ',') to join the domain"
+        }
+
         $waitOnDependency = @()
         foreach ($server in $waitOnServers) {
-
-            WriteStatus "WaitDomainJoin$server" {
-                DependsOn = "[FileReadAccessShare]DomainSMBShare"
-                Status    = "Waiting for $server to join the domain"
-            }
 
             VerifyComputerJoinDomain "WaitFor$server" {
                 ComputerName = $server
                 Ensure       = "Present"
-                DependsOn    = "[WriteStatus]WaitDomainJoin$server"
+                DependsOn    = "[WriteStatus]WaitDomainJoin"
             }
 
             DelegateControl "Add$server" {

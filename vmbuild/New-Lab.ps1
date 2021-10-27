@@ -872,7 +872,7 @@ try {
                 $successCount++
             }
 
-            Write-Progress -Id $job.Id -Completed
+            Write-Progress -Id $job.Id -Activity $job.Name -Completed
             $jobs.Remove($job)
         }
 

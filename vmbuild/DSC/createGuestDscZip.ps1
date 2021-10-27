@@ -34,7 +34,6 @@ $modules = @(
     'ComputerManagementDsc',
     'DnsServerDsc',
     'SqlServerDsc',
-    'SqlServer',
     'xDhcpServer',
     'NetworkingDsc'
 )

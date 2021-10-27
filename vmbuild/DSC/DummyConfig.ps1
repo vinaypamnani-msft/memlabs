@@ -1,7 +1,7 @@
 Configuration DummyConfig {
 
     # Cheat to include all modules guest VM's would need, so we have an exported copy.
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'SqlServerDsc', 'SqlServer','DnsServerDsc', 'ComputerManagementDsc', 'xDscDiagnostics', 'ActiveDirectoryDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'SqlServerDsc', 'DnsServerDsc', 'ComputerManagementDsc', 'xDscDiagnostics', 'ActiveDirectoryDsc'
 
     Node LOCALHOST {
 
