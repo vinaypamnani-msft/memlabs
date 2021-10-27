@@ -1017,7 +1017,10 @@ function New-DeployConfig {
 
     # add prefix to vm names
     $virtualMachines = $configObject.virtualMachines
-    $virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
+    foreach ($item in $virtualMachines){
+        $item.vmName = $configObject.vmOptions.prefix + $item.vmName
+    }
+    #$virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
 
     # create params object
     try {

@@ -156,8 +156,9 @@ function Select-DomainMenu {
     }
 
     if ($domainList.Count -eq 0) {
-        Write-Host -ForegroundColor Red "No Domains found. Please delete VM's manually from hyper-v"
         Write-Host
+        Write-Host -ForegroundColor Red "No Domains found. Please delete VM's manually from hyper-v"
+
         return
     }
 
@@ -1059,6 +1060,13 @@ function Show-ExistingNetwork {
         $stats = Get-DomainStatsLine -DomainName $item
 
         $domainList += "$($item.PadRight(22," ")) $stats"
+    }
+
+    if ($domainList.Count -eq 0) {
+        Write-Host
+        Write-Host -ForegroundColor Red "No Domains found. Please deploy a new domain"
+
+        return
     }
 
     while ($true) {
