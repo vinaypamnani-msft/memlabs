@@ -200,7 +200,7 @@
                 }
 
                 WaitForConfigurationFile WaitPassive {
-                    Role          = "Primary"
+                    Role          = "PassiveSite"
                     MachineName   = $PassiveVM.vmName
                     LogFolder     = $LogFolder
                     ReadNode      = "MachineJoinDomain"

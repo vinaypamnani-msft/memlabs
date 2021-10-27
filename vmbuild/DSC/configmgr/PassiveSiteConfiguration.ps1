@@ -124,7 +124,7 @@ configuration PassiveSiteConfiguration
         }
 
         WriteConfigurationFile WriteJoinDomain {
-            Role      = "Primary"
+            Role      = "PassiveSite"
             LogPath   = $LogPath
             WriteNode = "MachineJoinDomain"
             Status    = "Passed"
