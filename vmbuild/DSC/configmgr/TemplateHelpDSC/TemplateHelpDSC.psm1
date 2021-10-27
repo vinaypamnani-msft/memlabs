@@ -484,7 +484,7 @@ class DelegateControl {
         $arg1 = "CN=System Management,CN=System,$root"
         $permissioninfo = & $cmd $arg1
 
-        if (($permissioninfo | Where-Object { $_ -like "*$_machinename*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+        if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
             return $true
         }
 

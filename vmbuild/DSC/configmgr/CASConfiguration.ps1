@@ -346,6 +346,14 @@
 
             }
         }
+        else {
+
+            WriteStatus WaitDelegate {
+                DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+                Status    = "Wait for DC to assign permissions to Systems Management container"
+            }
+
+        }
 
         WaitForConfigurationFile DelegateControl {
             Role          = "DC"

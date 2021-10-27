@@ -1060,7 +1060,7 @@ function New-DeployConfig {
         $ActiveVMinConfig = $virtualMachines | Where-Object { $_.siteCode -eq $PassiveVM.siteCode -and $_.vmName -ne $PassiveVM.vmName }
         $activeVMName = $ActiveVMinConfig.vmName
         if (-not $ActiveVMinConfig) {
-            $ActiveVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PassiveVM.siteCode
+            $ActiveVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PassiveVM.siteCode | Where-Object { $_.role -ne "PassiveSite" }
             $existingActiveVMName = $ActiveVM.vmName
         }
 
