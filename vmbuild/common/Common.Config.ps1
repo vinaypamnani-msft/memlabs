@@ -760,8 +760,6 @@ function Test-Configuration {
         $configObject = $InputObject | ConvertTo-Json -Depth 3 | ConvertFrom-Json
     }
 
-    write-host "timhe"
-    $configObject | ConvertTo-Json -Depth 3 | out-host
     $deployConfig = New-DeployConfig -configObject $configObject
     $return.DeployConfig = $deployConfig
 
