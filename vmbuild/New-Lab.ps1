@@ -250,7 +250,7 @@ $VM_Create = {
     }
 
     # Copy SQL files to VM
-    if ($currentItem.sqlVersion) {
+    if ($currentItem.sqlVersion -and $createVM) {
 
         Write-Log "PSJOB: $($currentItem.vmName): Copying SQL installation files to the VM."
         Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Activity "Working" -Completed
@@ -404,7 +404,7 @@ $VM_Create = {
             Rename-Item -Path $jsonPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
         }
 
-        # For CAS re-run, mark ScriptWorkflow not started
+        # For re-run, mark ScriptWorkflow not started
         $ConfigurationFile = Join-Path -Path "C:\staging\DSC" -ChildPath "ScriptWorkflow.json"
         if (Test-Path $ConfigurationFile) {
             $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -498,14 +498,14 @@ $VM_Create = {
                 if (-not $result.ScriptBlockFailed) {
                     $logEntry = $result.ScriptBlockOutput
                     $logEntry = "ConfigMgrSetup.log: " + $logEntry.Substring(0, $logEntry.IndexOf("$"))
-                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed)" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                     $skipProgress = $true
                 }
             }
 
             if (-not $skipProgress) {
                 # Write progress
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed)" -Status $status.ScriptBlockOutput -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             }
 
             # Check if complete
@@ -539,7 +539,7 @@ $VM_Create = {
     }
     else {
         $worked = $true
-        Write-Progress "$($currentItem.role) configuration completed successfully. Elapsed time: $($stopWatch.Elapsed)" -Status $status.ScriptBlockOutput -Completed
+        Write-Progress "$($currentItem.role) configuration completed successfully. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -Completed
         Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
 
@@ -649,7 +649,7 @@ try {
     if ($DownloadFilesOnly.IsPresent) {
         $timer.Stop()
         Write-Host
-        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
+        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
         Write-Host
         return
     }
@@ -779,21 +779,32 @@ try {
             return
         }
         else {
-            # Revisit this for adding Passive to existing hierarchy
-            # $existingActive = $deployConfig.parameters.ExistingActiveName
-            # if ($existingActive) {
-            #     $existingActiveVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActive })
-            #     $deployConfig.virtualMachines += [PSCustomObject]@{
-            #         vmName          = $existingActiveVM.vmName
-            #         role            = $existingActiveVM.role
-            #         siteCode        = $existingActiveVM.siteCode
-            #         RemoteSQLVM     = $existingActiveVM.remoteSQLVM
-            #         SQLInstanceName = $existingActiveVM.SQLInstanceName
-            #         SQLVersion      = $existingActiveVM.SQLVersion
-            #         SQLInstanceDir  = $existingActiveVM.SQLInstanceDir
-            #         hidden          = $true
-            #     }
-            # }
+            $existingActive = $deployConfig.parameters.ExistingActiveName
+            if ($existingActive) {
+                $existingActiveVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActive })
+                if ($existingActiveVM.remoteSQLVM) {
+                    $sqlVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActiveVM.remoteSQLVM })
+                    $deployConfig.virtualMachines += [PSCustomObject]@{
+                        vmName          = $sqlVM.vmName
+                        SQLInstanceName = $sqlVM.SQLInstanceName
+                        SQLVersion      = $sqlVM.SQLVersion
+                        SQLInstanceDir  = $sqlVM.SQLInstanceDir
+                        role            = "DomainMember"
+                        hidden          = $true
+                    }
+                }
+
+                $deployConfig.virtualMachines += [PSCustomObject]@{
+                    vmName          = $existingActiveVM.vmName
+                    role            = $existingActiveVM.role
+                    siteCode        = $existingActiveVM.siteCode
+                    RemoteSQLVM     = $existingActiveVM.remoteSQLVM
+                    SQLInstanceName = $existingActiveVM.SQLInstanceName
+                    SQLVersion      = $existingActiveVM.SQLVersion
+                    SQLInstanceDir  = $existingActiveVM.SQLInstanceDir
+                    hidden          = $true
+                }
+            }
         }
     }
 
@@ -810,9 +821,7 @@ try {
 
         # Existing DC scenario
         $CreateVM = $true
-        if ($currentItem.vmName -eq $existingDC) { $CreateVM = $false }
-        if ($currentItem.vmName -eq $existingCAS) { $CreateVM = $false }
-        if ($currentItem.vmName -eq $existingActiveVM) { $CreateVM = $false }
+        if ($currentItem.hidden -eq $true) { $CreateVM = $false }
 
         $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
 
@@ -881,7 +890,7 @@ try {
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         }
     }
-    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
+    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
 }
 finally {
     # Ctrl + C brings us here :)

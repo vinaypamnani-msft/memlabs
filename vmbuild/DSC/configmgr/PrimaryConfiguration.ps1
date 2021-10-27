@@ -48,15 +48,17 @@
         }
     }
 
-    $SQLSysAdminAccounts = @('Administrators', $cm_admin)
+    $SQLSysAdminAccounts = @($cm_admin)
 
     # Force CM/SQL install to false if we're installing passive server
     if ($isPassive) {
         $InstallConfigMgr = $false
         $installSql = $false
-        $ContentLibVMName = $deployConfig.vmOptions.prefix + $ThisVM.remoteContentLibVM
-        $ActiveVM = $deployConfig.virtualMachines | Where-Object { $_.siteCode -eq $ThisVM.siteCode -and $_.vmName -ne $ThisVm.vmName }
-        $ActiveVMName = $ActiveVM.vmName
+        $ContentLibVMName = $ThisVM.remoteContentLibVM
+        $ActiveVMName = $deployConfig.parameters.ActiveVMName
+        if (-not $ActiveVMName) {
+            $ActiveVMName = $deployConfig.parameters.ExistingActiveName
+        }
     }
 
     $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
@@ -153,6 +155,15 @@
         WriteStatus OpenPorts {
             DependsOn = "[JoinDomain]JoinDomain"
             Status    = "Open required firewall ports"
+        }
+
+        WriteConfigurationFile WriteJoinDomain {
+            Role      = "Primary"
+            LogPath   = $LogPath
+            WriteNode = "MachineJoinDomain"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[JoinDomain]JoinDomain"
         }
 
         AddNtfsPermissions AddNtfsPerms {
@@ -309,9 +320,65 @@
 
         }
 
-        WriteStatus WaitDelegate {
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
-            Status    = "Wait for DC to assign permissions to Systems Management container"
+        if ($PassiveVM -and (-not $isPassive)) {
+
+            WriteStatus WaitPassive {
+                DependsOn = "[FileReadAccessShare]DomainSMBShare"
+                Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to be ready"
+            }
+
+            WaitForConfigurationFile WaitPassive {
+                Role          = "Primary"
+                MachineName   = $PassiveVM.vmName
+                LogFolder     = $LogFolder
+                ReadNode      = "PassiveReady"
+                ReadNodeValue = "Passed"
+                Ensure        = "Present"
+                DependsOn     = "[WriteStatus]WaitPassive"
+            }
+
+            if ($installSQL) {
+
+                SqlLogin addsysadmin {
+                    Ensure                  = 'Present'
+                    Name                    = "$DName\$($PassiveVM.vmName)$"
+                    LoginType               = 'WindowsUser'
+                    InstanceName            = $SQLInstanceName
+                    LoginMustChangePassword = $false
+                    PsDscRunAsCredential    = $CMAdmin
+                    DependsOn               = '[WaitForConfigurationFile]WaitPassive'
+                }
+
+                SqlRole addsysadmin {
+                    Ensure               = 'Present'
+                    ServerRoleName       = 'sysadmin'
+                    MembersToInclude     = $SQLSysAdminAccounts
+                    InstanceName         = $SQLInstanceName
+                    PsDscRunAsCredential = $CMAdmin
+                    DependsOn            = '[SqlLogin]addsysadmin'
+                }
+
+                WriteStatus WaitDelegate {
+                    DependsOn = "[SqlRole]addsysadmin"
+                    Status    = "Wait for DC to assign permissions to Systems Management container"
+                }
+            }
+            else {
+
+                WriteStatus WaitDelegate {
+                    DependsOn = "[WaitForConfigurationFile]WaitPassive"
+                    Status    = "Wait for DC to assign permissions to Systems Management container"
+                }
+
+            }
+        }
+        else {
+
+            WriteStatus WaitDelegate {
+                DependsOn = "[FileReadAccessShare]DomainSMBShare"
+                Status    = "Wait for DC to assign permissions to Systems Management container"
+            }
+
         }
 
         WaitForConfigurationFile DelegateControl {
@@ -321,7 +388,7 @@
             ReadNode      = "DelegateControl"
             ReadNodeValue = "Passed"
             Ensure        = "Present"
-            DependsOn     = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn     = "[WriteStatus]WaitDelegate"
         }
 
         if ($InstallConfigMgr) {
@@ -395,16 +462,39 @@
 
             if ($isPassive) {
 
-                # Wait for SQLVM
-                WriteStatus WaitActive {
+                WriteStatus WaitFS {
                     DependsOn = "[WaitForConfigurationFile]DelegateControl"
-                    Status    = "Waiting for Site Server $ActiveVMName to finish configuration."
+                    Status    = "Waiting for Content Lib VM $ContentLibVMName to finish configuration."
                 }
 
                 AddUserToLocalAdminGroup AddActiveLocalAdmin {
                     Name       = "$ActiveVMName$"
                     DomainName = $DomainName
-                    DependsOn  = "[WriteStatus]WaitActive"
+                    DependsOn  = "[WriteStatus]WaitFS"
+                }
+
+                WaitForConfigurationFile WaitFS {
+                    Role          = "DomainMember"
+                    MachineName   = $ContentLibVMName
+                    LogFolder     = $LogFolder
+                    ReadNode      = "DomainMemberFinished"
+                    ReadNodeValue = "Passed"
+                    Ensure        = "Present"
+                    DependsOn     = "[AddUserToLocalAdminGroup]AddActiveLocalAdmin"
+                }
+
+                WriteConfigurationFile WritePassiveReady {
+                    Role      = "Primary"
+                    LogPath   = $LogPath
+                    WriteNode = "PassiveReady"
+                    Status    = "Passed"
+                    Ensure    = "Present"
+                    DependsOn = "[WaitForConfigurationFile]WaitFS"
+                }
+
+                WriteStatus WaitActive {
+                    DependsOn = "[WriteConfigurationFile]WritePassiveReady"
+                    Status    = "Waiting for Site Server $ActiveVMName to finish configuration."
                 }
 
                 WaitForConfigurationFile WaitActive {
@@ -417,18 +507,8 @@
                     DependsOn     = "[WriteStatus]WaitActive"
                 }
 
-                WaitForConfigurationFile WaitFS {
-                    Role          = "DomainMember"
-                    MachineName   = $ContentLibVMName
-                    LogFolder     = $LogFolder
-                    ReadNode      = "DomainMemberFinished"
-                    ReadNodeValue = "Passed"
-                    Ensure        = "Present"
-                    DependsOn     = "[WaitForConfigurationFile]WaitActive"
-                }
-
                 WriteStatus Complete {
-                    DependsOn = "[WaitForConfigurationFile]WaitFS"
+                    DependsOn = "[WaitForConfigurationFile]WaitActive"
                     Status    = "Complete!"
                 }
 

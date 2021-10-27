@@ -21,6 +21,7 @@
     $DCName = $deployConfig.parameters.DCName
     $PSName = $deployConfig.parameters.PSName
     $CSName = $deployConfig.parameters.CSName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Server OS?
     $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
@@ -52,10 +53,12 @@
         }
     }
 
-    $SQLSysAdminAccounts = @('Administrators', $cm_admin)
-    $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+    $SQLSysAdminAccounts = @($cm_admin)
+    $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
     if ($PassiveVM) {
-        $SQLSysAdminAccounts += "$DName\$($PassiveVM.vmName)$"
+        foreach ($vm in $PassiveVM) {
+            $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
+        }
     }
 
     # Log share
@@ -64,6 +67,7 @@
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
     Node localhost
     {
@@ -187,9 +191,55 @@
                 InstanceName = $SQLInstanceName
             }
 
-            WriteStatus SSMS {
-                DependsOn = '[SqlMemory]SetSqlMemory'
-                Status    = "Downloading and installing SQL Management Studio"
+            if ($PassiveVM) {
+
+                WriteStatus WaitPassive {
+                    DependsOn = "[SqlMemory]SetSqlMemory"
+                    Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to join domain"
+                }
+
+                WaitForConfigurationFile WaitPassive {
+                    Role          = "Primary"
+                    MachineName   = $PassiveVM.vmName
+                    LogFolder     = $LogFolder
+                    ReadNode      = "MachineJoinDomain"
+                    ReadNodeValue = "Passed"
+                    Ensure        = "Present"
+                    DependsOn     = "[WriteStatus]WaitPassive"
+                }
+
+                SqlLogin addsysadmin {
+                    Ensure                  = 'Present'
+                    Name                    = "$DName\$($PassiveVM.vmName)$"
+                    LoginType               = 'WindowsUser'
+                    InstanceName            = $SQLInstanceName
+                    LoginMustChangePassword = $false
+                    PsDscRunAsCredential    = $CMAdmin
+                    DependsOn               = '[WaitForConfigurationFile]WaitPassive'
+                }
+
+                SqlRole addsysadmin {
+                    Ensure               = 'Present'
+                    ServerRoleName       = 'sysadmin'
+                    MembersToInclude     = $SQLSysAdminAccounts
+                    InstanceName         = $SQLInstanceName
+                    PsDscRunAsCredential = $CMAdmin
+                    DependsOn            = '[SqlLogin]addsysadmin'
+                }
+
+                WriteStatus SSMS {
+                    DependsOn = '[SqlRole]addsysadmin'
+                    Status    = "Downloading and installing SQL Management Studio"
+                }
+            }
+
+            else {
+
+                WriteStatus SSMS {
+                    DependsOn = '[SqlMemory]SetSqlMemory'
+                    Status    = "Downloading and installing SQL Management Studio"
+                }
+
             }
 
             InstallSSMS SSMS {

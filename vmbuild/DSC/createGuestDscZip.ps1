@@ -86,7 +86,13 @@ Write-Host "Installing $dscFolder TemplateHelpDSC on this machine.."
 Copy-Item .\$dscFolder\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
 
 # Create test config, for testing if the config definition is good.
-$role = if ($role -eq "DPMP") { "DomainMember" } else { $role }
+switch (($role)) {
+    "PassiveSite" { $role = "Primary" } # Set to Primary, even if we're doing this for CAS - All we need to do is prep the machine, no CM install.
+    "DPMP" { $role = "DomainMember" }
+    "AADClient" { $role = "WorkgroupMember" }
+    "InternetClient" { $role = "WorkgroupMember" }
+    Default { $role = $role }
+}
 Write-Host "Creating a test config for $role in C:\Temp"
 
 if ($creds) { $adminCreds = $creds }

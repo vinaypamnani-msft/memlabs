@@ -1057,7 +1057,7 @@ function New-DeployConfig {
         $activeVMName = $ActiveVMinConfig.vmName
         if (-not $ActiveVMinConfig) {
             $ActiveVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PassiveVM.siteCode
-            $activeVMName = $ActiveVM.vmName
+            $existingActiveVMName = $ActiveVM.vmName
         }
 
         # Add prefix to FS
@@ -1091,6 +1091,7 @@ function New-DeployConfig {
         DCName             = $DCName
         CSName             = $CSName
         PSName             = ($virtualMachines | Where-Object { $_.role -eq "Primary" }).vmName
+        ActiveVMName       = $activeVMName
         DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
         DomainMembers      = $clientsCsv
         Scenario           = $scenario
@@ -1102,7 +1103,7 @@ function New-DeployConfig {
         DHCPScopeEnd       = $network + ".199"
         ExistingDCName     = $existingDCName
         ExistingCASName    = $existingCSName
-        ExistingActiveName = $activeVMName
+        ExistingActiveName = $existingActiveVMName
         ThisMachineName    = $null
         ThisMachineRole    = $null
     }
@@ -1376,7 +1377,7 @@ function Get-List {
                         MemoryGB        = $vm.MemoryAssigned / 1GB
                         MemoryStartupGB = $vm.MemoryStartup / 1GB
                         DiskUsedGB      = $diskSize / 1GB
-                        State           = $vm.State
+                        State           = $vm.State.ToString()
                         Domain          = $vmNoteObject.domain
                         AdminName       = $adminUser
                         Subnet          = $vmNoteObject.network
@@ -1403,7 +1404,7 @@ function Get-List {
                         MemoryGB        = $vm.MemoryAssigned / 1GB
                         MemoryStartupGB = $vm.MemoryStartup / 1GB
                         DiskUsedGB      = $diskSize / 1GB
-                        State           = $vm.State
+                        State           = $vm.State.ToString()
                         LastKnownIP     = $null
                         Role            = $null
                         DeployedOS      = $null

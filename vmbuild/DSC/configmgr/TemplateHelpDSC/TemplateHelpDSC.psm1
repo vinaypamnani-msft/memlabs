@@ -261,47 +261,57 @@ class WriteConfigurationFile {
         }
         else {
             [hashtable]$Actions = @{
-                CSJoinDomain           = @{
+                MachineJoinDomain       = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                PSJoinDomain           = @{
+                CSJoinDomain            = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DPMPJoinDomain         = @{
+                PSJoinDomain            = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DomainMemberJoinDomain = @{
+                DPMPJoinDomain          = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DelegateControl        = @{
+                DomainMemberJoinDomain  = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                SCCMinstall            = @{
+                DelegateControl         = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DPMPFinished           = @{
+                SCCMinstall             = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DomainMemberFinished   = @{
+                DPMPFinished            = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                WorkgroupMemberFinished   = @{
+                DomainMemberFinished    = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
+                PassiveReady            = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
+                WorkgroupMemberFinished = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
