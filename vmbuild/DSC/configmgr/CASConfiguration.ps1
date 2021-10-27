@@ -47,9 +47,9 @@
 
     # Passive Site Server
     $SQLSysAdminAccounts = @($cm_admin, 'BUILTIN\Administrators')
-    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
     if ($containsPassive) {
-        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+        $PassiveVM = $containsPassive
         foreach ($vm in $PassiveVM) {
             $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
         }
