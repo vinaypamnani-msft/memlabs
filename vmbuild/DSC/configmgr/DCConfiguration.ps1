@@ -233,16 +233,6 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        # Reset DelegateControl
-        WriteConfigurationFile ResetDelegateControl {
-            Role      = "DC"
-            LogPath   = $LogPath
-            WriteNode = "DelegateControl"
-            Status    = "NotStart"
-            Ensure    = "Present"
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
-        }
-
         if ($containsPassive) {
 
             WriteStatus WaitDomainJoin {
