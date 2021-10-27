@@ -49,8 +49,11 @@
     # CM Files folder/share
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
-    # Contains Passive?
-    $PassiveVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+    # Passive Site
+    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    if ($containsPassive) {
+        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+    }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -217,21 +220,6 @@
             HashAlgorithm = "SHA256"
         }
 
-        if (-not $PSName) {
-
-            WriteStatus Complete {
-                DependsOn = "[InstallCA]InstallCA"
-                Status    = "Complete!"
-            }
-
-            return
-        }
-
-        WriteStatus WaitDomainJoin {
-            DependsOn = "[InstallCA]InstallCA"
-            Status    = "Waiting for computers to join the domain"
-        }
-
         File ShareFolder {
             DestinationPath = $LogPath
             Type            = 'Directory'
@@ -245,25 +233,55 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        foreach ($server in $PassiveVMs.vmName) {
+        # Reset DelegateControl
+        WriteConfigurationFile ResetDelegateControl {
+            Role      = "DC"
+            LogPath   = $LogPath
+            WriteNode = "DelegateControl"
+            Status    = "NotStart"
+            Ensure    = "Present"
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+        }
 
-            VerifyComputerJoinDomain WaitFor$server {
-                ComputerName = $server
+        if ($containsPassive) {
+
+            WriteStatus WaitDomainJoin {
+                DependsOn = "[FileReadAccessShare]DomainSMBShare"
+                Status    = "Waiting for $($PassiveVM.vmName) to join the domain"
+            }
+
+            VerifyComputerJoinDomain WaitForPassive {
+                ComputerName = $PassiveVM.vmName
                 Ensure       = "Present"
                 DependsOn    = "[FileReadAccessShare]DomainSMBShare"
             }
 
-            DelegateControl AddPS$server {
-                Machine        = $server
+            DelegateControl AddPassive {
+                Machine        = $PassiveVM.vmName
                 DomainFullName = $DomainName
                 Ensure         = "Present"
+                DependsOn      = "[VerifyComputerJoinDomain]WaitForPassive"
             }
+
+            WriteStatus WaitPS {
+                DependsOn = "[DelegateControl]AddPassive"
+                Status    = "Waiting for $PSName to join the domain"
+            }
+
+        }
+        else {
+
+            WriteStatus WaitPS {
+                DependsOn = "[FileReadAccessShare]DomainSMBShare"
+                Status    = "Waiting for $PSName to join the domain"
+            }
+
         }
 
         VerifyComputerJoinDomain WaitForPS {
             ComputerName = $PSName
             Ensure       = "Present"
-            DependsOn    = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn    = "[WriteStatus]WaitPS"
         }
 
         DelegateControl AddPS {
@@ -297,10 +315,15 @@
         else {
             # Hierarchy
 
+            WriteStatus WaitCS {
+                DependsOn = "[WriteConfigurationFile]WritePSJoinDomain"
+                Status    = "Waiting for $CSName to join the domain"
+            }
+
             VerifyComputerJoinDomain WaitForCS {
                 ComputerName = $CSName
                 Ensure       = "Present"
-                DependsOn = "[WriteConfigurationFile]WritePSJoinDomain"
+                DependsOn    = "[WriteConfigurationFile]WritePSJoinDomain"
             }
 
             WriteConfigurationFile WriteCSJoinDomain {
@@ -329,21 +352,33 @@
             }
         }
 
-        WriteStatus WaitExtSchema {
-            DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
-            Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
-        }
+        if (-not ($PSName -or $CSName)) {
 
-        WaitForExtendSchemaFile WaitForExtendSchemaFile {
-            MachineName = if ($Configuration -eq 'Standalone') { $PSName } else { $CSName }
-            ExtFolder   = $CM
-            Ensure      = "Present"
-            DependsOn   = "[WriteConfigurationFile]WriteDelegateControlfinished"
-        }
+            WriteStatus Complete {
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                Status    = "Complete!"
+            }
 
-        WriteStatus Complete {
-            DependsOn = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
-            Status    = "Complete!"
+        }
+        else {
+
+            WriteStatus WaitExtSchema {
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
+            }
+
+            WaitForExtendSchemaFile WaitForExtendSchemaFile {
+                MachineName = if ($Configuration -eq 'Standalone') { $PSName } else { $CSName }
+                ExtFolder   = $CM
+                Ensure      = "Present"
+                DependsOn   = "[WriteConfigurationFile]WriteDelegateControlfinished"
+            }
+
+            WriteStatus Complete {
+                DependsOn = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
+                Status    = "Complete!"
+            }
+
         }
     }
 }

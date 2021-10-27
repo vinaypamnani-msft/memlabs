@@ -319,7 +319,6 @@ $VM_Create = {
         # Set current role
 
         switch (($currentItem.role)) {
-            "PassiveSite" { $dscRole = "Primary" } # Set to Primary, even if we're doing this for CAS - All we need to do is prep the machine, no CM install.
             "DPMP" { $dscRole = "DomainMember" }
             "AADClient" { $dscRole = "WorkgroupMember" }
             "InternetClient" { $dscRole = "WorkgroupMember" }
@@ -737,16 +736,6 @@ try {
         }
     }
 
-    # Add exising DC to list
-    if ($existingDC -and $containsPS) {
-        # create a dummy VM object for the existingDC
-        $deployConfig.virtualMachines += [PSCustomObject]@{
-            vmName = $existingDC
-            role   = "DC"
-            hidden = $true
-        }
-    }
-
     # Existing CAS scenario
     $existingCAS = $deployConfig.parameters.ExistingCASName
 
@@ -808,6 +797,16 @@ try {
                     hidden          = $true
                 }
             }
+        }
+    }
+
+    # Add exising DC to list
+    if ($existingDC -and ($containsPS -or $containsPassive)) {
+        # create a dummy VM object for the existingDC
+        $deployConfig.virtualMachines += [PSCustomObject]@{
+            vmName = $existingDC
+            role   = "DC"
+            hidden = $true
         }
     }
 

@@ -17,13 +17,9 @@
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
-
     $DCName = $deployConfig.parameters.DCName
     $CSName = $deployConfig.parameters.CSName
     $Scenario = $deployConfig.parameters.Scenario
-
-    # This site is passive site server
-    $isPassive = $ThisVM.role -eq "PassiveSite"
 
     # Domain Admin User name
     $DomainAdminName = $deployConfig.vmOptions.adminName
@@ -48,22 +44,14 @@
         }
     }
 
-    $SQLSysAdminAccounts = @($cm_admin)
-
-    # Force CM/SQL install to false if we're installing passive server
-    if ($isPassive) {
-        $InstallConfigMgr = $false
-        $installSql = $false
-        $ContentLibVMName = $ThisVM.remoteContentLibVM
-        $ActiveVMName = $deployConfig.parameters.ActiveVMName
-        if (-not $ActiveVMName) {
-            $ActiveVMName = $deployConfig.parameters.ExistingActiveName
+    # Passive Site Server
+    $SQLSysAdminAccounts = @($cm_admin, 'BUILTIN\Administrators')
+    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    if ($containsPassive) {
+        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+        foreach ($vm in $PassiveVM) {
+            $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
         }
-    }
-
-    $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
-    if ($PassiveVM) {
-        $SQLSysAdminAccounts += "$DName\$($PassiveVM.vmName)$"
     }
 
     # Log share
@@ -155,15 +143,6 @@
         WriteStatus OpenPorts {
             DependsOn = "[JoinDomain]JoinDomain"
             Status    = "Open required firewall ports"
-        }
-
-        WriteConfigurationFile WriteJoinDomain {
-            Role      = "Primary"
-            LogPath   = $LogPath
-            WriteNode = "MachineJoinDomain"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = "[JoinDomain]JoinDomain"
         }
 
         AddNtfsPermissions AddNtfsPerms {
@@ -320,7 +299,8 @@
 
         }
 
-        if ($PassiveVM -and (-not $isPassive)) {
+        # There's a passive site server in config
+        if ($containsPassive) {
 
             WriteStatus WaitPassive {
                 DependsOn = "[FileReadAccessShare]DomainSMBShare"
@@ -328,7 +308,7 @@
             }
 
             WaitForConfigurationFile WaitPassive {
-                Role          = "Primary"
+                Role          = "PassiveSite"
                 MachineName   = $PassiveVM.vmName
                 LogFolder     = $LogFolder
                 ReadNode      = "PassiveReady"
@@ -362,6 +342,7 @@
                     DependsOn = "[SqlRole]addsysadmin"
                     Status    = "Wait for DC to assign permissions to Systems Management container"
                 }
+
             }
             else {
 
@@ -460,66 +441,9 @@
         }
         else {
 
-            if ($isPassive) {
-
-                WriteStatus WaitFS {
-                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
-                    Status    = "Waiting for Content Lib VM $ContentLibVMName to finish configuration."
-                }
-
-                AddUserToLocalAdminGroup AddActiveLocalAdmin {
-                    Name       = "$ActiveVMName$"
-                    DomainName = $DomainName
-                    DependsOn  = "[WriteStatus]WaitFS"
-                }
-
-                WaitForConfigurationFile WaitFS {
-                    Role          = "DomainMember"
-                    MachineName   = $ContentLibVMName
-                    LogFolder     = $LogFolder
-                    ReadNode      = "DomainMemberFinished"
-                    ReadNodeValue = "Passed"
-                    Ensure        = "Present"
-                    DependsOn     = "[AddUserToLocalAdminGroup]AddActiveLocalAdmin"
-                }
-
-                WriteConfigurationFile WritePassiveReady {
-                    Role      = "Primary"
-                    LogPath   = $LogPath
-                    WriteNode = "PassiveReady"
-                    Status    = "Passed"
-                    Ensure    = "Present"
-                    DependsOn = "[WaitForConfigurationFile]WaitFS"
-                }
-
-                WriteStatus WaitActive {
-                    DependsOn = "[WriteConfigurationFile]WritePassiveReady"
-                    Status    = "Waiting for Site Server $ActiveVMName to finish configuration."
-                }
-
-                WaitForConfigurationFile WaitActive {
-                    Role          = "ScriptWorkflow"
-                    MachineName   = $ActiveVMName
-                    LogFolder     = $LogFolder
-                    ReadNode      = "ScriptWorkflow"
-                    ReadNodeValue = "Completed"
-                    Ensure        = "Present"
-                    DependsOn     = "[WriteStatus]WaitActive"
-                }
-
-                WriteStatus Complete {
-                    DependsOn = "[WaitForConfigurationFile]WaitActive"
-                    Status    = "Complete!"
-                }
-
-            }
-            else {
-
-                WriteStatus Complete {
-                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
-                    Status    = "Complete!"
-                }
-
+            WriteStatus Complete {
+                DependsOn = "[WaitForConfigurationFile]DelegateControl"
+                Status    = "Complete!"
             }
 
         }

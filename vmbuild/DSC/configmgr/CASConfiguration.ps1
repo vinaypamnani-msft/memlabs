@@ -45,6 +45,16 @@
         }
     }
 
+    # Passive Site Server
+    $SQLSysAdminAccounts = @($cm_admin, 'BUILTIN\Administrators')
+    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    if ($containsPassive) {
+        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+        foreach ($vm in $PassiveVM) {
+            $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
+        }
+    }
+
     # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
@@ -176,7 +186,7 @@
                 SourcePath          = 'C:\temp\SQL'
                 UpdateEnabled       = 'True'
                 UpdateSource        = "C:\temp\SQL_CU"
-                SQLSysAdminAccounts = @('Administrators', $cm_admin)
+                SQLSysAdminAccounts = $SQLSysAdminAccounts
                 TcpEnabled          = $true
                 UseEnglish          = $true
                 DependsOn           = '[InstallADK]ADKInstall'
@@ -283,9 +293,58 @@
             DependsOn  = "[WaitForConfigurationFile]WaitPSJoinDomain"
         }
 
-        WriteStatus WaitDelegate {
-            DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
-            Status    = "Wait for DC to assign permissions to Systems Management container"
+        # There's a passive site server in config
+        if ($containsPassive) {
+
+            WriteStatus WaitPassive {
+                DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+                Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to be ready"
+            }
+
+            WaitForConfigurationFile WaitPassive {
+                Role          = "PassiveSite"
+                MachineName   = $PassiveVM.vmName
+                LogFolder     = $LogFolder
+                ReadNode      = "PassiveReady"
+                ReadNodeValue = "Passed"
+                Ensure        = "Present"
+                DependsOn     = "[WriteStatus]WaitPassive"
+            }
+
+            if ($installSQL) {
+
+                SqlLogin addsysadmin {
+                    Ensure                  = 'Present'
+                    Name                    = "$DName\$($PassiveVM.vmName)$"
+                    LoginType               = 'WindowsUser'
+                    InstanceName            = $SQLInstanceName
+                    LoginMustChangePassword = $false
+                    PsDscRunAsCredential    = $CMAdmin
+                    DependsOn               = '[WaitForConfigurationFile]WaitPassive'
+                }
+
+                SqlRole addsysadmin {
+                    Ensure               = 'Present'
+                    ServerRoleName       = 'sysadmin'
+                    MembersToInclude     = $SQLSysAdminAccounts
+                    InstanceName         = $SQLInstanceName
+                    PsDscRunAsCredential = $CMAdmin
+                    DependsOn            = '[SqlLogin]addsysadmin'
+                }
+
+                WriteStatus WaitDelegate {
+                    DependsOn = "[SqlRole]addsysadmin"
+                    Status    = "Wait for DC to assign permissions to Systems Management container"
+                }
+            }
+            else {
+
+                WriteStatus WaitDelegate {
+                    DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+                    Status    = "Wait for DC to assign permissions to Systems Management container"
+                }
+
+            }
         }
 
         WaitForConfigurationFile DelegateControl {
@@ -295,7 +354,7 @@
             ReadNode      = "DelegateControl"
             ReadNodeValue = "Passed"
             Ensure        = "Present"
-            DependsOn     = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+            DependsOn     = "[WriteStatus]WaitDelegate"
         }
 
         if ($InstallConfigMgr) {
