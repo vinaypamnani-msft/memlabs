@@ -684,14 +684,18 @@ function Get-NewMachineName {
         }
     }
 
-    if (($role -eq "Primary") -or ($role -eq "CAS")) {
+    if (($role -eq "Primary") -or ($role -eq "CAS") -or ($role -eq "PassiveSite")) {
         if ([String]::IsNullOrWhiteSpace($SiteCode)) {
             $newSiteCode = Get-NewSiteCode $Domain -Role $Role
         }
         else {
             $newSiteCode = $SiteCode
         }
-        return $newSiteCode + "SITE"
+        $NewName = $newSiteCode + "SITE"
+        if ($role -eq "PassiveSite"){
+            $NewName = $NewName + "-P"
+        }
+        return $NewName
     }
 
     if ($role -eq "DPMP") {
@@ -993,7 +997,9 @@ function Select-Config {
     $Global:configfile = $files[[int]$response - 1]
     $configSelected = Get-Content $Global:configfile -Force | ConvertFrom-Json
     if ($null -ne $configSelected.vmOptions.domainAdminName) {
-        $configSelected.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configSelected.vmOptions.domainAdminName
+        if ($null -eq ($configSelected.vmOptions.adminName)) {
+            $configSelected.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configSelected.vmOptions.domainAdminName
+        }
         $configSelected.vmOptions.PsObject.properties.Remove('domainAdminName')
     }
 
@@ -1089,6 +1095,11 @@ function Show-ExistingNetwork {
     }
     [string]$role = Select-RolesForExisting
 
+
+    if ($role -eq "H") {
+        $role = "PassiveSite"
+    }
+
     if ($role -eq "Primary") {
         $ExistingCasCount = (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
         if ($ExistingCasCount -gt 0) {
@@ -1109,16 +1120,41 @@ function Show-ExistingNetwork {
         }
     }
 
+    if ($role -eq "PassiveSite"){
+        $existingPassive = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
+        $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+
+        $PossibleSS = @()
+        foreach ($item in $existingSS) {
+            if ($existingPassive.SiteCode -contains $item.Sitecode) {
+                continue
+            }
+            $PossibleSS += $item
+        }
+
+        if ($PossibleSS.Count -eq 0) {
+            Write-Host
+            Write-Host "No siteservers found that are elegible for HA"
+            return
+        }
+        $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false
+        if ([string]::IsNullOrWhiteSpace($result)) {
+            return
+        }
+        $SiteCode = $result
+    }
+
     [string]$subnet = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1).Subnet
-    if ($role -ne "InternetClient" -and $role -ne "AADClient") {
+    if ($role -ne "InternetClient" -and $role -ne "AADClient" -and $role -ne "PassiveSite") {
         $subnet = Select-ExistingSubnets -Domain $domain -Role $role
         Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
         if ([string]::IsNullOrWhiteSpace($subnet)) {
             return $null
         }
     }
-    Write-verbose "[Show-ExistingNetwork] Calling Get-ExistingConfig '$domain' '$subnet' '$role'"
-    return Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -ParentSiteCode $ParentSiteCode
+    Write-verbose "[Show-ExistingNetwork] Calling Get-ExistingConfig '$domain' '$subnet' '$role' '$SiteCode'"
+    $newConfig = Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -ParentSiteCode $ParentSiteCode -SiteCode $Sitecode
+    return $newConfig
 }
 function Select-RolesForExisting {
     $existingRoles = $Common.Supported.RolesForExisting | Where-Object { $_ -ne "DPMP" }
@@ -1138,8 +1174,9 @@ function Select-RolesForExisting {
         }
     }
 
+    $OptionArray = @{ "H" = "Convert an existing CAS or Primary to HA" }
 
-    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue "DomainMember"
+    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue "DomainMember" -additionalOptions $OptionArray
 
     if ($role -eq "CAS and Primary") {
         $role = "CAS"
@@ -1331,12 +1368,14 @@ function Get-ExistingConfig {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [String] $Domain,
-        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [Parameter(Mandatory = $true, HelpMessage = "Subnet Name")]
         [string] $Subnet,
         [Parameter(Mandatory = $true, HelpMessage = "Role")]
         [String] $Role,
-        [Parameter(Mandatory = $false, HelpMessage = "Parent Side code, if we are deploying a primary in a heirarchy")]
-        [string] $ParentSiteCode = $null
+        [Parameter(Mandatory = $false, HelpMessage = "Parent Site code, if we are deploying a primary in a heirarchy")]
+        [string] $ParentSiteCode = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
+        [string] $SiteCode = $null
     )
 
 
@@ -1346,7 +1385,7 @@ function Get-ExistingConfig {
         $adminUser = "admin"
     }
 
-    Write-Verbose "Generating $Domain $Subnet $role $ParentSiteCode"
+    Write-Verbose "[Get-ExistingConfig] Generating $Domain $Subnet $role $ParentSiteCode"
 
     #    $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
     $prefix = get-PrefixForDomain -Domain $Domain
@@ -1360,17 +1399,16 @@ function Get-ExistingConfig {
         adminName  = $adminUser
         network    = $Subnet
     }
-
+    Write-Verbose "[Get-ExistingConfig] vmOptions: $vmOptions"
     $configGenerated = $null
     $configGenerated = [PSCustomObject]@{
         #cmOptions       = $newCmOptions
         vmOptions       = $vmOptions
         virtualMachines = $()
     }
-
-    $configGenerated = Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode
-
-    Write-Verbose "Config: $configGenerated"
+    Write-Verbose "[Get-ExistingConfig] Config: $configGenerated $($configGenerated.vmOptions.domainName)"
+    $configGenerated = Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode -SiteCode $SiteCode
+    Write-Verbose "[Get-ExistingConfig] Config: $configGenerated"
     return $configGenerated
 }
 
@@ -1863,8 +1901,8 @@ function Get-AdditionalValidations {
                 }
             }
 
-            if ($Property.Role -eq "DomainMember" -and $null -ne $Passive){
-                if ($Passive.remoteContentLibVM -eq $CurrentValue){
+            if ($Property.Role -eq "DomainMember" -and $null -ne $Passive) {
+                if ($Passive.remoteContentLibVM -eq $CurrentValue) {
                     $Passive.remoteContentLibVM = $value
                 }
             }
@@ -2351,11 +2389,10 @@ function Add-NewVMForRole {
         [string] $ParentSiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite")]
         [string] $SiteCode = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "RemoteContentLibVM if this is a PassiveSite")]
-        [string] $RemoteContentLibVM = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Override default OS")]
         [string] $OperatingSystem = $null
     )
+
 
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem"
 
@@ -2439,11 +2476,13 @@ function Add-NewVMForRole {
 
         }
         "PassiveSite" {
+
+            $NewFSServer = $($SiteCode + "FS")
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SiteCode' -Value $SiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $RemoteContentLibVM
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $NewFSServer
 
         }
         "WorkgroupMember" {}
@@ -2469,7 +2508,7 @@ function Add-NewVMForRole {
     }
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
-        $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem
+        $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode
         Write-Verbose "Machine Name Generated $machineName"
     }
     else {
@@ -2506,6 +2545,15 @@ function Add-NewVMForRole {
 
     if ($existingDPMP -eq 0) {
         $ConfigToModify = Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
+    }
+    if ($NewFSServer){
+        $FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
+            if (-not $FS) {
+                $ConfigToModify = Add-NewVMForRole -Role "DomainMember" -Domain $Domain -ConfigToModify $ConfigToModify -Name $NewFSServer
+                $FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
+                $disk = [PSCustomObject]@{"E" = "400GB" }
+                $FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            }
     }
 
     Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
@@ -2602,17 +2650,7 @@ function Select-VirtualMachines {
                                     Remove-VMFromConfig -vmName $PassiveNode.vmName -ConfigToModify $global:config
                                 }
                                 else {
-                                    $NewFSServer = $($virtualMachine.siteCode + "FS")
-                                    $FS = $global:config.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
-                                    if (-not $FS) {
-                                        Add-NewVMForRole -Role "DomainMember" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $NewFSServer
-                                        $FS = $global:config.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
-                                        $disk = [PSCustomObject]@{"E" = "400GB" }
-                                        $FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-                                    }
-                                    Add-NewVMForRole -Role "PassiveSite" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.vmName + "-P")  -SiteCode $virtualMachine.siteCode -RemoteContentLibVM $NewFSServer
-
-
+                                    Add-NewVMForRole -Role "PassiveSite" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.vmName + "-P")  -SiteCode $virtualMachine.siteCode
                                 }
                                 continue VMLoop
 

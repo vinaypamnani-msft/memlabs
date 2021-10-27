@@ -760,6 +760,8 @@ function Test-Configuration {
         $configObject = $InputObject | ConvertTo-Json -Depth 3 | ConvertFrom-Json
     }
 
+    write-host "timhe"
+    $configObject | ConvertTo-Json -Depth 3 | out-host
     $deployConfig = New-DeployConfig -configObject $configObject
     $return.DeployConfig = $deployConfig
 
@@ -998,9 +1000,10 @@ function New-DeployConfig {
         [object] $configObject
     )
 
-
-    if ($null -ne $configObject.vmOptions.domainAdminName) {
-        $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
+    if ($null -ne ($configObject.vmOptions.domainAdminName)) {
+        if ($null -eq ($configObject.vmOptions.adminName)) {
+                $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
+    }
         $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
     }
 
