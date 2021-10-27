@@ -586,6 +586,9 @@ try {
 
         $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
 
+        if (-not $($result.DeployNow)) {
+            return
+        }
         if ($configResult.Loaded) {
             $userConfig = $configResult.Config
             Clear-Host
