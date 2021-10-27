@@ -1068,7 +1068,7 @@ function Show-ExistingNetwork {
         }
         $domain = ($domainExpanded -Split " ")[0]
 
-        get-list -Type VM -DomainName $domain | Format-Table | Out-Host
+        get-list -Type VM -DomainName $domain |  Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB,@{Label="DiskUsedGB";Expression = {[Math]::Round($_.DiskUsedGB,2)}}, State, Domain, Subnet, SQLVersion| Out-Host
 
         $response = Read-Host2 -Prompt "Add new VMs to this domain? (Y/n)" -HideHelp
         if (-not [String]::IsNullOrWhiteSpace($response)) {
