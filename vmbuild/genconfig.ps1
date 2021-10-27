@@ -1975,6 +1975,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "siteCode") {
         $sorted += "siteCode"
     }
+    if ($members.Name -contains "remoteContentLibVM") {
+        $sorted += "remoteContentLibVM"
+    }
 
     if ($members.Name -contains "additionalDisks") {
         $sorted += "additionalDisks"
@@ -1999,6 +2002,7 @@ function Get-SortedProperties {
         "adminName" { }
         "basePath" { }
         "remoteSQLVM" {}
+        "remoteContentLibVM" {}
 
         Default { $sorted += $_ }
     }
