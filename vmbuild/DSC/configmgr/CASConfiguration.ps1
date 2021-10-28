@@ -29,7 +29,7 @@
     $InstallConfigMgr = $deployConfig.cmOptions.install
 
     # SQL Instance Location
-    if ($ThisVM.remoteSQLVM -or $ThisVM.Hidden) {
+    if ($ThisVM.remoteSQLVM) {
         $installSQL = $false
     }
     else {

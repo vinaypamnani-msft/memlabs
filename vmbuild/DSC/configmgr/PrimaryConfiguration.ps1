@@ -28,7 +28,7 @@
     # CM Options
     $InstallConfigMgr = $deployConfig.cmOptions.install
 
-    if ($ThisVM.remoteSQLVM -or $ThisVM.Hidden) {
+    if ($ThisVM.remoteSQLVM) {
         $installSQL = $false
     }
     else {

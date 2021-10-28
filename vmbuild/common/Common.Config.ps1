@@ -1017,7 +1017,7 @@ function New-DeployConfig {
 
     # add prefix to vm names
     $virtualMachines = $configObject.virtualMachines
-    foreach ($item in $virtualMachines){
+    foreach ($item in $virtualMachines) {
         $item.vmName = $configObject.vmOptions.prefix + $item.vmName
     }
     #$virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
@@ -1491,7 +1491,9 @@ Function Show-Summary {
     $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
     $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
     $containsMember = $deployConfig.virtualMachines.role -contains "DomainMember"
+    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
 
+    Write-Verbose "ContainsPS: $containsPS ContainsDPMP: $containsDPMP ContainsMember: $containsMember ContainsPassive: $containsPassive"
     if ($null -ne $($deployConfig.cmOptions) -and $containsPS -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
@@ -1512,7 +1514,14 @@ Function Show-Summary {
             }
         }
         else {
-            Write-RedX "ConfigMgr will not be installed."
+            Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
+            if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
+                $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+                Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
+            }
+            else {
+                Write-RedX "ConfigMgr will not be installed."
+            }
         }
 
 
@@ -1545,7 +1554,14 @@ Function Show-Summary {
 
     }
     else {
-        Write-RedX "ConfigMgr will not be installed."
+        Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
+        if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
+            $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+            Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
+        }
+        else {
+            Write-RedX "ConfigMgr will not be installed."
+        }
     }
 
     if (-not $null -eq $($deployConfig.vmOptions)) {
