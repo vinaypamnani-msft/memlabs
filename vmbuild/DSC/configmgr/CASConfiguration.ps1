@@ -273,38 +273,49 @@
             DependsOn = "[WriteStatus]DownLoadSCCM"
         }
 
-        FileReadAccessShare CMSourceSMBShare {
-            Name      = $CM
-            Path      = "c:\$CM"
-            DependsOn = "[DownloadSCCM]DownLoadSCCM"
-        }
+        if ($PSName) {
+            WriteStatus WaitPSJoinDomain {
+                DependsOn = "[DownloadSCCM]DownLoadSCCM"
+                Status    = "Wait for $PSName to join domain"
+            }
 
-        WriteStatus WaitPSJoinDomain {
-            DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
-            Status    = "Wait for $PSName to join domain"
-        }
+            WaitForConfigurationFile WaitPSJoinDomain {
+                Role          = "Primary"
+                MachineName   = $PSName
+                LogFolder     = $LogFolder
+                ReadNode      = "MachineJoinDomain"
+                ReadNodeValue = "Passed"
+                Ensure        = "Present"
+                DependsOn = "[DownloadSCCM]DownLoadSCCM"
+            }
 
-        WaitForConfigurationFile WaitPSJoinDomain {
-            Role          = "Primary"
-            MachineName   = $PSName
-            LogFolder     = $LogFolder
-            ReadNode      = "MachineJoinDomain"
-            ReadNodeValue = "Passed"
-            Ensure        = "Present"
-            DependsOn     = "[FileReadAccessShare]CMSourceSMBShare"
-        }
+            AddUserToLocalAdminGroup AddUserToLocalAdminGroup {
+                Name       = $PrimarySiteName
+                DomainName = $DomainName
+                DependsOn  = "[WaitForConfigurationFile]WaitPSJoinDomain"
+            }
 
-        AddUserToLocalAdminGroup AddUserToLocalAdminGroup {
-            Name       = $PrimarySiteName
-            DomainName = $DomainName
-            DependsOn  = "[WaitForConfigurationFile]WaitPSJoinDomain"
+            FileReadAccessShare CMSourceSMBShare {
+                Name      = $CM
+                Path      = "c:\$CM"
+                DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+            }
+        }
+        else {
+
+            FileReadAccessShare CMSourceSMBShare {
+                Name      = $CM
+                Path      = "c:\$CM"
+                DependsOn = "[DownloadSCCM]DownLoadSCCM"
+            }
+
         }
 
         # There's a passive site server in config
         if ($containsPassive) {
 
             WriteStatus WaitPassive {
-                DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+                DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
                 Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to be ready"
             }
 
@@ -347,7 +358,7 @@
             else {
 
                 WriteStatus WaitDelegate {
-                    DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+                    DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
                     Status    = "Wait for DC to assign permissions to Systems Management container"
                 }
 
@@ -356,7 +367,7 @@
         else {
 
             WriteStatus WaitDelegate {
-                DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+                DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
                 Status    = "Wait for DC to assign permissions to Systems Management container"
             }
 
