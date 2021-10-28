@@ -180,9 +180,17 @@ function Select-DomainMenu {
             "1" = "Stop VMs in domain";
             "2" = "Start VMs in domain";
             "3" = "Compact all VHDX's in domain (requires domain to be stopped)";
-            "D" = "Delete VMs in Domain%Yellow%Red";
+            "S" = "Snapshot all VM's in domain"
         }
 
+        $DC = get-list -type vm  -DomainName $domain | Where-Object { $_.role -eq "DC" }
+
+        $checkPoint = Get-VMCheckpoint -VMName $DC.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
+
+        if ($checkPoint) {
+            $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot"; "X" = "Delete (merge) domain Snapshots" }
+        }
+        $customOptions += [ordered]@{"D" = "Delete VMs in Domain%Yellow%Red" }
         $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions
 
         write-Verbose "1 response $response"
@@ -195,9 +203,125 @@ function Select-DomainMenu {
             "2" { Select-StartDomain -domain $domain }
             "3" { select-OptimizeDomain -domain $domain }
             "d" { Select-DeleteDomain -domain $domain }
+            "s" { select-SnapshotDomain -domain $domain }
+            "r" { select-RestoreSnapshotDomain -domain $domain }
+            "x" { select-DeleteSnapshotDomain -domain $domain }
             Default {}
         }
     }
+}
+
+
+function select-SnapshotDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
+        [string] $domain
+    )
+
+    $vms = get-list -type vm -DomainName $domain
+
+    foreach ($vm in $vms) {
+        $complete = $false
+        $tries = 0
+        While ($complete -ne $true) {
+            try {
+                if ($tries -gt 10){
+                    return
+                }
+                Write-Host "Checkpointing $($vm.VmName)"
+
+                Checkpoint-VM -Name $vm.VmName -SnapshotName 'MemLabs Snapshot' -ErrorAction Stop
+                $complete = $true
+            }
+            catch {
+                $tries++
+                Start-Sleep 10
+
+            }
+        }
+    }
+
+    write-host
+    Write-Host "$domain has been CheckPointed"
+
+}
+
+function select-RestoreSnapshotDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
+        [string] $domain
+    )
+
+    $vms = get-list -type vm -DomainName $domain
+
+    foreach ($vm in $vms) {
+        $complete = $false
+        $tries = 0
+        While ($complete -ne $true) {
+            try {
+                if ($tries -gt 10){
+                    return
+                }
+                $checkPoint = Get-VMCheckpoint -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
+
+                if ($checkPoint) {
+                    Write-Host "Restoring $($vm.VmName)"
+                    $checkPoint | Restore-VMCheckpoint -Confirm:$false
+                }
+                $complete = $true
+            }
+            catch {
+                Start-Sleep 10
+                $tries++
+
+            }
+        }
+    }
+    Get-List -FlushCache | out-null
+
+    write-host
+    Write-Host "$domain has been Restored"
+    Select-StartDomain -domain $domain
+}
+
+function select-DeleteSnapshotDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
+        [string] $domain
+    )
+
+    $vms = get-list -type vm -DomainName $domain
+
+    foreach ($vm in $vms) {
+        $complete = $false
+        $tries = 0
+        While ($complete -ne $true) {
+            try {
+                if ($tries -gt 10){
+                    return
+                }
+                $checkPoint = Get-VMCheckpoint -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
+
+                if ($checkPoint) {
+                    Write-Host "Merging $($vm.VmName)"
+                    Remove-VMCheckpoint -VMName $vm.vmName -Name "MemLabs Snapshot"
+                }
+                $complete = $true
+            }
+            catch {
+                Start-Sleep 10
+                $tries++
+
+            }
+        }
+    }
+
+    write-host
+    Write-Host "$domain has been CheckPointed"
+
 }
 
 function select-OptimizeDomain {
@@ -693,7 +817,7 @@ function Get-NewMachineName {
             $newSiteCode = $SiteCode
         }
         $NewName = $newSiteCode + "SITE"
-        if ($role -eq "PassiveSite"){
+        if ($role -eq "PassiveSite") {
             $NewName = $NewName + "-P"
         }
         return $NewName
@@ -1076,7 +1200,7 @@ function Show-ExistingNetwork {
         }
         $domain = ($domainExpanded -Split " ")[0]
 
-        get-list -Type VM -DomainName $domain |  Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB,@{Label="DiskUsedGB";Expression = {[Math]::Round($_.DiskUsedGB,2)}}, State, Domain, Subnet, SQLVersion| Out-Host
+        get-list -Type VM -DomainName $domain |  Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Subnet, SQLVersion | Out-Host
 
         $response = Read-Host2 -Prompt "Add new VMs to this domain? (Y/n)" -HideHelp
         if (-not [String]::IsNullOrWhiteSpace($response)) {
@@ -1128,7 +1252,7 @@ function Show-ExistingNetwork {
         }
     }
 
-    if ($role -eq "PassiveSite"){
+    if ($role -eq "PassiveSite") {
         $existingPassive = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
         $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
 
@@ -2554,14 +2678,14 @@ function Add-NewVMForRole {
     if ($existingDPMP -eq 0) {
         $ConfigToModify = Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
     }
-    if ($NewFSServer){
+    if ($NewFSServer) {
         $FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
-            if (-not $FS) {
-                $ConfigToModify = Add-NewVMForRole -Role "DomainMember" -Domain $Domain -ConfigToModify $ConfigToModify -Name $NewFSServer
-                $FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
-                $disk = [PSCustomObject]@{"E" = "400GB" }
-                $FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            }
+        if (-not $FS) {
+            $ConfigToModify = Add-NewVMForRole -Role "DomainMember" -Domain $Domain -ConfigToModify $ConfigToModify -Name $NewFSServer
+            $FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
+            $disk = [PSCustomObject]@{"E" = "400GB" }
+            $FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+        }
     }
 
     Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
