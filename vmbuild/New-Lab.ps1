@@ -132,14 +132,11 @@ $VM_Create = {
         }
 
         # Create VM
-        $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -WhatIf:$using:WhatIf
+        $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig -WhatIf:$using:WhatIf
         if (-not $created) {
             Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild.log." -Failure -OutputStream -HostOnly
             return
         }
-
-        # Write a note to the VM
-        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -InProgress
 
         # Wait for VM to finish OOBE
         $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
@@ -230,7 +227,7 @@ $VM_Create = {
             }
         }
         # Update VMNote
-        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $oobeStarted
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted
         return
     }
 
@@ -551,7 +548,7 @@ $VM_Create = {
 
     if ($createVM) {
         # Set VM Note
-        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $worked
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked
     }
 }
 
