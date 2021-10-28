@@ -320,23 +320,10 @@
 
         }
 
-        File ShareFolder {
-            DestinationPath = $LogPath
-            Type            = 'Directory'
-            Ensure          = 'Present'
-            DependsOn       = "[WriteStatus]AddLocalAdmin"
-        }
-
-        FileReadAccessShare DomainSMBShare {
-            Name      = $LogFolder
-            Path      = $LogPath
-            DependsOn = "[File]ShareFolder"
-        }
-
         AddUserToLocalAdminGroup AddADUserToLocalAdminGroup {
             Name       = "cm_svc"
             DomainName = $DomainName
-            DependsOn  = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn       = "[WriteStatus]AddLocalAdmin"
         }
 
         WriteConfigurationFile WriteDomainMemberFinished {
