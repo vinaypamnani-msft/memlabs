@@ -97,6 +97,11 @@ $create_Share = {
 
 Write-DscStatus "Creating a share on $remoteLibVMName to host the content library"
 Invoke-Command -Session (New-PSSession -ComputerName $remoteLibVMName) -ScriptBlock $create_Share
+$remoteSharePath = "\\$remoteLibVMName\$shareName\$SiteCode"
+if (-not (Test-Path $remoteSharePath)) {
+    Write-DscStatus "Failed to create $remoteSharePath share." -Failure
+    return
+}
 
 # Remove SCP
 # Remove-CMServiceConnectionPoint -SiteSystemServerName SCCM-CAS.contosomd.com -Force
@@ -126,17 +131,22 @@ do {
 
     $prereqFailure = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedPrereqMonitoring  -Filter "IsComplete = 4 AND Applicable = 1 AND Progress = 100" | Sort-Object MessageTime | Select-Object -Last 1
     if ($prereqFailure) {
-        Write-DscStatus "Adding passive site server on $passiveFQDN failed due to prereq failure. Reason: $($prereqFailure.SubStageName)" -RetrySeconds 60
+        Write-DscStatus "Failed to add passive site server on $passiveFQDN due to prereq failure. Reason: $($prereqFailure.SubStageName)" -Failure
+    }
+
+    $installFailure = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 4 AND Applicable = 1" | Sort-Object MessageTime | Select-Object -Last 1
+    if ($installFailure) {
+        Write-DscStatus "Failed to add passive site server on $passiveFQDN. Reason: $($state.SubStageName)" -Failure
     }
 
     $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 2 AND Applicable = 1" | Sort-Object MessageTime | Select-Object -Last 1
     if ($state) {
-        Write-DscStatus "Adding passive site server on $passiveFQDN. Current State: $($state.SubStageName)" -RetrySeconds 60
+        Write-DscStatus "Adding passive site server on $passiveFQDN`: $($state.SubStageName)" -RetrySeconds 60
     }
 
     Start-Sleep -Seconds 60
 
-} until ($state.SubStageId -eq 917515 -or $prereqFailure)
+} until ($state.SubStageId -eq 917515 -or $prereqFailure -or $installFailure)
 
 # Update actions file
 $Configuration.InstallPassive.Status = 'Completed'

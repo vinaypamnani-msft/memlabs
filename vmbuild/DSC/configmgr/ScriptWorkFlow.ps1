@@ -13,10 +13,15 @@ function Write-DscStatusSetup {
 }
 
 function Write-DscStatus {
-    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds)
+    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds, [switch]$Failure)
 
     if ($RetrySeconds) {
         $status = "$status; checking again in $RetrySeconds seconds"
+    }
+
+    if ($Failure.IsPresent) {
+        # Add prefix that host job can use to acknowledge failure
+        $status = "JOBFAILURE: $status"
     }
 
     if (-not $NoStatus.IsPresent) {
@@ -26,6 +31,11 @@ function Write-DscStatus {
 
     if (-not $NoLog.IsPresent) {
         "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $status" | Out-File -Append $global:StatusLog
+    }
+
+    if ($Failure.IsPresent) {
+        # Add a sleep so host VM has had time to poll for this entry
+        Start-Sleep -Seconds 10
     }
 }
 
