@@ -1378,7 +1378,8 @@ function Get-List {
                     }
                 }
 
-                $diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
+                #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
+                $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
                 $vmNet = $vm | Get-VMNetworkAdapter
 
                 $vmObject = [PSCustomObject]@{
