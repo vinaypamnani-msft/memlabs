@@ -24,7 +24,7 @@ if ($Common.Initialized) {
 
 # Set Verbose
 $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
-
+$NewLabsuccess = $false
 # Dot source common
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
@@ -896,9 +896,21 @@ try {
         }
     }
     Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
+    $NewLabsuccess = $true
+}catch {
+    Write-Log "An error occurred:"
+    Write-Log $_.ScriptStackTrace
+    if ($enableVerbose) {
+        write-host $deployConfig | ConvertTo-Json | out-host
+
+        Get-PSCallStack | out-host
+    }
 }
 finally {
     # Ctrl + C brings us here :)
+    if ($NewLabsuccess -ne $true){
+        Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs" -LogOnly
+    }
     get-job | stop-job
     Set-QuickEdit
 }
