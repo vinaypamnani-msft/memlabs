@@ -8,7 +8,6 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
-$DomainName = $DomainFullName.Split(".")[0]
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -22,6 +21,7 @@ $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 Write-DscStatus "Setting PS Drive for ConfigMgr"
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
 $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
+$localSiteServer = $ProviderMachineName
 
 # Get CM module path
 $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
@@ -81,13 +81,13 @@ $create_Share = {
     $inherit = [System.Security.AccessControl.InheritanceFlags]"ContainerInherit,ObjectInherit"
     $propagate = [System.Security.AccessControl.PropagationFlags]::None
 
-    foreach($item in $computersToAdd) {
-        $ace = New-Object System.Security.AccessControl.FileSystemAccessRule($item,$rights,$inherit,$propagate,$access)
+    foreach ($item in $computersToAdd) {
+        $ace = New-Object System.Security.AccessControl.FileSystemAccessRule($item, $rights, $inherit, $propagate, $access)
 
         # Retrieve the directory ACL and add a new ACL rule
         $acl = Get-Acl $sharePath
         $acl.AddAccessRule($ace)
-        $acl.SetAccessRuleProtection($false,$false)
+        $acl.SetAccessRuleProtection($false, $false)
 
         # Set-Acl $directory $acl
         Set-ACL -aclobject $acl $sharePath
@@ -103,7 +103,7 @@ if (-not (Test-Path $remoteSharePath)) {
     return
 }
 
-# Remove SCP
+# Remove SCP?
 # Remove-CMServiceConnectionPoint -SiteSystemServerName SCCM-CAS.contosomd.com -Force
 # Add NOSMS on all drives but H for fileserver
 # Add CAS to admin group on machine
@@ -111,21 +111,31 @@ if (-not (Test-Path $remoteSharePath)) {
 # Add-CMServiceConnectionPoint -Mode Online -SiteCode CAS -SiteSystemServerName SCCM-FileServer.contosomd.com
 # New-CMSiteSystemServer -SiteCode CAS -SiteSystemServerName SCCM-CAS2.contosomd.com
 
+if ((Get-CMDistributionPoint -SiteSystemServerName $localSiteServer).count -eq 1) {
+    Write-DscStatus "Removing DP Role from $localSiteServer before moving Content Library."
+    Remove-CMDistributionPoint -SiteSystemServerName $localSiteServer -Force | Out-File $global:StatusLog -Append
+}
+
 $contentLibShare = "\\$remoteLibVMName\$shareName\$SiteCode"
 Write-DscStatus "Moving Content Library to $contentLibShare for site $SiteCode"
-Move-CMContentLibrary -NewLocation $contentLibShare -SiteCode $SiteCode
+Move-CMContentLibrary -NewLocation $contentLibShare -SiteCode $SiteCode | Out-File $global:StatusLog -Append
 
 do {
     $moveStatus = Get-CMSite -SiteCode $SiteCode
     Write-DscStatus "Moving Content Library to $contentLibShare, Current Progress: $($moveStatus.ContentLibraryMoveProgress)%" -RetrySeconds 30
     Start-Sleep -Seconds 30
-} until ($moveStatus.ContentLibraryMoveProgress -eq 100 -and $null -ne $moveStatus.ContentLibraryLocation)
+    if ($moveStatus.ContentLibraryStatus -eq 3) {
+        Write-DscStatus "Content Library Location empty after move. Retrying Content Library Move"
+        Move-CMContentLibrary -NewLocation $contentLibShare -SiteCode $SiteCode | Out-File $global:StatusLog -Append
+    }
+} until ($moveStatus.ContentLibraryMoveProgress -eq 100 -and (-not [string]::IsNullOrWhitespace($moveStatus.ContentLibraryLocation)))
 Write-DscStatus "Content Library moved to $($moveStatus.ContentLibraryLocation)"
 
+# Add Passive site
 $passiveFQDN = $SSVM.vmName + "." + $DomainFullName
 Write-DscStatus "Adding passive site server on $passiveFQDN"
-New-CMSiteSystemServer -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN
-Add-CMPassiveSite -InstallDirectory $SSVM.cmInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite
+New-CMSiteSystemServer -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN | Out-File $global:StatusLog -Append
+Add-CMPassiveSite -InstallDirectory $SSVM.cmInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
 
 do {
 
