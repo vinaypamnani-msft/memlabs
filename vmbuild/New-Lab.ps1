@@ -486,6 +486,12 @@ $VM_Create = {
                 else {
                     $currentStatusTrimmed = $currentStatus
                 }
+
+                if ($currentStatusTrimmed.Contains("JOBFAILURE: ")) {
+                    Write-Log "PSJOB: $($currentItem.vmName): DSC: $($currentItem.role) failed: $currentStatusTrimmed" -Failure -OutputStream
+                    break
+                }
+
                 Write-Log "PSJOB: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
                 $previousStatus = $currentStatus
             }
@@ -535,7 +541,7 @@ $VM_Create = {
 
     if (-not $complete) {
         $worked = $false
-        Write-Log "PSJOB: $($currentItem.vmName): Configuration did not complete in allotted time ($timeout minutes) for $($currentItem.role)." -OutputStream -Failure
+        Write-Log "PSJOB: $($currentItem.vmName): Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -OutputStream -Failure
     }
     else {
         $worked = $true
