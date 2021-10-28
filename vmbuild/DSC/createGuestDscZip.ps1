@@ -88,6 +88,7 @@ Copy-Item .\$dscFolder\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modul
 # Create test config, for testing if the config definition is good.
 switch (($role)) {
     "DPMP" { $role = "DomainMember" }
+    "FileServer" { $role = "DomainMember" }
     "AADClient" { $role = "WorkgroupMember" }
     "InternetClient" { $role = "WorkgroupMember" }
     Default { $role = $role }

@@ -320,6 +320,7 @@ $VM_Create = {
 
         switch (($currentItem.role)) {
             "DPMP" { $dscRole = "DomainMember" }
+            "FileServer" { $dscRole = "DomainMember" }
             "AADClient" { $dscRole = "WorkgroupMember" }
             "InternetClient" { $dscRole = "WorkgroupMember" }
             Default { $dscRole = $currentItem.role }
