@@ -1304,8 +1304,17 @@ function Show-ExistingNetwork {
     $newConfig = Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -ParentSiteCode $ParentSiteCode -SiteCode $Sitecode
     return $newConfig
 }
+function Select-RolesForExistingList {
+    $existingRoles = $Common.Supported.RolesForExisting | Where-Object { $_ -ne "PassiveSite" }
+    return $existingRoles
+}
+
+function Select-RolesForNewList {
+    $Roles = $Common.Supported.Roles | Where-Object { $_ -ne "PassiveSite" }
+    return $Roles
+}
 function Select-RolesForExisting {
-    $existingRoles = $Common.Supported.RolesForExisting | Where-Object { $_ -ne "DPMP" }
+    $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DPMP" }
 
     $existingRoles2 = @()
 
@@ -1993,11 +2002,11 @@ Function Get-RoleMenu {
     $valid = $false
     while ($valid -eq $false) {
         if ($Global:AddToExisting -eq $true) {
-            $role = Get-Menu "Select Role" $($Common.Supported.RolesForExisting) $CurrentValue -Test:$false
+            $role = Get-Menu "Select Role" $(Select-RolesForExistingList) $CurrentValue -Test:$false
             $property."$name" = $role
         }
         else {
-            $role = Get-Menu "Select Role" $($Common.Supported.Roles) $CurrentValue -Test:$false
+            $role = Get-Menu "Select Role" $(Select-RolesForNewList) $CurrentValue -Test:$false
             $property."$name" = $role
         }
 
@@ -2348,7 +2357,19 @@ function Select-Options {
                     Get-remoteSQLVM -property $property -name $name -CurrentValue $value
                     return "REFRESH"
                 }
+                "siteCode" {
+                    if ($property.role -eq "PassiveSite"){
+                        write-host
+                        write-host -ForegroundColor Yellow "siteCode can not be manually modified on a Passive server."
+                        continue MainLoop
+                    }
+                }
                 "role" {
+                    if ($property.role -eq "PassiveSite"){
+                        write-host
+                        write-host -ForegroundColor Yellow "role can not be manually modified on a Passive server. Please disable HA or delete the VM."
+                        continue MainLoop
+                    }
                     if (Get-RoleMenu -property $property -name $name -CurrentValue $value) {
                         Write-Host -ForegroundColor Yellow "VirtualMachine object was re-created with new role. Taking you back to VM Menu."
                         # VM was deleted.. Lets get outta here.
