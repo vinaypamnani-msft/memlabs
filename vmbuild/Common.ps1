@@ -638,14 +638,12 @@ function New-VmNote {
     param (
         [Parameter(Mandatory = $true)]
         [string]$VmName,
-        [Parameter(Mandatory = $true)]
-        [string]$Role,
         [Parameter(Mandatory = $false)]
         [object]$DeployConfig,
         [Parameter(Mandatory = $false)]
         [bool]$Successful,
         [Parameter(Mandatory = $false)]
-        [switch]$InProgress
+        [bool]$InProgress
     )
 
     try {
@@ -654,9 +652,9 @@ function New-VmNote {
         $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
 
         $vmNote = [PSCustomObject]@{
-            inProgress = $InProgress.IsPresent
+            inProgress = $InProgress
             success    = $Successful
-            role       = $Role
+            role       = $ThisVM.role
             deployedOS = $ThisVM.operatingSystem
             domain     = $DeployConfig.vmOptions.domainName
             adminName  = $DeployConfig.vmOptions.adminName
@@ -777,6 +775,8 @@ function New-VirtualMachine {
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
+        [Parameter()]
+        [PsCustomObject] $DeployConfig,
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
@@ -829,6 +829,11 @@ function New-VirtualMachine {
     catch {
         Write-Log "New-VirtualMachine: $VmName`: Failed to create new VM. $_"
         return $false
+    }
+
+    # Add VMNote as soon as VM is created
+    if ($DeployConfig) {
+        New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
     }
 
     # Copy sysprepped image to VM location
