@@ -226,7 +226,7 @@ function select-SnapshotDomain {
         $tries = 0
         While ($complete -ne $true) {
             try {
-                if ($tries -gt 10){
+                if ($tries -gt 10) {
                     return
                 }
                 Write-Host "Checkpointing $($vm.VmName)"
@@ -261,7 +261,7 @@ function select-RestoreSnapshotDomain {
         $tries = 0
         While ($complete -ne $true) {
             try {
-                if ($tries -gt 10){
+                if ($tries -gt 10) {
                     return
                 }
                 $checkPoint = Get-VMCheckpoint -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
@@ -300,7 +300,7 @@ function select-DeleteSnapshotDomain {
         $tries = 0
         While ($complete -ne $true) {
             try {
-                if ($tries -gt 10){
+                if ($tries -gt 10) {
                     return
                 }
                 $checkPoint = Get-VMCheckpoint -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
@@ -2583,7 +2583,10 @@ function Add-NewVMForRole {
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
-
+            $existingPrimaryVM = $ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1
+            if ($existingPrimaryVM) {
+                $existingPrimaryVM | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $newSiteCode -Force
+            }
         }
         "Primary" {
             $existingCAS = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
