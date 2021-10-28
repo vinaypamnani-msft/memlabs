@@ -2768,7 +2768,7 @@ function Select-VirtualMachines {
                                 }
                             }
                             else {
-                                if ($virtualMachine.OperatingSystem -contains "Server") {
+                                if ($virtualMachine.OperatingSystem.Contains("Server")) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL"; "S" = "Add SQL" }
                                     }
