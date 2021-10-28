@@ -1388,7 +1388,7 @@ function Get-List {
                     subnet          = $vmNet.SwitchName
                     memoryGB        = $vm.MemoryAssigned / 1GB
                     memoryStartupGB = $vm.MemoryStartup / 1GB
-                    diskUsedGB      = $diskSize / 1GB
+                    diskUsedGB      = math::Round($diskSize / 1GB,2)
                     state           = $vm.State.ToString()
                 }
 

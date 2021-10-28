@@ -904,7 +904,7 @@ try {
     Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
     $NewLabsuccess = $true
 }catch {
-    Write-Log "An error occurred:"
+    Write-Log "An error occurred: $_"
     Write-Log $_.ScriptStackTrace
     if ($enableVerbose) {
         write-host $deployConfig | ConvertTo-Json | out-host
