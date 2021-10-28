@@ -281,12 +281,12 @@
 
         WriteStatus WaitPSJoinDomain {
             DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
-            Status    = "Wait for $PrimarySiteName to join domain"
+            Status    = "Wait for $PSName to join domain"
         }
 
         WaitForConfigurationFile WaitPSJoinDomain {
             Role          = "Primary"
-            MachineName   = $PrimarySiteName
+            MachineName   = $PSName
             LogFolder     = $LogFolder
             ReadNode      = "MachineJoinDomain"
             ReadNodeValue = "Passed"
@@ -295,7 +295,7 @@
         }
 
         AddUserToLocalAdminGroup AddUserToLocalAdminGroup {
-            Name       = "$PrimarySiteName"
+            Name       = $PrimarySiteName
             DomainName = $DomainName
             DependsOn  = "[WaitForConfigurationFile]WaitPSJoinDomain"
         }
