@@ -1453,7 +1453,7 @@ function Select-ExistingSubnets {
 
         $subnetListModified = @()
         foreach ($sb in $subnetListNew) {
-            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb } | Select-Object -expand SiteCode
+            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb } |Get-Unique| Select-Object -expand SiteCode
             if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
                 $subnetListModified += "$sb"
             }
@@ -2656,6 +2656,10 @@ function Add-NewVMForRole {
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
+        "FileServer"{
+            $disk = [PSCustomObject]@{"E" = "400GB" }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+        }
         "DC" { }
     }
 
@@ -2701,10 +2705,10 @@ function Add-NewVMForRole {
     if ($NewFSServer) {
         $FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
         if (-not $FS) {
-            $ConfigToModify = Add-NewVMForRole -Role "DomainMember" -Domain $Domain -ConfigToModify $ConfigToModify -Name $NewFSServer
+            $ConfigToModify = Add-NewVMForRole -Role "FileServer" -Domain $Domain -ConfigToModify $ConfigToModify -Name $NewFSServer
             $FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
-            $disk = [PSCustomObject]@{"E" = "400GB" }
-            $FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            #$disk = [PSCustomObject]@{"E" = "400GB" }
+            #$FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
     }
 

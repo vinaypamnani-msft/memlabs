@@ -1557,13 +1557,16 @@ Function Show-Summary {
         Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
         if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
             $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
-            Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
         }
         else {
             Write-RedX "ConfigMgr will not be installed."
         }
     }
 
+    if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
+        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+        Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
+    }
     if (-not $null -eq $($deployConfig.vmOptions)) {
 
         if ($null -eq $deployConfig.parameters.ExistingDCName) {
