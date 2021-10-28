@@ -231,6 +231,10 @@ function select-SnapshotDomain {
                 }
                 Write-Host "Checkpointing $($vm.VmName)"
 
+                $notesFile = Join-Path (get-vm $($vm.VmName)).Path 'MemLabs.Notes.json'
+                (get-vm $($vm.VmName)).notes | Out-File $notesFile
+
+
                 Checkpoint-VM -Name $vm.VmName -SnapshotName 'MemLabs Snapshot' -ErrorAction Stop
                 $complete = $true
             }
@@ -269,6 +273,13 @@ function select-RestoreSnapshotDomain {
                 if ($checkPoint) {
                     Write-Host "Restoring $($vm.VmName)"
                     $checkPoint | Restore-VMCheckpoint -Confirm:$false
+                    $notesFile = Join-Path (get-vm $($vm.VmName)).Path 'MemLabs.Notes.json'
+                    if (Test-Path $notesFile)
+                    {
+                        $notes = Get-Content $notesFile
+                        set-vm -VMName $vm.vmName -notes $notes
+                    }
+
                 }
                 $complete = $true
             }
@@ -308,6 +319,11 @@ function select-DeleteSnapshotDomain {
                 if ($checkPoint) {
                     Write-Host "Merging $($vm.VmName)"
                     Remove-VMCheckpoint -VMName $vm.vmName -Name "MemLabs Snapshot"
+                }
+                $notesFile = Join-Path (get-vm $($vm.VmName)).Path 'MemLabs.Notes.json'
+                if (Test-Path $notesFile)
+                {
+                    Remove-Item $notesFile -Force
                 }
                 $complete = $true
             }
