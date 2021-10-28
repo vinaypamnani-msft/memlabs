@@ -997,132 +997,139 @@ function New-DeployConfig {
         [Parameter()]
         [object] $configObject
     )
-
-    if ($null -ne ($configObject.vmOptions.domainAdminName)) {
-        if ($null -eq ($configObject.vmOptions.adminName)) {
-            $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
-        }
-        $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
-    }
-
-    $containsCS = $configObject.virtualMachines.role -contains "CAS"
-
-    # Scenario
-    if ($containsCS) {
-        $scenario = "Hierarchy"
-    }
-    else {
-        $scenario = "Standalone"
-    }
-
-    # add prefix to vm names
-    $virtualMachines = $configObject.virtualMachines
-    foreach ($item in $virtualMachines) {
-        $item.vmName = $configObject.vmOptions.prefix + $item.vmName
-    }
-    #$virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
-
-    # create params object
     try {
-        $network = $configObject.vmOptions.network.Substring(0, $configObject.vmOptions.network.LastIndexOf("."))
-    }
-    catch {}
-    $clientsCsv = ($virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
-
-    # DCName (prefer name in config over existing)
-    $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
-    $existingDCName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -Role "DC"
-    if (-not $DCName) {
-        $DCName = $existingDCName
-    }
-
-    # CSName (prefer name in config over existing)
-    $containsPS = $configObject.virtualMachines.role -contains "Primary"
-    if ($containsPS) {
-        $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-        $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode ($PSVM.parentSiteCode | Select-Object -First 1) # Bypass failures, validation would fail if we had multiple
-        $existingCSName = $existingCS.vmName
-        $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
-        if (-not $CSName) {
-            $CSName = $existingCSName
+        if ($null -ne ($configObject.vmOptions.domainAdminName)) {
+            if ($null -eq ($configObject.vmOptions.adminName)) {
+                $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
+            }
+            $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
 
-        # Add prefix to remote SQL
-        if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-            $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
-        }
-    }
+        $containsCS = $configObject.virtualMachines.role -contains "CAS"
 
-    # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
-    $containsPassive = $configObject.virtualMachines.role -contains "PassiveSite"
-    if ($containsPassive) {
-        $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-        $ActiveVMinConfig = $virtualMachines | Where-Object { $_.siteCode -eq $PassiveVM.siteCode -and $_.vmName -ne $PassiveVM.vmName }
-        $activeVMName = $ActiveVMinConfig.vmName
-        if (-not $ActiveVMinConfig) {
-            $ActiveVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PassiveVM.siteCode | Where-Object { $_.role -ne "PassiveSite" }
-            $existingActiveVMName = $ActiveVM.vmName
-        }
-
-        # Add prefix to FS
-        if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
-            $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
-        }
-    }
-
-    if ($containsCS) {
-        $CSVM = $virtualMachines | Where-Object { $_.role -eq "CAS" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-
-        # Add prefix to remote SQL
-        if ($CSVM.remoteSQLVM -and -not $CSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-            $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
-        }
-    }
-
-    if ($existingCSName -and $containsPS) {
-
-        if ($PSVM.parentSiteCode) {
+        # Scenario
+        if ($containsCS) {
             $scenario = "Hierarchy"
         }
         else {
             $scenario = "Standalone"
         }
 
+        # add prefix to vm names
+        $virtualMachines = $configObject.virtualMachines
+        foreach ($item in $virtualMachines) {
+            $item.vmName = $configObject.vmOptions.prefix + $item.vmName
+        }
+        #$virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
+
+        # create params object
+        try {
+            $network = $configObject.vmOptions.network.Substring(0, $configObject.vmOptions.network.LastIndexOf("."))
+        }
+        catch {}
+        $clientsCsv = ($virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
+
+        # DCName (prefer name in config over existing)
+        $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
+        $existingDCName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -Role "DC"
+        if (-not $DCName) {
+            $DCName = $existingDCName
+        }
+
+        # CSName (prefer name in config over existing)
+        $containsPS = $configObject.virtualMachines.role -contains "Primary"
+        if ($containsPS) {
+            $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+            $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode ($PSVM.parentSiteCode | Select-Object -First 1) # Bypass failures, validation would fail if we had multiple
+            $existingCSName = $existingCS.vmName
+            $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
+            if (-not $CSName) {
+                $CSName = $existingCSName
+            }
+
+            # Add prefix to remote SQL
+            if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+                $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
+            }
+        }
+
+        # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
+        $containsPassive = $configObject.virtualMachines.role -contains "PassiveSite"
+        if ($containsPassive) {
+            $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+            $ActiveVMinConfig = $virtualMachines | Where-Object { $_.siteCode -eq $PassiveVM.siteCode -and $_.vmName -ne $PassiveVM.vmName }
+            $activeVMName = $ActiveVMinConfig.vmName
+            if (-not $ActiveVMinConfig) {
+                $ActiveVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PassiveVM.siteCode | Where-Object { $_.role -ne "PassiveSite" }
+                $existingActiveVMName = $ActiveVM.vmName
+            }
+
+            # Add prefix to FS
+            if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
+                $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
+            }
+        }
+
+        if ($containsCS) {
+            $CSVM = $virtualMachines | Where-Object { $_.role -eq "CAS" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+
+            # Add prefix to remote SQL
+            if ($CSVM.remoteSQLVM -and -not $CSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+                $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
+            }
+        }
+
+        if ($existingCSName -and $containsPS) {
+
+            if ($PSVM.parentSiteCode) {
+                $scenario = "Hierarchy"
+            }
+            else {
+                $scenario = "Standalone"
+            }
+
+        }
+
+        $params = [PSCustomObject]@{
+            DomainName         = $configObject.vmOptions.domainName
+            DCName             = $DCName
+            CSName             = $CSName
+            PSName             = ($virtualMachines | Where-Object { $_.role -eq "Primary" }).vmName
+            ActiveVMName       = $activeVMName
+            DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
+            DomainMembers      = $clientsCsv
+            Scenario           = $scenario
+            DHCPScopeId        = $configObject.vmOptions.Network
+            DHCPScopeName      = $configObject.vmOptions.Network
+            DHCPDNSAddress     = $network + ".1"
+            DHCPDefaultGateway = $network + ".200"
+            DHCPScopeStart     = $network + ".20"
+            DHCPScopeEnd       = $network + ".199"
+            ExistingDCName     = $existingDCName
+            ExistingCASName    = $existingCSName
+            ExistingActiveName = $existingActiveVMName
+            ThisMachineName    = $null
+            ThisMachineRole    = $null
+        }
+
+        $existingVMs = Get-List -Type VM -DomainName $configObject.vmOptions.domainName
+
+        $deploy = [PSCustomObject]@{
+            cmOptions       = $configObject.cmOptions
+            vmOptions       = $configObject.vmOptions
+            virtualMachines = $virtualMachines
+            parameters      = $params
+            existingVMs     = $existingVMs
+        }
+
+        return $deploy
     }
-
-    $params = [PSCustomObject]@{
-        DomainName         = $configObject.vmOptions.domainName
-        DCName             = $DCName
-        CSName             = $CSName
-        PSName             = ($virtualMachines | Where-Object { $_.role -eq "Primary" }).vmName
-        ActiveVMName       = $activeVMName
-        DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
-        DomainMembers      = $clientsCsv
-        Scenario           = $scenario
-        DHCPScopeId        = $configObject.vmOptions.Network
-        DHCPScopeName      = $configObject.vmOptions.Network
-        DHCPDNSAddress     = $network + ".1"
-        DHCPDefaultGateway = $network + ".200"
-        DHCPScopeStart     = $network + ".20"
-        DHCPScopeEnd       = $network + ".199"
-        ExistingDCName     = $existingDCName
-        ExistingCASName    = $existingCSName
-        ExistingActiveName = $existingActiveVMName
-        ThisMachineName    = $null
-        ThisMachineRole    = $null
+    catch {
+        Write-Host "An error occurred:"
+        Write-Host $_.ScriptStackTrace
+        write-host $configObject | ConvertTo-Json | out-host
+        Get-PSCallStack | out-host
     }
-
-    $existingVMs = Get-List -Type VM -DomainName $configObject.vmOptions.domainName
-
-    $deploy = [PSCustomObject]@{
-        cmOptions       = $configObject.cmOptions
-        vmOptions       = $configObject.vmOptions
-        virtualMachines = $virtualMachines
-        parameters      = $params
-        existingVMs     = $existingVMs
-    }
-
-    return $deploy
 }
 
 function Get-ValidCASSiteCodes {
@@ -1514,14 +1521,7 @@ Function Show-Summary {
             }
         }
         else {
-            Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
-            if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
-                $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
-                Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
-            }
-            else {
-                Write-RedX "ConfigMgr will not be installed."
-            }
+            Write-RedX "ConfigMgr will not be installed."
         }
 
 
