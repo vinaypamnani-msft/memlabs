@@ -1332,6 +1332,7 @@ function Select-RolesForNew {
     if ($global:config.VirtualMachines.role -contains "DPMP") {
         $existingRoles.Remove("DPMP")
     }
+    $existingRoles.Remove("PassiveSite")
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
     return $role
 }
