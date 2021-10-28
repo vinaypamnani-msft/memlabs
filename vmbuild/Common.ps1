@@ -713,7 +713,7 @@ function Remove-DnsRecord {
     # Write-Host "DCName $DCName, Domain $Domain, RecordToDelete $RecordToDelete"
 
     $scriptBlock1 = {
-        Get-ADComputer -Identity $using:RecordToDelete -ErrorAction SilentlyContinue | Remove-ADObject -Recursive -ErrorAction SilentlyContinue -Confirm:$False
+        #Get-ADComputer -Identity $using:RecordToDelete -ErrorAction SilentlyContinue | Remove-ADObject -Recursive -ErrorAction SilentlyContinue -Confirm:$False
         Get-DnsServerResourceRecord -ZoneName $using:Domain -Node $using:RecordToDelete -RRType A
     }
 

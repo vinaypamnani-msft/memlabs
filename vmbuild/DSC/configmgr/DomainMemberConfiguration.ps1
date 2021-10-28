@@ -162,10 +162,32 @@
             Role      = "DomainMember"
         }
 
+        File ShareFolder {
+            DestinationPath = $LogPath
+            Type            = 'Directory'
+            Ensure          = 'Present'
+            DependsOn       = '[OpenFirewallPortForSCCM]OpenFirewall'
+        }
+
+        FileReadAccessShare DomainSMBShare {
+            Name      = $LogFolder
+            Path      = $LogPath
+            DependsOn = "[File]ShareFolder"
+        }
+
+        WriteConfigurationFile WriteJoinDomain {
+            Role      = "DomainMember"
+            LogPath   = $LogPath
+            WriteNode = "MachineJoinDomain"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+        }
+
         if ($installSQL) {
 
             WriteStatus InstallSQL {
-                DependsOn = '[OpenFirewallPortForSCCM]OpenFirewall'
+                DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
                 Status    = "Installing SQL Server ($SQLInstanceName instance)"
             }
 
@@ -292,7 +314,7 @@
         else {
 
             WriteStatus AddLocalAdmin {
-                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
                 Status    = "Adding cm_svc domain account to Local Administrators group"
             }
 

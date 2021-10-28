@@ -112,21 +112,31 @@ Move-CMContentLibrary -NewLocation $contentLibShare -SiteCode $SiteCode
 
 do {
     $moveStatus = Get-CMSite -SiteCode $SiteCode
-    Write-DscStatus "Moving Content Library to $($moveStatus.ContentLibraryLocation), Current Progress: $($moveStatus.ContentLibraryMoveProgress)%" -RetrySeconds 30
+    Write-DscStatus "Moving Content Library to $contentLibShare, Current Progress: $($moveStatus.ContentLibraryMoveProgress)%" -RetrySeconds 30
     Start-Sleep -Seconds 30
 } until ($moveStatus.ContentLibraryMoveProgress -eq 100 -and $null -ne $moveStatus.ContentLibraryLocation)
+Write-DscStatus "Content Library moved to $($moveStatus.ContentLibraryLocation)"
 
 $passiveFQDN = $SSVM.vmName + "." + $DomainFullName
 Write-DscStatus "Adding passive site server on $passiveFQDN"
 New-CMSiteSystemServer -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN
 Add-CMPassiveSite -InstallDirectory $SSVM.cmInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite
+
 do {
+
+    $prereqFailure = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedPrereqMonitoring  -Filter "IsComplete = 4 AND Applicable = 1 AND Progress = 100" | Sort-Object MessageTime | Select-Object -Last 1
+    if ($prereqFailure) {
+        Write-DscStatus "Adding passive site server on $passiveFQDN failed due to prereq failure. Reason: $($prereqFailure.SubStageName)" -RetrySeconds 60
+    }
+
     $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 2 AND Applicable = 1" | Sort-Object MessageTime | Select-Object -Last 1
     if ($state) {
         Write-DscStatus "Adding passive site server on $passiveFQDN. Current State: $($state.SubStageName)" -RetrySeconds 60
     }
+
     Start-Sleep -Seconds 60
-} until ($state.SubStageId -eq 917515)
+
+} until ($state.SubStageId -eq 917515 -or $prereqFailure)
 
 # Update actions file
 $Configuration.InstallPassive.Status = 'Completed'

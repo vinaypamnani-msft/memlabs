@@ -159,8 +159,30 @@
             Role      = "Site Server"
         }
 
+        File ShareFolder {
+            DestinationPath = $LogPath
+            Type            = 'Directory'
+            Ensure          = 'Present'
+            DependsOn       = '[OpenFirewallPortForSCCM]OpenFirewall'
+        }
+
+        FileReadAccessShare DomainSMBShare {
+            Name      = $LogFolder
+            Path      = $LogPath
+            DependsOn = "[File]ShareFolder"
+        }
+
+        WriteConfigurationFile WriteJoinDomain {
+            Role      = "CAS"
+            LogPath   = $LogPath
+            WriteNode = "MachineJoinDomain"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+        }
+
         WriteStatus ADKInstall {
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            DependsOn = "[WriteConfigurationFile]WriteJoinDomain"
             Status    = "Downloading and installing ADK"
         }
 
@@ -219,51 +241,36 @@
                 DependsOn       = "[ChangeSqlInstancePort]SqlInstancePort"
             }
 
-            File ShareFolder {
-                DestinationPath = $LogPath
-                Type            = 'Directory'
-                Ensure          = 'Present'
-                DependsOn       = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+            WriteStatus SSMS {
+                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+                Status    = "Downloading and installing SQL Management Studio"
             }
 
         }
         else {
 
-            File ShareFolder {
-                DestinationPath = $LogPath
-                Type            = 'Directory'
-                Ensure          = 'Present'
-                DependsOn       = '[InstallADK]ADKInstall'
+            WriteStatus SSMS {
+                DependsOn = '[InstallADK]ADKInstall'
+                Status    = "Downloading and installing SQL Management Studio"
             }
 
-        }
-
-        WriteStatus SSMS {
-            DependsOn = "[File]ShareFolder"
-            Status    = "Downloading and installing SQL Management Studio"
         }
 
         InstallSSMS SSMS {
             DownloadUrl = "https://aka.ms/ssmsfullsetup"
             Ensure      = "Present"
-            DependsOn   = "[File]ShareFolder"
-        }
-
-        FileReadAccessShare DomainSMBShare {
-            Name      = $LogFolder
-            Path      = $LogPath
-            DependsOn = "[InstallSSMS]SSMS"
+            DependsOn   = "[WriteStatus]SSMS"
         }
 
         WriteStatus DownLoadSCCM {
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn = "[InstallSSMS]SSMS"
             Status    = $CMDownloadStatus
         }
 
         DownloadSCCM DownLoadSCCM {
             CM        = $CM
             Ensure    = "Present"
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn = "[WriteStatus]DownLoadSCCM"
         }
 
         FileReadAccessShare CMSourceSMBShare {
@@ -278,10 +285,10 @@
         }
 
         WaitForConfigurationFile WaitPSJoinDomain {
-            Role          = "DC"
-            MachineName   = $DCName
+            Role          = "Primary"
+            MachineName   = $PrimarySiteName
             LogFolder     = $LogFolder
-            ReadNode      = "PSJoinDomain"
+            ReadNode      = "MachineJoinDomain"
             ReadNodeValue = "Passed"
             Ensure        = "Present"
             DependsOn     = "[FileReadAccessShare]CMSourceSMBShare"
