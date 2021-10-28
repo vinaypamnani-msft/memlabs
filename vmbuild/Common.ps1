@@ -977,9 +977,9 @@ function Wait-ForVm {
     }
 
     if ($OobeComplete.IsPresent) {
-        $status = "Waiting for OOBE to complete. "
-        Write-Log "Wait-ForVm: $VmName`: $status"
-        Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+        $originalStatus = "Waiting for OOBE to complete. "
+        Write-Log "Wait-ForVm: $VmName`: $originalStatus"
+        Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $originalStatus -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         $readyOobe = $false
         $wwahostrunning = $false
         $readySmb = $false
@@ -993,6 +993,7 @@ function Wait-ForVm {
 
             if ($null -ne $out.ScriptBlockOutput -and -not $readyOobe) {
                 Write-Log "Wait-ForVm: $VmName`: OOBE State is $($out.ScriptBlockOutput)"
+                $status = $originalStatus
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
             }
