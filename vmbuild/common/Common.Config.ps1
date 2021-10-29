@@ -1134,9 +1134,11 @@ function New-DeployConfig {
         return $deploy
     }
     catch {
-        Write-Host "An error occurred:"
+        Write-Host "An error occurred: $_"
         Write-Host $_.ScriptStackTrace
+        Write-Host "ConfigObject: " -NoNewline
         write-host $configObject | ConvertTo-Json | out-host
+        Write-Host "CallStack: "
         Get-PSCallStack | out-host
     }
 }

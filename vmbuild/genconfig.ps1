@@ -140,6 +140,7 @@ function Select-ConfigMenu {
             Default {}
         }
         if ($SelectedConfig) {
+            Write-Verbose "SelectedConfig : $SelectedConfig"
             return $SelectedConfig
         }
     }
@@ -2754,15 +2755,6 @@ function Add-NewVMForRole {
         #Get-PSCallStack | out-host
         $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$true
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $FSName
-        #$FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
-        #if ((Get-ListOfPossibleFileServers).Count -eq 0) {
-        #    $FSName = Add-NewVMForRole -Role "FileServer" -Domain $Domain -ConfigToModify $ConfigToModify -ReturnMachineName:$true
-        #    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $FSName
-        #$FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
-        #$disk = [PSCustomObject]@{"E" = "400GB" }
-        #$FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-        #}
-        #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $NewFSServer
     }
     #Get-PSCallStack | out-host
     if (-not $Quiet) {
@@ -2783,7 +2775,7 @@ function select-FileServerMenu {
         [object] $ConfigToModify = $global:config
     )
     $result = $null
-    if ((Get-ListOfPossibleFileServers).Count -eq 0) {
+    if ((Get-ListOfPossibleFileServers -Config $ConfigToModify).Count -eq 0) {
         $result = "n"
     }
 
@@ -2795,7 +2787,7 @@ function select-FileServerMenu {
         $additionalOptions += @{ "N" = "Create a New FileServer VM" }
     }
     while ([string]::IsNullOrWhiteSpace($result)) {
-        $result = Get-Menu "Select FileServer VM" $(Get-ListOfPossibleFileServers) -Test:$false -additionalOptions $additionalOptions
+        $result = Get-Menu "Select FileServer VM" $(Get-ListOfPossibleFileServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions
     }
     switch ($result.ToLowerInvariant()) {
         "n" {
@@ -2805,14 +2797,31 @@ function select-FileServerMenu {
     return $result
 }
 function Get-ListOfPossibleFileServers {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $Config = $global:config
+    )
     $FSList = @()
-    $FS = $ConfigToModify.virtualMachines | Where-Object { $_.role -eq "FileServer" }
+    $FS = $Config.virtualMachines | Where-Object { $_.role -eq "FileServer" }
     foreach ($item in $FS) {
         $FSList += $item.vmName
     }
-    $FSFromList = get-list -type VM -domain $global:config.vmOptions.DomainName | Where-Object { $_.role -eq "FileServer" }
-    foreach ($item in $FSFromList) {
-        $FSList += $item.vmName
+    $domain = $Config.vmOptions.DomainName
+    if ($null -ne $domain) {
+        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.role -eq "FileServer" }
+        foreach ($item in $FSFromList) {
+            $FSList += $item.vmName
+        }
+    }
+    else {
+        if ($null -ne $Config ) {
+            Write-Verbose $Config | ConvertTo-Json | Out-Host
+        }
+        else {
+            write-host "Config was null!"
+            Get-PSCallStack | Out-Host
+        }
     }
     return $FSList
 }
@@ -3073,9 +3082,11 @@ function Save-Config {
 }
 $Global:Config = $null
 $Global:Config = Select-ConfigMenu
+
+start-sleep -seconds 1
 $Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
 $Global:AddToExisting = $false
-$existingDCName = $deployConfig.parameters.existingDCName
+$existingDCName = $Global:DeployConfig.parameters.existingDCName
 if (-not [string]::IsNullOrWhiteSpace($existingDCName)) {
     $Global:AddToExisting = $true
 }
@@ -3086,7 +3097,7 @@ while ($valid -eq $false) {
     if ($return.DeployNow -is [PSCustomObject]) {
         return $return.DeployNow
     }
-    $c = Test-Configuration -InputObject $Config
+    $c = Test-Configuration -InputObject $Global:Config
     Write-Host
     Write-Verbose "12"
 

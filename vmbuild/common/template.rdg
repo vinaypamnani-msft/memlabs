@@ -110,6 +110,11 @@
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
+            <value>"FileServer"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
             <value>"sqlVersion"</value>
           </rule>
         </ruleGroup>
