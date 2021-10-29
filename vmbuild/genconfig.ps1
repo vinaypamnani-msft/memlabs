@@ -299,7 +299,6 @@ function select-RestoreSnapshotDomain {
 
     if ($missingVMS.Count -gt 0) {
         Write-Host
-        Write-Host "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)"
         $response2 = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
         if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
             foreach ($item in $missingVMS) {
