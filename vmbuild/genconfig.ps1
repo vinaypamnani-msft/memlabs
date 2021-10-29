@@ -218,7 +218,9 @@ function select-SnapshotDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
         [string] $domain
     )
-
+    Write-Host
+    Write-Host -ForegroundColor Yellow "It is reccommended to stop VM's before snapshotting. Please select which VM's to stop."
+    Select-StopDomain -domain $domain
     $vms = get-list -type vm -DomainName $domain
 
     foreach ($vm in $vms) {
@@ -259,7 +261,7 @@ function select-RestoreSnapshotDomain {
     )
 
     $vms = get-list -type vm -DomainName $domain
-
+    $missingVMS = @()
     foreach ($vm in $vms) {
         $complete = $false
         $tries = 0
@@ -274,12 +276,14 @@ function select-RestoreSnapshotDomain {
                     Write-Host "Restoring $($vm.VmName)"
                     $checkPoint | Restore-VMCheckpoint -Confirm:$false
                     $notesFile = Join-Path (get-vm $($vm.VmName)).Path 'MemLabs.Notes.json'
-                    if (Test-Path $notesFile)
-                    {
+                    if (Test-Path $notesFile) {
                         $notes = Get-Content $notesFile
                         set-vm -VMName $vm.vmName -notes $notes
                     }
 
+                }
+                else {
+                    $missingVMS += $vm.VmName
                 }
                 $complete = $true
             }
@@ -292,6 +296,17 @@ function select-RestoreSnapshotDomain {
     }
     Get-List -FlushCache | out-null
 
+    if ($missingVMS.Count -gt 0) {
+        Write-Host
+        Write-Host "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)"
+        $response2 = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
+        if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
+            foreach ($item in $missingVMS) {
+                Remove-VirtualMachine -VmName $item
+            }
+        }
+
+    }
     write-host
     Write-Host "$domain has been Restored"
     Select-StartDomain -domain $domain
@@ -321,8 +336,7 @@ function select-DeleteSnapshotDomain {
                     Remove-VMCheckpoint -VMName $vm.vmName -Name "MemLabs Snapshot"
                 }
                 $notesFile = Join-Path (get-vm $($vm.VmName)).Path 'MemLabs.Notes.json'
-                if (Test-Path $notesFile)
-                {
+                if (Test-Path $notesFile) {
                     Remove-Item $notesFile -Force
                 }
                 $complete = $true
@@ -657,6 +671,9 @@ function Select-MainMenu {
         if ($InternalUseOnly.IsPresent) {
             $customOptions += @{ "D" = "Deploy Config%Green%Green" }
         }
+        if ($enableVerbose){
+            $customOptions += @{ "R" = "Return deployConfig" }
+        }
 
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -Test:$false
         write-Verbose "response $response"
@@ -669,6 +686,7 @@ function Select-MainMenu {
             "3" { Select-VirtualMachines }
             "d" { return $true }
             "s" { return $false }
+            "r" { return Test-Configuration -InputObject $Global:Config}
         }
     }
 }
@@ -1462,7 +1480,7 @@ function Select-ExistingSubnets {
 
         $subnetListModified = @()
         foreach ($sb in $subnetListNew) {
-            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb } |Get-Unique| Select-Object -expand SiteCode
+            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb } | Get-Unique | Select-Object -expand SiteCode
             if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
                 $subnetListModified += "$sb"
             }
@@ -2358,14 +2376,14 @@ function Select-Options {
                     return "REFRESH"
                 }
                 "siteCode" {
-                    if ($property.role -eq "PassiveSite"){
+                    if ($property.role -eq "PassiveSite") {
                         write-host
                         write-host -ForegroundColor Yellow "siteCode can not be manually modified on a Passive server."
                         continue MainLoop
                     }
                 }
                 "role" {
-                    if ($property.role -eq "PassiveSite"){
+                    if ($property.role -eq "PassiveSite") {
                         write-host
                         write-host -ForegroundColor Yellow "role can not be manually modified on a Passive server. Please disable HA or delete the VM."
                         continue MainLoop
@@ -2677,7 +2695,7 @@ function Add-NewVMForRole {
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
-        "FileServer"{
+        "FileServer" {
             $disk = [PSCustomObject]@{"E" = "400GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
@@ -3002,6 +3020,9 @@ $valid = $false
 while ($valid -eq $false) {
 
     $return.DeployNow = Select-MainMenu
+    if ($return.DeployNow -is [PSCustomObject]){
+        return $return.DeployNow
+    }
     $c = Test-Configuration -InputObject $Config
     Write-Host
     Write-Verbose "12"

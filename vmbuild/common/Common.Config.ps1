@@ -1391,6 +1391,7 @@ function Get-List {
 
                 #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
                 $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
+                $diskSizeGB = $diskSize / 1GB
                 $vmNet = $vm | Get-VMNetworkAdapter
 
                 $vmObject = [PSCustomObject]@{
@@ -1399,7 +1400,7 @@ function Get-List {
                     subnet          = $vmNet.SwitchName
                     memoryGB        = $vm.MemoryAssigned / 1GB
                     memoryStartupGB = $vm.MemoryStartup / 1GB
-                    diskUsedGB      = $diskSize / 1GB
+                    diskUsedGB      = [math]::Round($diskSizeGB,2)
                     state           = $vm.State.ToString()
                 }
 
