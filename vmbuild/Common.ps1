@@ -245,7 +245,7 @@ function Get-File {
 
                 $i++
                 if ($i -gt 5) {
-                    Write-Log "Get-FileFromStorage: Timed out while waiting to download '$sourceDisplay'." -Failure
+                    Write-Log "Get-File: Timed out while waiting to download '$sourceDisplay'." -Failure
                     $timedOut = $true
                     break
                 }
@@ -324,6 +324,7 @@ function Start-CurlTransfer {
 
         if ($LASTEXITCODE -eq 0) {
             $success = $true
+            Write-Host
             break
         }
         else {
