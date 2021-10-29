@@ -760,6 +760,16 @@ function Test-Configuration {
         $configObject = $InputObject | ConvertTo-Json -Depth 3 | ConvertFrom-Json
     }
 
+    # InputObject could be blank
+    # if (-not $InputObject -and -not $FilePath) {
+    #     if ($InputObject -isnot [System.Management.Automation.PSCustomObject]) {
+    #         $return.Message = "InputObject is invalid. Please check if the config is valid or create a new one using genconfig.ps1"
+    #         $return.Problems += 1
+    #         $return.Failures += 1
+    #         return $return
+    #     }
+    # }
+
     $deployConfig = New-DeployConfig -configObject $configObject
     $return.DeployConfig = $deployConfig
 
@@ -1134,12 +1144,7 @@ function New-DeployConfig {
         return $deploy
     }
     catch {
-        Write-Host "An error occurred: $_"
-        Write-Host $_.ScriptStackTrace
-        Write-Host "ConfigObject: " -NoNewline
-        write-host $configObject | ConvertTo-Json | out-host
-        Write-Host "CallStack: "
-        Get-PSCallStack | out-host
+        Write-Exception -ExceptionInfo $_ -AdditionalInfo ($configObject | ConvertTo-Json)
     }
 }
 
@@ -1402,7 +1407,7 @@ function Get-List {
                     subnet          = $vmNet.SwitchName
                     memoryGB        = $vm.MemoryAssigned / 1GB
                     memoryStartupGB = $vm.MemoryStartup / 1GB
-                    diskUsedGB      = [math]::Round($diskSizeGB,2)
+                    diskUsedGB      = [math]::Round($diskSizeGB, 2)
                     state           = $vm.State.ToString()
                 }
 

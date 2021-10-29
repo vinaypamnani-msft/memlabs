@@ -128,6 +128,28 @@ function Write-Log {
     }
 }
 
+function Write-Exception {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        $ExceptionInfo,
+        [Parameter()]
+        $AdditionalInfo
+    )
+
+    $parentFunctionName = (Get-PSCallStack)[1].FunctionName
+    Write-Host "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo" -ForegroundColor Red
+    Write-Host "`n=== Exception.ScriptStackTrace:`n"
+    $ExceptionInfo.ScriptStackTrace | Out-Host
+    Write-Host "`n=== Get-PSCallStack:`n"
+    (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim() | Out-Host
+    if ($AdditionalInfo) {
+        Write-Host "`n=== Additional Information:`n"
+        ($AdditionalInfo | Out-String).Trim() | Out-Host
+    }
+    Write-Host
+}
+
 function Get-File {
     param(
         [Parameter(Mandatory = $false)]
