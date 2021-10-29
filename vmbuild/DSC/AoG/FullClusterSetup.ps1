@@ -1,0 +1,302 @@
+Configuration FullClusterSetup
+{
+    param
+    (
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]
+        $SqlAdministratorCredential,
+
+        [parameter(Mandatory = $true)]
+        [System.String]
+        $GroupName,
+
+        [ValidateSet('DomainLocal', 'Global', 'Universal')]
+        [System.String]
+        $Scope = 'Global',
+
+        [ValidateSet('Security', 'Distribution')]
+        [System.String]
+        $Category = 'Security',
+
+        [ValidateNotNullOrEmpty()]
+        [System.String]
+        $Description
+    )
+
+    Import-DscResource -ModuleName 'ActiveDirectoryDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration'
+    Import-DscResource -ModuleName 'TemplateHelpDSC'
+    Import-DscResource -ModuleName 'ComputerManagementDsc'
+    Import-DscResource -ModuleName 'xFailOverCluster'
+
+    Node $AllNodes.Where{$_.Role -eq 'ADSetup' }.NodeName
+    {
+
+        WindowsFeature ADDADPS
+        {
+            Ensure = 'Present'
+            Name   = 'RSAT-AD-PowerShell'
+        }
+
+        ADComputer 'ClusterAccount'
+        {
+            ComputerName      = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).ComputerName
+            EnabledOnCreation  = $false
+            Dependson   = '[WindowsFeature]ADDADPS'
+
+            PsDscRunAsCredential       = $SqlAdministratorCredential
+
+        }
+
+        ADGroup 'CASCluster'
+        {
+            GroupName   = $GroupName
+            GroupScope  = $Scope
+            Category    = $Category
+            Description = $Description
+            Ensure      = 'Present'
+            Members     = @($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).ADmembers
+
+            Dependson   = '[WindowsFeature]ADDADPS', '[ADComputer]ClusterAccount'
+
+            PsDscRunAsCredential       = $SqlAdministratorCredential
+        }
+
+    }
+    Node $AllNodes.Where{$_.Role -eq 'FileServer' }.NodeName 
+    {
+        WaitForAll AD
+        {
+            ResourceName      = '[ADGroup]CASCluster'
+            NodeName          = $AllNodes.Where{$_.Role -eq 'ADSetup' }.NodeName
+            RetryIntervalSec  = 10
+            RetryCount        = 10
+        }
+        
+        File ClusterWitness {
+            Type = 'Directory'
+            DestinationPath = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).WitnessPath
+            Ensure = "Present"
+        }
+
+        FileACLPermission ClusterWitnessShare {
+            Path        = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).WitnessPath
+            Accounts     = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).Accounts
+
+            Dependson   = '[File]ClusterWitness'
+        }
+
+        SmbShare 'CASClusterShare'
+        {
+            Name = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).Name
+            Path = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).Path
+            Description = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).Description
+            FolderEnumerationMode = 'AccessBased'
+            FullAccess = @($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).FullAccess
+            ReadAccess = @($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).ReadAccess
+
+            DependsOn = '[FileACLPermission]ClusterWitnessShare'
+        }
+    }
+    Node $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.NodeName 
+    {
+        WaitForAll FS
+        {
+            ResourceName      = '[SmbShare]CASClusterShare'
+            NodeName          = $AllNodes.Where{$_.Role -eq 'FileServer' }.NodeName
+            RetryIntervalSec  = 15
+            RetryCount        = 20
+        }
+
+        WindowsFeature ADDADPS
+        {
+            Ensure = 'Present'
+            Name   = 'RSAT-AD-PowerShell'
+        }
+
+        ModuleAdd SQLServerModule
+        {
+            Key = 'Always'
+            CheckModuleName   = $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.CheckModuleName
+       
+        }
+
+        WindowsFeature AddFailoverFeature
+        {
+            Ensure = 'Present'
+            Name   = 'Failover-clustering'
+        }
+
+        WindowsFeature AddRemoteServerAdministrationToolsClusteringPowerShellFeature
+        {
+            Ensure    = 'Present'
+            Name      = 'RSAT-Clustering-PowerShell'
+            DependsOn = '[WindowsFeature]AddFailoverFeature'
+        }
+
+        WindowsFeature AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature
+        {
+            Ensure    = 'Present'
+            Name      = 'RSAT-Clustering-CmdInterface'
+            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringPowerShellFeature'
+        }
+
+        WindowsFeature AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature
+        {
+            Ensure    = 'Present'
+            Name      = 'RSAT-Clustering-Mgmt'
+            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature'
+        }
+
+        xCluster CreateCluster
+        {
+            Name                          = $Node.ClusterName
+            StaticIPAddress               = $Node.ClusterIPAddress
+            # This user must have the permission to create the CNO (Cluster Name Object) in Active Directory, unless it is prestaged.
+            DomainAdministratorCredential = $SqlAdministratorCredential
+            DependsOn                     = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
+        }
+
+        xClusterNetwork 'ChangeNetwork-192'
+        {
+            Address     =  $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.Address
+            AddressMask =  $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.AddressMask
+            Name        =  $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.Name
+            Role        = '0'
+
+            DependsOn = '[xCluster]CreateCluster'
+        }
+
+        ADGroup 'CASCluster'
+        {
+            GroupName   = $GroupName
+            GroupScope  = $Scope
+            Category    = $Category
+            Description = $Description
+            Ensure      = 'Present'
+            Members     = @($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).ADmembers
+
+            DependsOn = '[WindowsFeature]ADDADPS','[xClusterNetwork]ChangeNetwork-192'
+
+            PsDscRunAsCredential       = $SqlAdministratorCredential
+        }
+    }
+
+    Node $AllNodes.Where{$_.Role -eq 'ClusterNode2' }.NodeName 
+    {
+        WindowsFeature AddFailoverFeature
+        {
+            Ensure = 'Present'
+            Name   = 'Failover-clustering'
+        }
+
+        WindowsFeature AddRemoteServerAdministrationToolsClusteringPowerShellFeature
+        {
+            Ensure    = 'Present'
+            Name      = 'RSAT-Clustering-PowerShell'
+            DependsOn = '[WindowsFeature]AddFailoverFeature'
+        }
+
+        WindowsFeature AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature
+        {
+            Ensure    = 'Present'
+            Name      = 'RSAT-Clustering-CmdInterface'
+            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringPowerShellFeature'
+        }
+
+        WindowsFeature AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature
+        {
+            Ensure    = 'Present'
+            Name      = 'RSAT-Clustering-Mgmt'
+            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature'
+        }
+
+        WaitForAll CS
+        {
+            ResourceName      = '[ADGroup]CASCluster'
+            NodeName          = $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.NodeName
+            RetryIntervalSec  = 15
+            RetryCount        = 20
+        }
+
+        xWaitForCluster WaitForCluster
+        {
+            Name             = $Node.ClusterName
+            RetryIntervalSec = 15
+            RetryCount       = 30
+            DependsOn        = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
+        }
+
+        xCluster JoinSecondNodeToCluster
+        {
+            Name                          = $Node.ClusterName
+            StaticIPAddress               = $Node.ClusterIPAddress
+            DomainAdministratorCredential = $SqlAdministratorCredential
+            DependsOn                     = '[xWaitForCluster]WaitForCluster'
+        }
+
+        xClusterQuorum 'ClusterWitness'
+        {
+            IsSingleInstance = 'Yes'
+            Type             = 'NodeAndFileShareMajority'
+            Resource         = $AllNodes.Where{$_.Role -eq 'ClusterNode2' }.Resource
+
+            DependsOn = '[xCluster]JoinSecondNodeToCluster'
+        }
+    }
+}
+
+$Configuration = @{
+    AllNodes = @(
+        # Node01 - First cluster node.
+        @{
+            # Replace with the name of the actual target node.
+            NodeName = 'SCCM-CASClust1'
+
+            # This is used in the configuration to know which resource to compile.
+            Role             = 'ClusterNode1'
+            CheckModuleName  = 'SqlServer'
+            Address          = '192.168.1.0'
+            AddressMask      = '255.255.255.0'
+            Name             = 'Ethernet'
+            
+        },
+
+        # Node02 - Second cluster node
+        @{
+            # Replace with the name of the actual target node.
+            NodeName = 'SCCM-CASClust2'
+
+            # This is used in the configuration to know which resource to compile.
+            Role      = 'ClusterNode2'
+            Resource  = '\\sccm-fileserver\CASClusterWitness'
+        },
+        @{
+            NodeName     = 'SCCM-CAS'
+            Role         = 'ADSetup'
+            ADmembers    = 'SCCM-CASClust1$','SCCM-CASClust2$', 'CASCluster$'
+            ComputerName = 'CASCluster'
+
+        },
+        @{
+            NodeName      = 'SCCM-FileServer'
+            Role         = 'FileServer'
+            Name         = 'CASClusterWitness'
+            Path         = 'F:\CASClusterWitness'
+            Description  = 'CASWitnessShare'
+            WitnessPath  = "F:\CASClusterWitness"
+            Accounts     = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
+            FullAccess   = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
+            ReadAccess   = 'Everyone'
+        },
+        @{
+            NodeName                     = "*"
+            PSDscAllowDomainUser         = $true
+            PSDscAllowPlainTextPassword  = $true
+            ClusterName                 = 'CASCluster'
+            ClusterIPAddress            = '10.250.250.30/24'
+        }
+    )
+}
+
+FullClusterSetup -ConfigurationData $Configuration -OutputPath C:\temp\FullClusterSetup -GroupName CASCluster -Description "CAS Cluster Access Group"
