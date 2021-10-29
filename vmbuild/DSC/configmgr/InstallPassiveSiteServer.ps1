@@ -96,10 +96,12 @@ $create_Share = {
 }
 
 Write-DscStatus "Creating a share on $remoteLibVMName to host the content library"
-Invoke-Command -Session (New-PSSession -ComputerName $remoteLibVMName) -ScriptBlock $create_Share
+Invoke-Command -Session (New-PSSession -ComputerName $remoteLibVMName) -ScriptBlock $create_Share *> C:\staging\invoke.txt
 $remoteSharePath = "\\$remoteLibVMName\$shareName\$SiteCode"
 if (-not (Test-Path $remoteSharePath)) {
-    Start-Sleep -Seconds 30
+    Start-Sleep -Seconds 15
+    Invoke-Command -Session (New-PSSession -ComputerName $remoteLibVMName) -ScriptBlock $create_Share
+    Start-Sleep -Seconds 15
     if (-not (Test-Path $remoteSharePath)) {
         Write-DscStatus "Failed to create $remoteSharePath share." -Failure
         return
