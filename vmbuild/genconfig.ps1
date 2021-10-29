@@ -686,7 +686,7 @@ function Select-MainMenu {
             "3" { Select-VirtualMachines }
             "d" { return $true }
             "s" { return $false }
-            "r" { return (Test-Configuration -InputObject $Global:Config).deployConfig}
+            "r" { return Test-Configuration -InputObject $Global:Config}
         }
     }
 }
