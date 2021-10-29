@@ -125,7 +125,7 @@ $DPMPFQDN = $DPMPName + "." + $DomainFullName
 $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
 if (!$SystemServer) {
     Write-DscStatus "Creating new CM Site System server on $DPMPFQDN"
-    New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN -AccountName $cm_svc | Out-File $global:StatusLog -Append
+    New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN | Out-File $global:StatusLog -Append
     Start-Sleep -Seconds 5
     $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
 }
