@@ -1038,8 +1038,8 @@ function New-DeployConfig {
 
         # CSName (prefer name in config over existing)
         $containsPS = $configObject.virtualMachines.role -contains "Primary"
-        if ($containsPS) {
-            $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+        $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+        if ($PSVM) {
             $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode ($PSVM.parentSiteCode | Select-Object -First 1) # Bypass failures, validation would fail if we had multiple
             $existingCSName = $existingCS.vmName
             $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
@@ -1051,12 +1051,20 @@ function New-DeployConfig {
             if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
                 $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
             }
+
+            $PSName = $PSVM.vmName
+        }
+
+        # PSName
+        if (-not $PSName) {
+            # Set existing PS from same subnet as current config - we don't allow multiple primary sites in same subnet
+            $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+            $existingPSName = $existingPS.vmName
         }
 
         # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
-        $containsPassive = $configObject.virtualMachines.role -contains "PassiveSite"
-        if ($containsPassive) {
-            $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+        $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+        if ($PassiveVM) {
             $ActiveVMinConfig = $virtualMachines | Where-Object { $_.siteCode -eq $PassiveVM.siteCode -and $_.vmName -ne $PassiveVM.vmName }
             $activeVMName = $ActiveVMinConfig.vmName
             if (-not $ActiveVMinConfig) {
@@ -1094,7 +1102,7 @@ function New-DeployConfig {
             DomainName         = $configObject.vmOptions.domainName
             DCName             = $DCName
             CSName             = $CSName
-            PSName             = ($virtualMachines | Where-Object { $_.role -eq "Primary" }).vmName
+            PSName             = $PSName
             ActiveVMName       = $activeVMName
             DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
             DomainMembers      = $clientsCsv
@@ -1107,6 +1115,7 @@ function New-DeployConfig {
             DHCPScopeEnd       = $network + ".199"
             ExistingDCName     = $existingDCName
             ExistingCASName    = $existingCSName
+            ExistingPSName     = $existingPSName
             ExistingActiveName = $existingActiveVMName
             ThisMachineName    = $null
             ThisMachineRole    = $null
@@ -1218,6 +1227,7 @@ function Get-ExistingSiteServer {
                         SiteCode = $vm.siteCode
                         Domain   = $vm.domain
                         State    = $vm.State
+                        Subnet   = $vm.Subnet
                     }
                     $existingValue += $so
                 }
@@ -1230,6 +1240,7 @@ function Get-ExistingSiteServer {
                         SiteCode = $vm.siteCode
                         Domain   = $vm.domain
                         State    = $vm.State
+                        Subnet   = $vm.Subnet
                     }
                     $existingValue += $so
                 }
