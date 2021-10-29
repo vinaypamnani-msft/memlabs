@@ -1590,7 +1590,7 @@ function Get-ExistingConfig {
         virtualMachines = $()
     }
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated $($configGenerated.vmOptions.domainName)"
-    Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode -SiteCode $SiteCode
+    Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode -SiteCode $SiteCode -Quiet:$true
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated"
     return $configGenerated
 }
@@ -2043,7 +2043,7 @@ Function Get-RoleMenu {
 
         # In order to make sure the default params like SQLVersion, CMVersion are correctly applied.  Delete the VM and re-create with the same name.
         Remove-VMFromConfig -vmName $property.vmName -ConfigToModify $global:config
-        Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -Name $property.vmName
+        Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -Name $property.vmName -Quiet:$true
 
         # We cant do anything with the test result, as our underlying object is no longer in config.
         Get-TestResult -config $global:config -SuccessOnWarning -NoNewLine | out-null
@@ -2586,7 +2586,9 @@ function Add-NewVMForRole {
         [Parameter(Mandatory = $false, HelpMessage = "Override default OS")]
         [string] $OperatingSystem = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Return Created Machine Name")]
-        [bool] $ReturnMachineName = $false
+        [bool] $ReturnMachineName = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Quiet Mode")]
+        [bool] $Quiet = $false
     )
 
 
@@ -2738,7 +2740,7 @@ function Add-NewVMForRole {
     }
 
     if ($existingPrimary -eq 0) {
-        Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
+        Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Quiet:$Quiet
     }
 
     if ($existingPrimary -gt 0) {
@@ -2746,11 +2748,11 @@ function Add-NewVMForRole {
     }
 
     if ($existingDPMP -eq 0) {
-        Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
+        Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Quiet:$Quiet
     }
     if ($NewFSServer -eq $true) {
         #Get-PSCallStack | out-host
-        $FSName = select-FileServerMenu -HA:$true
+        $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$true
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $FSName
         #$FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
         #if ((Get-ListOfPossibleFileServers).Count -eq 0) {
@@ -2762,9 +2764,14 @@ function Add-NewVMForRole {
         #}
         #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $NewFSServer
     }
-
+    #Get-PSCallStack | out-host
+    if (-not $Quiet) {
+        Write-Host -ForegroundColor Yellow "New Virtual Machine $machineName ($role) was added"
+    }
     Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
-    return $machineName
+    if ($ReturnMachineName) {
+        return $machineName
+    }
 }
 
 function select-FileServerMenu {
@@ -2792,7 +2799,7 @@ function select-FileServerMenu {
     }
     switch ($result.ToLowerInvariant()) {
         "n" {
-           $result = Add-NewVMForRole -Role "FileServer" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true
+            $result = Add-NewVMForRole -Role "FileServer" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true
         }
     }
     return $result
