@@ -671,7 +671,7 @@ function Select-MainMenu {
         if ($InternalUseOnly.IsPresent) {
             $customOptions += @{ "D" = "Deploy Config%Green%Green" }
         }
-        if ($Debug){
+        if ($Debug) {
             $customOptions += @{ "R" = "Return deployConfig" }
         }
 
@@ -686,7 +686,7 @@ function Select-MainMenu {
             "3" { Select-VirtualMachines }
             "d" { return $true }
             "s" { return $false }
-            "r" { return Test-Configuration -InputObject $Global:Config}
+            "r" { return Test-Configuration -InputObject $Global:Config }
         }
     }
 }
@@ -810,6 +810,9 @@ function Get-NewMachineName {
         if ($Role -eq "AADClient") {
             $RoleName = "AAD"
         }
+        if ($Role -eq "FileServer") {
+            $RoleName = "FS"
+        }
         Write-Verbose "Rolename is now $RoleName"
 
         if ($OS -like "Windows 10*") {
@@ -863,7 +866,11 @@ function Get-NewMachineName {
             return $($PSVM.SiteCode) + $role
         }
     }
-
+    if ($Role -eq "FileServer") {
+        $RoleName = "FS"
+        $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
+        $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
+    }
     Write-Verbose "[Get-NewMachineName] found $ConfigCount machines in Config with role $Role"
     $TotalCount = [int]$RoleCount + [int]$ConfigCount
 
@@ -1583,7 +1590,7 @@ function Get-ExistingConfig {
         virtualMachines = $()
     }
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated $($configGenerated.vmOptions.domainName)"
-    $configGenerated = Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode -SiteCode $SiteCode
+    Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode -SiteCode $SiteCode
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated"
     return $configGenerated
 }
@@ -2036,7 +2043,7 @@ Function Get-RoleMenu {
 
         # In order to make sure the default params like SQLVersion, CMVersion are correctly applied.  Delete the VM and re-create with the same name.
         Remove-VMFromConfig -vmName $property.vmName -ConfigToModify $global:config
-        $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -Name $property.vmName
+        Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -Name $property.vmName
 
         # We cant do anything with the test result, as our underlying object is no longer in config.
         Get-TestResult -config $global:config -SuccessOnWarning -NoNewLine | out-null
@@ -2077,7 +2084,7 @@ function Get-AdditionalValidations {
                 }
             }
 
-            if ($Property.Role -eq "DomainMember" -and $null -ne $Passive) {
+            if ($Property.Role -eq "FileServer" -and $null -ne $Passive) {
                 if ($Passive.remoteContentLibVM -eq $CurrentValue) {
                     $Passive.remoteContentLibVM = $value
                 }
@@ -2346,8 +2353,7 @@ function Select-Options {
                     continue MainLoop
                 }
                 "remoteContentLibVM" {
-                    write-host
-                    write-host -ForegroundColor Yellow "remoteContentLibVM Can not be modified manually, but the VM can be renamed."
+                    $property.remoteContentLibVM = select-FileServerMenu -HA:$true
                     continue MainLoop
                 }
                 "domainName" {
@@ -2578,7 +2584,9 @@ function Add-NewVMForRole {
         [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite")]
         [string] $SiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Override default OS")]
-        [string] $OperatingSystem = $null
+        [string] $OperatingSystem = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Return Created Machine Name")]
+        [bool] $ReturnMachineName = $false
     )
 
 
@@ -2614,6 +2622,7 @@ function Add-NewVMForRole {
     }
     $existingPrimary = $null
     $existingDPMP = $null
+    $NewFSServer = $null
     switch ($Role) {
         "SQLServer" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -2668,13 +2677,11 @@ function Add-NewVMForRole {
         }
         "PassiveSite" {
 
-            $NewFSServer = $($SiteCode + "FS")
+            $NewFSServer = $true
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SiteCode' -Value $SiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $NewFSServer
-
         }
         "WorkgroupMember" {}
         "InternetClient" {}
@@ -2696,7 +2703,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
         "FileServer" {
-            $disk = [PSCustomObject]@{"E" = "400GB" }
+            $disk = [PSCustomObject]@{"E" = "500GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
         "DC" { }
@@ -2731,7 +2738,7 @@ function Add-NewVMForRole {
     }
 
     if ($existingPrimary -eq 0) {
-        $ConfigToModify = Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
+        Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
     }
 
     if ($existingPrimary -gt 0) {
@@ -2739,23 +2746,69 @@ function Add-NewVMForRole {
     }
 
     if ($existingDPMP -eq 0) {
-        $ConfigToModify = Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
+        Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem
     }
-    if ($NewFSServer) {
-        $FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
-        if (-not $FS) {
-            $ConfigToModify = Add-NewVMForRole -Role "FileServer" -Domain $Domain -ConfigToModify $ConfigToModify -Name $NewFSServer
-            $FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
-            #$disk = [PSCustomObject]@{"E" = "400GB" }
-            #$FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-        }
+    if ($NewFSServer -eq $true) {
+        #Get-PSCallStack | out-host
+        $FSName = select-FileServerMenu -HA:$true
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $FSName
+        #$FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
+        #if ((Get-ListOfPossibleFileServers).Count -eq 0) {
+        #    $FSName = Add-NewVMForRole -Role "FileServer" -Domain $Domain -ConfigToModify $ConfigToModify -ReturnMachineName:$true
+        #    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $FSName
+        #$FS = $ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $NewFSServer }
+        #$disk = [PSCustomObject]@{"E" = "400GB" }
+        #$FS | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+        #}
+        #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $NewFSServer
     }
 
     Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
-    return $ConfigToModify
+    return $machineName
 }
 
+function select-FileServerMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Display HA message")]
+        [bool] $HA = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config
+    )
+    $result = $null
+    if ((Get-ListOfPossibleFileServers).Count -eq 0) {
+        $result = "n"
+    }
 
+    $additionalOptions = @{}
+    if ($HA) {
+        $additionalOptions += @{ "N" = "Create new FileServer to host Content Library" }
+    }
+    else {
+        $additionalOptions += @{ "N" = "Create a New FileServer VM" }
+    }
+    while ([string]::IsNullOrWhiteSpace($result)) {
+        $result = Get-Menu "Select FileServer VM" $(Get-ListOfPossibleFileServers) -Test:$false -additionalOptions $additionalOptions
+    }
+    switch ($result.ToLowerInvariant()) {
+        "n" {
+           $result = Add-NewVMForRole -Role "FileServer" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true
+        }
+    }
+    return $result
+}
+function Get-ListOfPossibleFileServers {
+    $FSList = @()
+    $FS = $ConfigToModify.virtualMachines | Where-Object { $_.role -eq "FileServer" }
+    foreach ($item in $FS) {
+        $FSList += $item.vmName
+    }
+    $FSFromList = get-list -type VM -domain $global:config.vmOptions.DomainName | Where-Object { $_.role -eq "FileServer" }
+    foreach ($item in $FSFromList) {
+        $FSList += $item.vmName
+    }
+    return $FSList
+}
 
 
 function Select-VirtualMachines {
@@ -2778,7 +2831,7 @@ function Select-VirtualMachines {
                 $os = Select-OSForNew -Role $role
 
 
-                $global:config = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os
+                Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os
                 if ($role -eq "DC") {
                     $Global:Config.vmOptions.domainName = select-NewDomainName
                     $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
@@ -2840,8 +2893,11 @@ function Select-VirtualMachines {
                             if ($newValue -eq "H") {
                                 $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
                                 if ($PassiveNode) {
-                                    Remove-VMFromConfig -vmName $PassiveNode.remoteContentLibVM -ConfigToModify $global:config
-                                    $virtualMachine.psobject.properties.remove('remoteContentLibVM')
+                                    $FSVM = $global:config.virtualMachines | Where-Object { $_.vmName -eq $PassiveNode.remoteContentLibVM }
+                                    if ($FSVM) {
+                                        Remove-VMFromConfig -vmName $FSVM.vmName -ConfigToModify $global:config
+                                    }
+                                    #$virtualMachine.psobject.properties.remove('remoteContentLibVM')
                                     Remove-VMFromConfig -vmName $PassiveNode.vmName -ConfigToModify $global:config
                                 }
                                 else {
@@ -3020,7 +3076,7 @@ $valid = $false
 while ($valid -eq $false) {
 
     $return.DeployNow = Select-MainMenu
-    if ($return.DeployNow -is [PSCustomObject]){
+    if ($return.DeployNow -is [PSCustomObject]) {
         return $return.DeployNow
     }
     $c = Test-Configuration -InputObject $Config
