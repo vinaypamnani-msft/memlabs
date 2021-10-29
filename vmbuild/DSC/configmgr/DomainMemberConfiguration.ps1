@@ -62,6 +62,11 @@
         }
     }
 
+    # Set PS name to existing PS name, if PS not in config
+    if (-not $PSName) {
+        $PSName = $deployConfig.parameters.ExistingPSName
+    }
+
     # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
@@ -294,22 +299,6 @@
                 Status    = "Adding cm_svc domain account to Local Administrators group"
             }
 
-            if ($PSName) {
-                AddUserToLocalAdminGroup AddPSLocalAdmin {
-                    Name       = "$PSName$"
-                    DomainName = $DomainName
-                    DependsOn  = "[WriteStatus]AddLocalAdmin"
-                }
-            }
-
-            if ($CSName) {
-                AddUserToLocalAdminGroup AddCSLocalAdmin {
-                    Name       = "$CSName$"
-                    DomainName = $DomainName
-                    DependsOn  = "[WriteStatus]AddLocalAdmin"
-                }
-            }
-
         }
         else {
 
@@ -324,6 +313,22 @@
             Name       = "cm_svc"
             DomainName = $DomainName
             DependsOn       = "[WriteStatus]AddLocalAdmin"
+        }
+
+        if ($PSName) {
+            AddUserToLocalAdminGroup AddPSLocalAdmin {
+                Name       = "$PSName$"
+                DomainName = $DomainName
+                DependsOn  = "[WriteStatus]AddLocalAdmin"
+            }
+        }
+
+        if ($CSName) {
+            AddUserToLocalAdminGroup AddCSLocalAdmin {
+                Name       = "$CSName$"
+                DomainName = $DomainName
+                DependsOn  = "[WriteStatus]AddLocalAdmin"
+            }
         }
 
         WriteConfigurationFile WriteDomainMemberFinished {
