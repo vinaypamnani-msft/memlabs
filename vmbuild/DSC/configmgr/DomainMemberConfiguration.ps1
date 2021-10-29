@@ -21,6 +21,7 @@
     $DCName = $deployConfig.parameters.DCName
     $PSName = $deployConfig.parameters.PSName
     $CSName = $deployConfig.parameters.CSName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Server OS?
     $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
@@ -52,12 +53,27 @@
         }
     }
 
+    $SQLSysAdminAccounts = @($cm_admin)
+    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    if ($containsPassive) {
+        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+        foreach ($vm in $PassiveVM) {
+            $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
+        }
+    }
+
+    # Set PS name to existing PS name, if PS not in config
+    if (-not $PSName) {
+        $PSName = $deployConfig.parameters.ExistingPSName
+    }
+
     # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
     Node localhost
     {
@@ -151,10 +167,32 @@
             Role      = "DomainMember"
         }
 
+        File ShareFolder {
+            DestinationPath = $LogPath
+            Type            = 'Directory'
+            Ensure          = 'Present'
+            DependsOn       = '[OpenFirewallPortForSCCM]OpenFirewall'
+        }
+
+        FileReadAccessShare DomainSMBShare {
+            Name      = $LogFolder
+            Path      = $LogPath
+            DependsOn = "[File]ShareFolder"
+        }
+
+        WriteConfigurationFile WriteJoinDomain {
+            Role      = "DomainMember"
+            LogPath   = $LogPath
+            WriteNode = "MachineJoinDomain"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+        }
+
         if ($installSQL) {
 
             WriteStatus InstallSQL {
-                DependsOn = '[OpenFirewallPortForSCCM]OpenFirewall'
+                DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
                 Status    = "Installing SQL Server ($SQLInstanceName instance)"
             }
 
@@ -166,7 +204,7 @@
                 SourcePath          = 'C:\temp\SQL'
                 UpdateEnabled       = 'True'
                 UpdateSource        = "C:\temp\SQL_CU"
-                SQLSysAdminAccounts = @('Administrators', $cm_admin)
+                SQLSysAdminAccounts = $SQLSysAdminAccounts
                 TcpEnabled          = $true
                 UseEnglish          = $true
                 DependsOn           = '[OpenFirewallPortForSCCM]OpenFirewall'
@@ -181,9 +219,55 @@
                 InstanceName = $SQLInstanceName
             }
 
-            WriteStatus SSMS {
-                DependsOn = '[SqlMemory]SetSqlMemory'
-                Status    = "Downloading and installing SQL Management Studio"
+            if ($containsPassive) {
+
+                WriteStatus WaitPassive {
+                    DependsOn = "[SqlMemory]SetSqlMemory"
+                    Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to join domain"
+                }
+
+                WaitForConfigurationFile WaitPassive {
+                    Role          = "PassiveSite"
+                    MachineName   = $PassiveVM.vmName
+                    LogFolder     = $LogFolder
+                    ReadNode      = "MachineJoinDomain"
+                    ReadNodeValue = "Passed"
+                    Ensure        = "Present"
+                    DependsOn     = "[WriteStatus]WaitPassive"
+                }
+
+                SqlLogin addsysadmin {
+                    Ensure                  = 'Present'
+                    Name                    = "$DName\$($PassiveVM.vmName)$"
+                    LoginType               = 'WindowsUser'
+                    InstanceName            = $SQLInstanceName
+                    LoginMustChangePassword = $false
+                    PsDscRunAsCredential    = $CMAdmin
+                    DependsOn               = '[WaitForConfigurationFile]WaitPassive'
+                }
+
+                SqlRole addsysadmin {
+                    Ensure               = 'Present'
+                    ServerRoleName       = 'sysadmin'
+                    MembersToInclude     = $SQLSysAdminAccounts
+                    InstanceName         = $SQLInstanceName
+                    PsDscRunAsCredential = $CMAdmin
+                    DependsOn            = '[SqlLogin]addsysadmin'
+                }
+
+                WriteStatus SSMS {
+                    DependsOn = '[SqlRole]addsysadmin'
+                    Status    = "Downloading and installing SQL Management Studio"
+                }
+            }
+
+            else {
+
+                WriteStatus SSMS {
+                    DependsOn = '[SqlMemory]SetSqlMemory'
+                    Status    = "Downloading and installing SQL Management Studio"
+                }
+
             }
 
             InstallSSMS SSMS {
@@ -215,49 +299,36 @@
                 Status    = "Adding cm_svc domain account to Local Administrators group"
             }
 
-            if ($PSName) {
-                AddUserToLocalAdminGroup AddPSLocalAdmin {
-                    Name       = "$PSName$"
-                    DomainName = $DomainName
-                    DependsOn  = "[WriteStatus]AddLocalAdmin"
-                }
-            }
-
-            if ($CSName) {
-                AddUserToLocalAdminGroup AddCSLocalAdmin {
-                    Name       = "$CSName$"
-                    DomainName = $DomainName
-                    DependsOn  = "[WriteStatus]AddLocalAdmin"
-                }
-            }
-
         }
         else {
 
             WriteStatus AddLocalAdmin {
-                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
                 Status    = "Adding cm_svc domain account to Local Administrators group"
             }
 
         }
 
-        File ShareFolder {
-            DestinationPath = $LogPath
-            Type            = 'Directory'
-            Ensure          = 'Present'
-            DependsOn       = "[WriteStatus]AddLocalAdmin"
-        }
-
-        FileReadAccessShare DomainSMBShare {
-            Name      = $LogFolder
-            Path      = $LogPath
-            DependsOn = "[File]ShareFolder"
-        }
-
         AddUserToLocalAdminGroup AddADUserToLocalAdminGroup {
             Name       = "cm_svc"
             DomainName = $DomainName
-            DependsOn  = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn       = "[WriteStatus]AddLocalAdmin"
+        }
+
+        if ($PSName) {
+            AddUserToLocalAdminGroup AddPSLocalAdmin {
+                Name       = "$PSName$"
+                DomainName = $DomainName
+                DependsOn  = "[WriteStatus]AddLocalAdmin"
+            }
+        }
+
+        if ($CSName) {
+            AddUserToLocalAdminGroup AddCSLocalAdmin {
+                Name       = "$CSName$"
+                DomainName = $DomainName
+                DependsOn  = "[WriteStatus]AddLocalAdmin"
+            }
         }
 
         WriteConfigurationFile WriteDomainMemberFinished {

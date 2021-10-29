@@ -49,6 +49,17 @@
     # CM Files folder/share
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
+    # Passive Site
+    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    if ($containsPassive) {
+        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+    }
+
+    $waitOnServers = @()
+    if ($PSName) { $waitOnServers += $PSName }
+    if ($PassiveVM) { $waitOnServers += $PassiveVM.vmName }
+    if ($CSName) { $waitOnServers += $CSName }
+
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
@@ -214,21 +225,6 @@
             HashAlgorithm = "SHA256"
         }
 
-        if (-not $PSName) {
-
-            WriteStatus Complete {
-                DependsOn = "[InstallCA]InstallCA"
-                Status    = "Complete!"
-            }
-
-            return
-        }
-
-        WriteStatus WaitDomainJoin {
-            DependsOn = "[InstallCA]InstallCA"
-            Status    = "Waiting for computers to join the domain"
-        }
-
         File ShareFolder {
             DestinationPath = $LogPath
             Type            = 'Directory'
@@ -242,90 +238,88 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        VerifyComputerJoinDomain WaitForPS {
-            ComputerName = $PSName
-            Ensure       = "Present"
-            DependsOn    = "[FileReadAccessShare]DomainSMBShare"
+        WriteStatus WaitDomainJoin {
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            Status    = "Waiting for $($waitOnServers -join ',') to join the domain"
         }
 
-        WriteConfigurationFile WritePSJoinDomain {
+        $waitOnDependency = @()
+        foreach ($server in $waitOnServers) {
+
+            VerifyComputerJoinDomain "WaitFor$server" {
+                ComputerName = $server
+                Ensure       = "Present"
+                DependsOn    = "[WriteStatus]WaitDomainJoin"
+            }
+
+            DelegateControl "Add$server" {
+                Machine        = $server
+                DomainFullName = $DomainName
+                Ensure         = "Present"
+                DependsOn      = "[VerifyComputerJoinDomain]WaitFor$server"
+            }
+
+            $waitOnDependency += "[DelegateControl]Add$server"
+        }
+
+        WriteConfigurationFile WriteDelegateControlfinished {
             Role      = "DC"
             LogPath   = $LogPath
-            WriteNode = "PSJoinDomain"
+            WriteNode = "DelegateControl"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[VerifyComputerJoinDomain]WaitForPS"
+            DependsOn = $waitOnDependency
         }
 
-        DelegateControl AddPS {
-            Machine        = $PSName
-            DomainFullName = $DomainName
-            Ensure         = "Present"
-            DependsOn      = "[WriteConfigurationFile]WritePSJoinDomain"
-        }
-
-        if ($Configuration -eq 'Standalone') {
-
-            WriteConfigurationFile WriteDelegateControlfinished {
+        if ($PSName) {
+            WriteConfigurationFile WritePSJoinDomain {
                 Role      = "DC"
                 LogPath   = $LogPath
-                WriteNode = "DelegateControl"
+                WriteNode = "PSJoinDomain"
                 Status    = "Passed"
                 Ensure    = "Present"
-                DependsOn = "[DelegateControl]AddPS"
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
             }
-
         }
-        else {
-            # Hierarchy
 
-            VerifyComputerJoinDomain WaitForCS {
-                ComputerName = $CSName
-                Ensure       = "Present"
-                DependsOn    = "[FileReadAccessShare]DomainSMBShare"
-            }
-
+        if ($CSName) {
             WriteConfigurationFile WriteCSJoinDomain {
                 Role      = "DC"
                 LogPath   = $LogPath
                 WriteNode = "CSJoinDomain"
                 Status    = "Passed"
                 Ensure    = "Present"
-                DependsOn = "[VerifyComputerJoinDomain]WaitForCS"
-            }
-
-            DelegateControl AddCS {
-                Machine        = $CSName
-                DomainFullName = $DomainName
-                Ensure         = "Present"
-                DependsOn      = "[WriteConfigurationFile]WriteCSJoinDomain"
-            }
-
-            WriteConfigurationFile WriteDelegateControlfinished {
-                Role      = "DC"
-                LogPath   = $LogPath
-                WriteNode = "DelegateControl"
-                Status    = "Passed"
-                Ensure    = "Present"
-                DependsOn = @("[DelegateControl]AddCS", "[DelegateControl]AddPS")
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
             }
         }
 
-        WriteStatus WaitExtSchema {
-            DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
-            Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
-        }
+        if (-not ($PSName -or $CSName)) {
 
-        WaitForExtendSchemaFile WaitForExtendSchemaFile {
-            MachineName = if ($Configuration -eq 'Standalone') { $PSName } else { $CSName }
-            ExtFolder   = $CM
-            Ensure      = "Present"
-            DependsOn   = "[WriteConfigurationFile]WriteDelegateControlfinished"
-        }
+            WriteStatus Complete {
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                Status    = "Complete!"
+            }
 
-        WriteStatus Complete {
-            DependsOn = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
-            Status    = "Complete!"
+        }
+        else {
+
+            WriteStatus WaitExtSchema {
+                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
+            }
+
+            WaitForExtendSchemaFile WaitForExtendSchemaFile {
+                MachineName = if ($Configuration -eq 'Standalone') { $PSName } else { $CSName }
+                ExtFolder   = $CM
+                Ensure      = "Present"
+                DependsOn   = "[WriteConfigurationFile]WriteDelegateControlfinished"
+            }
+
+            WriteStatus Complete {
+                DependsOn = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
+                Status    = "Complete!"
+            }
+
         }
     }
 }

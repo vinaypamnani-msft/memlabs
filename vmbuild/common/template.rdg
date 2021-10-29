@@ -102,6 +102,16 @@
             <operator>Matches</operator>
             <value>"DPMP"</value>
           </rule>
+           <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"PassiveSite"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"FileServer"</value>
+          </rule>
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>

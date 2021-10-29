@@ -29,7 +29,7 @@
     $InstallConfigMgr = $deployConfig.cmOptions.install
 
     # SQL Instance Location
-    if ($ThisVM.remoteSQLVM -or $ThisVM.Hidden) {
+    if ($ThisVM.remoteSQLVM) {
         $installSQL = $false
     }
     else {
@@ -42,6 +42,16 @@
         }
         if ($ThisVM.sqlInstanceName) {
             $SQLInstanceName = $ThisVM.sqlInstanceName
+        }
+    }
+
+    # Passive Site Server
+    $SQLSysAdminAccounts = @($cm_admin, 'BUILTIN\Administrators')
+    $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+    if ($containsPassive) {
+        $PassiveVM = $containsPassive
+        foreach ($vm in $PassiveVM) {
+            $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
         }
     }
 
@@ -149,8 +159,30 @@
             Role      = "Site Server"
         }
 
+        File ShareFolder {
+            DestinationPath = $LogPath
+            Type            = 'Directory'
+            Ensure          = 'Present'
+            DependsOn       = '[OpenFirewallPortForSCCM]OpenFirewall'
+        }
+
+        FileReadAccessShare DomainSMBShare {
+            Name      = $LogFolder
+            Path      = $LogPath
+            DependsOn = "[File]ShareFolder"
+        }
+
+        WriteConfigurationFile WriteJoinDomain {
+            Role      = "CAS"
+            LogPath   = $LogPath
+            WriteNode = "MachineJoinDomain"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+        }
+
         WriteStatus ADKInstall {
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            DependsOn = "[WriteConfigurationFile]WriteJoinDomain"
             Status    = "Downloading and installing ADK"
         }
 
@@ -176,7 +208,7 @@
                 SourcePath          = 'C:\temp\SQL'
                 UpdateEnabled       = 'True'
                 UpdateSource        = "C:\temp\SQL_CU"
-                SQLSysAdminAccounts = @('Administrators', $cm_admin)
+                SQLSysAdminAccounts = $SQLSysAdminAccounts
                 TcpEnabled          = $true
                 UseEnglish          = $true
                 DependsOn           = '[InstallADK]ADKInstall'
@@ -209,83 +241,136 @@
                 DependsOn       = "[ChangeSqlInstancePort]SqlInstancePort"
             }
 
-            File ShareFolder {
-                DestinationPath = $LogPath
-                Type            = 'Directory'
-                Ensure          = 'Present'
-                DependsOn       = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+            WriteStatus SSMS {
+                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+                Status    = "Downloading and installing SQL Management Studio"
             }
 
         }
         else {
 
-            File ShareFolder {
-                DestinationPath = $LogPath
-                Type            = 'Directory'
-                Ensure          = 'Present'
-                DependsOn       = '[InstallADK]ADKInstall'
+            WriteStatus SSMS {
+                DependsOn = '[InstallADK]ADKInstall'
+                Status    = "Downloading and installing SQL Management Studio"
             }
 
-        }
-
-        WriteStatus SSMS {
-            DependsOn = "[File]ShareFolder"
-            Status    = "Downloading and installing SQL Management Studio"
         }
 
         InstallSSMS SSMS {
             DownloadUrl = "https://aka.ms/ssmsfullsetup"
             Ensure      = "Present"
-            DependsOn   = "[File]ShareFolder"
-        }
-
-        FileReadAccessShare DomainSMBShare {
-            Name      = $LogFolder
-            Path      = $LogPath
-            DependsOn = "[InstallSSMS]SSMS"
+            DependsOn   = "[WriteStatus]SSMS"
         }
 
         WriteStatus DownLoadSCCM {
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn = "[InstallSSMS]SSMS"
             Status    = $CMDownloadStatus
         }
 
         DownloadSCCM DownLoadSCCM {
             CM        = $CM
             Ensure    = "Present"
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            DependsOn = "[WriteStatus]DownLoadSCCM"
         }
 
-        FileReadAccessShare CMSourceSMBShare {
-            Name      = $CM
-            Path      = "c:\$CM"
-            DependsOn = "[DownloadSCCM]DownLoadSCCM"
+        if ($PSName) {
+            WriteStatus WaitPSJoinDomain {
+                DependsOn = "[DownloadSCCM]DownLoadSCCM"
+                Status    = "Wait for $PSName to join domain"
+            }
+
+            WaitForConfigurationFile WaitPSJoinDomain {
+                Role          = "Primary"
+                MachineName   = $PSName
+                LogFolder     = $LogFolder
+                ReadNode      = "MachineJoinDomain"
+                ReadNodeValue = "Passed"
+                Ensure        = "Present"
+                DependsOn = "[DownloadSCCM]DownLoadSCCM"
+            }
+
+            AddUserToLocalAdminGroup AddUserToLocalAdminGroup {
+                Name       = $PrimarySiteName
+                DomainName = $DomainName
+                DependsOn  = "[WaitForConfigurationFile]WaitPSJoinDomain"
+            }
+
+            FileReadAccessShare CMSourceSMBShare {
+                Name      = $CM
+                Path      = "c:\$CM"
+                DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+            }
+        }
+        else {
+
+            FileReadAccessShare CMSourceSMBShare {
+                Name      = $CM
+                Path      = "c:\$CM"
+                DependsOn = "[DownloadSCCM]DownLoadSCCM"
+            }
+
         }
 
-        WriteStatus WaitPSJoinDomain {
-            DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
-            Status    = "Wait for $PrimarySiteName to join domain"
-        }
+        # There's a passive site server in config
+        if ($containsPassive) {
 
-        WaitForConfigurationFile WaitPSJoinDomain {
-            Role          = "DC"
-            MachineName   = $DCName
-            LogFolder     = $LogFolder
-            ReadNode      = "PSJoinDomain"
-            ReadNodeValue = "Passed"
-            Ensure        = "Present"
-            DependsOn     = "[FileReadAccessShare]CMSourceSMBShare"
-        }
+            WriteStatus WaitPassive {
+                DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
+                Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to be ready"
+            }
 
-        AddUserToLocalAdminGroup AddUserToLocalAdminGroup {
-            Name       = "$PrimarySiteName"
-            DomainName = $DomainName
-            DependsOn  = "[WaitForConfigurationFile]WaitPSJoinDomain"
-        }
+            WaitForConfigurationFile WaitPassive {
+                Role          = "PassiveSite"
+                MachineName   = $PassiveVM.vmName
+                LogFolder     = $LogFolder
+                ReadNode      = "PassiveReady"
+                ReadNodeValue = "Passed"
+                Ensure        = "Present"
+                DependsOn     = "[WriteStatus]WaitPassive"
+            }
 
-        WriteStatus WaitDelegate {
-            DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
-            Status    = "Wait for DC to assign permissions to Systems Management container"
+            if ($installSQL) {
+
+                SqlLogin addsysadmin {
+                    Ensure                  = 'Present'
+                    Name                    = "$DName\$($PassiveVM.vmName)$"
+                    LoginType               = 'WindowsUser'
+                    InstanceName            = $SQLInstanceName
+                    LoginMustChangePassword = $false
+                    PsDscRunAsCredential    = $CMAdmin
+                    DependsOn               = '[WaitForConfigurationFile]WaitPassive'
+                }
+
+                SqlRole addsysadmin {
+                    Ensure               = 'Present'
+                    ServerRoleName       = 'sysadmin'
+                    MembersToInclude     = $SQLSysAdminAccounts
+                    InstanceName         = $SQLInstanceName
+                    PsDscRunAsCredential = $CMAdmin
+                    DependsOn            = '[SqlLogin]addsysadmin'
+                }
+
+                WriteStatus WaitDelegate {
+                    DependsOn = "[SqlRole]addsysadmin"
+                    Status    = "Wait for DC to assign permissions to Systems Management container"
+                }
+            }
+            else {
+
+                WriteStatus WaitDelegate {
+                    DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
+                    Status    = "Wait for DC to assign permissions to Systems Management container"
+                }
+
+            }
+        }
+        else {
+
+            WriteStatus WaitDelegate {
+                DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
+                Status    = "Wait for DC to assign permissions to Systems Management container"
+            }
+
         }
 
         WaitForConfigurationFile DelegateControl {
@@ -295,7 +380,7 @@
             ReadNode      = "DelegateControl"
             ReadNodeValue = "Passed"
             Ensure        = "Present"
-            DependsOn     = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+            DependsOn     = "[WriteStatus]WaitDelegate"
         }
 
         if ($InstallConfigMgr) {
