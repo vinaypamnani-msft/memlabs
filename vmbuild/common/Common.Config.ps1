@@ -1434,15 +1434,15 @@ function Get-List {
         }
 
         if ($Type -eq "UniqueDomain") {
-            return $return | Select-Object -ExpandProperty Domain -Unique
+            return $return | Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniqueSubnet") {
-            return $return | Select-Object -ExpandProperty Subnet -Unique
+            return $return | Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniquePrefix") {
-            return $return | Select-Object -ExpandProperty Prefix -Unique
+            return $return | Select-Object -ExpandProperty Prefix -Unique -ErrorAction SilentlyContinue
         }
 
     }
