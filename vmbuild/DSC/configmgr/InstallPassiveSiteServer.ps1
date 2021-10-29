@@ -8,6 +8,7 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
+$DomainName = $DomainFullName.Split(".")[0]
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -100,6 +101,39 @@ Invoke-Command -Session (New-PSSession -ComputerName $remoteLibVMName) -ScriptBl
 if ($Err2.Count -ne 0) {
     Write-DscStatus "Invoke-Command: Failed to create share $contentLibShare on $remoteLibVMName. Error: $Err2" -Failure
     return
+}
+
+$add_local_admin = {
+    param($computersToAdd, $domainName)
+    foreach($computer in $computersToAdd) {
+        if ($computer -eq "$($env:COMPUTERNAME)$") { continue }
+        $memberToCheck = "$domainName\$computer"
+        $exists = Get-LocalGroupMember -Name "Administrators" -Member $memberToCheck
+        if (-not $exists) {
+            Add-LocalGroupMember -Group "Administrators" -Member $computer
+        }
+    }
+}
+
+Write-DscStatus "Verifying/adding Active and Passive computer accounts on all site system servers"
+$siteSystems = Get-CMSiteSystemServer -SiteCode PRI | Select-Object -Expand NetworkOSPath
+$siteSystems += "\\$remoteLibVMName"
+foreach ($server in $siteSystems) {
+    $serverName = $server.Substring(2, $server.Length - 2) # NetworkOSPath = \\server.domain.dom
+    if ($serverName -eq $localSiteServer) {
+        Invoke-Command -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $domainName -ErrorVariable Err3
+    }
+    else {
+        Invoke-Command -Session (New-PSSession -ComputerName $serverName) -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $domainName -ErrorVariable Err3
+    }
+
+    if ($Err3.Count -ne 0) {
+        Write-DscStatus "WARNING: Failed to add $computersToAdd to local Administrators group on $serverName. Error: $Err3"
+    }
+    else {
+        $displayName = $computersToAdd -join ","
+        Write-Host "Verified/added [$displayName] as members of local Administrators group on $serverName."
+    }
 }
 
 # Remove SCP?
