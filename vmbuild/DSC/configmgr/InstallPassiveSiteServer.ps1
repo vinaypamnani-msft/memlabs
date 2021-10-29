@@ -99,8 +99,11 @@ Write-DscStatus "Creating a share on $remoteLibVMName to host the content librar
 Invoke-Command -Session (New-PSSession -ComputerName $remoteLibVMName) -ScriptBlock $create_Share
 $remoteSharePath = "\\$remoteLibVMName\$shareName\$SiteCode"
 if (-not (Test-Path $remoteSharePath)) {
-    Write-DscStatus "Failed to create $remoteSharePath share." -Failure
-    return
+    Start-Sleep -Seconds 30
+    if (-not (Test-Path $remoteSharePath)) {
+        Write-DscStatus "Failed to create $remoteSharePath share." -Failure
+        return
+    }
 }
 
 # Remove SCP?
