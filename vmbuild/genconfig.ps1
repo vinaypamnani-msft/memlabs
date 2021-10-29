@@ -17,7 +17,7 @@ if (-not $InternalUseOnly.IsPresent) {
 
     # Set Verbose
     $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
-
+    $Debug = $PSCmdlet.MyInvocation.BoundParameters["Debug"].IsPresent
     # Dot source common
     . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 }
@@ -671,7 +671,7 @@ function Select-MainMenu {
         if ($InternalUseOnly.IsPresent) {
             $customOptions += @{ "D" = "Deploy Config%Green%Green" }
         }
-        if ($enableVerbose){
+        if ($Debug){
             $customOptions += @{ "R" = "Return deployConfig" }
         }
 
@@ -686,7 +686,7 @@ function Select-MainMenu {
             "3" { Select-VirtualMachines }
             "d" { return $true }
             "s" { return $false }
-            "r" { return Test-Configuration -InputObject $Global:Config}
+            "r" { return (Test-Configuration -InputObject $Global:Config).deployConfig}
         }
     }
 }
