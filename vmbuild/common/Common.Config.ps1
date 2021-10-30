@@ -1051,7 +1051,7 @@ function New-DeployConfig {
         $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         if ($PSVM) {
             $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode ($PSVM.parentSiteCode | Select-Object -First 1) # Bypass failures, validation would fail if we had multiple
-            $existingCSName = $existingCS.vmName
+            $existingCSName = ($existingCS | Where-Object { $_.role -ne "PassiveSite" }).vmName
             $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
             if (-not $CSName) {
                 $CSName = $existingCSName
@@ -1069,7 +1069,7 @@ function New-DeployConfig {
         if (-not $PSName) {
             # Set existing PS from same subnet as current config - we don't allow multiple primary sites in same subnet
             $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-            $existingPSName = $existingPS.vmName
+            $existingPSName =($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
         }
 
         # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
