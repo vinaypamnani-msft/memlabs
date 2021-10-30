@@ -483,7 +483,7 @@ function Remove-MissingDomainsFromFile {
         [object]$file
     )
     $domainList = (Get-List -Type UniqueDomain -ResetCache)
-
+    Write-Verbose "[Remove-MissingDomainsFromFile] DomainList: $($domainList -join ",")"
     foreach ($group in $file.SelectNodes("group")) {
         if ($group.properties.name -in $domainList) {
             continue;
