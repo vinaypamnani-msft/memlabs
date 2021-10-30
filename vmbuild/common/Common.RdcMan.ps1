@@ -486,6 +486,7 @@ function Remove-MissingDomainsFromFile {
     Write-Verbose "[Remove-MissingDomainsFromFile] DomainList: $($domainList -join ",")"
     foreach ($group in $file.SelectNodes("group")) {
         if ($group.properties.name -in $domainList) {
+            Write-Verbose "[Remove-MissingDomainsFromFile] Not Deleting : $group.properties.name"
             continue;
         }
         $file.RemoveChild($group) | out-null
