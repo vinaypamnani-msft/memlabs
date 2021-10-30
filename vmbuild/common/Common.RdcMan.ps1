@@ -275,12 +275,11 @@ function New-RDCManFileFromHyperV {
     }
 
     # Gets the blank template, or returns the existing rdg xml if available.
-    $existing = $template
-    if (Test-Path $rdcmanfile) {
+    if (-not (Test-Path $rdcmanfile)) {
+        Copy-Item $templatefile $rdcmanfile
         Write-Verbose "[New-RDCManFileFromHyperV] Loading config from $rdcmanfile"
-        [xml]$existing = Get-Content -Path $rdcmanfile
     }
-
+    [xml]$existing = Get-Content -Path $rdcmanfile
     # This is the bulk of the data.
     $file = $existing.RDCMan.file
     if ($null -eq $file) {
@@ -294,6 +293,12 @@ function New-RDCManFileFromHyperV {
         return
     }
 
+    # If the original file was a template, remove the templated group.
+    if ($group.properties.Name -eq "VMASTEMPLATE") {
+        [void]$file.RemoveChild($group)
+        $group = $null
+    }
+
     $groupFromTemplate = $template.RDCMan.file.group
     if ($null -eq $groupFromTemplate) {
         Write-Log "New-RDCManFile: Could not load group section from $templatefile" -Failure
@@ -301,15 +306,15 @@ function New-RDCManFileFromHyperV {
     }
 
     Install-RDCman
-
     foreach ($domain in (Get-List -Type UniqueDomain -ResetCache)) {
         Write-Verbose "[New-RDCManFileFromHyperV] Adding all machines from Domain $domain"
+        $findGroup = $null
         $findGroup = Get-RDCManGroupToModify $domain $group $findGroup $groupFromTemplate $existing
         if ($findGroup -eq $false -or $null -eq $findGroup) {
             Write-Log "New-RDCManFile: Failed to find group to modify" -Failure
             return
         }
-
+        Remove-MissingServersFromGroup -findgroup $findGroup
         # Set user/pass on the group
         $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -first 1).AdminName
 
@@ -333,6 +338,7 @@ function New-RDCManFileFromHyperV {
 
         # $vmList = (Get-List -Type VM -domain $domain).VmName
         $vmListFull = (Get-List -Type VM -domain $domain)
+
         foreach ($vm in $vmListFull) {
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
@@ -407,6 +413,7 @@ function New-RDCManFileFromHyperV {
 
     }
 
+    Remove-MissingDomainsFromFile -file $file
     $unknownVMs = @()
     $unknownVMs += get-list -type vm  | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
@@ -441,11 +448,6 @@ function New-RDCManFileFromHyperV {
         [void]$file.AppendChild($findgroup)
     }
 
-
-    # If the original file was a template, remove the templated group.
-    if ($group.properties.Name -eq "VMASTEMPLATE") {
-        [void]$file.RemoveChild($group)
-    }
     Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
@@ -459,6 +461,38 @@ function New-RDCManFileFromHyperV {
     }
 }
 
+function Remove-MissingServersFromGroup {
+    [CmdletBinding()]
+    param(
+        [object]$findgroup
+    )
+
+    $completeServerList = Get-List -Type VM | Select-Object -ExpandProperty vmName
+    foreach ($item in $findgroup.group.server) {
+        if ($item.properties.displayName -in $completeServerList -or $item.properties.name -in $completeServerList) {
+            continue;
+        }
+        Write-Log ("[Remove-MissingServersFromGroup] Removing $($item.properties.displayName)") -LogOnly
+        $findGroup.group.RemoveChild($item) | out-null
+    }
+
+}
+function Remove-MissingDomainsFromFile {
+    [CmdletBinding()]
+    param(
+        [object]$file
+    )
+    $domainList = (Get-List -Type UniqueDomain -ResetCache)
+
+    foreach ($group in $file.SelectNodes("group")) {
+        if ($group.properties.name -in $domainList) {
+            continue;
+        }
+        $file.RemoveChild($group) | out-null
+    }
+
+}
+
 function Add-RDCManServerToGroup {
     [CmdletBinding()]
     param(
@@ -470,7 +504,6 @@ function Add-RDCManServerToGroup {
         [string]$comment,
         [bool]$ForceOverwrite
     )
-
 
     if ($ForceOverwrite) {
         #Delete Old Records and let them be regenerated
@@ -514,8 +547,9 @@ function Get-RDCManGroupToModify {
         $existing
     )
 
-    $findGroup = $group | Where-Object { $_.properties.name -eq $domain } | Select-Object -First 1
-
+    if ($null -ne $group) {
+        $findGroup = $group | Where-Object { $_.properties.name -eq $domain } | Select-Object -First 1
+    }
     if ($null -eq $findGroup) {
         Write-Log "Get-RDCManGroupToModify: Group entry named $domain not found in current xml. Creating new group." -LogOnly
         $findGroup = $groupFromTemplate.Clone()

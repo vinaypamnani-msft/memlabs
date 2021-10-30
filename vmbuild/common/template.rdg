@@ -15,6 +15,7 @@
       <properties>
         <expanded>True</expanded>
         <name>VMASTEMPLATE</name>
+		<comment>MemLabs Auto Generated</comment>
       </properties>
       <logonCredentials inherit="None">
         <profileName scope="Local">Custom</profileName>
