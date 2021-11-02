@@ -193,10 +193,14 @@ else {
 
 # Add Passive site
 $passiveFQDN = $SSVM.vmName + "." + $DomainFullName
+$SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
+if ($SSVM.cmInstallDir) {
+    $SMSInstallDir = $SSVM.cmInstallDir
+}
 Write-DscStatus "Adding passive site server on $passiveFQDN"
 try {
     New-CMSiteSystemServer -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN | Out-File $global:StatusLog -Append
-    Add-CMPassiveSite -InstallDirectory $SSVM.cmInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
+    Add-CMPassiveSite -InstallDirectory $SMSInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
 }
 catch {
     Write-DscStatus "Failed to add passive site on $passiveFQDN. Error: $_" -Failure
@@ -224,7 +228,7 @@ do {
 
     if (0 -eq $i % 10 -and (-not $state)) {
         Write-DscStatus "No Progress after $i tries, Adding passive site server again on $passiveFQDN`: $($state.SubStageName)"
-        Add-CMPassiveSite -InstallDirectory $SSVM.cmInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
+        Add-CMPassiveSite -InstallDirectory $SMSInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
         if ($i -gt 31) {
             Write-DscStatus "No Progress for adding passive site server after $i tries, giving up." -Falure
             $installFailure = $true

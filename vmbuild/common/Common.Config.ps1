@@ -514,17 +514,17 @@ function Test-ValidVmPath {
         $installDrive = $VM.$PathProperty.Substring(0, 1)
 
         if ($installDrive -in "A", "B", "D", "Z") {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. A/B/D/Z drive letters are not allowed." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid $PathProperty [$($VM.$PathProperty)]. A/B/D/Z drive letters are not allowed." -ReturnObject $ReturnObject -Failure
         }
 
         if ($installDrive -ne "C" -and -not $VM.additionalDisks) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must be defined." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid $PathProperty [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must be defined." -ReturnObject $ReturnObject -Warning
         }
 
         if ($installDrive -ne "C" -and $VM.additionalDisks) {
             $defined = $VM.additionalDisks | Get-Member -Name $installDrive
             if (-not $defined) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid sqlInstanceDir [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains invalid $PathProperty [$($VM.$PathProperty)]. When using a drive other than C, additionalDisks must contain the desired drive letter." -ReturnObject $ReturnObject -Warning
             }
         }
 
@@ -672,8 +672,8 @@ function Test-ValidRoleCSPS {
     if ($VM.siteCode.ToUpperInvariant() -in "AUX", "CON", "NUL", "PRN", "SMS", "ENV") {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
-    $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode }
 
+    $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode }
     foreach ($siteServer in $otherVMs) {
         if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant() -and $siteServer.role -ne "PassiveSite") {
             Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
@@ -687,12 +687,112 @@ function Test-ValidRoleCSPS {
         }
     }
 
+    # Server OS
+    Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
+
+    # install dir
+    Test-ValidVmPath -VM $VM -PathProperty "cmInstallDir" -ValidPathExample "E:\ConfigMgr" -ReturnObject $ReturnObject
+
+}
+
+function Test-ValidRolePassiveSite {
+    param (
+        [object] $VM,
+        [object] $ConfigObject,
+        [object] $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
 
     # Server OS
     Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
 
     # install dir
     Test-ValidVmPath -VM $VM -PathProperty "cmInstallDir" -ValidPathExample "E:\ConfigMgr" -ReturnObject $ReturnObject
+
+    if (-not $VM.remoteContentLibVM) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain remoteContentLibVM; When deploying $vmRole Role, you must specify the FileServer where Content Library will be hosted." -ReturnObject $ReturnObject -Warning
+    }
+
+    if ($VM.remoteContentLibVM) {
+        $fsInConfig = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $VM.remoteContentLibVM }
+        if (-not $fsInConfig) {
+            $fsVM = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $_.vmName -eq $VM.remoteContentLibVM }
+        }
+        else {
+            $fsVM = $fsInConfig
+        }
+
+        if (-not $fsVM) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] configuration contains remoteContentLibVM [$($VM.remoteContentLibVM)] which does not exist in Configuration or Hyper-V." -ReturnObject $ReturnObject -Warning
+        }
+
+        if ($fsVM -and $fsVM.role -ne "FileServer") {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] configuration contains remoteContentLibVM [$($VM.remoteContentLibVM)] which currently has role [$($fsVM.role)]. remoteContentLibVM role must be FileServer." -ReturnObject $ReturnObject -Warning
+        }
+    }
+
+    if (-not $VM.siteCode) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain siteCode; When deploying $vmRole Role, you must specify the siteCode of an Active Site Server." -ReturnObject $ReturnObject -Warning
+    }
+    else {
+        $assInConfig = $ConfigObject.virtualMachines | Where-Object { $_.sitecode -eq $VM.siteCode -and ($_.role -eq "CAS" -or $_.role -eq "Primary") }
+        if (-not $assInConfig) {
+            $assVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
+
+            if (($assVM | Measure-Object).Count -eq 0) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Site Server." -ReturnObject $ReturnObject -Warning
+            }
+
+            if (($assVM | Measure-Object).Count -gt 1) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which already contains a passive site server." -ReturnObject $ReturnObject -Warning
+            }
+        }
+        else {
+            $assVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
+            if (($assVM | Measure-Object).Count -ne 0) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which already exists in Hyper-V for VM [$($assVM.vmName)]." -ReturnObject $ReturnObject -Warning
+            }
+        }
+    }
+}
+
+function Test-ValidRoleFileServer {
+    param (
+        [object] $VM,
+        [object] $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
+
+    # Server OS
+    Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
+
+    if (-not $VM.additionalDisks) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain additionalDisks. FileServer must contain E and F drives." -ReturnObject $ReturnObject -Warning
+    }
+    else {
+        $edrive = $VM.additionalDisks | Get-Member -Name "E"
+        $fdrive = $VM.additionalDisks | Get-Member -Name "F"
+
+        if (-not $edrive) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain E drive. FileServer must contain E and F drives." -ReturnObject $ReturnObject -Warning
+        }
+
+        if (-not $fdrive) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain F drive. FileServer must contain E and F drives." -ReturnObject $ReturnObject -Warning
+        }
+    }
 
 }
 
@@ -786,9 +886,10 @@ function Test-Configuration {
         $containsCS = $deployConfig.virtualMachines.role -contains "CAS"
         $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
         $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
+        $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
     }
     else {
-        $containsCS = $containsPS = $containsDPMP = $false
+        $containsCS = $containsPS = $containsDPMP = $containsPassive = $false
     }
 
     $needCMOptions = $containsCS -or $containsPS
@@ -915,6 +1016,24 @@ function Test-Configuration {
             }
 
         }
+    }
+
+    # Passive Validations
+    # ===================
+    if ($containsPassive) {
+        $passiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+
+        # PassiveSite VM count -eq 1
+        if (Test-SingleRole -VM $passiveVM -ReturnObject $return) {
+            Test-ValidRolePassiveSite -VM $passiveVM -ConfigObject $deployConfig -ReturnObject $return
+        }
+    }
+
+    # FileServer Validations
+    # ======================
+    $FSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "FileServer" }
+    foreach ($FSVM in $FSVMs) {
+        Test-ValidRoleFileServer -VM $FSVM -ReturnObject $return
     }
 
     # DPMP Validations
@@ -1069,7 +1188,7 @@ function New-DeployConfig {
         if (-not $PSName) {
             # Set existing PS from same subnet as current config - we don't allow multiple primary sites in same subnet
             $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-            $existingPSName =($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
+            $existingPSName = ($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
         }
 
         # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
