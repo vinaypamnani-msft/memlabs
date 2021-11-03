@@ -1519,6 +1519,7 @@ function Get-List {
                 $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
                 $diskSizeGB = $diskSize / 1GB
                 $vmNet = $vm | Get-VMNetworkAdapter
+                $vmName = $vm.Name
                 $vmState = $vm.State.ToString()
 
                 $vmObject = [PSCustomObject]@{
@@ -1541,14 +1542,14 @@ function Get-List {
                     if ($vmNoteObject.role -in "CAS", "Primary", "PassiveSite") {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                             if ($vmState -eq "Running" -and (-not $inProgress)) {
-                                $siteCodeFromVM = Invoke-VmCommand -VmName $vm.Name -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" }
+                                $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" }
                                 $siteCode = $siteCodeFromVM.ScriptBlockOutput
-                                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode -Force
-                                Write-Log "Get-List: Site code for $($vm.vmName) is missing in VM Note. Adding siteCode $siteCode." -LogOnly
-                                Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+                                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
+                                Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
+                                Set-VMNote -vmName $vmName -vmNote $vmNoteObject
                             }
                             else {
-                                Write-Log "Get-List: Site code for $($vm.vmName) is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                                Write-Log "Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                             }
                         }
                     }
