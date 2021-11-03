@@ -1536,13 +1536,28 @@ function Get-List {
                     if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin } # we renamed this property, read if it exists
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
 
+                    # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
+                    if ($vmNoteObject.role -in "CAS", "Primary", "PassiveSite") {
+                        if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
+                            if ($vm.state -eq "Running" -and $vm.inProgress -eq $false) {
+                                $siteCodeFromVM = Invoke-VmCommand -VmName $vm.Name -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" }
+                                $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode -Force
+                                Write-Log "Get-List: Site code for $($vm.vmName) is missing in VM Note. Adding siteCode $siteCode." -LogOnly
+                                Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+                            }
+                            else {
+                                Write-Log "Get-List: Site code for $($vm.vmName) is missing in VM Note, but VM is not runnning [$($vm.State.ToString())] or deployment is in progress [$inProgress]." -LogOnly
+                            }
+                        }
+                    }
+
                     $vmObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $adminUser -Force
                     $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
 
                     foreach ($prop in $vmNoteObject.PSObject.Properties) {
                         $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
                     }
-
                 }
 
                 $return += $vmObject
