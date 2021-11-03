@@ -1644,6 +1644,9 @@ if (-not $Common.Initialized) {
         Get-List -Type VM -ResetCache | Out-Null
     }
 
+    # Add HGS Registry key to allow local CA Cert
+    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+
     # Write progress
     Write-Progress "Loading required modules." -Completed
 
