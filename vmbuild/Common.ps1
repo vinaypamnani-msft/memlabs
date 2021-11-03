@@ -708,15 +708,12 @@ function Set-VMNote {
         [Parameter(Mandatory = $true)]
         [object]$vmNote
     )
-    if ($null -eq $vmNote.lastUpdate) {
-        $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
-    }
-    else {
-        $vmNote.lastUpdate = (Get-Date -format "MM/dd/yyyy HH:mm")
-    }
+
+    $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
     $vm = Get-Vm $VmName -ErrorAction Stop
     if ($vm) {
+        Write-Log "Set-VMNote: Setting VM Note for $vmName"
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
     }
 }
