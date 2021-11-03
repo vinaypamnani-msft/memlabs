@@ -303,6 +303,7 @@ function select-RestoreSnapshotDomain {
         if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
             foreach ($item in $missingVMS) {
                 Remove-VirtualMachine -VmName $item
+                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
             }
         }
 
@@ -2678,7 +2679,7 @@ function Add-NewVMForRole {
 
         }
         "PassiveSite" {
-
+            $virtualMachine.memory = "4GB"
             $NewFSServer = $true
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SiteCode' -Value $SiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
@@ -2705,7 +2706,8 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
         "FileServer" {
-            $disk = [PSCustomObject]@{"E" = "500GB" }
+            $virtualMachine.memory = "3GB"
+            $disk = [PSCustomObject]@{"E" = "500GB"; "F" = "200GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
         "DC" { }
@@ -2988,10 +2990,23 @@ function Select-VirtualMachines {
             }
             if ($newValue -eq "D") {
                 $i = 0
+                $removeVM = $true
                 foreach ($virtualMachine in $global:config.virtualMachines) {
                     $i = $i + 1
                     if ($i -eq $response) {
-                        Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
+                        if ($virtualMachine.role -eq "FileServer") {
+                            $passiveVM = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+                            if ($passiveVM) {
+                                if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
+                                    Write-Host
+                                    write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
+                                    $removeVM = $false
+                                }
+                            }
+                        }
+                        if ($removeVM -eq $true) {
+                            Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
+                        }
                     }
                 }
             }
