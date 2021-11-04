@@ -867,7 +867,7 @@ try {
             Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
 
-            if ($jobOutPut.StartsWith("ERROR")) {
+            if ($jobOutput.ToString().StartsWith("ERROR")) {
                 Write-Host $jobOutput -ForegroundColor Red
                 $failedCount++
             }
