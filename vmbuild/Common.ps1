@@ -137,16 +137,45 @@ function Write-Exception {
         $AdditionalInfo
     )
 
+    $crashLogsFolder = Join-Path $PSScriptRoot "crashlogs"
+    if (-not (Test-Path $crashLogsFolder)) { New-Item -Path $crashLogsFolder -ItemType Directory -Force | Out-Null }
+    $guid = (New-Guid).Guid
+    $crashFile = Join-Path $crashLogsFolder "$guid.txt"
+
+    $sb = [System.Text.StringBuilder]::new()
+
     $parentFunctionName = (Get-PSCallStack)[1].FunctionName
-    Write-Host "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo" -ForegroundColor Red
-    Write-Host "`n=== Exception.ScriptStackTrace:`n"
-    $ExceptionInfo.ScriptStackTrace | Out-Host
-    Write-Host "`n=== Get-PSCallStack:`n"
-    (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim() | Out-Host
+    $msg = "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
+    $sb.AppendLine($msg)
+    Write-Host $msg -ForegroundColor Red
+
+    $msg = "`n=== Exception.ScriptStackTrace:`n"
+    $sb.AppendLine($msg)
+    Write-Host $msg -ForegroundColor Red
+
+    $msg = $ExceptionInfo.ScriptStackTrace
+    $sb.AppendLine($msg)
+    $msg | Out-Host
+
+    $msg = "`n=== Get-PSCallStack:`n"
+    $sb.AppendLine($msg)
+    Write-Host $msg -ForegroundColor Red
+
+    $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
+    $sb.AppendLine($msg)
+    $msg | Out-Host
+
     if ($AdditionalInfo) {
-        Write-Host "`n=== Additional Information:`n"
-        ($AdditionalInfo | Out-String).Trim() | Out-Host
+        $msg = "`n=== Additional Information:`n"
+        $sb.AppendLine($msg)
+        Write-Host "$msg" -ForegroundColor Red
+        Write-Host "Dumped to $crashFile"
+
+        $msg = ($AdditionalInfo | Out-String).Trim()
+        $sb.AppendLine($msg)
     }
+
+    $sb.ToString() | Out-File -FilePath $crashFile -Force
     Write-Host
 }
 
@@ -713,7 +742,7 @@ function Set-VMNote {
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
     $vm = Get-Vm $VmName -ErrorAction Stop
     if ($vm) {
-        Write-Log "Set-VMNote: Setting VM Note for $vmName"
+        Write-Log "Set-VMNote: Setting VM Note for $vmName" -LogOnly
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
     }
 }

@@ -10,6 +10,7 @@ _fileList.json
 
 # Ignore vmbuild log(s)
 *.log
+/vmbuild/crashlogs
 
 # Ignore winre.wim, created by WindowsImageTools module
 /vmbuild/winre.wim
@@ -35,3 +36,7 @@ _fileList.json
 
 # Ignore bginfo.exe since it's not redistributable
 bginfo.exe
+
+# Ignore vscode files
+.vscode
+.vscodecounter
