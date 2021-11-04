@@ -2240,14 +2240,14 @@ class ModuleAdd {
         
         $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
         
-        IF ($null -eq $_moduleName)
+        IF ($null -eq $module)
         {
-            Install-Module -Name PowerShellGet -Force -Scope AllUsers
+            Install-Module -Name PowerShellGet -Force -Scope $_userScope
         }
         
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
         
-        IF ($null -eq $_moduleName)
+        IF ($null -eq $module)
         {
             IF($this.Clobber -eq 'Yes'){
                 Install-Module -Name $_moduleName -Force -Scope $_userScope -AllowClobber
@@ -2264,7 +2264,7 @@ class ModuleAdd {
         $GetModuleStatus = Get-InstalledModule -Name $_ModuleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
         write-verbose ('Searching for module:' + $_ModuleName + 'ModuleStatus:' + $GetModuleStatus)
-        ]
+        
 
         IF ($null -eq $GetModuleStatus){
             Return $false
@@ -2275,6 +2275,113 @@ class ModuleAdd {
     }
 
     [ModuleAdd] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class ActiveDirectorySPN {
+    [DscProperty(Key)]
+    [string] $key = 'Always'
+
+    [DscProperty()]
+    [string] $UserName
+
+    [DscProperty()]
+    [string] $ClusterDevice
+
+    [DscProperty(Mandatory)]
+    [string] $FQDNDomainName = "contoso.com"
+
+    [DscProperty()]
+    [string] $OULocationUser = 'CN=Users,DC=contosomd,DC=com'
+
+    [DscProperty()]
+    [string] $OULocationDevice = 'CN=Computers,DC=contosomd,DC=com'
+
+    [void] Set() {
+     
+        Import-Module ActiveDirectory
+
+        Set-Location AD:
+
+        #Set SPN permissions to object to allow it to update SPN registrations.
+        $_UserName = $this.UserName
+        $_OULocationUser = $this.OULocationUser
+        $_FQDNDomainName = $this.FQDNDomainName
+
+        
+        write-verbose ('Setting Permissions for User:' + $_UserName  + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
+        #Set SPN permissions to object to allow it to update SPN registrations.
+        
+        $oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
+        $UserObject = "CN=$_UserName,$_OULocationUser"
+
+        $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+        $UserSID = $UserSID.Value
+               
+        $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+        $SIDMatch = $Matches[0]
+        
+        $oldSddl = $oldSddl -replace ($SIDMatch,$UserSID)
+        
+        #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+        #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+        
+        $ACL = Get-Acl -Path "AD:$UserObject"
+        $currentSSDL = $ACL.Sddl
+
+        $newSSDL = $currentSSDL + $oldSddl
+        $ACL.SetSecurityDescriptorSddlForm($newSSDL)
+
+        Set-Acl -AclObject $acl -Path "AD:$UserObject"
+        write-verbose (' Permissions for User:' + $_UserName  + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName + ' have been set')
+
+    }
+
+    [bool] Test() {
+        
+        Import-Module ActiveDirectory
+
+        Set-Location AD:
+
+        #Set SPN permissions to object to allow it to update SPN registrations.
+        $_UserName = $this.UserName
+        $_OULocationUser = $this.OULocationUser
+        $_FQDNDomainName = $this.FQDNDomainName
+
+        write-verbose ('Checking Permissions for User:' + $_UserName  + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
+        
+        $oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
+        $UserObject = "CN=$_UserName,$_OULocationUser"
+
+        $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+        $UserSID = $UserSID.Value
+
+        write-verbose ('User:' + $_UserName  + ' SIDValue is:' + $UserSID + ' On Domain:' + $_FQDNDomainName)
+               
+        $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+        $SIDMatch = $Matches[0]
+        
+        $oldSddl = $oldSddl -replace ($SIDMatch,$UserSID)
+        
+        #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+        #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+        
+        $ACL = Get-Acl -Path "AD:$UserObject"
+        $currentSSDL = $ACL.Sddl
+        
+        IF ($currentSSDL -match ("\(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;$UserSID\)")){
+            write-verbose ('Permissions for SPN are already set')
+            Return $true
+        }ELSE{
+            write-verbose ('Permissions for SPN are not currently set')
+            Return $false
+        }
+    }
+
+    [ActiveDirectorySPN] Get() {
         return $this
     }
 

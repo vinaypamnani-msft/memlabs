@@ -28,6 +28,7 @@ Configuration FullClusterSetup
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'ComputerManagementDsc'
     Import-DscResource -ModuleName 'xFailOverCluster'
+    Import-DscResource -ModuleName 'AccessControlDsc'
 
     Node $AllNodes.Where{$_.Role -eq 'ADSetup' }.NodeName
     {
@@ -62,12 +63,50 @@ Configuration FullClusterSetup
             PsDscRunAsCredential       = $SqlAdministratorCredential
         }
 
+        ADUser 'SQLServiceAccount'
+        {
+            Ensure     = 'Present'
+            UserName   = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAccount
+            Password   = $SqlAdministratorCredential
+            DomainName = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
+            Path       = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUUserPath
+
+            Dependson   = '[ADGroup]CASCluster'
+
+            PsDscRunAsCredential       = $SqlAdministratorCredential
+        }
+
+        ADUser 'SQLServiceAgent'
+        {
+            Ensure     = 'Present'
+            UserName   = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAgent
+            Password   = $SqlAdministratorCredential
+            DomainName = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
+            Path       = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUUserPath
+
+            Dependson   = '[ADUser]SQLServiceAccount'
+
+            PsDscRunAsCredential       = $SqlAdministratorCredential
+        }
+
+        ActiveDirectorySPN 'SQLServiceAccountSPNSetup'
+        {
+            Key             = 'Always'
+            UserName        =  ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAccount
+            FQDNDomainName  =  ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
+            OULocationUser  =  ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUUserPath
+
+            Dependson   = '[ActiveDirectorySPN]SQLServiceAccountSPNSetup'
+
+            PsDscRunAsCredential       = $SqlAdministratorCredential
+        }
+
     }
     Node $AllNodes.Where{$_.Role -eq 'FileServer' }.NodeName 
     {
         WaitForAll AD
         {
-            ResourceName      = '[ADGroup]CASCluster'
+            ResourceName      = '[ActiveDirectorySPN]SQLServiceAccountSPNSetup'
             NodeName          = $AllNodes.Where{$_.Role -eq 'ADSetup' }.NodeName
             RetryIntervalSec  = 10
             RetryCount        = 10
@@ -79,10 +118,67 @@ Configuration FullClusterSetup
             Ensure = "Present"
         }
 
-        FileACLPermission ClusterWitnessShare {
+        NTFSAccessEntry ClusterWitnessPermissions
+        {
             Path        = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).WitnessPath
-            Accounts     = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).Accounts
-
+            AccessControlList = @(
+                NTFSAccessControlList
+                {
+                    Principal = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).Principal1
+                    ForcePrincipal = $true
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry
+                        {
+                            AccessControlType = 'Allow'
+                            FileSystemRights = 'FullControl'
+                            Inheritance = 'This folder subfolders and files'
+                            Ensure = 'Present'
+                        }
+                    )               
+                }
+                NTFSAccessControlList
+                {
+                    Principal = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).Principal2
+                    ForcePrincipal = $false
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry
+                        {
+                            AccessControlType = 'Allow'
+                            FileSystemRights = 'FullControl'
+                            Inheritance = 'This folder subfolders and files'
+                            Ensure = 'Present'
+                        }
+                    )               
+                }
+                NTFSAccessControlList
+                {
+                    Principal = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).Principal3
+                    ForcePrincipal = $false
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry
+                        {
+                            AccessControlType = 'Allow'
+                            FileSystemRights = 'FullControl'
+                            Inheritance = 'This folder subfolders and files'
+                            Ensure = 'Present'
+                        }
+                    )               
+                }
+                NTFSAccessControlList
+                {
+                    Principal = ($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).Principal4
+                    ForcePrincipal = $false
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry
+                        {
+                            AccessControlType = 'Allow'
+                            FileSystemRights = 'FullControl'
+                            Inheritance = 'This folder subfolders and files'
+                            Ensure = 'Present'
+                        }
+                    )               
+                }
+            )
             Dependson   = '[File]ClusterWitness'
         }
 
@@ -95,7 +191,7 @@ Configuration FullClusterSetup
             FullAccess = @($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).FullAccess
             ReadAccess = @($AllNodes | Where-Object { $_.Role -eq 'FileServer' }).ReadAccess
 
-            DependsOn = '[FileACLPermission]ClusterWitnessShare'
+            DependsOn = '[NTFSAccessEntry]ClusterWitnessPermissions'
         }
     }
     Node $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.NodeName 
@@ -272,22 +368,31 @@ $Configuration = @{
             Resource  = '\\sccm-fileserver\CASClusterWitness'
         },
         @{
-            NodeName     = 'SCCM-CAS'
-            Role         = 'ADSetup'
-            ADmembers    = 'SCCM-CASClust1$','SCCM-CASClust2$', 'CASCluster$'
-            ComputerName = 'CASCluster'
+            NodeName          = 'SCCM-CAS'
+            Role              = 'ADSetup'
+            ADmembers         = 'SCCM-CASClust1$','SCCM-CASClust2$', 'CASCluster$'
+            ComputerName      = 'CASCluster'
+            SQLServiceAccount = 'SQLServerServiceCAS2'
+            SQLServiceAgent   = 'SQLAgentCAS2'
+            DomainName        = 'contosomd.com'
+            OUUserPath        = 'CN=Users,DC=contosomd,DC=com'
 
         },
         @{
-            NodeName      = 'SCCM-FileServer'
-            Role         = 'FileServer'
-            Name         = 'CASClusterWitness'
-            Path         = 'F:\CASClusterWitness'
-            Description  = 'CASWitnessShare'
-            WitnessPath  = "F:\CASClusterWitness"
-            Accounts     = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
-            FullAccess   = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
-            ReadAccess   = 'Everyone'
+            NodeName         = 'SCCM-FileServer'
+            Role             = 'FileServer'
+            Name             = 'CASClusterWitness'
+            Path             = 'F:\CASClusterWitness'
+            Description      = 'CASWitnessShare'
+            WitnessPath      = "F:\CASClusterWitness"
+            Accounts         = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
+            Principal1       = 'CONTOSOMD\SCCM-CASClust1$'
+            Principal2       = 'CONTOSOMD\SCCM-CASClust2$'
+            Principal3       = 'CONTOSOMD\CASCluster$'
+            Principal4       = 'CONTOSOMD\Admin'
+            FullAccess       = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
+            ReadAccess       = 'Everyone'
+            CheckModuleName  = 'AccessControlDSC'
         },
         @{
             NodeName                     = "*"

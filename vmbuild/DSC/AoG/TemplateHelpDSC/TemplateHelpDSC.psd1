@@ -40,7 +40,8 @@ DscResourcesToExport = @(
     'FileReadAccessShare',
     'InstallCA',
     'FileACLPermission',
-    'ModuleAdd'
+    'ModuleAdd',
+    'ActiveDirectorySPN'
 )
 
 # Version number of this module.
