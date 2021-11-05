@@ -24,7 +24,7 @@ if ($Common.Initialized) {
 
 # Set Verbose
 $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
-
+$NewLabsuccess = $false
 # Dot source common
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
@@ -132,14 +132,11 @@ $VM_Create = {
         }
 
         # Create VM
-        $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -WhatIf:$using:WhatIf
+        $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig -WhatIf:$using:WhatIf
         if (-not $created) {
             Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild.log." -Failure -OutputStream -HostOnly
             return
         }
-
-        # Write a note to the VM
-        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -InProgress
 
         # Wait for VM to finish OOBE
         $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -WhatIf:$using:WhatIf
@@ -230,7 +227,7 @@ $VM_Create = {
             }
         }
         # Update VMNote
-        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $oobeStarted
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted
         return
     }
 
@@ -250,7 +247,7 @@ $VM_Create = {
     }
 
     # Copy SQL files to VM
-    if ($currentItem.sqlVersion) {
+    if ($currentItem.sqlVersion -and $createVM) {
 
         Write-Log "PSJOB: $($currentItem.vmName): Copying SQL installation files to the VM."
         Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Activity "Working" -Completed
@@ -297,7 +294,7 @@ $VM_Create = {
         # Create init log
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_InstallModules: Started at $time`r`n====="  | Out-File $log -Force
+        "`r`n=====`r`nDSC_InstallModules: Started at $time`r`n=====" | Out-File $log -Force
 
         # Install modules
         "Installing modules" | Out-File $log -Append
@@ -320,6 +317,7 @@ $VM_Create = {
 
         switch (($currentItem.role)) {
             "DPMP" { $dscRole = "DomainMember" }
+            "FileServer" { $dscRole = "DomainMember" }
             "AADClient" { $dscRole = "WorkgroupMember" }
             "InternetClient" { $dscRole = "WorkgroupMember" }
             Default { $dscRole = $currentItem.role }
@@ -379,7 +377,7 @@ $VM_Create = {
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n====="  | Out-File $log -Append
+        "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n=====" | Out-File $log -Append
 
         # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
         $dscLog = "C:\staging\DSC\DSC_Log.txt"
@@ -403,7 +401,7 @@ $VM_Create = {
             Rename-Item -Path $jsonPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
         }
 
-        # For CAS re-run, mark ScriptWorkflow not started
+        # For re-run, mark ScriptWorkflow not started
         $ConfigurationFile = Join-Path -Path "C:\staging\DSC" -ChildPath "ScriptWorkflow.json"
         if (Test-Path $ConfigurationFile) {
             $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -485,6 +483,12 @@ $VM_Create = {
                 else {
                     $currentStatusTrimmed = $currentStatus
                 }
+
+                if ($currentStatusTrimmed.Contains("JOBFAILURE: ")) {
+                    Write-Log "PSJOB: $($currentItem.vmName): DSC: $($currentItem.role) failed: $currentStatusTrimmed" -Failure -OutputStream
+                    break
+                }
+
                 Write-Log "PSJOB: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
                 $previousStatus = $currentStatus
             }
@@ -497,14 +501,14 @@ $VM_Create = {
                 if (-not $result.ScriptBlockFailed) {
                     $logEntry = $result.ScriptBlockOutput
                     $logEntry = "ConfigMgrSetup.log: " + $logEntry.Substring(0, $logEntry.IndexOf("$"))
-                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed)" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                     $skipProgress = $true
                 }
             }
 
             if (-not $skipProgress) {
                 # Write progress
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed)" -Status $status.ScriptBlockOutput -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             }
 
             # Check if complete
@@ -534,17 +538,17 @@ $VM_Create = {
 
     if (-not $complete) {
         $worked = $false
-        Write-Log "PSJOB: $($currentItem.vmName): Configuration did not complete in allotted time ($timeout minutes) for $($currentItem.role)." -OutputStream -Failure
+        Write-Log "PSJOB: $($currentItem.vmName): Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -OutputStream -Failure
     }
     else {
         $worked = $true
-        Write-Progress "$($currentItem.role) configuration completed successfully. Elapsed time: $($stopWatch.Elapsed)" -Status $status.ScriptBlockOutput -Completed
+        Write-Progress "$($currentItem.role) configuration completed successfully. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -Completed
         Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
 
     if ($createVM) {
         # Set VM Note
-        New-VmNote -VmName $currentItem.vmName -Role $currentItem.role -DeployConfig $deployConfig -Successful $worked
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked
     }
 }
 
@@ -585,6 +589,9 @@ try {
 
         $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
 
+        if (-not $($result.DeployNow)) {
+            return
+        }
         if ($configResult.Loaded) {
             $userConfig = $configResult.Config
             Clear-Host
@@ -648,7 +655,7 @@ try {
     if ($DownloadFilesOnly.IsPresent) {
         $timer.Stop()
         Write-Host
-        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
+        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
         Write-Host
         return
     }
@@ -723,22 +730,13 @@ try {
     # Existing DC scenario
     $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
     $existingDC = $deployConfig.parameters.ExistingDCName
+    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
         Write-Log "Main: Attempting to remove existing DNS Records" -Activity -HostOnly
         foreach ($item in $deployConfig.virtualMachines) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
-        }
-    }
-
-    # Add exising DC to list
-    if ($existingDC -and $containsPS) {
-        # create a dummy VM object for the existingDC
-        $deployConfig.virtualMachines += [PSCustomObject]@{
-            vmName = $existingDC
-            role   = "DC"
-            hidden = $true
         }
     }
 
@@ -759,15 +757,63 @@ try {
         else {
             $existingCASVM = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS })
             $deployConfig.virtualMachines += [PSCustomObject]@{
-                vmName = $existingCAS
+                vmName          = $existingCAS
                 SQLInstanceName = $existingCASVM.SQLInstanceName
-                SQLVersion = $existingCASVM.SQLVersion
-                SQLInstanceDir = $existingCASVM.SQLInstanceDir
-                role   = "CAS"
-                hidden = $true
+                SQLVersion      = $existingCASVM.SQLVersion
+                SQLInstanceDir  = $existingCASVM.SQLInstanceDir
+                role            = "CAS"
+                hidden          = $true
             }
         }
     }
+
+    # Adding Passive to existing
+    if ($containsPassive) {
+        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+        if (($PassiveVM | Measure-Object).Count -ne 1) {
+            Write-Log "Main: Two Passive site servers found in deployment. We only support adding one at a time." -Failure
+            return
+        }
+        else {
+            $existingActive = $deployConfig.parameters.ExistingActiveName
+            if ($existingActive) {
+                $existingActiveVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActive })
+                if ($existingActiveVM.remoteSQLVM) {
+                    $sqlVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActiveVM.remoteSQLVM })
+                    $deployConfig.virtualMachines += [PSCustomObject]@{
+                        vmName          = $sqlVM.vmName
+                        SQLInstanceName = $sqlVM.SQLInstanceName
+                        SQLVersion      = $sqlVM.SQLVersion
+                        SQLInstanceDir  = $sqlVM.SQLInstanceDir
+                        role            = "DomainMember"
+                        hidden          = $true
+                    }
+                }
+
+                $deployConfig.virtualMachines += [PSCustomObject]@{
+                    vmName          = $existingActiveVM.vmName
+                    role            = $existingActiveVM.role
+                    siteCode        = $existingActiveVM.siteCode
+                    RemoteSQLVM     = $existingActiveVM.remoteSQLVM
+                    SQLInstanceName = $existingActiveVM.SQLInstanceName
+                    SQLVersion      = $existingActiveVM.SQLVersion
+                    SQLInstanceDir  = $existingActiveVM.SQLInstanceDir
+                    hidden          = $true
+                }
+            }
+        }
+    }
+
+    # Add exising DC to list
+    if ($existingDC -and ($containsPS -or $containsPassive)) {
+        # create a dummy VM object for the existingDC
+        $deployConfig.virtualMachines += [PSCustomObject]@{
+            vmName = $existingDC
+            role   = "DC"
+            hidden = $true
+        }
+    }
+
     Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
     # New scenario
@@ -781,8 +827,7 @@ try {
 
         # Existing DC scenario
         $CreateVM = $true
-        if ($currentItem.vmName -eq $existingDC) { $CreateVM = $false }
-        if ($currentItem.vmName -eq $existingCAS) { $CreateVM = $false }
+        if ($currentItem.hidden -eq $true) { $CreateVM = $false }
 
         $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
 
@@ -821,15 +866,17 @@ try {
             Write-JobProgress($job)
             Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
-            $jobOutput
-            if ($jobOutPut.StartsWith("ERROR")) {
+
+            if ($jobOutput.ToString().StartsWith("ERROR")) {
+                Write-Host $jobOutput -ForegroundColor Red
                 $failedCount++
             }
             else {
+                Write-Host $jobOutput -ForegroundColor Green
                 $successCount++
             }
 
-            #$job | Remove-Job -Force -Confirm:$false
+            Write-Progress -Id $job.Id -Activity $job.Name -Completed
             $jobs.Remove($job)
         }
 
@@ -851,10 +898,18 @@ try {
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         }
     }
-    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed)" -Success
+    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
+    $NewLabsuccess = $true
+}
+catch {
+    Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json)
 }
 finally {
     # Ctrl + C brings us here :)
+    if ($NewLabsuccess -ne $true){
+        Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs" -LogOnly
+    }
+    $Common.Initialized = $false
     get-job | stop-job
     Set-QuickEdit
 }

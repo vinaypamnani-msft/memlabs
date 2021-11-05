@@ -13,10 +13,15 @@ function Write-DscStatusSetup {
 }
 
 function Write-DscStatus {
-    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds)
+    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds, [switch]$Failure)
 
     if ($RetrySeconds) {
         $status = "$status; checking again in $RetrySeconds seconds"
+    }
+
+    if ($Failure.IsPresent) {
+        # Add prefix that host job can use to acknowledge failure
+        $status = "JOBFAILURE: $status"
     }
 
     if (-not $NoStatus.IsPresent) {
@@ -26,6 +31,11 @@ function Write-DscStatus {
 
     if (-not $NoLog.IsPresent) {
         "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $status" | Out-File -Append $global:StatusLog
+    }
+
+    if ($Failure.IsPresent) {
+        # Add a sleep so host VM has had time to poll for this entry
+        Start-Sleep -Seconds 10
     }
 }
 
@@ -39,6 +49,11 @@ $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
 if (!(Test-Path $ProvisionToolPath)) {
     New-Item $ProvisionToolPath -ItemType directory | Out-Null
 }
+
+# contains passive?
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+$containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
 
 # Script Workflow json file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -81,7 +96,8 @@ else {
             }
         }
     }
-    else {
+
+    if ($scenario -eq "Hierarchy") {
         if ($CurrentRole -eq "CAS") {
             [hashtable]$Actions = @{
                 InstallSCCM    = @{
@@ -141,6 +157,19 @@ else {
             }
         }
     }
+
+    if ($containsPassive) {
+
+        $Actions += @{
+            InstallPassive   = @{
+                Status    = 'NotStart'
+                StartTime = ''
+                EndTime   = ''
+            }
+        }
+
+    }
+
     $Configuration = New-Object -TypeName psobject -Property $Actions
     $Configuration.ScriptWorkflow.Status = "Running"
     $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
@@ -158,7 +187,9 @@ if ($scenario -eq "Standalone") {
     . $ScriptFile $ConfigFilePath $LogPath
 
 }
-else {
+
+if ($scenario -eq "Hierarchy") {
+
     if ($CurrentRole -eq "CAS") {
 
         #Install CM and Config
@@ -176,6 +207,14 @@ else {
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
     }
+}
+
+if ($containsPassive) {
+
+    # Install Passive Site Server
+    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPassiveSiteServer.ps1"
+    . $ScriptFile $ConfigFilePath $LogPath
+
 }
 
 Write-DscStatus "Finished setting up ConfigMgr."

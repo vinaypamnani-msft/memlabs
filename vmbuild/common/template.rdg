@@ -15,6 +15,7 @@
       <properties>
         <expanded>True</expanded>
         <name>VMASTEMPLATE</name>
+		<comment>MemLabs Auto Generated</comment>
       </properties>
       <logonCredentials inherit="None">
         <profileName scope="Local">Custom</profileName>
@@ -101,6 +102,16 @@
             <property>Comment</property>
             <operator>Matches</operator>
             <value>"DPMP"</value>
+          </rule>
+           <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"PassiveSite"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"FileServer"</value>
           </rule>
           <rule>
             <property>Comment</property>

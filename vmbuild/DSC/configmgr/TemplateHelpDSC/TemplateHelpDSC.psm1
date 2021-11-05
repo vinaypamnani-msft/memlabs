@@ -261,47 +261,57 @@ class WriteConfigurationFile {
         }
         else {
             [hashtable]$Actions = @{
-                CSJoinDomain           = @{
+                MachineJoinDomain       = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                PSJoinDomain           = @{
+                CSJoinDomain            = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DPMPJoinDomain         = @{
+                PSJoinDomain            = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DomainMemberJoinDomain = @{
+                DPMPJoinDomain          = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DelegateControl        = @{
+                DomainMemberJoinDomain  = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                SCCMinstall            = @{
+                DelegateControl         = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DPMPFinished           = @{
+                SCCMinstall             = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                DomainMemberFinished   = @{
+                DPMPFinished            = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
-                WorkgroupMemberFinished   = @{
+                DomainMemberFinished    = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
+                PassiveReady            = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
+                WorkgroupMemberFinished = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
@@ -474,7 +484,7 @@ class DelegateControl {
         $arg1 = "CN=System Management,CN=System,$root"
         $permissioninfo = & $cmd $arg1
 
-        if (($permissioninfo | Where-Object { $_ -like "*$_machinename*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+        if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
             return $true
         }
 

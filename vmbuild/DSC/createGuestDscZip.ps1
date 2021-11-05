@@ -86,7 +86,13 @@ Write-Host "Installing $dscFolder TemplateHelpDSC on this machine.."
 Copy-Item .\$dscFolder\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
 
 # Create test config, for testing if the config definition is good.
-$role = if ($role -eq "DPMP") { "DomainMember" } else { $role }
+switch (($role)) {
+    "DPMP" { $role = "DomainMember" }
+    "FileServer" { $role = "DomainMember" }
+    "AADClient" { $role = "WorkgroupMember" }
+    "InternetClient" { $role = "WorkgroupMember" }
+    Default { $role = $role }
+}
 Write-Host "Creating a test config for $role in C:\Temp"
 
 if ($creds) { $adminCreds = $creds }

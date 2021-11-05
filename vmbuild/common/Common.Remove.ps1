@@ -134,7 +134,7 @@ function Remove-Domain {
             Remove-DhcpScope -ScopeId $scope.Subnet -WhatIf:$WhatIf
         }
     }
-
+    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
     Write-Host
 
 }

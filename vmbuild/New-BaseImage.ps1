@@ -309,5 +309,5 @@ else {
 
 $timer.Stop()
 Write-Host
-Write-Log "### COMPLETE. Elapsed Time: $($timer.Elapsed)" -Success
+Write-Log "### COMPLETE. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
 Write-Host

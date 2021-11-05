@@ -128,6 +128,57 @@ function Write-Log {
     }
 }
 
+function Write-Exception {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        $ExceptionInfo,
+        [Parameter()]
+        $AdditionalInfo
+    )
+
+    $crashLogsFolder = Join-Path $PSScriptRoot "crashlogs"
+    if (-not (Test-Path $crashLogsFolder)) { New-Item -Path $crashLogsFolder -ItemType Directory -Force | Out-Null }
+    $guid = (New-Guid).Guid
+    $crashFile = Join-Path $crashLogsFolder "$guid.txt"
+
+    $sb = [System.Text.StringBuilder]::new()
+
+    $parentFunctionName = (Get-PSCallStack)[1].FunctionName
+    $msg = "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
+    $sb.AppendLine($msg)
+    Write-Host $msg -ForegroundColor Red
+
+    $msg = "`n=== Exception.ScriptStackTrace:`n"
+    $sb.AppendLine($msg)
+    Write-Host $msg -ForegroundColor Red
+
+    $msg = $ExceptionInfo.ScriptStackTrace
+    $sb.AppendLine($msg)
+    $msg | Out-Host
+
+    $msg = "`n=== Get-PSCallStack:`n"
+    $sb.AppendLine($msg)
+    Write-Host $msg -ForegroundColor Red
+
+    $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
+    $sb.AppendLine($msg)
+    $msg | Out-Host
+
+    if ($AdditionalInfo) {
+        $msg = "`n=== Additional Information:`n"
+        $sb.AppendLine($msg)
+        Write-Host "$msg" -ForegroundColor Red
+        Write-Host "Dumped to $crashFile"
+
+        $msg = ($AdditionalInfo | Out-String).Trim()
+        $sb.AppendLine($msg)
+    }
+
+    $sb.ToString() | Out-File -FilePath $crashFile -Force
+    Write-Host
+}
+
 function Get-File {
     param(
         [Parameter(Mandatory = $false)]
@@ -223,7 +274,7 @@ function Get-File {
 
                 $i++
                 if ($i -gt 5) {
-                    Write-Log "Get-FileFromStorage: Timed out while waiting to download '$sourceDisplay'." -Failure
+                    Write-Log "Get-File: Timed out while waiting to download '$sourceDisplay'." -Failure
                     $timedOut = $true
                     break
                 }
@@ -280,7 +331,7 @@ function Start-CurlTransfer {
 
     $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
     if (-not (Test-Path $curlPath)) {
-        & choco install curl -y  | Out-Null
+        & choco install curl -y | Out-Null
     }
 
     if (-not (Test-Path $curlPath)) {
@@ -302,6 +353,7 @@ function Start-CurlTransfer {
 
         if ($LASTEXITCODE -eq 0) {
             $success = $true
+            Write-Host
             break
         }
         else {
@@ -638,14 +690,12 @@ function New-VmNote {
     param (
         [Parameter(Mandatory = $true)]
         [string]$VmName,
-        [Parameter(Mandatory = $true)]
-        [string]$Role,
         [Parameter(Mandatory = $false)]
         [object]$DeployConfig,
         [Parameter(Mandatory = $false)]
         [bool]$Successful,
         [Parameter(Mandatory = $false)]
-        [switch]$InProgress
+        [bool]$InProgress
     )
 
     try {
@@ -653,56 +703,23 @@ function New-VmNote {
 
         $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
 
-        if ($InProgress.IsPresent) {
-            $vmNote = [PSCustomObject]@{
-                inProgress = $true
-                role       = $Role
-                deployedOS = $ThisVM.operatingSystem
-                domain     = $DeployConfig.vmOptions.domainName
-                adminName  = $DeployConfig.vmOptions.adminName
-                network    = $DeployConfig.vmOptions.network
-                prefix     = $DeployConfig.vmOptions.prefix
-            }
-        }
-        else {
-            $vmNote = [PSCustomObject]@{
-                success    = $Successful
-                role       = $Role
-                deployedOS = $ThisVM.operatingSystem
-                domain     = $DeployConfig.vmOptions.domainName
-                adminName  = $DeployConfig.vmOptions.adminName
-                network    = $DeployConfig.vmOptions.network
-                prefix     = $DeployConfig.vmOptions.prefix
-            }
+        $vmNote = [PSCustomObject]@{
+            inProgress = $InProgress
+            success    = $Successful
+            role       = $ThisVM.role
+            deployedOS = $ThisVM.operatingSystem
+            domain     = $DeployConfig.vmOptions.domainName
+            adminName  = $DeployConfig.vmOptions.adminName
+            network    = $DeployConfig.vmOptions.network
+            prefix     = $DeployConfig.vmOptions.prefix
         }
 
-        if ($DeployConfig.cmOptions.install -and ($Role -eq "CAS" -or $Role -eq "Primary")) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $ThisVM.siteCode
-            $vmNote | Add-Member -MemberType NoteProperty -Name "cmInstallDir" -Value $ThisVM.cmInstallDir
-        }
-
-        if ($ThisVM.parentSiteCode) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "parentSiteCode" -Value $ThisVM.parentSiteCode
-        }
-
-        if ($ThisVM.sqlVersion) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlVersion" -Value $ThisVM.sqlVersion
-            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlInstanceName" -Value $ThisVM.sqlInstanceName
-            $vmNote | Add-Member -MemberType NoteProperty -Name "sqlInstanceDir" -Value $ThisVM.sqlInstanceDir
-        }
-
-        if ($ThisVM.remoteSQLVM) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "remoteSQLVM" -Value $ThisVM.remoteSQLVM
+        foreach ($prop in $ThisVM.PSObject.Properties) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
         }
 
         Set-VMNote -vmName $vmName -vmNote $vmNote
-        #$vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
 
-        #$vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-        #$vm = Get-Vm $VmName -ErrorAction Stop
-        #if ($vm) {
-        #    $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
-        #}
     }
     catch {
         Write-Log "New-VmNote: Failed to add a note to the VM '$VmName' in Hyper-V. $_" -Failure
@@ -720,15 +737,12 @@ function Set-VMNote {
         [Parameter(Mandatory = $true)]
         [object]$vmNote
     )
-    if ($null -eq $vmNote.lastUpdate) {
-        $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm")
-    }
-    else {
-        $vmNote.lastUpdate = (Get-Date -format "MM/dd/yyyy HH:mm")
-    }
+
+    $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
     $vm = Get-Vm $VmName -ErrorAction Stop
     if ($vm) {
+        Write-Log "Set-VMNote: Setting VM Note for $vmName" -LogOnly
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
     }
 }
@@ -746,6 +760,7 @@ function Remove-DnsRecord {
     # Write-Host "DCName $DCName, Domain $Domain, RecordToDelete $RecordToDelete"
 
     $scriptBlock1 = {
+        #Get-ADComputer -Identity $using:RecordToDelete -ErrorAction SilentlyContinue | Remove-ADObject -Recursive -ErrorAction SilentlyContinue -Confirm:$False
         Get-DnsServerResourceRecord -ZoneName $using:Domain -Node $using:RecordToDelete -RRType A
     }
 
@@ -809,6 +824,8 @@ function New-VirtualMachine {
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
+        [Parameter()]
+        [PsCustomObject] $DeployConfig,
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
@@ -863,6 +880,11 @@ function New-VirtualMachine {
         return $false
     }
 
+    # Add VMNote as soon as VM is created
+    if ($DeployConfig) {
+        New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+    }
+
     # Copy sysprepped image to VM location
     $osDiskName = "$($VmName)_OS.vhdx"
     $osDiskPath = Join-Path $vm.Path $osDiskName
@@ -877,7 +899,7 @@ function New-VirtualMachine {
 
     if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
         New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
-        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
     }
 
     $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
@@ -949,11 +971,11 @@ function New-VirtualMachine {
     return $true
 }
 
-function Get-AvailableMemoryGB{
+function Get-AvailableMemoryGB {
     $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-    $availableMemory = ($availableMemory-("4GB"/1kB)) * 1KB / 1GB
-    $availableMemory = [Math]::Round($availableMemory,2)
-    if ($availableMemory -lt 0){
+    $availableMemory = ($availableMemory - ("4GB" / 1kB)) * 1KB / 1GB
+    $availableMemory = [Math]::Round($availableMemory, 2)
+    if ($availableMemory -lt 0) {
         $availableMemory = 0
     }
     return $availableMemory
@@ -998,7 +1020,7 @@ function Wait-ForVm {
         do {
             try {
                 $vmTest = Get-VM -Name $VmName
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 $ready = $vmTest.State -eq $VmState
                 Start-Sleep -Seconds 5
             }
@@ -1009,9 +1031,9 @@ function Wait-ForVm {
     }
 
     if ($OobeComplete.IsPresent) {
-        $status = "Waiting for OOBE to complete. "
-        Write-Log "Wait-ForVm: $VmName`: $status"
-        Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+        $originalStatus = "Waiting for OOBE to complete. "
+        Write-Log "Wait-ForVm: $VmName`: $originalStatus"
+        Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $originalStatus -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         $readyOobe = $false
         $wwahostrunning = $false
         $readySmb = $false
@@ -1025,18 +1047,19 @@ function Wait-ForVm {
 
             if ($null -ne $out.ScriptBlockOutput -and -not $readyOobe) {
                 Write-Log "Wait-ForVm: $VmName`: OOBE State is $($out.ScriptBlockOutput)"
+                $status = $originalStatus
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
             }
 
             if (-not $readyOobe) {
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 5
             }
 
             # Wait until \\localhost\c$ is accessible
             if (-not $readySmb -and $readyOobe) {
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 15
                 $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "Wait-ForVm: $VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
@@ -1051,7 +1074,7 @@ function Wait-ForVm {
                 if ($wwahost.ScriptBlockOutput) {
                     $wwahostrunning = $true
                     Write-Log "Wait-ForVm: $VmName`: OOBE complete. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
-                    Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE complete, and SMB available. Waiting for WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) to stop before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                    Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "OOBE complete, and SMB available. Waiting for WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) to stop before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                     Start-Sleep -Seconds 15
                 }
                 else {
@@ -1063,7 +1086,7 @@ function Wait-ForVm {
             # OOBE and SMB ready, buffer wait to ensure we're at login screen. Bad things happen if you reboot the machine before it really finished OOBE.
             if (-not $wwahostrunning -and $readySmb) {
                 Write-Log "Wait-ForVm: $VmName`: VM is ready. Waiting $WaitSeconds seconds before continuing."
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "VM is ready. Waiting $WaitSeconds seconds before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "VM is ready. Waiting $WaitSeconds seconds before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds $WaitSeconds
                 $ready = $true
             }
@@ -1082,7 +1105,7 @@ function Wait-ForVm {
             if ($wwahost.ScriptBlockOutput) {
                 $ready = $true
                 Write-Log "Wait-ForVm: $VmName`: OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             }
             else {
                 Write-Log "Wait-ForVm: $VmName`: OOBE hasn't started yet. WWAHost not running."
@@ -1102,7 +1125,7 @@ function Wait-ForVm {
 
         Write-Log "Wait-ForVm: $VmName`: $msg..."
         do {
-            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $msg -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $msg -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             Start-Sleep -Seconds 5
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
@@ -1543,6 +1566,8 @@ function Set-SupportedOptions {
         "DC",
         "Primary",
         "CAS",
+        "PassiveSite",
+        "FileServer",
         "DPMP",
         "DomainMember",
         "WorkgroupMember",
@@ -1554,6 +1579,8 @@ function Set-SupportedOptions {
         "DPMP",
         "CAS",
         "Primary",
+        "PassiveSite",
+        "FileServer",
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
@@ -1645,6 +1672,9 @@ if (-not $Common.Initialized) {
         # Retrieve VM List, and cache results
         Get-List -Type VM -ResetCache | Out-Null
     }
+
+    # Add HGS Registry key to allow local CA Cert
+    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
 
     # Write progress
     Write-Progress "Loading required modules." -Completed

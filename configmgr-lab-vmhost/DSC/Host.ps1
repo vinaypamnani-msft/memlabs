@@ -16,12 +16,14 @@ Configuration Host {
         }
 
         WindowsFeature Hyper-V-Tools {
+            DependsOn            = "[WindowsFeature]Hyper-V"
             Ensure               = 'Present'
             Name                 = 'Hyper-V-Tools'
             IncludeAllSubFeature = $true
         }
 
         WindowsFeature Hyper-V-PowerShell {
+            DependsOn            = "[WindowsFeature]Hyper-V-Tools"
             Ensure               = 'Present'
             Name                 = 'Hyper-V-PowerShell'
             IncludeAllSubFeature = $true

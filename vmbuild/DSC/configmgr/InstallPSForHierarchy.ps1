@@ -50,8 +50,7 @@ $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.js
 
 # Wait for ScriptWorkflow.json to exist on CAS
 Write-DscStatus "Waiting for $CSName to begin installation"
-while(!(Test-Path $CSConfigurationFile))
-{
+while (!(Test-Path $CSConfigurationFile)) {
     Write-DscStatus "Waiting for $CSName to begin installation" -RetrySeconds 60
     Start-Sleep -Seconds 60
 }
@@ -59,8 +58,7 @@ while(!(Test-Path $CSConfigurationFile))
 # Read CAS actions file, wait for install to finish
 Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr"
 $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-while($CSConfiguration.$("InstallSCCM").Status -ne "Completed")
-{
+while ($CSConfiguration.$("InstallSCCM").Status -ne "Completed") {
     Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr" -NoLog -RetrySeconds 60
     Start-Sleep -Seconds 60
     $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
@@ -70,8 +68,7 @@ if ($UpdateToLatest) {
     # Read CAS actions file, wait for upgrade to finish
     Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr"
     $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-    while($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed")
-    {
+    while ($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed") {
         Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 60
         Start-Sleep -Seconds 60
         $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
@@ -83,18 +80,24 @@ $Configuration.WaitingForCASFinsihedInstall.Status = 'Completed'
 $Configuration.WaitingForCASFinsihedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-# Create $CM dir, before creating the ini
-if(!(Test-Path C:\$CM))
-{
-    New-Item C:\$CM -ItemType directory | Out-Null
-}
+if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
 
-# Set cource path
-Write-DscStatus "Creating HierarchyPS.ini file"
+    # Set Install action as Running
+    $Configuration.InstallSCCM.Status = 'Running'
+    $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-$CMINIPath = "c:\$CM\HierarchyPS.ini"
+    # Create $CM dir, before creating the ini
+    if (!(Test-Path C:\$CM)) {
+        New-Item C:\$CM -ItemType directory | Out-Null
+    }
 
-$cmini = @'
+    # Set cource path
+    Write-DscStatus "Creating HierarchyPS.ini file"
+
+    $CMINIPath = "c:\$CM\HierarchyPS.ini"
+
+    $cmini = @'
 [Identification]
 Action=InstallPrimarySite
 CDLatest=1
@@ -133,64 +136,64 @@ CCARSiteServer=%CASMachineFQDN%
 
 '@
 
-# Get SQL instance info
-#$inst = (get-itemproperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server').InstalledInstances[0]
-#$p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').$inst
-#$sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
+    # Get SQL instance info
+    #$inst = (get-itemproperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server').InstalledInstances[0]
+    #$p = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL').$inst
+    #$sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
 
-# Set CM Source Path
-$csShare = Invoke-Command -ComputerName $CSName -ScriptBlock { Get-SmbShare | Where-Object {$_.Name -like 'SMS_*' -and $_.Path -notlike '*despoolr.box*' -and $_.Description -like 'SMS Site *'} }
-$cmsourcepath = "\\$CSName\$($csShare.Name)\cd.latest"
+    # Set CM Source Path
+    $csShare = Invoke-Command -ComputerName $CSName -ScriptBlock { Get-SmbShare | Where-Object { $_.Name -like 'SMS_*' -and $_.Path -notlike '*despoolr.box*' -and $_.Description -like 'SMS Site *' } }
+    $cmsourcepath = "\\$CSName\$($csShare.Name)\cd.latest"
 
-# Set ini values
-$cmini = $cmini.Replace('%InstallDir%',$SMSInstallDir)
-$cmini = $cmini.Replace('%MachineFQDN%',"$env:computername.$DomainFullName")
-$cmini = $cmini.Replace('%SQLMachineFQDN%',"$sqlServerName.$DomainFullName")
-$cmini = $cmini.Replace('%SiteCode%',$SiteCode)
-$cmini = $cmini.Replace('%SiteName%',"ConfigMgr Primary Site")
-# $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
-# $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
-$cmini = $cmini.Replace('%CASMachineFQDN%',"$CSName.$DomainFullName")
-$cmini = $cmini.Replace('%REdistPath%',"$cmsourcepath\REdist")
+    # Set ini values
+    $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
+    $cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")
+    $cmini = $cmini.Replace('%SQLMachineFQDN%', "$sqlServerName.$DomainFullName")
+    $cmini = $cmini.Replace('%SiteCode%', $SiteCode)
+    $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+    # $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
+    # $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
+    $cmini = $cmini.Replace('%CASMachineFQDN%', "$CSName.$DomainFullName")
+    $cmini = $cmini.Replace('%REdistPath%', "$cmsourcepath\REdist")
 
-if($sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
-    $cmini = $cmini.Replace('%SQLInstance%',"")
+    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
+        $cmini = $cmini.Replace('%SQLInstance%', "")
+    }
+    else {
+        $tinstance = $sqlInstanceName.ToUpper() + "\"
+        $cmini = $cmini.Replace('%SQLInstance%', $tinstance)
+    }
+
+    # Create ini
+    $cmini > $CMINIPath
+
+    # Set env var to disable open file security warning, otherwise PS hangs in background
+    $env:SEE_MASK_NOZONECHECKS = 1
+
+    # Install CM
+    $CMInstallationFile = "$cmsourcepath\SMSSETUP\BIN\X64\Setup.exe"
+
+    # Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log
+    Write-DscStatusSetup
+
+    Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+
+    Write-DscStatus "Installation finished."
+    Start-Sleep -Seconds 5
+
+    # Delete ini file?
+    # Remove-Item $CMINIPath
+
+    # Wait for Site ready
+    $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+    Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
+    while ($CSConfiguration.$("PSReadytoUse").Status -ne "Completed") {
+        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 60
+        Start-Sleep -Seconds 60
+        $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    }
+
+    $Configuration.InstallSCCM.Status = 'Completed'
+    $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
-else {
-    $tinstance = $sqlInstanceName.ToUpper() + "\"
-    $cmini = $cmini.Replace('%SQLInstance%',$tinstance)
-}
-
-# Create ini
-$cmini > $CMINIPath
-
-# Set env var to disable open file security warning, otherwise PS hangs in background
-$env:SEE_MASK_NOZONECHECKS = 1
-
-# Install CM
-$CMInstallationFile = "$cmsourcepath\SMSSETUP\BIN\X64\Setup.exe"
-
-# Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log
-Write-DscStatusSetup
-
-Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
-
-Write-DscStatus "Installation finished."
-Start-Sleep -Seconds 5
-
-# Delete ini file?
-# Remove-Item $CMINIPath
-
-# Wait for Site ready
-$CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
-while($CSConfiguration.$("PSReadytoUse").Status -ne "Completed")
-{
-    Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 60
-    Start-Sleep -Seconds 60
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
-}
-
-$Configuration.InstallSCCM.Status = 'Completed'
-$Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force

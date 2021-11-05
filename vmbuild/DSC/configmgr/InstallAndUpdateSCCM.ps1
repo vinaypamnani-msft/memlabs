@@ -578,25 +578,28 @@ else {
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
     $PSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PSName }
-    $PSSiteCode = $PSVM.siteCode
-    $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
-    Write-DscStatus "Waiting for Primary site installation to finish"
-    while (!$PSSystemServer) {
-        Write-DscStatus "Waiting for Primary site installation to finish" -NoLog -RetrySeconds 60
-        Start-Sleep -Seconds 60
+
+    if ($PSVM) {
+        $PSSiteCode = $PSVM.siteCode
         $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
-    }
+        Write-DscStatus "Waiting for Primary site installation to finish"
+        while (!$PSSystemServer) {
+            Write-DscStatus "Waiting for Primary site installation to finish" -NoLog -RetrySeconds 60
+            Start-Sleep -Seconds 60
+            $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
+        }
 
-    # Wait for replication ready
-    $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
-    Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'"
-    while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-        Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'" -RetrySeconds 60
-        Start-Sleep -Seconds 60
+        # Wait for replication ready
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
-    }
+        Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'"
+        while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
+            Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'" -RetrySeconds 60
+            Start-Sleep -Seconds 60
+            $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
+        }
 
-    Write-DscStatus "Primary installation complete. Replication link is 'Active'."
+        Write-DscStatus "Primary installation complete. Replication link is 'Active'."
+    }
 
     # Update Actions file
     $Configuration.PSReadyToUse.Status = 'Completed'

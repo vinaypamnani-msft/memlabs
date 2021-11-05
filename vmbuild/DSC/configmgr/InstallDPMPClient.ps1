@@ -16,6 +16,12 @@ $installDPMPRoles = $deployConfig.cmOptions.installDPMPRoles
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 $networkSubnet = $deployConfig.vmOptions.network
 
+# exit if rerunning DSC to add passive site
+if ($null -ne $deployConfig.parameters.ExistingActiveName) {
+    Write-DscStatus "Skip DP/MP/Client install since we're adding Passive site server"
+    return
+}
+
 # overwrite installDPMPRoles to true if client push is true
 if ($pushClients) {
     Write-DscStatus "Client Push is true. Forcing installDPMPRoles to true to allow client push to work."
@@ -119,7 +125,7 @@ $DPMPFQDN = $DPMPName + "." + $DomainFullName
 $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
 if (!$SystemServer) {
     Write-DscStatus "Creating new CM Site System server on $DPMPFQDN"
-    New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN -AccountName $cm_svc | Out-File $global:StatusLog -Append
+    New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN | Out-File $global:StatusLog -Append
     Start-Sleep -Seconds 5
     $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
 }
