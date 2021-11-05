@@ -66,10 +66,13 @@ Configuration FullClusterSetup
         ADUser 'SQLServiceAccount'
         {
             Ensure     = 'Present'
-            UserName   = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAccount
-            Password   = $SqlAdministratorCredential
-            DomainName = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
-            Path       = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUUserPath
+            CannotChangePassword  = $true
+            PasswordNeverExpires  = $true
+            UserPrincipalName     = (($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAccount) + '@' + ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
+            UserName              = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAccount
+            Password              = $SqlAdministratorCredential
+            DomainName            = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
+            Path                  = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUUserPath
 
             Dependson   = '[ADGroup]CASCluster'
 
@@ -79,10 +82,13 @@ Configuration FullClusterSetup
         ADUser 'SQLServiceAgent'
         {
             Ensure     = 'Present'
-            UserName   = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAgent
-            Password   = $SqlAdministratorCredential
-            DomainName = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
-            Path       = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUUserPath
+            CannotChangePassword  = $true
+            PasswordNeverExpires  = $true
+            UserPrincipalName     = (($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAgent) + '@' + ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
+            UserName              = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAgent
+            Password              = $SqlAdministratorCredential
+            DomainName            = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
+            Path                  = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUUserPath
 
             Dependson   = '[ADUser]SQLServiceAccount'
 
@@ -95,8 +101,10 @@ Configuration FullClusterSetup
             UserName        =  ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAccount
             FQDNDomainName  =  ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
             OULocationUser  =  ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUUserPath
+            ClusterDevice   =  @($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' -or $_.role -eq 'ClusterNode2' }).NodeName
+            UserNameCluster = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).UserNameCluster
 
-            Dependson   = '[ActiveDirectorySPN]SQLServiceAccountSPNSetup'
+            Dependson   = '[ADUser]SQLServiceAgent'
 
             PsDscRunAsCredential       = $SqlAdministratorCredential
         }
@@ -374,6 +382,7 @@ $Configuration = @{
             ComputerName      = 'CASCluster'
             SQLServiceAccount = 'SQLServerServiceCAS2'
             SQLServiceAgent   = 'SQLAgentCAS2'
+            UserNameCluster   = 'SQLServerServiceCAS2'
             DomainName        = 'contosomd.com'
             OUUserPath        = 'CN=Users,DC=contosomd,DC=com'
 
