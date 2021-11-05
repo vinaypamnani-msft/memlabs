@@ -388,14 +388,14 @@ function New-RDCManFileFromHyperV {
         $CurrentSmartGroups = $findgroup.SelectNodes('smartGroup')
         foreach ($item in $CurrentSmartGroups){
             #Write-Log $item.properties.name
-            $findGroup.RemoveChild($item)
+            [void]$findGroup.RemoveChild($item)
         }
 
         foreach ($item in $groupFromTemplate.SelectNodes('smartGroup')){
             #write-host "template: $($item.properties.name)"
             $clonedItem = $item.clone()
             $clonedItem = $existing.ImportNode($clonedItem, $true)
-            $findGroup.AppendChild($clonedItem)
+            [void]$findGroup.AppendChild($clonedItem)
         }
         #$roles = $vmListFull | Select-Object -ExpandProperty role
         #$SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | Select-Object -First 1
