@@ -146,33 +146,33 @@ function Write-Exception {
 
     $parentFunctionName = (Get-PSCallStack)[1].FunctionName
     $msg = "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
-    $sb.AppendLine($msg)
+    [void]$sb.AppendLine($msg)
     Write-Host $msg -ForegroundColor Red
 
     $msg = "`n=== Exception.ScriptStackTrace:`n"
-    $sb.AppendLine($msg)
+    [void]$sb.AppendLine($msg)
     Write-Host $msg -ForegroundColor Red
 
     $msg = $ExceptionInfo.ScriptStackTrace
-    $sb.AppendLine($msg)
+    [void]$sb.AppendLine($msg)
     $msg | Out-Host
 
     $msg = "`n=== Get-PSCallStack:`n"
-    $sb.AppendLine($msg)
+    [void]$sb.AppendLine($msg)
     Write-Host $msg -ForegroundColor Red
 
     $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
-    $sb.AppendLine($msg)
+    [void]$sb.AppendLine($msg)
     $msg | Out-Host
 
     if ($AdditionalInfo) {
         $msg = "`n=== Additional Information:`n"
-        $sb.AppendLine($msg)
+        [void]$sb.AppendLine($msg)
         Write-Host "$msg" -ForegroundColor Red
         Write-Host "Dumped to $crashFile"
 
         $msg = ($AdditionalInfo | Out-String).Trim()
-        $sb.AppendLine($msg)
+        [void]$sb.AppendLine($msg)
     }
 
     $sb.ToString() | Out-File -FilePath $crashFile -Force

@@ -1250,8 +1250,6 @@ function New-DeployConfig {
             ThisMachineRole    = $null
         }
 
-        if ($params.StartsWith("crash")) {}
-
         $existingVMs = Get-List -Type VM -DomainName $configObject.vmOptions.domainName
 
         $deploy = [PSCustomObject]@{
