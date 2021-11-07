@@ -2599,7 +2599,7 @@ class ActiveDirectorySPN {
 			$UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
 			$UserSID = $UserSID.Value
 
-            write-verbose ('Device:' + $_UserName + ' SIDValue is:' + $UserSID + ' On Domain:' + $_FQDNDomainName)
+            write-verbose ('User:' + $_UserName + ' SIDValue is:' + $UserSID + ' On Domain:' + $_FQDNDomainName)
 			
 			$oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
 			$SIDMatch = $Matches[0]
@@ -2657,7 +2657,7 @@ class ActiveDirectorySPN {
 			$ACL.SetSecurityDescriptorSddlForm($newSSDL)
 			
 			Set-Acl -AclObject $acl -Path "AD:$DeviceObject"
-			write-verbose (' Permissions for User:' + $_DeviceName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName + ' have been set')
+			write-verbose (' Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName + ' have been set')
 		}
 	}
 	

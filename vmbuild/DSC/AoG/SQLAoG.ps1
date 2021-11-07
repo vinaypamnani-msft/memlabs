@@ -104,8 +104,9 @@
             ServerName           = $Node.NodeName
             InstanceName         = 'CAS'
             AvailabilityGroup    = 'CASAlwaysOn'
+            DHCP                 =  $true
             Name                 = 'CASAlwaysOn'
-            IpAddress            = '10.250.250.50/255.255.255.0'
+            IpAddress            = '10.250.250.1/255.255.255.0'
             Port                 =  1500
 
             DependsOn            = '[SqlAG]CMCASAG'

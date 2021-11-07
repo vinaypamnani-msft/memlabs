@@ -255,7 +255,7 @@ Configuration FullClusterSetup
         xCluster CreateCluster
         {
             Name                          = $Node.ClusterName
-            StaticIPAddress               = $Node.ClusterIPAddress
+            #StaticIPAddress               = $Node.ClusterIPAddress
             # This user must have the permission to create the CNO (Cluster Name Object) in Active Directory, unless it is prestaged.
             DomainAdministratorCredential = $SqlAdministratorCredential
             DependsOn                     = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
@@ -269,6 +269,18 @@ Configuration FullClusterSetup
             Role        = '0'
 
             DependsOn = '[xCluster]CreateCluster'
+            PsDscRunAsCredential       = $SqlAdministratorCredential
+        }
+
+        xClusterNetwork 'ChangeNetwork-10'
+        {
+            Address     =  $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.Address2
+            AddressMask =  $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.AddressMask2
+            Name        =  $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.Name2
+            Role        = '3'
+
+            DependsOn = '[xCluster]CreateCluster'
+            PsDscRunAsCredential       = $SqlAdministratorCredential
         }
 
         ADGroup 'CASCluster'
@@ -334,9 +346,11 @@ Configuration FullClusterSetup
         xCluster JoinSecondNodeToCluster
         {
             Name                          = $Node.ClusterName
-            StaticIPAddress               = $Node.ClusterIPAddress
+            #StaticIPAddress               = $Node.ClusterIPAddress
             DomainAdministratorCredential = $SqlAdministratorCredential
             DependsOn                     = '[xWaitForCluster]WaitForCluster'
+
+            PsDscRunAsCredential       = $SqlAdministratorCredential
         }
 
         xClusterQuorum 'ClusterWitness'
@@ -346,6 +360,7 @@ Configuration FullClusterSetup
             Resource         = $AllNodes.Where{$_.Role -eq 'ClusterNode2' }.Resource
 
             DependsOn = '[xCluster]JoinSecondNodeToCluster'
+            PsDscRunAsCredential       = $SqlAdministratorCredential
         }
     }
 }
@@ -363,6 +378,9 @@ $Configuration = @{
             Address          = '192.168.1.0'
             AddressMask      = '255.255.255.0'
             Name             = 'Ethernet'
+            Address2          = '10.250.250.0'
+            AddressMask2      = '255.255.255.0'
+            Name2             = 'Ethernet 2'
             
         },
 
@@ -380,9 +398,9 @@ $Configuration = @{
             Role              = 'ADSetup'
             ADmembers         = 'SCCM-CASClust1$','SCCM-CASClust2$', 'CASCluster$'
             ComputerName      = 'CASCluster'
-            SQLServiceAccount = 'SQLServerServiceCAS2'
-            SQLServiceAgent   = 'SQLAgentCAS2'
-            UserNameCluster   = 'SQLServerServiceCAS2'
+            SQLServiceAccount = 'SQLServerServiceCAS'
+            SQLServiceAgent   = 'SQLAgentCAS'
+            UserNameCluster   = 'SQLServerServiceCAS'
             DomainName        = 'contosomd.com'
             OUUserPath        = 'CN=Users,DC=contosomd,DC=com'
 
@@ -408,7 +426,7 @@ $Configuration = @{
             PSDscAllowDomainUser         = $true
             PSDscAllowPlainTextPassword  = $true
             ClusterName                 = 'CASCluster'
-            ClusterIPAddress            = '10.250.250.30/24'
+            #ClusterIPAddress            = '10.250.250.30/24'
         }
     )
 }
