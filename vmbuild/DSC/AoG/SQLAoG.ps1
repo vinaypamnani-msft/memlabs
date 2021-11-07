@@ -8,6 +8,7 @@
     )
 
     Import-DscResource -ModuleName 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration'
 
      Node $AllNodes.Where{$_.Role -eq 'ClusterNode1' }.NodeName
     {
@@ -15,20 +16,53 @@
         SqlServiceAccount 'SetServiceAccountSQL_User'
         {
             ServerName     = $Node.NodeName
-            InstanceName   = 'CAS'
+            InstanceName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             ServiceType    = 'DatabaseEngine'
             ServiceAccount = $SqlAdministratorCredential
             RestartService = $true
+            PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
         #Change SQL Service Account
         SqlServiceAccount 'SetServiceAccountAgent_User'
         {
             ServerName     = $Node.NodeName
-            InstanceName   = 'CAS'
+            InstanceName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             ServiceType    = 'SQLServerAgent'
             ServiceAccount = $SqlAdministratorCredential
             RestartService = $true
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+ 
+        SqlLogin 'Add_WindowsUser'
+        {
+            Ensure               = 'Present'
+            Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).SQLAgentUser
+            LoginType            = 'WindowsUser'
+            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+
+        SqlRole 'Add_ServerRole'
+        {
+            Ensure               = 'Present'
+            ServerRoleName       = 'SysAdmin'
+            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            MembersToInclude     = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).SQLAgentUser), 'BUILTIN\Administrators'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+            DependsOn = '[SqlLogin]Add_WindowsUser'
+        }
+
+        Service 'ChangeStartupAgent'
+        {
+            Name = 'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            StartupType = "Automatic"
+            State       = "Running"
+            DependsOn   = '[SqlServiceAccount]SetServiceAccountAgent_User', '[SqlRole]Add_ServerRole'
+            PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
         # Adding the required service account to allow the cluster to log into SQL
@@ -38,7 +72,7 @@
             Name                 = 'NT SERVICE\ClusSvc'
             LoginType            = 'WindowsUser'
             ServerName           = $Node.NodeName
-            InstanceName         = 'CAS'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
 
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -46,10 +80,10 @@
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions'
         {
-            DependsOn            = '[SqlLogin]AddNTServiceClusSvc'
+            DependsOn            = '[SqlLogin]AddNTServiceClusSvc', '[Service]ChangeStartupAgent'
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
-            InstanceName         = 'CAS'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             Principal            = 'NT SERVICE\ClusSvc'
             Permission           = 'AlterAnyAvailabilityGroup', 'ViewServerState'
 
@@ -64,7 +98,7 @@
             Ensure               = 'Present'
             Port                 = 5022
             ServerName           = $Node.NodeName
-            InstanceName         = 'CAS'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
 
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -73,7 +107,7 @@
         SqlAlwaysOnService 'EnableHADR'
         {
             Ensure               = 'Present'
-            InstanceName         = 'CAS'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             ServerName           = $Node.NodeName
 
             PsDscRunAsCredential = $SqlAdministratorCredential
@@ -83,8 +117,8 @@
         SqlAG 'CMCASAG'
         {
             Ensure                        = 'Present'
-            Name                          = 'CASAlwaysOn'
-            InstanceName                  = 'CAS'
+            Name                          = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterName
+            InstanceName                  = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             ServerName                    = $Node.NodeName
             AvailabilityMode              = 'SynchronousCommit'
             BackupPriority                = 50
@@ -102,10 +136,10 @@
         {
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
-            InstanceName         = 'CAS'
-            AvailabilityGroup    = 'CASAlwaysOn'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            AvailabilityGroup    = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterName
             DHCP                 =  $true
-            Name                 = 'CASAlwaysOn'
+            Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterName
             IpAddress            = '10.250.250.1/255.255.255.0'
             Port                 =  1500
 
@@ -120,20 +154,53 @@
         SqlServiceAccount 'SetServiceAccountSQL_User'
         {
             ServerName     = $Node.NodeName
-            InstanceName   = 'CAS'
+            InstanceName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             ServiceType    = 'DatabaseEngine'
             ServiceAccount = $SqlAdministratorCredential
             RestartService = $true
+            PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
         #Change SQL Service Account
         SqlServiceAccount 'SetServiceAccountAgent_User'
         {
             ServerName     = $Node.NodeName
-            InstanceName   = 'CAS'
+            InstanceName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             ServiceType    = 'SQLServerAgent'
             ServiceAccount = $SqlAdministratorCredential
             RestartService = $true
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+        SqlLogin 'Add_WindowsUser'
+        {
+            Ensure               = 'Present'
+            Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).SQLAgentUser
+            LoginType            = 'WindowsUser'
+            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+
+        SqlRole 'Add_ServerRole'
+        {
+            Ensure               = 'Present'
+            ServerRoleName       = 'SysAdmin'
+            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            MembersToInclude     = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).SQLAgentUser), 'BUILTIN\Administrators'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+            DependsOn = '[SqlLogin]Add_WindowsUser'
+        }
+
+        Service 'ChangeStartupAgent'
+        {
+            Name = 'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            StartupType = "Automatic"
+            State       = "Running"
+            DependsOn   = '[SqlServiceAccount]SetServiceAccountAgent_User', '[SqlRole]Add_ServerRole'
+            PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
         # Adding the required service account to allow the cluster to log into SQL
@@ -143,7 +210,7 @@
             Name                 = 'NT SERVICE\ClusSvc'
             LoginType            = 'WindowsUser'
             ServerName           = $Node.NodeName
-            InstanceName         = 'CAS'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
 
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -151,10 +218,10 @@
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions'
         {
-            DependsOn            = '[SqlLogin]AddNTServiceClusSvc'
+            DependsOn            = '[SqlLogin]AddNTServiceClusSvc', '[Service]ChangeStartupAgent'
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
-            InstanceName         = 'CAS'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             Principal            = 'NT SERVICE\ClusSvc'
             Permission           = 'AlterAnyAvailabilityGroup', 'ViewServerState'
 
@@ -169,7 +236,7 @@
             Ensure               = 'Present'
             Port                 = 5022
             ServerName           = $Node.NodeName
-            InstanceName         = 'CAS'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
 
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -177,7 +244,7 @@
         SqlAlwaysOnService EnableHADR
         {
             Ensure               = 'Present'
-            InstanceName         = 'CAS'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             ServerName           = $Node.NodeName
 
             PsDscRunAsCredential = $SqlAdministratorCredential
@@ -185,11 +252,11 @@
 
         SqlWaitForAG 'SQLConfigureAG-WaitAG'
         {
-            Name                 = 'CASAlwaysOn'
-            RetryIntervalSec     = 20
-            RetryCount           = 30
+            Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterName
+            RetryIntervalSec     = 60
+            RetryCount           = 3
             ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
-            InstanceName         = 'CAS'
+            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
 
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -197,19 +264,19 @@
         # Add the availability group replica to the availability group
         SqlAGReplica 'AddReplica'
         {
-               
+            
             Ensure                     = 'Present'
-            Name                       = "$(($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName)\CAS"
-            AvailabilityGroupName      = 'CASAlwaysOn'
+            Name                       = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName) + '\' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            AvailabilityGroupName      = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterName
             ServerName                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
-            InstanceName               = 'CAS'
+            InstanceName               = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             AvailabilityMode              = 'SynchronousCommit'
             BackupPriority                = 50
             ConnectionModeInPrimaryRole   = 'AllowAllConnections'
             ConnectionModeInSecondaryRole = 'AllowAllConnections'
             FailoverMode                  = 'Manual'
-            PrimaryReplicaServerName   = 'SCCM-CASClust1.contosomd.com'
-            PrimaryReplicaInstanceName = 'CAS'
+            PrimaryReplicaServerName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).PrimaryReplicaServerName
+            PrimaryReplicaInstanceName = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             ProcessOnlyOnActiveNode    = $true
 
             DependsOn                  = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
@@ -227,7 +294,10 @@ $Configuration = @{
             NodeName = 'SCCM-CASClust1'
 
             # This is used in the configuration to know which resource to compile.
-            Role     = 'ClusterNode1'
+            Role                     = 'ClusterNode1'
+            InstanceName             = 'CAS'
+            ClusterName              = 'CASAlwaysOn'
+            SQLAgentUser             = 'contosomd\SQLAgentCAS'
         },
 
         # Node02 - Second cluster node
@@ -237,6 +307,7 @@ $Configuration = @{
 
             # This is used in the configuration to know which resource to compile.
             Role     = 'ClusterNode2'
+            PrimaryReplicaServerName = 'SCCM-CASClust1.contosomd.com'
         },
         @{
             NodeName                     = "*"
