@@ -1560,7 +1560,8 @@ function Get-List {
                     $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
 
                     foreach ($prop in $vmNoteObject.PSObject.Properties) {
-                        $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+                        $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
+                        $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                     }
                 }
 
