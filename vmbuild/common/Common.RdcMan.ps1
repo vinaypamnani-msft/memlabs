@@ -381,7 +381,11 @@ function New-RDCManFileFromHyperV {
                 }
             }
             $ForceOverwrite = $true
-            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite) -eq $True) {
+            $vmID = $null
+            if ($vm.Role -eq "OSDClient"){
+                $vmID = $vm.vmId
+            }
+            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID) -eq $True) {
                 $shouldSave = $true
             }
         }
@@ -406,15 +410,15 @@ function New-RDCManFileFromHyperV {
             $clonedSG.properties.name = "OSD Clients"
             $clonedSG.ruleGroup.rule.value = "OSDClient"
             [void]$findgroup.AppendChild($clonedSG)
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value “Microsoft Virtual Console Service/*” -Force
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value “Microsoft Virtual Console Service/*” -Force
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentials -Name Hyper-V -PropertyType String -Value “Microsoft Virtual Console Service/*” -Force
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsDomain -Name Hyper-V -PropertyType String -Value “Microsoft Virtual Console Service/*” -Force
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentials -Name Hyper-V -PropertyType String -Value “Microsoft Virtual Console Service/*” -Force
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value “Microsoft Virtual Console Service/*” -Force
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnlyDomain -Name Hyper-V -PropertyType String -Value “Microsoft Virtual Console Service/*” -Force
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentials -Name Hyper-V -PropertyType String -Value “Microsoft Virtual Console Service/*” -Force
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value “Microsoft Virtual Console Service/*” -Force
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnlyDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
         }
         #if ($roles -contains "AADClient") {
         #    Write-Host "Adding SmartGroup AAD Clients"
@@ -524,8 +528,12 @@ function Add-RDCManServerToGroup {
         [object]$groupFromTemplate,
         [object]$existing,
         [string]$comment,
+        [string]$vmID = $null,
         [bool]$ForceOverwrite
     )
+
+    #<connectionType>VirtualMachineConsoleConnect</connectionType>
+    #<vmId>TEMPLATE</vmId>
 
     if ($ForceOverwrite) {
         #Delete Old Records and let them be regenerated
@@ -547,7 +555,32 @@ function Add-RDCManServerToGroup {
         $newserver.properties.name = $serverName
         $newserver.properties.displayName = $displayName
         $newserver.properties.comment = $comment
+
+
         $clonedNode = $existing.ImportNode($newserver, $true)
+        if ($null -ne $vmID){
+
+            [xml]$logonCredsXml = @"
+            <logonCredentials inherit="None">
+             <profileName scope="Local">Custom</profileName>
+             <userName>labadmin</userName>
+             <password />
+             <domain />
+            </logonCredentials>
+"@
+            $clonedNode.AppendChild($existing.ImportNode($logonCredsXml.logonCredentials, $true))
+
+            $clonedNode.properties.name = "localhost"
+            $e = $existing.CreateElement("connectionType")
+            $e.set_InnerText("VirtualMachineConsoleConnect")
+            $clonedNode2 = $existing.ImportNode($e, $true)
+            [void]$clonedNode.properties.AppendChild($clonedNode2)
+            $f = $existing.CreateElement("vmId")
+            $f.set_InnerText($vmID)
+            $clonedNode2 = $existing.ImportNode($f, $true)
+            [void]$clonedNode.properties.AppendChild($clonedNode2)
+        }
+
         $findgroup.group.AppendChild($clonedNode)
         return $True
     }

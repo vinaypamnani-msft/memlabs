@@ -1036,6 +1036,9 @@ function Select-NewDomainConfig {
         $response = $null
         while (-not $response) {
             $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
+            if ([string]::IsNullOrWhiteSpace($response)){
+                return
+            }
         }
 
         $CASJson = Join-Path $sampleDir "Hierarchy.json"
@@ -1260,9 +1263,9 @@ function Show-ExistingNetwork {
 
     }
 
-    $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" } | Measure-Object).Count
+    $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" -and ($_.Role -eq "CAS" -or $_.Role -eq "Primary" -or $_.Role -eq "DC") } | Measure-Object).Count
     if ($TotalStoppedVMs -gt 0) {
-        $response = Read-Host2 -Prompt "$TotalStoppedVMs VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp
+        $response = Read-Host2 -Prompt "$TotalStoppedVMs Critical VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp
         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
         }
         else {
