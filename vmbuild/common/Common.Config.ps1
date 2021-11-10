@@ -258,7 +258,7 @@ function Test-ValidVmOptions {
 
         $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) | Select-Object -First 1 }
         if ($existingSubnet) {
-            if ($($ConfigObject.vmoptions.domainName) -ne $($existingSubnet.Domain)) {
+            if ($($ConfigObject.vmoptions.domainName.Trim()) -ne $($existingSubnet.Domain.Trim())) {
                 Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
             }
             $CASorPRI = ($ConfigObject.virtualMachines.role -contains "CAS") -or (($ConfigObject.virtualMachines.role -contains "Primary"))
