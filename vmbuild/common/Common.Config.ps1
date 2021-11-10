@@ -259,7 +259,7 @@ function Test-ValidVmOptions {
         $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) | Select-Object -First 1 }
         if ($existingSubnet) {
             if ($($ConfigObject.vmoptions.domainName) -ne $($existingSubnet.Domain)) {
-                Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
             }
             $CASorPRI = ($ConfigObject.virtualMachines.role -contains "CAS") -or (($ConfigObject.virtualMachines.role -contains "Primary"))
             if ($CASorPRI) {
@@ -1560,7 +1560,8 @@ function Get-List {
                     $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
 
                     foreach ($prop in $vmNoteObject.PSObject.Properties) {
-                        $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+                        $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
+                        $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                     }
                 }
 
