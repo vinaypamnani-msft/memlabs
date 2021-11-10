@@ -333,8 +333,10 @@ function Test-ValidVmSupported {
     }
 
     # Supported OS
-    if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+    if ($VM.role -ne "OSDClient") {
+        if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
+            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+        }
     }
 
     # Supported DSC Roles for Existing scenario

@@ -132,9 +132,20 @@ $VM_Create = {
         }
 
         # Create VM
-        $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig -WhatIf:$using:WhatIf
+        if ($currentItem.role -eq "OSDClient") {
+            $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -OSDClient -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig -WhatIf:$using:WhatIf
+        }
+        else {
+            $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig -WhatIf:$using:WhatIf
+        }
         if (-not $created) {
             Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild.log." -Failure -OutputStream -HostOnly
+            return
+        }
+
+        if ($currentItem.role -eq "OSDClient") {
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
+            Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
             return
         }
 
@@ -889,15 +900,17 @@ try {
     Write-Log "Main: $successCount jobs completed successfully, $failedCount failed."
 
     $timer.Stop()
-    Write-Host
 
     if (Test-Path "C:\tools\rdcman.exe") {
-        Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
+        Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Activity
         $roles = $deployConfig.virtualMachines | Select-Object -ExpandProperty Role
-        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient") -or ($roles -Contains "DomainMember") -or ($roles -Contains "WorkgroupMember")) {
+        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient") -or ($roles -Contains "DomainMember") -or ($roles -Contains "WorkgroupMember") -or ($roles -Contains "OSDClient")) {
+            Write-Log "Main: Updating RDCMan file"
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         }
     }
+
+    Write-Host
     Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
     $NewLabsuccess = $true
 }

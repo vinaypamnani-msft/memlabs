@@ -810,7 +810,7 @@ function New-VirtualMachine {
         [string]$VmName,
         [Parameter(Mandatory = $true)]
         [string]$VmPath,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
         [string]$SourceDiskPath,
         [Parameter(Mandatory = $true)]
         [string]$Memory,
@@ -827,6 +827,8 @@ function New-VirtualMachine {
         [Parameter()]
         [PsCustomObject] $DeployConfig,
         [Parameter(Mandatory = $false)]
+        [switch]$OSDClient,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -839,7 +841,7 @@ function New-VirtualMachine {
     Write-Log "New-VirtualMachine: $VmName`: Creating Virtual Machine"
 
     # Test if source file exists
-    if (-not (Test-Path $SourceDiskPath)) {
+    if (-not (Test-Path $SourceDiskPath) -and (-not $OSDClient.IsPresent)) {
         Write-Log "New-VirtualMachine: $VmName`: $SourceDiskPath not found. Cannot create new VM."
         return $false
     }
@@ -888,10 +890,20 @@ function New-VirtualMachine {
     # Copy sysprepped image to VM location
     $osDiskName = "$($VmName)_OS.vhdx"
     $osDiskPath = Join-Path $vm.Path $osDiskName
-    $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
-    if (-not $worked) {
-        Write-Log "New-VirtualMachine: $VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
-        return $false
+
+    if (-not $OSDClient.IsPresent) {
+        $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
+        if (-not $worked) {
+            Write-Log "New-VirtualMachine: $VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+            return $false
+        }
+    }
+    else {
+        $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
+        if (-not $worked) {
+            Write-Log "New-VirtualMachine: $VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+            return $false
+        }
     }
 
     Write-Log "New-VirtualMachine: $VmName`: Enabling Hyper-V Guest Services"
@@ -920,6 +932,7 @@ function New-VirtualMachine {
     Write-Log "New-VirtualMachine: $VmName`: Adding virtual disk $osDiskPath"
     Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0
 
+
     Write-Log "New-VirtualMachine: $VmName`: Adding a DVD drive"
     Add-VMDvdDrive -VMName $VmName
 
@@ -946,29 +959,102 @@ function New-VirtualMachine {
 
     # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
     if ($null -ne $f_file) {
-        Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net
+        if (-not $OSDClient.IsPresent) {
+            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net
+        }
+        else {
+            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd
+        }
     }
     else {
-        Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net
+        if (-not $OSDClient.IsPresent) {
+            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net
+        }
+        else {
+            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd
+        }
     }
 
-    try {
-        Write-Log "New-VirtualMachine: $VmName`: Starting virtual machine"
-        Start-VM -Name $VmName -ErrorAction Stop
-    }
-    catch {
+    if (-not $OSDClient.IsPresent) {
         try {
-            Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message). Retrying once..." -Warning
-            Start-Sleep -Seconds 60
+            Write-Log "New-VirtualMachine: $VmName`: Starting virtual machine"
             Start-VM -Name $VmName -ErrorAction Stop
         }
         catch {
-            Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message)" -Failure
-            return $false
+            try {
+                Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message). Retrying once..." -Warning
+                Start-Sleep -Seconds 60
+                Start-VM -Name $VmName -ErrorAction Stop
+            }
+            catch {
+                Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message)" -Failure
+                return $false
+            }
         }
     }
 
     return $true
+}
+
+function New-BareVirtualMachine {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $true)]
+        [string]$VmPath,
+        [Parameter(Mandatory = $true)]
+        [string]$Memory,
+        [Parameter(Mandatory = $true)]
+        [int]$Processors,
+        [Parameter(Mandatory = $true)]
+        [int]$Generation,
+        [Parameter(Mandatory = $true)]
+        [string]$SwitchName,
+        [Parameter(Mandatory = $false)]
+        [object]$AdditionalDisks,
+        [Parameter()]
+        [PsCustomObject] $DeployConfig,
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    # WhatIf
+    if ($WhatIf) {
+        Write-Log "New-BareVirtualMachine - WhatIf: Will create VM $VmName in $VmPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName"
+        return $true
+    }
+
+    Write-Log "New-BareVirtualMachine: $VmName`: Creating Virtual Machine"
+
+    # VM Exists
+    $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    if ($vmTest -and $ForceNew.IsPresent) {
+        Write-Log "New-BareVirtualMachine: $VmName`: Virtual machine already exists. Exiting."
+        return $false
+    }
+
+    # Make sure Existing VM Path is gone!
+    $VmSubPath = Join-Path $VmPath $VmName
+    if (Test-Path -Path $VmSubPath) {
+        Write-Log "New-BareVirtualMachine: $VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
+        Remove-Item -Path $VmSubPath -Force -Recurse
+        Write-Log "New-BareVirtualMachine: $VmName`: Purge complete." -Verbose
+    }
+
+    # Create new VM
+    try {
+        $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
+    }
+    catch {
+        Write-Log "New-BareVirtualMachine: $VmName`: Failed to create new VM. $_"
+        return $false
+    }
+
+    # Add VMNote as soon as VM is created
+    if ($DeployConfig) {
+        New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+    }
+
 }
 
 function Get-AvailableMemoryGB {
@@ -1572,7 +1658,8 @@ function Set-SupportedOptions {
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
-        "AADClient"
+        "AADClient",
+        "OSDClient"
     )
 
     $rolesForExisting = @(
@@ -1584,7 +1671,8 @@ function Set-SupportedOptions {
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
-        "AADClient"
+        "AADClient",
+        "OSDClient"
     )
 
     $cmVersions = @(
