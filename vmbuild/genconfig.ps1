@@ -771,6 +771,9 @@ function Get-NewMachineName {
     $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
     $RoleName = $Role
+    if ($Role -eq "OSDClient"){
+        $RoleName = "OSD"
+    }
     if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role) -or $Role -eq "WorkgroupMember" -or $Role -eq "AADClient" -or $role -eq "InternetClient") {
         if (($global:config.vmOptions.prefix.length) -gt 4) {
             $RoleName = "Mem"
@@ -2700,6 +2703,10 @@ function Add-NewVMForRole {
             }
             $virtualMachine.Memory = "2GB"
         }
+        "OSDClient" {
+            $virtualMachine.memory = "2GB"
+            $virtualMachine.PsObject.Members.Remove('operatingSystem')
+        }
         "DPMP" {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
@@ -2881,7 +2888,7 @@ function Select-VirtualMachines {
                                 }
                             }
                             else {
-                                if ($virtualMachine.OperatingSystem.Contains("Server")) {
+                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL"; "S" = "Add SQL" }
                                     }
