@@ -996,67 +996,6 @@ function New-VirtualMachine {
     return $true
 }
 
-function New-BareVirtualMachine {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$VmName,
-        [Parameter(Mandatory = $true)]
-        [string]$VmPath,
-        [Parameter(Mandatory = $true)]
-        [string]$Memory,
-        [Parameter(Mandatory = $true)]
-        [int]$Processors,
-        [Parameter(Mandatory = $true)]
-        [int]$Generation,
-        [Parameter(Mandatory = $true)]
-        [string]$SwitchName,
-        [Parameter(Mandatory = $false)]
-        [object]$AdditionalDisks,
-        [Parameter()]
-        [PsCustomObject] $DeployConfig,
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
-    )
-
-    # WhatIf
-    if ($WhatIf) {
-        Write-Log "New-BareVirtualMachine - WhatIf: Will create VM $VmName in $VmPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName"
-        return $true
-    }
-
-    Write-Log "New-BareVirtualMachine: $VmName`: Creating Virtual Machine"
-
-    # VM Exists
-    $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
-    if ($vmTest -and $ForceNew.IsPresent) {
-        Write-Log "New-BareVirtualMachine: $VmName`: Virtual machine already exists. Exiting."
-        return $false
-    }
-
-    # Make sure Existing VM Path is gone!
-    $VmSubPath = Join-Path $VmPath $VmName
-    if (Test-Path -Path $VmSubPath) {
-        Write-Log "New-BareVirtualMachine: $VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
-        Remove-Item -Path $VmSubPath -Force -Recurse
-        Write-Log "New-BareVirtualMachine: $VmName`: Purge complete." -Verbose
-    }
-
-    # Create new VM
-    try {
-        $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
-    }
-    catch {
-        Write-Log "New-BareVirtualMachine: $VmName`: Failed to create new VM. $_"
-        return $false
-    }
-
-    # Add VMNote as soon as VM is created
-    if ($DeployConfig) {
-        New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
-    }
-
-}
-
 function Get-AvailableMemoryGB {
     $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
     $availableMemory = ($availableMemory - ("4GB" / 1kB)) * 1KB / 1GB
