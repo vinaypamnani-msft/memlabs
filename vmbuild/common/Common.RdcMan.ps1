@@ -397,16 +397,16 @@ function New-RDCManFileFromHyperV {
             $clonedItem = $existing.ImportNode($clonedItem, $true)
             [void]$findGroup.AppendChild($clonedItem)
         }
-        #$roles = $vmListFull | Select-Object -ExpandProperty role
-        #$SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | Select-Object -First 1
+        $roles = $vmListFull | Select-Object -ExpandProperty role
+        $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | Select-Object -First 1
         #$ruleToClone = $SmartGroupToClone.ruleGroup.rule
-        #$clonedSG = $SmartGroupToClone.clone()
-        #if ($roles -contains "InternetClient") {
-        #    $clonedSG = $SmartGroupToClone.clone()
-        #    $clonedSG.properties.name = "Members - Internet"
-        #    $clonedSG.ruleGroup.rule.value = "InternetClient"
-        #    #    $findgroup.AppendChild($clonedSG)
-        #}
+        $clonedSG = $SmartGroupToClone.clone()
+        if ($roles -contains "OSDClient") {
+            $clonedSG = $SmartGroupToClone.clone()
+            $clonedSG.properties.name = "OSD Clients"
+            $clonedSG.ruleGroup.rule.value = "OSDClient"
+                [void]$findgroup.AppendChild($clonedSG)
+        }
         #if ($roles -contains "AADClient") {
         #    Write-Host "Adding SmartGroup AAD Clients"
         #    $clonedSG = $SmartGroupToClone.clone()
