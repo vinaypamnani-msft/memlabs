@@ -558,7 +558,7 @@ function Add-RDCManServerToGroup {
 
 
         $clonedNode = $existing.ImportNode($newserver, $true)
-        if ($null -ne $vmID){
+        if (-not [string]::IsNullOrWhiteSpace($vmID)){
 
             [xml]$logonCredsXml = @"
             <logonCredentials inherit="None">
