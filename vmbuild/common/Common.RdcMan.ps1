@@ -535,6 +535,10 @@ function Add-RDCManServerToGroup {
     #<connectionType>VirtualMachineConsoleConnect</connectionType>
     #<vmId>TEMPLATE</vmId>
 
+    if (-not [string]::IsNullOrWhiteSpace($vmID)){
+        $displayName = "[console] "+ $displayName
+    }
+
     if ($ForceOverwrite) {
         #Delete Old Records and let them be regenerated
 
@@ -570,7 +574,7 @@ function Add-RDCManServerToGroup {
 "@
             $clonedNode.AppendChild($existing.ImportNode($logonCredsXml.logonCredentials, $true))
 
-            $clonedNode.properties.name = "localhost"
+            $clonedNode.properties.name = $env:computername
             $e = $existing.CreateElement("connectionType")
             $e.set_InnerText("VirtualMachineConsoleConnect")
             $clonedNode2 = $existing.ImportNode($e, $true)
