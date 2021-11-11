@@ -573,7 +573,7 @@ function Add-RDCManServerToGroup {
             </logonCredentials>
 "@
             $clonedNode.AppendChild($existing.ImportNode($logonCredsXml.logonCredentials, $true))
-
+            $clonedNode.logonCredentials.userName =  $env:username
             $clonedNode.properties.name = $env:computername
             $e = $existing.CreateElement("connectionType")
             $e.set_InnerText("VirtualMachineConsoleConnect")
