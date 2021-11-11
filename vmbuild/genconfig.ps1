@@ -10,14 +10,15 @@ $return = [PSCustomObject]@{
     ForceNew       = $false
 }
 
+# Set Debug & Verbose
+$enableVerbose = if ($PSBoundParameters.Verbose -eq $true) { $true } else { $false };
+$enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false };
+
 if (-not $InternalUseOnly.IsPresent) {
     if ($Common.Initialized) {
         $Common.Initialized = $false
     }
 
-    # Set Verbose
-    $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
-    $Debug = $PSCmdlet.MyInvocation.BoundParameters["Debug"].IsPresent
     # Dot source common
     . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 }
@@ -174,7 +175,7 @@ function Select-DomainMenu {
         Write-Host
         Write-Host "Domain '$domain' contains these resources:"
         Write-Host
-        (get-list -type vm  -DomainName $domain | Select-Object VmName, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table  | Out-String).Trim() | out-host
+        (get-list -type vm  -DomainName $domain | Select-Object VmName, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
         #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
 
         $customOptions = [ordered]@{
@@ -595,7 +596,7 @@ function Select-DeleteDomain {
 
 function Select-DeletePending {
 
-    get-list -Type VM  | Where-Object { $_.InProgress -eq "True" } | Format-Table | Out-Host
+    get-list -Type VM | Where-Object { $_.InProgress -eq "True" } | Format-Table | Out-Host
     Write-Host "Please confirm these VM's are not currently in process of being deployed."
     Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
     $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
@@ -672,7 +673,7 @@ function Select-MainMenu {
         if ($InternalUseOnly.IsPresent) {
             $customOptions += @{ "D" = "Deploy Config%Green%Green" }
         }
-        if ($Debug) {
+        if ($enableDebug) {
             $customOptions += @{ "R" = "Return deployConfig" }
         }
 
@@ -771,7 +772,7 @@ function Get-NewMachineName {
     $ConfigCount = ($config.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
     $RoleName = $Role
-    if ($Role -eq "OSDClient"){
+    if ($Role -eq "OSDClient") {
         $RoleName = "OSD"
     }
     if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role) -or $Role -eq "WorkgroupMember" -or $Role -eq "AADClient" -or $role -eq "InternetClient") {
@@ -1036,7 +1037,7 @@ function Select-NewDomainConfig {
         $response = $null
         while (-not $response) {
             $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
-            if ([string]::IsNullOrWhiteSpace($response)){
+            if ([string]::IsNullOrWhiteSpace($response)) {
                 return
             }
         }
@@ -1191,7 +1192,7 @@ Function Get-DomainStatsLine {
     $ExistingDPMPCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $ExistingSQLCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
     $ExistingSubnetCount = (Get-List -Type VM -Domain $DomainName | Select-Object -Property Subnet -unique | measure-object).Count
-    $TotalVMs = (Get-List -Type VM -Domain $DomainName  | Measure-Object).Count
+    $TotalVMs = (Get-List -Type VM -Domain $DomainName | Measure-Object).Count
     $TotalRunningVMs = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
     $TotalMem = (Get-List -Type VM -Domain $DomainName | Measure-Object -Sum MemoryGB).Sum
     $TotalMaxMem = (Get-List -Type VM -Domain $DomainName | Measure-Object -Sum MemoryStartupGB).Sum
@@ -1248,7 +1249,7 @@ function Show-ExistingNetwork {
         }
         $domain = ($domainExpanded -Split " ")[0]
 
-        get-list -Type VM -DomainName $domain |  Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Subnet, SQLVersion | Out-Host
+        get-list -Type VM -DomainName $domain | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Subnet, SQLVersion | Out-Host
 
         $response = Read-Host2 -Prompt "Add new VMs to this domain? (Y/n)" -HideHelp
         if (-not [String]::IsNullOrWhiteSpace($response)) {

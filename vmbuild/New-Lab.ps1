@@ -1,3 +1,4 @@
+[CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
     [string]$Configuration,
@@ -22,9 +23,12 @@ if ($Common.Initialized) {
     $Common.Initialized = $false
 }
 
-# Set Verbose
-$enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
 $NewLabsuccess = $false
+
+# Set Debug & Verbose
+$enableVerbose = if ($PSBoundParameters.Verbose -eq $true) { $true } else { $false };
+$enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false };
+
 # Dot source common
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
@@ -588,8 +592,14 @@ try {
     else {
         Write-Log "Main: No Configuration specified. Calling genconfig." -Activity
         Set-Location $PSScriptRoot
-        $result = ./genconfig.ps1 -InternalUseOnly
+        $result = ./genconfig.ps1 -InternalUseOnly -Verbose:$enableVerbose -Debug:$enableDebug
 
+        # genconfig was called with -Debug true, and returned DeployConfig instead of ConfigFileName
+        if ($result.DeployConfig) {
+            return $result
+        }
+
+        # genconfig specified not to deploy
         if (-not $result.DeployNow) {
             return
         }
@@ -919,7 +929,7 @@ catch {
 }
 finally {
     # Ctrl + C brings us here :)
-    if ($NewLabsuccess -ne $true){
+    if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs" -LogOnly
     }
     $Common.Initialized = $false
