@@ -1868,14 +1868,16 @@ Function Get-SiteCodeMenu {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
-        [Object] $CurrentValue
+        [Object] $CurrentValue,
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [Object] $ConfigToCheck = $global:config
     )
     $valid = $false
     #Get-PSCallStack | out-host
     while ($valid -eq $false) {
         $siteCodes = @()
-        #$siteCodes += ($global:config.VirtualMachines | Where-Object {$_.role -eq "Primary"} | Select-Object -first 1).SiteCode
-        $siteCodes += Get-ExistingSiteServer -DomainName $global:config.vmOptions.domainName -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
+        $siteCodes += ($ConfigToCheck.VirtualMachines | Where-Object {$_.role -eq "Primary"} | Select-Object -first 1).SiteCode
+        $siteCodes += Get-ExistingSiteServer -DomainName $ConfigToCheck.vmOptions.domainName -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
         if ($siteCodes.Length -eq 0) {
             Write-Host
             write-host "No valid site codes are eligible to accept this DPMP"
@@ -2796,7 +2798,7 @@ function Add-NewVMForRole {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
                 }
                 else {
-                    Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode
+                    Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
                 }
             }
             else {
