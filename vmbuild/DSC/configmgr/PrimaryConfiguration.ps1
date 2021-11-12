@@ -397,6 +397,8 @@
 
             if ($waitOnServers) {
 
+                $waitOnDependency = @()
+
                 WriteStatus WaitDomainMember {
                     DependsOn = "[WaitForConfigurationFile]DelegateControl"
                     Status    = "Waiting for $($waitOnServers -join ',') to finish configuration."
