@@ -382,7 +382,7 @@ function New-RDCManFileFromHyperV {
             }
             $ForceOverwrite = $true
             $vmID = $null
-            if ($vm.Role -eq "OSDClient"){
+            if ($vm.Role -eq "OSDClient" -or $vm.Role -eq "AADClient"){
                 $vmID = $vm.vmId
             }
             if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID) -eq $True) {

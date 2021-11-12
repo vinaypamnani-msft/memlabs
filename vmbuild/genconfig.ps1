@@ -175,7 +175,11 @@ function Select-DomainMenu {
         Write-Host
         Write-Host "Domain '$domain' contains these resources:"
         Write-Host
-        (get-list -type vm  -DomainName $domain | Select-Object VmName, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
+        $vmsInDomain = get-list -type vm  -DomainName $domain
+        if (-not $vmsInDomain) {
+            return
+        }
+        ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
         #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
 
         $customOptions = [ordered]@{
@@ -184,11 +188,11 @@ function Select-DomainMenu {
             "3" = "Compact all VHDX's in domain (requires domain to be stopped)";
             "S" = "Snapshot all VM's in domain"
         }
-
+        $checkPoint = $null
         $DC = get-list -type vm  -DomainName $domain | Where-Object { $_.role -eq "DC" }
-
-        $checkPoint = Get-VMCheckpoint -VMName $DC.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
-
+        if ($DC) {
+            $checkPoint = Get-VMCheckpoint -VMName $DC.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
+        }
         if ($checkPoint) {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot"; "X" = "Delete (merge) domain Snapshots" }
         }
@@ -204,7 +208,10 @@ function Select-DomainMenu {
             "1" { Select-StopDomain -domain $domain }
             "2" { Select-StartDomain -domain $domain }
             "3" { select-OptimizeDomain -domain $domain }
-            "d" { Select-DeleteDomain -domain $domain }
+            "d" {
+                Select-DeleteDomain -domain $domain
+                return
+                }
             "s" { select-SnapshotDomain -domain $domain }
             "r" { select-RestoreSnapshotDomain -domain $domain }
             "x" { select-DeleteSnapshotDomain -domain $domain }
@@ -563,6 +570,9 @@ function Select-DeleteDomain {
 
     while ($true) {
         $vms = get-list -type vm -DomainName $domain | Select-Object -ExpandProperty vmName
+        if (-not $vms){
+            return
+        }
         $customOptions = [ordered]@{"D" = "Delete All VMs" }
         $response = Get-Menu -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false
 
@@ -576,6 +586,7 @@ function Select-DeleteDomain {
                 if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
                     Remove-Domain -DomainName $domain
                     Get-List -type VM -ResetCache | Out-Null
+                    return
                 }
             }
         }
@@ -1495,10 +1506,10 @@ function Select-ExistingSubnets {
 
         $subnetListModified = @()
         foreach ($sb in $subnetListNew) {
-            if ($sb -eq "Internet"){
+            if ($sb -eq "Internet") {
                 continue
             }
-            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode -and ($_.Role -eq "Primary" -or $_.Role -eq "CAS") }| Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
+            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode -and ($_.Role -eq "Primary" -or $_.Role -eq "CAS") } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
             if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
                 $subnetListModified += "$sb"
             }
