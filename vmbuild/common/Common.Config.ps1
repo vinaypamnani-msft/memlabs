@@ -1171,7 +1171,7 @@ function New-DeployConfig {
 
         # Build DPMP List
         $DPMPNames = @()
-        foreach($dpmp in $virtualMachines | Where-Object { $_.role -eq "DPMP" }) {$DPMPNames+= $dpmp.vmName}
+        foreach ($dpmp in $virtualMachines | Where-Object { $_.role -eq "DPMP" }) { $DPMPNames += $dpmp.vmName }
 
         $containsPS = $configObject.virtualMachines.role -contains "Primary"
         $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
@@ -1199,9 +1199,9 @@ function New-DeployConfig {
             $existingPSName = ($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
 
             # Add existing DPMP's matching existingPS site code or subnet
-            foreach($dpmp in Get-List -Type VM | Where-Object {$_.role -eq "DPMP"}) {
+            foreach ($dpmp in Get-List -Type VM | Where-Object { $_.role -eq "DPMP" }) {
                 if ($dpmp.siteCode -eq $existingPS.siteCode -or $dpmp.network -eq $existingPS.subnet) {
-                    $DPMPNames+= $dpmp.vmName
+                    $DPMPNames += $dpmp.vmName
                 }
             }
         }
@@ -1248,7 +1248,7 @@ function New-DeployConfig {
             CSName             = $CSName
             PSName             = $PSName
             ActiveVMName       = $activeVMName
-            DPMPName           = $DPMPNames
+            DPMPNames          = $DPMPNames
             DomainMembers      = $clientsCsv
             Scenario           = $scenario
             DHCPScopeId        = $configObject.vmOptions.Network
