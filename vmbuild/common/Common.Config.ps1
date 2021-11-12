@@ -1544,11 +1544,37 @@ function Get-List {
                     if ($vmNoteObject.role -in "CAS", "Primary", "PassiveSite") {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                             if ($vmState -eq "Running" -and (-not $inProgress)) {
-                                $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" }
-                                $siteCode = $siteCodeFromVM.ScriptBlockOutput
-                                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
-                                Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                                try {
+                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                                    $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
+                                    Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
+                                    Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                                }
+                                catch {
+                                    Write-Log "Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                }
+                            }
+                            else {
+                                Write-Log "Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                            }
+                        }
+                    }
+
+                    # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
+                    if ($vmNoteObject.role -eq "DPMP") {
+                        if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
+                            if ($vmState -eq "Running" -and (-not $inProgress)) {
+                                try {
+                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "SiteCode" } -SuppressLog
+                                    $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
+                                    Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
+                                    Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                                }
+                                catch {
+                                    Write-Log "Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                }
                             }
                             else {
                                 Write-Log "Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
