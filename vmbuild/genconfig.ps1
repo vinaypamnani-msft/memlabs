@@ -1872,7 +1872,11 @@ Function Get-SiteCodeMenu {
         $siteCodes = @()
         $siteCodes += ($global:config.VirtualMachines | Where-Object {$_.role -eq "Primary"} | Select-Object -first 1).SiteCode
         $sitecodes += Get-ExistingSiteServer -DomainName $global:config.vmOptions.domainName -Role "Primary" | Select-Object -ExpandProperty SiteCode
-
+        if ($siteCodes.Length -eq 0){
+            Write-Host
+            write-host "No valid site codes are eligible to accept this DPMP"
+            return
+        }
         $result = Get-Menu -Prompt "Select sitecode to connect DPMP to:" -OptionArray $sitecodes -CurrentValue $CurrentValue -Test:$false
         if ($result.ToLowerInvariant() -eq "x") {
             $property."$name" = $null

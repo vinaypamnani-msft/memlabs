@@ -567,7 +567,6 @@ $VM_Create = {
     }
 }
 
-Set-QuickEdit -DisableQuickEdit
 Clear-Host
 
 try {
@@ -630,7 +629,7 @@ try {
         }
 
     }
-
+    Set-QuickEdit -DisableQuickEdit
     # Timer
     $timer = New-Object -TypeName System.Diagnostics.Stopwatch
     $timer.Start()
