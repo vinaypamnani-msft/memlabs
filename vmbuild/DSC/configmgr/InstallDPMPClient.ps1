@@ -122,13 +122,6 @@ Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyC
 # Create Site system Server
 #============
 $DPMPFQDN = $DPMPName + "." + $DomainFullName
-$SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
-if (!$SystemServer) {
-    Write-DscStatus "Creating new CM Site System server on $DPMPFQDN"
-    New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN | Out-File $global:StatusLog -Append
-    Start-Sleep -Seconds 5
-    $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
-}
 
 # Install DP
 #============
@@ -136,27 +129,50 @@ $Configuration.InstallDP.Status = 'Running'
 $Configuration.InstallDP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-if ((Get-CMDistributionPoint -SiteSystemServerName $DPMPFQDN).count -ne 1) {
-    Write-DscStatus "Adding Distribution Point role on $DPMPFQDN"
-    $Date = [DateTime]::Now.AddYears(30)
-    Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
-    Start-Sleep -Seconds 5
+$i = 0
+$installFailure = $false
+do {
 
-    if ((Get-CMDistributionPoint -SiteSystemServerName $DPMPFQDN).count -eq 1) {
-        Write-DscStatus "DP Role added on $DPMPFQDN"
-        $Configuration.InstallDP.Status = 'Completed'
-        $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    $i++
+    $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
+    if (-not $SystemServer) {
+        Write-DscStatus "Creating new CM Site System server on $DPMPFQDN"
+        New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN | Out-File $global:StatusLog -Append
+        Start-Sleep -Seconds 5
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
+    }
+
+    $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPMPFQDN
+    if (-not $dpinstalled) {
+        Write-DscStatus "DP Role not detected on $DPMPFQDN. Adding Distribution Point role."
+        $Date = [DateTime]::Now.AddYears(30)
+        Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+        Start-Sleep -Seconds 5
     }
     else {
-        Write-DscStatus "Failed to add DP Role on $DPMPFQDN"
-        $Configuration.InstallDP.Status = 'Failed'
-        $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        Write-DscStatus "DP Role detected on $DPMPFQDN"
+        $dpinstalled = $true
     }
+
+    if ($i -gt 10) {
+        Write-DscStatus "No Progress after $i tries, Giving up."
+        $installFailure = $true
+    }
+
+    Start-Sleep -Seconds 60
+
+} until ($dpinstalled -or $installFailure)
+
+if ($dpinstalled) {
+    $Configuration.InstallDP.Status = 'Completed'
+    $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
 else {
-    Write-DscStatus "DP Role already installed on $DPMPFQDN"
+
+    $Configuration.InstallDP.Status = 'Failed'
+    $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
 
 # Install MP
@@ -165,27 +181,48 @@ $Configuration.InstallMP.Status = 'Running'
 $Configuration.InstallMP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-if ((Get-CMManagementPoint -SiteSystemServerName $DPMPFQDN).count -ne 1) {
+$i = 0
+$installFailure = $false
+do {
 
-    Write-DscStatus "Adding Management Point role on $DPMPFQDN"
-    Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
-    Start-Sleep -Seconds 5
+    $i++
+    $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
+    if (-not $SystemServer) {
+        Write-DscStatus "Creating new CM Site System server on $DPMPFQDN"
+        New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN | Out-File $global:StatusLog -Append
+        Start-Sleep -Seconds 5
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
+    }
 
-    if ((Get-CMManagementPoint -SiteSystemServerName $DPMPFQDN).count -eq 1) {
-        Write-DscStatus "MP Role added on $DPMPFQDN"
-        $Configuration.InstallMP.Status = 'Completed'
-        $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $DPMPFQDN
+    if (-not $mpinstalled) {
+        Write-DscStatus "MP Role not detected on $DPMPFQDN. Adding Management Point role."
+        Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
+        Start-Sleep -Seconds 5
     }
     else {
-        Write-DscStatus "Failed to add MP Role on $DPMPFQDN"
-        $Configuration.InstallMP.Status = 'Failed'
-        $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        Write-DscStatus "MP Role detected on $DPMPFQDN"
+        $mpinstalled = $true
     }
+
+    if ($i -gt 10) {
+        Write-DscStatus "No Progress after $i tries, Giving up."
+        $installFailure = $true
+    }
+
+    Start-Sleep -Seconds 60
+
+} until ($mpinstalled -or $installFailure)
+
+if ($mpinstalled) {
+    $Configuration.InstallMP.Status = 'Completed'
+    $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
 else {
-    Write-DscStatus "MP Role already installed on $DPMPFQDN"
+    $Configuration.InstallMP.Status = 'Failed'
+    $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
 
 # Push Clients
