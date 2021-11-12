@@ -406,7 +406,7 @@
 
                 foreach ($server in $waitOnServers) {
 
-                    WaitForConfigurationFile WaitFor$server {
+                    WaitForConfigurationFile "WaitFor$server" {
                         Role          = "DomainMember"
                         MachineName   = $server
                         LogFolder     = $LogFolder
