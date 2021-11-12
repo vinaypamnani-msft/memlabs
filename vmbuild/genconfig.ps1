@@ -478,12 +478,12 @@ function Select-StartDomain {
                 foreach ($vm in $other) {
                     if ($vm.State -ne "Running") {
                         write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
-                        start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm $vm } -ArgumentList $vm.vmName
+                        start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm $vm } -ArgumentList $vm.vmName | Out-Null
                     }
                 }
             }
-            get-job | wait-job
-            get-job | remove-job
+            get-job | wait-job | out-null
+            get-job | remove-job | out-null
             get-list -type VM -ResetCache | out-null
             if ($CriticalOnly -eq $false) {
                 return
@@ -494,8 +494,8 @@ function Select-StartDomain {
         }
         else {
             start-vm $response
-            get-job | wait-job
-            get-job | remove-job
+            get-job | wait-job | out-null
+            get-job | remove-job | out-null
             get-list -type VM -ResetCache | out-null
         }
     }
@@ -543,18 +543,18 @@ function Select-StopDomain {
                 $vm2 = Get-VM $vm.vmName -ErrorAction SilentlyContinue
                 if ($vm2.State -eq "Running") {
                     Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
-                    start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName
+                    start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName | Out-Null
                 }
             }
-            get-job | wait-job
-            get-job | remove-job
+            get-job | wait-job | Out-Null
+            get-job | remove-job | Out-Null
             get-list -type VM -ResetCache | out-null
             return
         }
         else {
             stop-vm $response -force
-            get-job | wait-job
-            get-job | remove-job
+            get-job | wait-job | Out-Null
+            get-job | remove-job | Out-Null
             get-list -type VM -ResetCache | out-null
         }
 
