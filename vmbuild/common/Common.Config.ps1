@@ -676,16 +676,16 @@ function Test-ValidRoleCSPS {
     }
 
     $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode }
-    foreach ($siteServer in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant() -and $siteServer.role -ne "PassiveSite") {
-            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
+    foreach ($vmWithSiteCode in $otherVMs) {
+        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary")) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
         }
     }
 
     $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $null -ne $_.siteCode }
-    foreach ($siteServer in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant()) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
+    foreach ($vmWithSiteCode in $otherVMs) {
+        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary")) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -1053,7 +1053,9 @@ function Test-Configuration {
             }
         }
         else {
-            Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site. DPMP Role can only be deployed with a Primary Site." -ReturnObject $return -Warning
+            if (-not $deployConfig.parameters.ExistingPSName) {
+                Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode/subnet was not found." -ReturnObject $return -Warning
+            }
         }
 
     }
@@ -1167,10 +1169,14 @@ function New-DeployConfig {
             $DCName = $existingDCName
         }
 
-        # CSName (prefer name in config over existing)
+        # Build DPMP List
+        $DPMPNames = @()
+        foreach($dpmp in $virtualMachines | Where-Object { $_.role -eq "DPMP" }) {$DPMPNames+= $dpmp.vmName}
+
         $containsPS = $configObject.virtualMachines.role -contains "Primary"
         $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         if ($PSVM) {
+            # CSName (prefer name in config over existing)
             $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode ($PSVM.parentSiteCode | Select-Object -First 1) # Bypass failures, validation would fail if we had multiple
             $existingCSName = ($existingCS | Where-Object { $_.role -ne "PassiveSite" }).vmName
             $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
@@ -1189,8 +1195,15 @@ function New-DeployConfig {
         # PSName
         if (-not $PSName) {
             # Set existing PS from same subnet as current config - we don't allow multiple primary sites in same subnet
-            $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+            $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" -and $_.subnet -eq $configObject.vmOptions.network } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
             $existingPSName = ($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
+
+            # Add existing DPMP's matching existingPS site code or subnet
+            foreach($dpmp in Get-List -Type VM | Where-Object {$_.role -eq "DPMP"}) {
+                if ($dpmp.siteCode -eq $existingPS.siteCode -or $dpmp.network -eq $existingPS.subnet) {
+                    $DPMPNames+= $dpmp.vmName
+                }
+            }
         }
 
         # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
@@ -1235,7 +1248,7 @@ function New-DeployConfig {
             CSName             = $CSName
             PSName             = $PSName
             ActiveVMName       = $activeVMName
-            DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
+            DPMPName           = $DPMPNames
             DomainMembers      = $clientsCsv
             Scenario           = $scenario
             DHCPScopeId        = $configObject.vmOptions.Network

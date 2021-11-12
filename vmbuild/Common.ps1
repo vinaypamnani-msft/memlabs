@@ -1607,6 +1607,7 @@ function Set-SupportedOptions {
         "Primary",
         "PassiveSite",
         "FileServer",
+        "DPMP",
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
