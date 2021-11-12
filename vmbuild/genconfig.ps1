@@ -2776,10 +2776,11 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
-                $SiteCode = Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode
+                Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode
+            }else{
+                write-log "Adding new DPMP for sitecode $newSiteCode"
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
             }
-            write-log "Adding new DPMP for sitecode $newSiteCode"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
         }
         "FileServer" {
             $virtualMachine.memory = "3GB"
