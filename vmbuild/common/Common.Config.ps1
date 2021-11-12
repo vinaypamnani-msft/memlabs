@@ -944,7 +944,7 @@ function Test-Configuration {
 
             # Minimum SQL Memory
             if ($VM.memory / 1 -lt 4GB) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using SQL." -ReturnObject $ReturnObject -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using SQL." -ReturnObject $return -Failure
             }
         }
 

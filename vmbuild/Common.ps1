@@ -1602,7 +1602,6 @@ function Set-SupportedOptions {
     )
 
     $rolesForExisting = @(
-        "DPMP",
         "CAS",
         "Primary",
         "PassiveSite",
