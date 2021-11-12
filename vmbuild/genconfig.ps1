@@ -1358,7 +1358,7 @@ function Select-RolesForNewList {
     return $Roles
 }
 function Select-RolesForExisting {
-   # $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DPMP" }
+    $existingRoles = Select-RolesForExistingList
 
     $existingRoles2 = @()
 
@@ -1398,9 +1398,9 @@ function Select-RolesForNew {
     if ($global:config.VirtualMachines.role -contains "CAS") {
         $existingRoles.Remove("CAS")
     }
-   # if ($global:config.VirtualMachines.role -contains "DPMP") {
-   #     $existingRoles.Remove("DPMP")
-   # }
+    # if ($global:config.VirtualMachines.role -contains "DPMP") {
+    #     $existingRoles.Remove("DPMP")
+    # }
     $existingRoles.Remove("PassiveSite")
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
     return $role
@@ -1562,7 +1562,7 @@ function Select-ExistingSubnets {
                 break
             }
         }
-        $valid = Get-TestResult -Config (Get-ExistingConfig -Domain $Domain -Subnet $response -Role $Role) -SuccessOnWarning
+        $valid = Get-TestResult -Config (Get-ExistingConfig -Domain $Domain -Subnet $response -Role $Role -test:$true) -SuccessOnWarning
     }
     Write-Verbose "[Select-ExistingSubnets] Subnet response = $response"
     return [string]$response
@@ -1580,7 +1580,10 @@ function Get-ExistingConfig {
         [Parameter(Mandatory = $false, HelpMessage = "Parent Site code, if we are deploying a primary in a heirarchy")]
         [string] $ParentSiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
-        [string] $SiteCode = $null
+        [string] $SiteCode = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
+        [bool] $test = $false
+
     )
 
 
@@ -1612,7 +1615,7 @@ function Get-ExistingConfig {
         virtualMachines = $()
     }
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated $($configGenerated.vmOptions.domainName)"
-    Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode -SiteCode $SiteCode -Quiet:$true
+    Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode -SiteCode $SiteCode -Quiet:$true -test:$test
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated"
     return $configGenerated
 }
@@ -1868,18 +1871,26 @@ Function Get-SiteCodeMenu {
         [Object] $CurrentValue
     )
     $valid = $false
+    #Get-PSCallStack | out-host
     while ($valid -eq $false) {
         $siteCodes = @()
-        $siteCodes += ($global:config.VirtualMachines | Where-Object {$_.role -eq "Primary"} | Select-Object -first 1).SiteCode
-        $sitecodes += Get-ExistingSiteServer -DomainName $global:config.vmOptions.domainName -Role "Primary" | Select-Object -ExpandProperty SiteCode
-
-        $result = Get-Menu -Prompt "Select sitecode to connect DPMP to:" -OptionArray $sitecodes -CurrentValue $CurrentValue -Test:$false
+        #$siteCodes += ($global:config.VirtualMachines | Where-Object {$_.role -eq "Primary"} | Select-Object -first 1).SiteCode
+        $siteCodes += Get-ExistingSiteServer -DomainName $global:config.vmOptions.domainName -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
+        if ($siteCodes.Length -eq 0) {
+            Write-Host
+            write-host "No valid site codes are eligible to accept this DPMP"
+            return
+        }
+        else {
+            #write-host $siteCodes
+        }
+        $result = Get-Menu -Prompt "Select sitecode to connect DPMP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false
         if ($result.ToLowerInvariant() -eq "x") {
             $property."$name" = $null
         }
         else {
             $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -Force
-           #$property."$name" = $result
+            #$property."$name" = $result
         }
         if (Get-TestResult -SuccessOnWarning -NoNewLine) {
             return
@@ -2190,7 +2201,9 @@ function Get-AdditionalValidations {
             if ($property.role -eq "Primary") {
                 $VM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
                 if ($VM) {
-                    $VM.SiteCode = $value
+                    if ($VM.siteCode -eq $CurrentValue ) {
+                        $VM.SiteCode = $value
+                    }
                 }
             }
         }
@@ -2451,8 +2464,9 @@ function Select-Options {
                         write-host -ForegroundColor Yellow "siteCode can not be manually modified on a Passive server."
                         continue MainLoop
                     }
-                    if ($property.role -eq "DPMP"){
+                    if ($property.role -eq "DPMP") {
                         Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
+                        continue MainLoop
                     }
                 }
                 "role" {
@@ -2655,7 +2669,9 @@ function Add-NewVMForRole {
         [Parameter(Mandatory = $false, HelpMessage = "Return Created Machine Name")]
         [bool] $ReturnMachineName = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Quiet Mode")]
-        [bool] $Quiet = $false
+        [bool] $Quiet = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Test Mode")]
+        [bool] $test = $false
     )
 
 
@@ -2776,10 +2792,17 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
-                $SiteCode = Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode
+                if ($test) {
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
+                }
+                else {
+                    Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode
+                }
             }
-            write-log "Adding new DPMP for sitecode $newSiteCode"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
+            else {
+                write-log "Adding new DPMP for sitecode $newSiteCode"
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
+            }
         }
         "FileServer" {
             $virtualMachine.memory = "3GB"
