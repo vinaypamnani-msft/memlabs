@@ -1358,7 +1358,7 @@ function Select-RolesForNewList {
     return $Roles
 }
 function Select-RolesForExisting {
-   # $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DPMP" }
+    $existingRoles = Select-RolesForExistingList
 
     $existingRoles2 = @()
 
