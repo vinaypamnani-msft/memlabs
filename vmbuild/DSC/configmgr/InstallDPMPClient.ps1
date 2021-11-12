@@ -83,9 +83,16 @@ if (Test-Path $cm_svc_file) {
     Start-Sleep -Seconds 5
 }
 
+
 # Enable EHTTP, some components are still installing and they reset it to Disabled.
 # Keep setting it every 30 seconds, 10 times and bail...
+
 $attempts = 0
+if ($deployConfig.parameters.ExistingPSName) {
+    # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
+    $attempts = 10
+}
+
 $enabled = $false
 Write-DscStatus "Enabling e-HTTP"
 do {
@@ -103,6 +110,7 @@ if (-not $enabled) {
 else {
     Write-DscStatus "e-HTTP was enabled."
 }
+
 
 # exit if nothing to do
 if (-not $installDPMPRoles -and -not $pushClients) {
