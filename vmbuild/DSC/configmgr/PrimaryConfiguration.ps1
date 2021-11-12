@@ -69,6 +69,13 @@
         $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
     }
 
+    # DomainMembers to wait before running Script Workflow
+    $waitOnServers = @()
+    if ($ThisVM.remoteSQLVM) { $waitOnServers += $ThisVM.remoteSQLVM }
+    foreach ($dpmp in $deployConfig.virtualMachines | Where-Object {$_.role -eq "DPMP"}) {
+        $waitOnServers += $dpmp.vmName
+    }
+
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
@@ -387,37 +394,41 @@
 
         if ($InstallConfigMgr) {
 
-            if ($installSQL) {
+
+            if ($waitOnServers) {
+
+                WriteStatus WaitDomainMember {
+                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
+                    Status    = "Waiting for $($waitOnServers -join ',') to finish configuration."
+                }
+
+                foreach ($server in $waitOnServers) {
+
+                    WaitForConfigurationFile WaitFor$server {
+                        Role          = "DomainMember"
+                        MachineName   = $server
+                        LogFolder     = $LogFolder
+                        ReadNode      = "DomainMemberFinished"
+                        ReadNodeValue = "Passed"
+                        Ensure        = "Present"
+                        DependsOn     = "[WriteStatus]WaitDomainMember"
+                    }
+
+                    $waitOnDependency += "[WaitForConfigurationFile]WaitFor$server"
+                }
 
                 WriteStatus RunScriptWorkflow {
-                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
+                    DependsOn = $waitOnDependency
                     Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
                 }
 
             }
             else {
 
-                # Wait for SQLVM
-                WriteStatus WaitSQL {
-                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
-                    Status    = "Waiting for remote SQL VM $($ThisVM.remoteSQLVM) to finish configuration."
-                }
-
-                WaitForConfigurationFile WaitSQL {
-                    Role          = "DomainMember"
-                    MachineName   = $ThisVM.remoteSQLVM
-                    LogFolder     = $LogFolder
-                    ReadNode      = "DomainMemberFinished"
-                    ReadNodeValue = "Passed"
-                    Ensure        = "Present"
-                    DependsOn     = "[WaitForConfigurationFile]DelegateControl"
-                }
-
                 WriteStatus RunScriptWorkflow {
-                    DependsOn = "[WaitForConfigurationFile]WaitSQL"
+                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
                     Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
                 }
-
             }
 
             WriteFileOnce CMSvc {

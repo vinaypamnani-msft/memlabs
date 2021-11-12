@@ -142,7 +142,7 @@ foreach ($DPMPName in $DPMPNames) {
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $DPMPFQDN"
             New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
         }
 
@@ -151,7 +151,7 @@ foreach ($DPMPName in $DPMPNames) {
             Write-DscStatus "DP Role not detected on $DPMPFQDN. Adding Distribution Point role."
             $Date = [DateTime]::Now.AddYears(30)
             Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 60
         }
         else {
             Write-DscStatus "DP Role detected on $DPMPFQDN"
@@ -163,7 +163,7 @@ foreach ($DPMPName in $DPMPNames) {
             $installFailure = $true
         }
 
-        Start-Sleep -Seconds 60
+        Start-Sleep -Seconds 10
 
     } until ($dpinstalled -or $installFailure)
 
@@ -194,7 +194,7 @@ foreach ($DPMPName in $DPMPNames) {
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $DPMPFQDN"
             New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
         }
 
@@ -202,7 +202,7 @@ foreach ($DPMPName in $DPMPNames) {
         if (-not $mpinstalled) {
             Write-DscStatus "MP Role not detected on $DPMPFQDN. Adding Management Point role."
             Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 60
         }
         else {
             Write-DscStatus "MP Role detected on $DPMPFQDN"
@@ -214,7 +214,7 @@ foreach ($DPMPName in $DPMPNames) {
             $installFailure = $true
         }
 
-        Start-Sleep -Seconds 60
+        Start-Sleep -Seconds 10
 
     } until ($mpinstalled -or $installFailure)
 

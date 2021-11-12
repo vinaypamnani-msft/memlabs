@@ -1359,7 +1359,7 @@ function Get-ExistingSiteServer {
         $existingValue = @()
         foreach ($vm in $vmList) {
             $so = $null
-            if ($vm.siteCode) {
+            if ($vm.role -in "CAS", "Primary", "Secondary") {
                 if ($PSBoundParameters.ContainsKey("SiteCode") -and $vm.siteCode.ToLowerInvariant() -eq $SiteCode.ToLowerInvariant()) {
 
                     $so = [PSCustomObject]@{
