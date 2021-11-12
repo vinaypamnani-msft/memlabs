@@ -1876,7 +1876,10 @@ Function Get-SiteCodeMenu {
     #Get-PSCallStack | out-host
     while ($valid -eq $false) {
         $siteCodes = @()
-        $siteCodes += ($ConfigToCheck.VirtualMachines | Where-Object {$_.role -eq "Primary"} | Select-Object -first 1).SiteCode
+        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -first 1).SiteCode
+        if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
+            $siteCodes += $tempSiteCode
+        }
         $siteCodes += Get-ExistingSiteServer -DomainName $ConfigToCheck.vmOptions.domainName -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
         if ($siteCodes.Length -eq 0) {
             Write-Host
