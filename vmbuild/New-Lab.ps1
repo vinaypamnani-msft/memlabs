@@ -752,6 +752,7 @@ try {
     $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
     $existingDC = $deployConfig.parameters.ExistingDCName
     $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
@@ -786,6 +787,24 @@ try {
                 hidden          = $true
             }
         }
+    }
+
+    # Add DPMP to existing PS
+    $existingPSName = $deployConfig.parameters.ExistingPSName
+
+    if ($containsDPMP -and $existingPSName) {
+        $existingPSVM = (get-list -Type VM | where-object { $_.vmName -eq $existingPSName })
+        $deployConfig.virtualMachines += [PSCustomObject]@{
+            vmName          = $existingPSVM.vmName
+            role            = $existingPSVM.role
+            siteCode        = $existingPSVM.siteCode
+            RemoteSQLVM     = $existingPSVM.remoteSQLVM
+            SQLInstanceName = $existingPSVM.SQLInstanceName
+            SQLVersion      = $existingPSVM.SQLVersion
+            SQLInstanceDir  = $existingPSVM.SQLInstanceDir
+            hidden          = $true
+        }
+
     }
 
     # Adding Passive to existing
