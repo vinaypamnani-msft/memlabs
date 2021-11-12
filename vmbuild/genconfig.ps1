@@ -211,7 +211,7 @@ function Select-DomainMenu {
             "d" {
                 Select-DeleteDomain -domain $domain
                 return
-                }
+            }
             "s" { select-SnapshotDomain -domain $domain }
             "r" { select-RestoreSnapshotDomain -domain $domain }
             "x" { select-DeleteSnapshotDomain -domain $domain }
@@ -570,7 +570,7 @@ function Select-DeleteDomain {
 
     while ($true) {
         $vms = get-list -type vm -DomainName $domain | Select-Object -ExpandProperty vmName
-        if (-not $vms){
+        if (-not $vms) {
             return
         }
         $customOptions = [ordered]@{"D" = "Delete All VMs" }
@@ -1358,7 +1358,7 @@ function Select-RolesForNewList {
     return $Roles
 }
 function Select-RolesForExisting {
-    $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DPMP" }
+   # $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DPMP" }
 
     $existingRoles2 = @()
 
@@ -1398,9 +1398,9 @@ function Select-RolesForNew {
     if ($global:config.VirtualMachines.role -contains "CAS") {
         $existingRoles.Remove("CAS")
     }
-    if ($global:config.VirtualMachines.role -contains "DPMP") {
-        $existingRoles.Remove("DPMP")
-    }
+   # if ($global:config.VirtualMachines.role -contains "DPMP") {
+   #     $existingRoles.Remove("DPMP")
+   # }
     $existingRoles.Remove("PassiveSite")
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
     return $role
@@ -1823,7 +1823,7 @@ Function Get-OperatingSystemMenu {
     }
 }
 
-Function Get-ParentSideCodeMenu {
+Function Get-ParentSiteCodeMenu {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
@@ -1844,6 +1844,42 @@ Function Get-ParentSideCodeMenu {
         }
         else {
             $property."$name" = $result
+        }
+        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+            return
+        }
+        else {
+            if ($property."$name" -eq $value) {
+                return
+            }
+        }
+    }
+}
+
+
+Function Get-SiteCodeMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+    $valid = $false
+    while ($valid -eq $false) {
+        $siteCodes = @()
+        $siteCodes += ($global:config.VirtualMachines | Where-Object {$_.role -eq "Primary"} | Select-Object -first 1).SiteCode
+        $sitecodes += Get-ExistingSiteServer -DomainName $global:config.vmOptions.domainName -Role "Primary" | Select-Object -ExpandProperty SiteCode
+
+        $result = Get-Menu -Prompt "Select sitecode to connect DPMP to:" -OptionArray $sitecodes -CurrentValue $CurrentValue -Test:$false
+        if ($result.ToLowerInvariant() -eq "x") {
+            $property."$name" = $null
+        }
+        else {
+            $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -Force
+           #$property."$name" = $result
         }
         if (Get-TestResult -SuccessOnWarning -NoNewLine) {
             return
@@ -2151,6 +2187,12 @@ function Get-AdditionalValidations {
                     $PRIVM.ParentSiteCode = $value
                 }
             }
+            if ($property.role -eq "Primary") {
+                $VM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                if ($VM) {
+                    $VM.SiteCode = $value
+                }
+            }
         }
     }
 }
@@ -2392,7 +2434,7 @@ function Select-Options {
                     continue MainLoop
                 }
                 "ParentSiteCode" {
-                    Get-ParentSideCodeMenu -property $property -name $name -CurrentValue $value
+                    Get-ParentSiteCodeMenu -property $property -name $name -CurrentValue $value
                     continue MainLoop
                 }
                 "sqlVersion" {
@@ -2408,6 +2450,9 @@ function Select-Options {
                         write-host
                         write-host -ForegroundColor Yellow "siteCode can not be manually modified on a Passive server."
                         continue MainLoop
+                    }
+                    if ($property.role -eq "DPMP"){
+                        Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
                     }
                 }
                 "role" {
@@ -2603,7 +2648,7 @@ function Add-NewVMForRole {
         [string] $Name = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary in a Heirarchy")]
         [string] $ParentSiteCode = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite")]
+        [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite or a DPMP")]
         [string] $SiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Override default OS")]
         [string] $OperatingSystem = $null,
@@ -2729,6 +2774,12 @@ function Add-NewVMForRole {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            if (-not $SiteCode) {
+                $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
+                $SiteCode = Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode
+            }
+            write-log "Adding new DPMP for sitecode $newSiteCode"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
         }
         "FileServer" {
             $virtualMachine.memory = "3GB"
@@ -2775,7 +2826,11 @@ function Add-NewVMForRole {
     }
 
     if ($existingDPMP -eq 0) {
-        Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Quiet:$Quiet
+        if (-not $newSiteCode) {
+            $newSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
+        }
+        write-log "Adding new DPMP for sitecode $newSiteCode"
+        Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -SiteCode $newSiteCode -Quiet:$Quiet
     }
     if ($NewFSServer -eq $true) {
         #Get-PSCallStack | out-host

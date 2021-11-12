@@ -78,7 +78,8 @@
                 "E": "250GB"
             },
             "memory": "3GB",
-            "virtualProcs": 4
+            "virtualProcs": 4,
+            "siteCode": "PRI"
         },
         {
             "vmName": "W10Client1",

@@ -60,7 +60,8 @@
                 "E": "250GB"
             },
             "memory": "3GB",
-            "virtualProcs": 4
+            "virtualProcs": 4,
+            "siteCode":"PS1"
         },
         {
             "vmName": "W10Client1",
