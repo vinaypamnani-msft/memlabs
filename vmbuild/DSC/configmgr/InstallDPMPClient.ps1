@@ -13,7 +13,12 @@ $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
 $DPMPNames = @()
-$DPMPNames += ($deployConfig.virtualMachines | Where-Object {$_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode)}).vmName
+$DPMPNames += ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) }).vmName
+$DPMPNames += ($deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) }).vmName
+if ($ThisVM.hidden) {
+    $ThisExistingVM = $deployConfig.existingVMs | Where-Object ($_.vmName -eq $ThisVM.vmName)
+    $DPMPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network }
+}
 
 $ClientNames = $deployConfig.parameters.DomainMembers
 $cm_svc = "$DomainName\cm_svc"
