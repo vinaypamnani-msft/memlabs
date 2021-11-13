@@ -20,6 +20,8 @@ if ($ThisVM.hidden) {
     $DPMPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network }
 }
 
+$DPMPNames = $DPMPNames | Where-Object {$_ -and $_.Trim()}
+
 $ClientNames = $deployConfig.parameters.DomainMembers
 $cm_svc = "$DomainName\cm_svc"
 $installDPMPRoles = $deployConfig.cmOptions.installDPMPRoles
@@ -140,7 +142,10 @@ Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyC
 
 # TODO: $Configuration.InstallDP status won't be accurate if multiple DP's are in config.
 foreach ($DPMPName in $DPMPNames) {
-
+    Write-DscStatus "DPMP role to be installed on '$DPMPName'"
+    if ([string]::IsNullOrWhiteSpace($DPMPName)) {
+        continue
+    }
     # Create Site system Server
     #============
     $DPMPFQDN = $DPMPName + "." + $DomainFullName
