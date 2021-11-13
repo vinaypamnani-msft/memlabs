@@ -1199,7 +1199,7 @@ function New-DeployConfig {
             $existingPSName = ($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
 
             # Add existing DPMP's matching existingPS site code or subnet
-            foreach ($dpmp in Get-List -Type VM | Where-Object { $_.role -eq "DPMP" }) {
+            foreach ($dpmp in Get-List -Type VM -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "DPMP" }) {
                 if ($dpmp.siteCode -eq $existingPS.siteCode -or $dpmp.network -eq $existingPS.subnet) {
                     $DPMPNames += $dpmp.vmName
                 }
