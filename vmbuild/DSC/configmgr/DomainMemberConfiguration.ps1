@@ -22,6 +22,10 @@
 
     if ($ThisVm.siteCode) {
         $PSName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
+        $PSPassiveName =  ($deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
+        if (-not $PSPassiveName){
+            $PSPassiveName =  ($deployConfig.existingVMs | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
+        }
     }
 
     if (-not $PSName){
@@ -325,6 +329,14 @@
         if ($PSName) {
             AddUserToLocalAdminGroup AddPSLocalAdmin {
                 Name       = "$PSName$"
+                DomainName = $DomainName
+                DependsOn  = "[WriteStatus]AddLocalAdmin"
+            }
+        }
+
+        if ($PSPassiveName) {
+            AddUserToLocalAdminGroup AddPassiveLocalAdmin {
+                Name       = "$PSPassiveName$"
                 DomainName = $DomainName
                 DependsOn  = "[WriteStatus]AddLocalAdmin"
             }
