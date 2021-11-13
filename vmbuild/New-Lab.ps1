@@ -789,21 +789,40 @@ try {
     }
 
     # Add DPMP to existing PS
-    $existingPSName = $deployConfig.parameters.ExistingPSName
-
-    if ($containsDPMP -and $existingPSName) {
-        $existingPSVM = (get-list -Type VM | where-object { $_.vmName -eq $existingPSName })
-        $deployConfig.virtualMachines += [PSCustomObject]@{
-            vmName          = $existingPSVM.vmName
-            role            = $existingPSVM.role
-            siteCode        = $existingPSVM.siteCode
-            RemoteSQLVM     = $existingPSVM.remoteSQLVM
-            SQLInstanceName = $existingPSVM.SQLInstanceName
-            SQLVersion      = $existingPSVM.SQLVersion
-            SQLInstanceDir  = $existingPSVM.SQLInstanceDir
-            hidden          = $true
+    # $existingPSName = $deployConfig.parameters.ExistingPSName
+    #
+    # if ($containsDPMP -and $existingPSName) {
+    #     $existingPSVM = (get-list -Type VM | where-object { $_.vmName -eq $existingPSName })
+    #     $deployConfig.virtualMachines += [PSCustomObject]@{
+    #         vmName          = $existingPSVM.vmName
+    #         role            = $existingPSVM.role
+    #         siteCode        = $existingPSVM.siteCode
+    #         RemoteSQLVM     = $existingPSVM.remoteSQLVM
+    #         SQLInstanceName = $existingPSVM.SQLInstanceName
+    #         SQLVersion      = $existingPSVM.SQLVersion
+    #         SQLInstanceDir  = $existingPSVM.SQLInstanceDir
+    #         hidden          = $true
+    #     }
+    #
+    # }
+    #
+    if ($containsDPMP) {
+        $DPMPs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
+        foreach ($dpmp in $DPMPS) {
+            $existingPrimary = (get-list -type VM -Domainname $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $($dpmp.siteCode) })
+            if ($existingPrimary -and $deployConfig.virtualMachines.vmName -notcontains $existingPrimary.vmName) {
+                $deployConfig.virtualMachines += [PSCustomObject]@{
+                    vmName          = $existingPrimary.vmName
+                    role            = $existingPrimary.role
+                    siteCode        = $existingPrimary.siteCode
+                    RemoteSQLVM     = $existingPrimary.remoteSQLVM
+                    SQLInstanceName = $existingPrimary.SQLInstanceName
+                    SQLVersion      = $existingPrimary.SQLVersion
+                    SQLInstanceDir  = $existingPrimary.SQLInstanceDir
+                    hidden          = $true
+                }
+            }
         }
-
     }
 
     # Adding Passive to existing
@@ -852,6 +871,14 @@ try {
             hidden = $true
         }
     }
+    Write-Log "Timhe says remove this return2"
+    return
+    if ($enableDebug) {
+        return $deployConfig
+    }
+
+    Write-Log "Timhe says remove this return"
+    return
 
     Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 

@@ -1616,23 +1616,23 @@ function Get-List {
         }
 
         if ($Type -eq "Subnet") {
-            return $return | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
+            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
         }
 
         if ($Type -eq "Prefix") {
-            return $return | Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
+            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } |Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
         }
 
         if ($Type -eq "UniqueDomain") {
-            return $return | Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
+            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } |Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniqueSubnet") {
-            return $return | Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
+            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } |Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniquePrefix") {
-            return $return | Select-Object -ExpandProperty Prefix -Unique -ErrorAction SilentlyContinue
+            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } |Select-Object -ExpandProperty Prefix -Unique -ErrorAction SilentlyContinue
         }
 
     }
