@@ -72,7 +72,7 @@
     # DomainMembers to wait before running Script Workflow
     $waitOnServers = @()
     if ($ThisVM.remoteSQLVM) { $waitOnServers += $ThisVM.remoteSQLVM }
-    foreach ($dpmp in $deployConfig.virtualMachines | Where-Object {$_.role -eq "DPMP"}) {
+    foreach ($dpmp in $deployConfig.virtualMachines | Where-Object {$_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode)}) {
         $waitOnServers += $dpmp.vmName
     }
 

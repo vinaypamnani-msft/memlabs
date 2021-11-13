@@ -871,14 +871,10 @@ try {
             hidden = $true
         }
     }
-    Write-Log "Timhe says remove this return2"
-    return
+
     if ($enableDebug) {
         return $deployConfig
     }
-
-    Write-Log "Timhe says remove this return"
-    return
 
     Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
