@@ -1188,7 +1188,7 @@ function New-DeployConfig {
         # PSName
         if (-not $PSName) {
             # Set existing PS from same subnet as current config - we don't allow multiple primary sites in same subnet
-            $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" -and $_.subnet -eq $configObject.vmOptions.network } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+            $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
             $existingPSName = ($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
 
             # Add existing DPMP's matching existingPS site code or subnet
