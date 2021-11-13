@@ -1709,7 +1709,7 @@ Function Show-Summary {
 
             If ($containsDPMP) {
                 $DPMP = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
-                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName)" -NoNewLine
+                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
             }
             else {
                 $PSVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" }
