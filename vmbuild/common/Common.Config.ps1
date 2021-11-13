@@ -1044,18 +1044,11 @@ function Test-Configuration {
 
         $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
 
-        if ($containsPS) {
-            # DPMP VM count -eq 1
-            if (Test-SingleRole -VM $DPMPVM -ReturnObject $return) {
+        # Server OS
+        Test-ValidVmServerOS -VM $DPMPVM -ReturnObject $return
 
-                # Server OS
-                Test-ValidVmServerOS -VM $DPMPVM -ReturnObject $return
-            }
-        }
-        else {
-            if (-not $deployConfig.parameters.ExistingPSName) {
-                Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode/subnet was not found." -ReturnObject $return -Warning
-            }
+        if (-not $containsPS -and -not $deployConfig.parameters.ExistingPSName) {
+            Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode/subnet was not found." -ReturnObject $return -Warning
         }
 
     }
