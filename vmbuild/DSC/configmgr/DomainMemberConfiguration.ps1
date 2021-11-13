@@ -21,7 +21,7 @@
     $DCName = $deployConfig.parameters.DCName
 
     if ($ThisVm.siteCode) {
-        $PSName = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $ThisVM.siteCode }
+        $PSName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
     }
 
     if (-not $PSName){
