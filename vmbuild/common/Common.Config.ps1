@@ -1676,24 +1676,24 @@ Function Show-Summary {
 
     $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
     #$CHECKMARK = ([char]8730)
-    $containsPS = $fixedConfig.virtualMachines.role -contains "Primary"
-    $containsDPMP = $fixedConfig.virtualMachines.role -contains "DPMP"
-    $containsMember = $fixedConfig.virtualMachines.role -contains "DomainMember"
-    $containsPassive = $fixedConfig.virtualMachines.role -contains "PassiveSite"
+    $containsPS = $fixedConfig.role -contains "Primary"
+    $containsDPMP = $fixedConfig.role -contains "DPMP"
+    $containsMember = $fixedConfig.role -contains "DomainMember"
+    $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
     Write-Verbose "ContainsPS: $containsPS ContainsDPMP: $containsDPMP ContainsMember: $containsMember ContainsPassive: $containsPassive"
-    if ($null -ne $($fixedConfig.cmOptions) -and $containsPS -and $fixedConfig.cmOptions.install -eq $true) {
-        if ($fixedConfig.cmOptions.install -eq $true) {
-            Write-GreenCheck "ConfigMgr $($fixedConfig.cmOptions.version) will be installed."
+    if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
+        if ($fixedConfig.cmOptions.install -eq $true -and $containsPS) {
+            Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
 
 
-            if ($fixedConfig.cmOptions.updateToLatest -eq $true) {
+            if ($deployConfig.cmOptions.updateToLatest -eq $true) {
                 Write-GreenCheck "ConfigMgr will be updated to latest"
             }
             else {
                 Write-RedX "ConfigMgr will NOT updated to latest"
             }
-            $PSVM = $fixedConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" }
+            $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PSVM.ParentSiteCode) {
                 Write-GreenCheck "ConfigMgr Primary server Will join a Heirarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
             }
@@ -1706,14 +1706,14 @@ Function Show-Summary {
         }
 
 
-        if (($fixedConfig.cmOptions.installDPMPRoles -or $fixedConfig.cmOptions.pushClientToDomainMembers) -and $fixedConfig.cmOptions.install -eq $true) {
+        if (($deployConfig.cmOptions.installDPMPRoles -or $deployConfig.cmOptions.pushClientToDomainMembers) -and $deployConfig.cmOptions.install -eq $true) {
 
             If ($containsDPMP) {
-                $DPMP = $fixedConfig.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" }
                 Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
             }
             else {
-                $PSVM = $fixedConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" }
+                $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
                 Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
             }
         }
@@ -1722,7 +1722,7 @@ Function Show-Summary {
         }
 
         if ($containsMember) {
-            if ($fixedConfig.cmOptions.pushClientToDomainMembers -and $fixedConfig.cmOptions.install -eq $true) {
+            if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $fixedConfig.cmOptions.install -eq $true) {
                 Write-Host " [Client Push: Yes]"
             }
             else {
@@ -1735,39 +1735,39 @@ Function Show-Summary {
 
     }
     else {
-        Write-Verbose "deployConfig.cmOptions.install = $($fixedConfig.cmOptions.install)"
-        if (($fixedConfig.cmOptions.install -eq $true) -and $containsPassive) {
-            $PassiveVM = $fixedConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+        Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
+        if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
+            $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
         }
         else {
             Write-RedX "ConfigMgr will not be installed."
         }
     }
 
-    if (($fixedConfig.cmOptions.install -eq $true) -and $containsPassive) {
-        $PassiveVM = $fixedConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+    if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
+        $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
         Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
     }
-    if (-not $null -eq $($fixedConfig.vmOptions)) {
+    if (-not $null -eq $($deployConfig.vmOptions)) {
 
-        if ($null -eq $fixedConfig.parameters.ExistingDCName) {
-            Write-GreenCheck "Domain: $($fixedConfig.vmOptions.domainName) will be created." -NoNewLine
+        if ($null -eq $deployConfig.parameters.ExistingDCName) {
+            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be created." -NoNewLine
         }
         else {
-            Write-GreenCheck "Domain: $($fixedConfig.vmOptions.domainName) will be joined." -NoNewLine
+            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be joined." -NoNewLine
         }
 
-        Write-Host " [Network $($fixedConfig.vmOptions.network)]"
-        Write-GreenCheck "Virtual Machine files will be stored in $($fixedConfig.vmOptions.basePath) on host machine"
+        Write-Host " [Network $($deployConfig.vmOptions.network)]"
+        Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
 
-        $totalMemory = $fixedConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
+        $totalMemory = $fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
         $totalMemory = $totalMemory.Sum / 1GB
         $availableMemory = Get-AvailableMemoryGB
         Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine"
     }
     Write-GreenCheck "Domain Admin account: " -NoNewLine
-    Write-Host -ForegroundColor Green "$($fixedConfig.vmOptions.adminName)" -NoNewline
-    Write-Host "Password: " -NoNewLine
+    Write-Host -ForegroundColor Green "$($deployConfig.vmOptions.adminName)" -NoNewline
+    Write-Host " Password: " -NoNewLine
     Write-Host -ForegroundColor Green "$($Common.LocalAdmin.GetNetworkCredential().Password)"
 
     $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,

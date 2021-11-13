@@ -955,7 +955,7 @@ try {
     if (Test-Path "C:\tools\rdcman.exe") {
         Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Activity
         $roles = $deployConfig.virtualMachines | Select-Object -ExpandProperty Role
-        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient") -or ($roles -Contains "DomainMember") -or ($roles -Contains "WorkgroupMember") -or ($roles -Contains "OSDClient")) {
+        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient") -or ($roles -Contains "DomainMember") -or ($roles -Contains "WorkgroupMember") -or ($roles -Contains "OSDClient") -or ($roles -Contains "DPMP")) {
             Write-Log "Main: Updating RDCMan file"
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         }
