@@ -19,7 +19,14 @@
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
-    $PSName = $deployConfig.parameters.PSName
+
+    if ($ThisVm.siteCode) {
+        $PSName = $deployConfig.virtualMachines | Where-Object { Where-Object $_.role -eq "Primary" -and $_.siteCode -eq $ThisVM.siteCode }
+    }
+
+    if (-not $PSName){
+        $PSName = $deployConfig.parameters.PSName
+    }
     $CSName = $deployConfig.parameters.CSName
     $DomainAdminName = $deployConfig.vmOptions.adminName
 

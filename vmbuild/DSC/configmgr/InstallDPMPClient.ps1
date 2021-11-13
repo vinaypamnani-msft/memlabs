@@ -9,7 +9,12 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $DomainName = $DomainFullName.Split(".")[0]
-$DPMPNames = $deployConfig.parameters.DPMPNames
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+
+$DPMPNames = @()
+$DPMPNames += ($deployConfig.virtualMachines | Where-Object {$_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode)}).vmName
+
 $ClientNames = $deployConfig.parameters.DomainMembers
 $cm_svc = "$DomainName\cm_svc"
 $installDPMPRoles = $deployConfig.cmOptions.installDPMPRoles

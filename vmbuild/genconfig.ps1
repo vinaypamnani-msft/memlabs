@@ -1889,7 +1889,10 @@ Function Get-SiteCodeMenu {
         else {
             #write-host $siteCodes
         }
-        $result = Get-Menu -Prompt "Select sitecode to connect DPMP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false
+        $result = $null
+        while (-not $result) {
+            $result = Get-Menu -Prompt "Select sitecode to connect DPMP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false
+        }
         if ($result.ToLowerInvariant() -eq "x") {
             $property."$name" = $null
         }

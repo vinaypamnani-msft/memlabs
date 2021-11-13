@@ -1162,10 +1162,6 @@ function New-DeployConfig {
             $DCName = $existingDCName
         }
 
-        # Build DPMP List
-        $DPMPNames = @()
-        foreach ($dpmp in $virtualMachines | Where-Object { $_.role -eq "DPMP" }) { $DPMPNames += $dpmp.vmName }
-
         $containsPS = $configObject.virtualMachines.role -contains "Primary"
         $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         if ($PSVM) {
@@ -1191,12 +1187,6 @@ function New-DeployConfig {
             $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
             $existingPSName = ($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
 
-            # Add existing DPMP's matching existingPS site code or subnet
-            foreach ($dpmp in Get-List -Type VM -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "DPMP" }) {
-                if ($dpmp.siteCode -eq $existingPS.siteCode -or $dpmp.network -eq $existingPS.subnet) {
-                    $DPMPNames += $dpmp.vmName
-                }
-            }
         }
 
         # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
@@ -1241,7 +1231,6 @@ function New-DeployConfig {
             CSName             = $CSName
             PSName             = $PSName
             ActiveVMName       = $activeVMName
-            DPMPNames          = $DPMPNames
             DomainMembers      = $clientsCsv
             Scenario           = $scenario
             DHCPScopeId        = $configObject.vmOptions.Network
