@@ -137,7 +137,13 @@ function Select-ConfigMenu {
             "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
             "f" { Select-DeletePending }
             "d" { Select-DomainMenu }
-            "P" { Write-Host "Password for all accounts is: $($Common.LocalAdmin.GetNetworkCredential().Password)" }
+            "P" {
+                 Write-Host
+                 Write-Host "Password for all accounts is: " -NoNewline
+                 Write-Host -foregroundColor Green "$($Common.LocalAdmin.GetNetworkCredential().Password)"
+                 Write-Host
+                 get-list -type vm | Where-Object {$_.Role -eq "DC"} | ft domain, adminName , @{Name = "Password"; Expression =  {$($Common.LocalAdmin.GetNetworkCredential().Password)} } | out-host
+                }
             Default {}
         }
         if ($SelectedConfig) {
@@ -2685,6 +2691,7 @@ function Add-NewVMForRole {
     )
 
 
+    $oldConfig = $configToModify | ConvertTo-Json -Depth 3 | ConvertFrom-Json
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem"
 
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
@@ -2823,7 +2830,7 @@ function Add-NewVMForRole {
     }
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
-        $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $ConfigToModify
+        $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig
         Write-Verbose "Machine Name Generated $machineName"
     }
     else {
