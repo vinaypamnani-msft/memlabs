@@ -138,12 +138,12 @@ function Select-ConfigMenu {
             "f" { Select-DeletePending }
             "d" { Select-DomainMenu }
             "P" {
-                 Write-Host
-                 Write-Host "Password for all accounts is: " -NoNewline
-                 Write-Host -foregroundColor Green "$($Common.LocalAdmin.GetNetworkCredential().Password)"
-                 Write-Host
-                 get-list -type vm | Where-Object {$_.Role -eq "DC"} | ft domain, adminName , @{Name = "Password"; Expression =  {$($Common.LocalAdmin.GetNetworkCredential().Password)} } | out-host
-                }
+                Write-Host
+                Write-Host "Password for all accounts is: " -NoNewline
+                Write-Host -foregroundColor Green "$($Common.LocalAdmin.GetNetworkCredential().Password)"
+                Write-Host
+                get-list -type vm | Where-Object { $_.Role -eq "DC" } | ft domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
+            }
             Default {}
         }
         if ($SelectedConfig) {
@@ -277,6 +277,26 @@ function select-RestoreSnapshotDomain {
 
     $vms = get-list -type vm -DomainName $domain
     $missingVMS = @()
+
+    foreach ($vm in $vms) {
+        $checkPoint = Get-VMCheckpoint -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
+        if (-not $checkPoint) {
+            $missingVMS += $vm.VmName
+        }
+    }
+    if ($missingVMS.Count -gt 0) {
+        Write-Host
+        $DeleteVMs = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
+    }
+
+    $startAll = Read-Host2 -Prompt "Start All vms after restore? (Y/n)" -HideHelp
+    if ($startAll.ToLowerInvariant() -eq "n" -or $startAll.ToLowerInvariant() -eq "no") {
+        $startAll = $null
+    }
+    else{
+        $startAll = "A"
+    }
+
     foreach ($vm in $vms) {
         $complete = $false
         $tries = 0
@@ -297,9 +317,6 @@ function select-RestoreSnapshotDomain {
                     }
 
                 }
-                else {
-                    $missingVMS += $vm.VmName
-                }
                 $complete = $true
             }
             catch {
@@ -312,19 +329,19 @@ function select-RestoreSnapshotDomain {
     Get-List -FlushCache | out-null
 
     if ($missingVMS.Count -gt 0) {
-        Write-Host
-        $response2 = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
-        if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
+        #Write-Host
+        #$response2 = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
+        if ($DeleteVMs.ToLowerInvariant() -eq "y" -or $DeleteVMs.ToLowerInvariant() -eq "yes") {
             foreach ($item in $missingVMS) {
                 Remove-VirtualMachine -VmName $item
-                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
             }
+            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         }
 
     }
     write-host
     Write-Host "$domain has been Restored"
-    Select-StartDomain -domain $domain
+    Select-StartDomain -domain $domain -response $startAll
 }
 
 function select-DeleteSnapshotDomain {
@@ -407,7 +424,9 @@ function Select-StartDomain {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
-        [string] $domain
+        [string] $domain,
+        [Parameter(Mandatory = $false, HelpMessage = "Prepopulate response")]
+        [string] $response = $null
     )
 
     while ($true) {
@@ -427,7 +446,10 @@ function Select-StartDomain {
 
         $vmsname = $notRunning | Select-Object -ExpandProperty vmName
         $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" }
-        $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
+        while ($null -eq $response){
+            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
+            break
+        }
 
         if ([string]::IsNullOrWhiteSpace($response)) {
             return
