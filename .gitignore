@@ -1,6 +1,7 @@
 # Ignore storage config and image list files, if present anywhere
 _storageConfig.json
 _fileList.json
+_fileList_develop.json
 
 # Ignore wim/vhdx/iso/exe files, if accidentally placed elsewhere
 *.wim

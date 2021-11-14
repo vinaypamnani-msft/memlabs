@@ -294,7 +294,7 @@ $VM_Create = {
         }
 
         # Copy SQL CU file to VM
-        Copy-Item -ToSession $ps -Path $sqlCUPath -Destination "C:\temp\SQL_CU\$sqlCUFileName" -Force
+        # Copy-Item -ToSession $ps -Path $sqlCUPath -Destination "C:\temp\SQL_CU\$sqlCUFileName" -Force
 
         # Eject ISO from guest
         Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
@@ -890,6 +890,15 @@ try {
         # Existing DC scenario
         $CreateVM = $true
         if ($currentItem.hidden -eq $true) { $CreateVM = $false }
+
+        # Determine SQL CU URL for VM to download. This is done here instead of inside $VM_Create because we need $Common.AzureFileList
+        if ($createVM -and $currentItem.sqlVersion) {
+            $sqlFile = $Common.AzureFileList.ISO | Where-Object {$_.id -eq $currentItem.sqlVersion}
+            $deployConfig.parameters.ThisSQLCUURL = $sqlFile.cuURL
+        }
+        else {
+            $deployConfig.parameters.ThisSQLCUURL = $null
+        }
 
         $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
 

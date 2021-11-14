@@ -1343,8 +1343,15 @@ function Get-StorageConfig {
 
         # Get image list from storage location
         $updateList = $true
-        $fileListPath = Join-Path $Common.AzureFilesPath "_fileList.json"
-        $fileListLocation = "$($StorageConfig.StorageLocation)/_fileList.json"
+
+        # Set file name based on git branch
+        $fileListName = "_fileList.json"
+        $currentBranch = (& git branch) -match '\*'
+        if ($currentBranch -and $currentBranch -notmatch "main") {
+            $fileListName = "_fileList_develop.json"
+        }
+        $fileListPath = Join-Path $Common.AzureFilesPath $fileListName
+        $fileListLocation = "$($StorageConfig.StorageLocation)/$fileListName"
 
         # See if image list needs to be updated
         if (Test-Path $fileListPath) {

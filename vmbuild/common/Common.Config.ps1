@@ -1245,6 +1245,7 @@ function New-DeployConfig {
             ExistingActiveName = $existingActiveVMName
             ThisMachineName    = $null
             ThisMachineRole    = $null
+            ThisSQLCUURL       = $null
         }
 
         $existingVMs = Get-List -Type VM -DomainName $configObject.vmOptions.domainName

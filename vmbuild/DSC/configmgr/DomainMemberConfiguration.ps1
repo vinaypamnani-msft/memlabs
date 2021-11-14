@@ -22,13 +22,13 @@
 
     if ($ThisVm.siteCode) {
         $PSName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-        $PSPassiveName =  ($deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-        if (-not $PSPassiveName){
-            $PSPassiveName =  ($deployConfig.existingVMs | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
+        $PSPassiveName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
+        if (-not $PSPassiveName) {
+            $PSPassiveName = ($deployConfig.existingVMs | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
         }
     }
 
-    if (-not $PSName){
+    if (-not $PSName) {
         $PSName = $deployConfig.parameters.PSName
     }
     $CSName = $deployConfig.parameters.CSName
@@ -52,6 +52,7 @@
 
     # SQL Setup
     $installSQL = $false
+    $sqlUpdateEnabled = $false
     if ($ThisVM.sqlVersion) {
         $installSQL = $true
         $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
@@ -61,6 +62,11 @@
         }
         if ($ThisVM.sqlInstanceName) {
             $SQLInstanceName = $ThisVM.sqlInstanceName
+        }
+        if ($deployConfig.parameters.ThisSQLCUURL) {
+            $sqlUpdateEnabled = $true
+            $sqlCUURL = $deployConfig.parameters.ThisSQLCUURL
+            $sqlCuDownloadPath = Join-Path "C:\Temp\SQL_CU" (Split-Path -Path $sqlCUURL -Leaf)
         }
     }
 
@@ -202,9 +208,32 @@
 
         if ($installSQL) {
 
-            WriteStatus InstallSQL {
-                DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
-                Status    = "Installing SQL Server ($SQLInstanceName instance)"
+            if ($sqlUpdateEnabled) {
+
+                WriteStatus DownloadSQLCU {
+                    DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
+                    Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
+                }
+
+                DownloadFile DownloadSQLCU {
+                    DownloadUrl = $sqlCUURL
+                    FilePath    = $sqlCuDownloadPath
+                    Ensure      = "Present"
+                    DependsOn = "[WriteStatus]DownloadSQLCU"
+
+                }
+
+                WriteStatus InstallSQL {
+                    DependsOn = '[DownloadFile]DownloadSQLCU'
+                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                }
+
+            }
+            else {
+                WriteStatus InstallSQL {
+                    DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
+                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                }
             }
 
             SqlSetup InstallSQL {
@@ -213,12 +242,12 @@
                 SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
                 Features            = 'SQLENGINE,CONN,BC'
                 SourcePath          = 'C:\temp\SQL'
-                UpdateEnabled       = 'True'
+                UpdateEnabled       = $sqlUpdateEnabled
                 UpdateSource        = "C:\temp\SQL_CU"
                 SQLSysAdminAccounts = $SQLSysAdminAccounts
                 TcpEnabled          = $true
                 UseEnglish          = $true
-                DependsOn           = '[OpenFirewallPortForSCCM]OpenFirewall'
+                DependsOn           = '[WriteStatus]InstallSQL'
             }
 
             SqlMemory SetSqlMemory {
@@ -323,7 +352,7 @@
         AddUserToLocalAdminGroup AddADUserToLocalAdminGroup {
             Name       = "cm_svc"
             DomainName = $DomainName
-            DependsOn       = "[WriteStatus]AddLocalAdmin"
+            DependsOn  = "[WriteStatus]AddLocalAdmin"
         }
 
         if ($PSName) {
