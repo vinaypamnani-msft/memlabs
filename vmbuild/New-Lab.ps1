@@ -97,6 +97,7 @@ $VM_Create = {
     $deployConfig = $using:deployConfig
     $forceNew = $using:ForceNew
     $createVM = $using:CreateVM
+    $sqlCUUrl = $using:sqlCUUrl
 
     # Change log location
     $domainName = $using:domainName
@@ -327,6 +328,7 @@ $VM_Create = {
         $currentItem = $using:currentItem
         $adminCreds = $using:Common.LocalAdmin
         $deployConfig = $using:deployConfig
+        $sqlCUUrl = $using:sqlCUUrl
 
         # Set current role
 
@@ -370,6 +372,10 @@ $VM_Create = {
         $configFilePath = "C:\staging\DSC\deployConfig.json"
         $deployConfig.parameters.ThisMachineName = $currentItem.vmName
         $deployConfig.parameters.ThisMachineRole = $currentItem.role   # Don't override this to DomainMember, otherwise DSC won't run MPDP config
+
+        if ($sqlCUUrl) {
+            $deployConfig.parameters.ThisSQLCUURL = $sqlCUUrl
+        }
 
         "Writing DSC config to $configFilePath" | Out-File $log -Append
         $deployConfig | ConvertTo-Json -Depth 3 | Out-File $configFilePath -Force -Confirm:$false
@@ -892,12 +898,10 @@ try {
         if ($currentItem.hidden -eq $true) { $CreateVM = $false }
 
         # Determine SQL CU URL for VM to download. This is done here instead of inside $VM_Create because we need $Common.AzureFileList
+        $sqlCUUrl = $null
         if ($createVM -and $currentItem.sqlVersion) {
             $sqlFile = $Common.AzureFileList.ISO | Where-Object {$_.id -eq $currentItem.sqlVersion}
-            $deployConfig.parameters.ThisSQLCUURL = $sqlFile.cuURL
-        }
-        else {
-            $deployConfig.parameters.ThisSQLCUURL = $null
+            $sqlCUUrl = $sqlFile.cuURL
         }
 
         $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err

@@ -597,6 +597,9 @@ class DownloadSCCM {
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
         if (!(Test-Path $cmsourcepath)) {
             Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+
         }
     }
 
