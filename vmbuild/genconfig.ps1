@@ -705,7 +705,7 @@ function Select-MainMenu {
         $preOptions = [ordered]@{}
         $preOptions += [ordered]@{ "*G" = "---  Global Options%cyan%cyan"; "V" = "Global VM Options `t $(get-VMOptionsSummary)%gray%green" }
         if ($Global:Config.cmOptions) {
-            $preOptions += @{"C" = "Global CM Options `t $(get-CMOptionsSummary)%gray%green" }
+            $preOptions += [ordered]@{"C" = "Global CM Options `t $(get-CMOptionsSummary)%gray%green" }
         }
         $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Virtual Machines%cyan%cyan" }
         $customOptions = [ordered]@{}
