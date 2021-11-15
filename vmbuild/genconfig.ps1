@@ -3012,7 +3012,7 @@ function Add-NewVMForRole {
         if (-not $newSiteCode) {
             $newSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
         }
-        write-log "Adding new DPMP for sitecode $newSiteCode"
+        #write-log "Adding new DPMP for sitecode $newSiteCode"
         Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -SiteCode $newSiteCode -Quiet:$Quiet
     }
     if ($NewFSServer -eq $true) {
