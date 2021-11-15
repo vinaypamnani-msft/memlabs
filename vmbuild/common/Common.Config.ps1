@@ -297,9 +297,9 @@ function Test-ValidCmOptions {
     }
 
     # installDPMPRoles
-    if ($ConfigObject.cmOptions.installDPMPRoles -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.installDPMPRoles has an invalid value [$($ConfigObject.cmOptions.installDPMPRoles)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
-    }
+    #if ($ConfigObject.cmOptions.installDPMPRoles -isnot [bool]) {
+    #    Add-ValidationMessage -Message "CM Options Validation: cmOptions.installDPMPRoles has an invalid value [$($ConfigObject.cmOptions.installDPMPRoles)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    #}
 
     # pushClientToDomainMembers
     if ($ConfigObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
@@ -1606,23 +1606,23 @@ function Get-List {
         }
 
         if ($Type -eq "Subnet") {
-            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
         }
 
         if ($Type -eq "Prefix") {
-            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } |Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
         }
 
         if ($Type -eq "UniqueDomain") {
-            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } |Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniqueSubnet") {
-            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } |Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniquePrefix") {
-            return $return | where-object {-not [String]::IsNullOrWhiteSpace($_.Domain) } |Select-Object -ExpandProperty Prefix -Unique -ErrorAction SilentlyContinue
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Prefix -Unique -ErrorAction SilentlyContinue
         }
 
     }
@@ -1707,16 +1707,45 @@ Function Show-Summary {
         }
 
 
-        if (($deployConfig.cmOptions.installDPMPRoles -or $deployConfig.cmOptions.pushClientToDomainMembers) -and $deployConfig.cmOptions.install -eq $true) {
+        if ($deployConfig.cmOptions.install -eq $true) {
+            $foundDP = $false
+            $foundMP = $false
 
-            If ($containsDPMP) {
-                $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" }
+            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and $_.InstallMP }
+            if ($DPMP) {
                 Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
+                $foundDP = $true
+                $foundMP = $true
             }
-            else {
+
+            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and -not $_.InstallMP }
+            if ($DPMP) {
+                Write-GreenCheck "DP roles will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
+                $foundDP = $true
+            }
+            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallMP -and -not $_.InstallDP }
+            if ($DPMP) {
+                Write-GreenCheck "MP roles will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
+                $foundMP = $true
+            }
+
+            if (-not $foundDP -or -not $foundMP) {
                 $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-                Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
+                if ($PSVM) {
+                    if (-not $foundDP -and -not $foundMP) {
+                        Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
+                    }
+                    else {
+                        if (-not $foundDP) {
+                            Write-GreenCheck "DP role will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
+                        }
+                        if (-not $foundMP) {
+                            Write-GreenCheck "MP role will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
+                        }
+                    }
+                }
             }
+
         }
         else {
             Write-RedX "DPMP roles will not be installed" -NoNewLine
@@ -1773,13 +1802,14 @@ Function Show-Summary {
 
     $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,
     @{Label = "Procs"; Expression = { $_.virtualProcs } },
-    @{Label = "SiteCode"; Expression ={
-        $SiteCode = $_.siteCode
-        if ($_.ParentSiteCode) {
-            $SiteCode += "->$($_.ParentSiteCode)"
+    @{Label = "SiteCode"; Expression = {
+            $SiteCode = $_.siteCode
+            if ($_.ParentSiteCode) {
+                $SiteCode += "->$($_.ParentSiteCode)"
+            }
+            $SiteCode
         }
-        $SiteCode
-    }},
+    },
     @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
     @{Label = "SQL"; Expression = {
             if ($null -ne $_.SqlVersion) {
