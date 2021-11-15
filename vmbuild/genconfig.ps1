@@ -103,17 +103,17 @@ function Write-Option {
 
 function Select-ConfigMenu {
     while ($true) {
-        $customOptions = [ordered]@{ "1" = "Create New Domain" }
+        $customOptions = [ordered]@{ "1" = "Create New Domain%white%green" }
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
-        $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]"; }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load Sample Configuration"; "4" = "Load saved config from File"; "*B3" = ""; }
+        $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%white%green"; }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load Sample Configuration%gray%green"; "4" = "Load saved config from File%gray%green"; "*B3" = ""; }
         $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
         $vmsTotal = (Get-List -Type VM | Measure-Object).Count
         $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
         $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
         $disk = Get-Volume -DriveLetter E
         $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%cyan"; }
-        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow"; "P" = "Show Passwords" }
+        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%gray%green" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%gray%green"; "P" = "Show Passwords" }
 
         $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" }).Count
 
@@ -1088,7 +1088,7 @@ function Select-NewDomainConfig {
     $valid = $false
     while ($valid -eq $false) {
 
-        $customOptions = [ordered]@{ "1" = "CAS and Primary"; "2" = "Primary Site only"; "3" = "Tech Preview (NO CAS)" ; "4" = "No ConfigMgr"; }
+        $customOptions = [ordered]@{ "1" = "CAS and Primary%gray%green"; "2" = "Primary Site only%gray%green"; "3" = "Tech Preview (NO CAS)%red%green" ; "4" = "No ConfigMgr%yellow%green"; }
         $response = $null
         while (-not $response) {
             $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
