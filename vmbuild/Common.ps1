@@ -975,21 +975,19 @@ function New-VirtualMachine {
         }
     }
 
-    if (-not $OSDClient.IsPresent) {
+    try {
+        Write-Log "New-VirtualMachine: $VmName`: Starting virtual machine"
+        Start-VM -Name $VmName -ErrorAction Stop
+    }
+    catch {
         try {
-            Write-Log "New-VirtualMachine: $VmName`: Starting virtual machine"
+            Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message). Retrying once..." -Warning
+            Start-Sleep -Seconds 60
             Start-VM -Name $VmName -ErrorAction Stop
         }
         catch {
-            try {
-                Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message). Retrying once..." -Warning
-                Start-Sleep -Seconds 60
-                Start-VM -Name $VmName -ErrorAction Stop
-            }
-            catch {
-                Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message)" -Failure
-                return $false
-            }
+            Write-Log "New-VirtualMachine: $VmName`: Failed to start newly created VM. $($_.Exception.Message)" -Failure
+            return $false
         }
     }
 
