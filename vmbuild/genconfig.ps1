@@ -1455,7 +1455,7 @@ function Select-RolesForExisting {
 
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue "DomainMember" -additionalOptions $OptionArray
 
-    $role = $role.Split("[").Trim()
+    $role = $role.Split("[")[0].Trim()
     if ($role -eq "CAS and Primary") {
         $role = "CAS"
     }
