@@ -1720,12 +1720,12 @@ Function Show-Summary {
 
             $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and -not $_.InstallMP }
             if ($DPMP) {
-                Write-GreenCheck "DP roles will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
+                Write-GreenCheck "DP role will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
                 $foundDP = $true
             }
             $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallMP -and -not $_.InstallDP }
             if ($DPMP) {
-                Write-GreenCheck "MP roles will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
+                Write-GreenCheck "MP role will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
                 $foundMP = $true
             }
 
