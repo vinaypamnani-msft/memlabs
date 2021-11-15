@@ -147,6 +147,8 @@ function New-RDCManFile {
         [string]$rdcmanfile
     )
 
+    Write-Log "Creating/Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity
+
     $templatefile = Join-Path $PSScriptRoot "template.rdg"
 
     # Gets the blank template
@@ -240,13 +242,13 @@ function New-RDCManFile {
     Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
-        Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success
+        Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving $rdcmanfile." -Success
         Get-Process -Name rdcman -ea Ignore | Stop-Process
         Start-Sleep 1
         $existing.save($rdcmanfile) | Out-Null
     }
     else {
-        Write-Log "New-RDCManFile: No Changes. Not Saving resultant XML to $rdcmanfile" -Success
+        Write-Log "New-RDCManFile: No Changes. Not updating $rdcmanfile" -Success
     }
 }
 
@@ -256,6 +258,8 @@ function New-RDCManFileFromHyperV {
         [string]$rdcmanfile,
         [bool]$OverWrite = $false
     )
+
+    Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity
 
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
@@ -270,26 +274,26 @@ function New-RDCManFileFromHyperV {
     # Gets the blank template
     [xml]$template = Get-Content -Path $templatefile
     if ($null -eq $template) {
-        Write-Log "New-RDCManFile: Could not locate $templatefile" -Failure
+        Write-Log "New-RDCManFileFromHyperV: Could not locate $templatefile" -Failure
         return
     }
 
     # Gets the blank template, or returns the existing rdg xml if available.
     if (-not (Test-Path $rdcmanfile)) {
         Copy-Item $templatefile $rdcmanfile
-        Write-Verbose "[New-RDCManFileFromHyperV] Loading config from $rdcmanfile"
+        Write-Verbose "New-RDCManFileFromHyperV: Loading config from $rdcmanfile"
     }
     [xml]$existing = Get-Content -Path $rdcmanfile
     # This is the bulk of the data.
     $file = $existing.RDCMan.file
     if ($null -eq $file) {
-        Write-Log "New-RDCManFile: Could not load File section from $rdcmanfile" -Failure
+        Write-Log "New-RDCManFileFromHyperV: Could not load File section from $rdcmanfile" -Failure
         return
     }
 
     $group = $file.group
     if ($null -eq $group) {
-        Write-Log "New-RDCManFile: Could not load group section from $rdcmanfile" -Failure
+        Write-Log "New-RDCManFileFromHyperV: Could not load group section from $rdcmanfile" -Failure
         return
     }
 
@@ -301,17 +305,17 @@ function New-RDCManFileFromHyperV {
 
     $groupFromTemplate = $template.RDCMan.file.group
     if ($null -eq $groupFromTemplate) {
-        Write-Log "New-RDCManFile: Could not load group section from $templatefile" -Failure
+        Write-Log "New-RDCManFileFromHyperV: Could not load group section from $templatefile" -Failure
         return
     }
 
     Install-RDCman
     foreach ($domain in (Get-List -Type UniqueDomain -ResetCache)) {
-        Write-Verbose "[New-RDCManFileFromHyperV] Adding all machines from Domain $domain"
+        Write-Verbose "New-RDCManFileFromHyperV: Adding all machines from Domain $domain"
         $findGroup = $null
         $findGroup = Get-RDCManGroupToModify $domain $group $findGroup $groupFromTemplate $existing
         if ($findGroup -eq $false -or $null -eq $findGroup) {
-            Write-Log "New-RDCManFile: Failed to find group to modify" -Failure
+            Write-Log "New-RDCManFileFromHyperV: Failed to find group to modify" -Failure
             return
         }
         Remove-MissingServersFromGroup -findgroup $findGroup
@@ -321,12 +325,12 @@ function New-RDCManFileFromHyperV {
         if (Test-Path "$Global:newrdcmanpath\$rdcmanexe") {
             $encryptedPass = Get-RDCManPassword $Global:newrdcmanpath
             if ($null -eq $encryptedPass) {
-                Write-Log "New-RDCManFile: Password was not generated correctly." -Failure
+                Write-Log "New-RDCManFileFromHyperV: Password was not generated correctly." -Failure
                 return
             }
         }
         else {
-            Write-Log "New-RDCManFile: Cound not located $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
+            Write-Log "New-RDCManFileFromHyperV: Could not located $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
             return
         }
 
@@ -442,11 +446,11 @@ function New-RDCManFileFromHyperV {
     $unknownVMs = @()
     $unknownVMs += get-list -type vm  | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
-        Write-Verbose "[New-RDCManFileFromHyperV] Adding Unknown VMs"
+        Write-Verbose "New-RDCManFileFromHyperV: Adding Unknown VMs"
         $findGroup = $null
         $findGroup = Get-RDCManGroupToModify "UnknownVMs" $group $findGroup $groupFromTemplate $existing
         if ($findGroup -eq $false -or $null -eq $findGroup) {
-            Write-Log "New-RDCManFile: Failed to find group to modify" -Failure
+            Write-Log "New-RDCManFileFromHyperV: Failed to find group to modify" -Failure
             return
         }
         $findGroup.group.properties.expanded = "True"
@@ -458,7 +462,7 @@ function New-RDCManFileFromHyperV {
         }
 
         foreach ($vm in $unknownVMs) {
-            Write-Verbose "Adding VM $($vm.VmName)"
+            Write-Verbose "New-RDCManFileFromHyperV: Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
             $comment = $c | ConvertTo-Json
@@ -476,13 +480,13 @@ function New-RDCManFileFromHyperV {
     Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
-        Write-Log "New-RDCManFile: Killing RDCMan, if necessary and saving resultant XML to $rdcmanfile." -Success
+        Write-Log "New-RDCManFileFromHyperV: Killing RDCMan, if necessary and updating $rdcmanfile." -Success
         Get-Process -Name rdcman -ea Ignore | Stop-Process
         Start-Sleep 1
         $existing.save($rdcmanfile) | Out-Null
     }
     else {
-        Write-Log "New-RDCManFile: No Changes. Not Saving resultant XML to $rdcmanfile" -Success
+        Write-Log "New-RDCManFileFromHyperV: No Changes. Not updating $rdcmanfile" -Success
     }
 }
 
