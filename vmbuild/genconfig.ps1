@@ -2219,6 +2219,46 @@ function Get-AdditionalValidations {
     #$name = $($item.Name)
     Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
     switch ($name) {
+        "E" {
+            if (-not $value.EndsWith("GB" -and -not $value.EndsWith("MB"))) {
+                if ($CurrentValue.EndsWith("GB")) {
+                    $property.$name = $value.Trim() + "GB"
+                }
+                if ($CurrentValue.EndsWith("MB")) {
+                    $property.$name = $value.Trim() + "MB"
+                }
+            }
+        }
+        "F" {
+            if (-not $value.EndsWith("GB" -and -not $value.EndsWith("MB"))) {
+                if ($CurrentValue.EndsWith("GB")) {
+                    $property.$name = $value.Trim() + "GB"
+                }
+                if ($CurrentValue.EndsWith("MB")) {
+                    $property.$name = $value.Trim() + "MB"
+                }
+            }
+        }
+        "G" {
+            if (-not $value.EndsWith("GB" -and -not $value.EndsWith("MB"))) {
+                if ($CurrentValue.EndsWith("GB")) {
+                    $property.$name = $value.Trim() + "GB"
+                }
+                if ($CurrentValue.EndsWith("MB")) {
+                    $property.$name = $value.Trim() + "MB"
+                }
+            }
+        }
+        "memory" {
+            if (-not $value.EndsWith("GB" -and -not $value.EndsWith("MB"))) {
+                if ($CurrentValue.EndsWith("GB")) {
+                    $property.$name = $value.Trim() + "GB"
+                }
+                if ($CurrentValue.EndsWith("MB")) {
+                    $property.$name = $value.Trim() + "MB"
+                }
+            }
+        }
         "vmName" {
 
             $CASVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
@@ -3078,7 +3118,7 @@ function Select-VirtualMachines {
                                 }
                             }
                             else {
-                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
+                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not $virtualMachine.Role -eq "DC") {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Add SQL" }
                                     }
@@ -3206,6 +3246,7 @@ function Select-VirtualMachines {
                         }
                     }
                 }
+                return
             }
         }
         else {
