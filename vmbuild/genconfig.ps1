@@ -1402,6 +1402,34 @@ function Select-RolesForNewList {
     return $Roles
 }
 
+function Format-Roles{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Roles Array")]
+        [object]$Roles
+    )
+
+    $newRoles = @()
+
+    $padding = 22
+    foreach ($role in $Roles){
+        switch ($role){
+            "CAS and Primary" { $newRoles += "$($role.PadRight($padding))`t[New CAS and Primary Site]"}
+            "Primary" { $newRoles += "$($role.PadRight($padding))`t[New Primary site (Standalone or join a CAS)]"}
+            "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]"}
+            "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site]"}
+            "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain]"}
+            "DomainMember (Client)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Client OS joined to the domain]"}
+            "WorkgroupMember" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access]"}
+            "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]"}
+            "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]"}
+            "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]"}
+        }
+    }
+
+    return $newRoles
+
+}
 
 function Select-RolesForExisting {
     $existingRoles = Select-RolesForExistingList
@@ -1421,10 +1449,13 @@ function Select-RolesForExisting {
         }
     }
 
+    $existingRoles2 = Format-Roles $existingRoles2
+
     $OptionArray = @{ "H" = "Convert an existing CAS or Primary to HA" }
 
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue "DomainMember" -additionalOptions $OptionArray
 
+    $role = $role.Split("[").Trim()
     if ($role -eq "CAS and Primary") {
         $role = "CAS"
     }
