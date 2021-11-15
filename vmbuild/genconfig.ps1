@@ -1402,22 +1402,6 @@ function Select-RolesForNewList {
     return $Roles
 }
 
-function Format-Roles{
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Roles Array")]
-        [object]$Roles
-    )
-
-    $newRoles = @()
-
-    foreach ($role in $Roles){
-        switch ($role){
-
-        }
-    }
-
-}
 
 function Select-RolesForExisting {
     $existingRoles = Select-RolesForExistingList
