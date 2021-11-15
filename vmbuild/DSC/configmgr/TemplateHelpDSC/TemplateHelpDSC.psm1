@@ -148,6 +148,8 @@ class InstallSSMS {
                 Write-Verbose "Installing SSMS..."
                 & $cmd $arg1 $arg2 $arg3 | out-null
                 Write-Verbose "SSMS Installed Successfully!"
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
@@ -596,10 +598,7 @@ class DownloadSCCM {
 
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
         if (!(Test-Path $cmsourcepath)) {
-            Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-            $global:DSCMachineStatus = 1
-
+            Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -Wait
         }
     }
 
