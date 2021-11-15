@@ -1773,6 +1773,13 @@ Function Show-Summary {
 
     $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,
     @{Label = "Procs"; Expression = { $_.virtualProcs } },
+    @{Label = "SiteCode"; Expression ={
+        $SiteCode = $_.siteCode
+        if ($_.ParentSiteCode) {
+            $SiteCode += "->$($_.ParentSiteCode)"
+        }
+        $SiteCode
+    }},
     @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
     @{Label = "SQL"; Expression = {
             if ($null -ne $_.SqlVersion) {
