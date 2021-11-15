@@ -3136,7 +3136,7 @@ function Select-VirtualMachines {
                     $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
                 }
                 Get-TestResult -SuccessOnError | out-null
-                continue
+                return
             }
             :VMLoop while ($true) {
                 $i = 0
