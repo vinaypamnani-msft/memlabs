@@ -703,11 +703,11 @@ function get-VMSummary {
 function Select-MainMenu {
     while ($true) {
         $preOptions = [ordered]@{}
-        $preOptions += @{ "*G" = "---  Global Options%cyan%cyan"; "V" = "Global VM Options `t $(get-VMOptionsSummary)%gray%green" }
+        $preOptions += [ordered]@{ "*G" = "---  Global Options%cyan%cyan"; "V" = "Global VM Options `t $(get-VMOptionsSummary)%gray%green" }
         if ($Global:Config.cmOptions) {
             $preOptions += @{"C" = "Global CM Options `t $(get-CMOptionsSummary)%gray%green" }
         }
-        $preOptions += @{ "*V1" = ""; "*V" = "---  Virtual Machines%cyan%cyan" }
+        $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Virtual Machines%cyan%cyan" }
         $customOptions = [ordered]@{}
         #$customOptions += @{"3" = "Virtual Machines `t`t $(get-VMSummary)" }
 
@@ -717,16 +717,16 @@ function Select-MainMenu {
 
             $i = $i + 1
             $name = Get-VMString $virtualMachine
-            $customOptions += @{"$i" = "$name%white%green" }
+            $customOptions += [ordered]@{"$i" = "$name%white%green" }
             #write-Option "$i" "$($name)"
         }
 
         $customOptions += [ordered]@{ "N" = "New Virtual Machine%DarkGreen%Green"; "*D1" = ""; "*D" = "---  Deployment%cyan%cyan"; "S" = "Save Configuration and Exit%gray%green" }
         if ($InternalUseOnly.IsPresent) {
-            $customOptions += @{ "D" = "Deploy Config%Green%Green" }
+            $customOptions += [ordered]@{ "D" = "Deploy Config%Green%Green" }
         }
         if ($enableDebug) {
-            $customOptions += @{ "R" = "Return deployConfig" }
+            $customOptions += [ordered]@{ "R" = "Return deployConfig" }
         }
         #write-Option -color DarkGreen -Color2 Green "N" "New Virtual Machine"
 
@@ -1401,6 +1401,24 @@ function Select-RolesForNewList {
     $Roles = $Common.Supported.Roles | Where-Object { $_ -ne "PassiveSite" }
     return $Roles
 }
+
+function Format-Roles{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Roles Array")]
+        [object]$Roles
+    )
+
+    $newRoles = @()
+
+    foreach ($role in $Roles){
+        switch ($role){
+
+        }
+    }
+
+}
+
 function Select-RolesForExisting {
     $existingRoles = Select-RolesForExistingList
 
