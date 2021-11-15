@@ -1402,7 +1402,7 @@ function Select-RolesForNewList {
     return $Roles
 }
 
-function Format-Roles{
+function Format-Roles {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Roles Array")]
@@ -1412,18 +1412,18 @@ function Format-Roles{
     $newRoles = @()
 
     $padding = 22
-    foreach ($role in $Roles){
-        switch ($role){
-            "CAS and Primary" { $newRoles += "$($role.PadRight($padding))`t[New CAS and Primary Site]"}
-            "Primary" { $newRoles += "$($role.PadRight($padding))`t[New Primary site (Standalone or join a CAS)]"}
-            "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]"}
-            "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site]"}
-            "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain]"}
-            "DomainMember (Client)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Client OS joined to the domain]"}
-            "WorkgroupMember" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access]"}
-            "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]"}
-            "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]"}
-            "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]"}
+    foreach ($role in $Roles) {
+        switch ($role) {
+            "CAS and Primary" { $newRoles += "$($role.PadRight($padding))`t[New CAS and Primary Site]" }
+            "Primary" { $newRoles += "$($role.PadRight($padding))`t[New Primary site (Standalone or join a CAS)]" }
+            "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]" }
+            "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site]" }
+            "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain]" }
+            "DomainMember (Client)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Client OS joined to the domain]" }
+            "WorkgroupMember" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access]" }
+            "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]" }
+            "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]" }
+            "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]" }
         }
     }
 
@@ -3012,7 +3012,9 @@ function Add-NewVMForRole {
         if (-not $newSiteCode) {
             $newSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
         }
-        #write-log "Adding new DPMP for sitecode $newSiteCode"
+        if (-not $test) {
+            Write-Host "New Primary server found. Adding new DPMP for sitecode $newSiteCode"
+        }
         Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -SiteCode $newSiteCode -Quiet:$Quiet
     }
     if ($NewFSServer -eq $true) {
