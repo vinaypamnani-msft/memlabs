@@ -1713,19 +1713,19 @@ Function Show-Summary {
 
             $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and $_.InstallMP }
             if ($DPMP) {
-                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
+                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")"
                 $foundDP = $true
                 $foundMP = $true
             }
 
             $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and -not $_.InstallMP }
             if ($DPMP) {
-                Write-GreenCheck "DP role will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
+                Write-GreenCheck "DP role will be installed on $($DPMP.vmName -Join ",")"
                 $foundDP = $true
             }
             $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallMP -and -not $_.InstallDP }
             if ($DPMP) {
-                Write-GreenCheck "MP role will be installed on $($DPMP.vmName -Join ",")" -NoNewLine
+                Write-GreenCheck "MP role will be installed on $($DPMP.vmName -Join ",")"
                 $foundMP = $true
             }
 
@@ -1733,14 +1733,14 @@ Function Show-Summary {
                 $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
                 if ($PSVM) {
                     if (-not $foundDP -and -not $foundMP) {
-                        Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
+                        Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)"
                     }
                     else {
                         if (-not $foundDP) {
-                            Write-GreenCheck "DP role will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
+                            Write-GreenCheck "DP role will be installed on Primary Site Server $($PSVM.vmName)"
                         }
                         if (-not $foundMP) {
-                            Write-GreenCheck "MP role will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
+                            Write-GreenCheck "MP role will be installed on Primary Site Server $($PSVM.vmName)"
                         }
                     }
                 }
@@ -1748,19 +1748,20 @@ Function Show-Summary {
 
         }
         else {
-            Write-RedX "DPMP roles will not be installed" -NoNewLine
+            Write-RedX "DPMP roles will not be installed"
         }
 
         if ($containsMember) {
             if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                Write-Host " [Client Push: Yes]"
+                $MemberNames = ($fixedConfig | Where-Object { $_.Role -eq "DomainMember" }).vmName
+                Write-GreenCheck "Client Push: Yes [$($MemberNames -join ",")]"
             }
             else {
-                Write-Host " [Client Push: No]"
+                Write-RedX "Client Push: No"
             }
         }
         else {
-            Write-Host " [Client Push: N/A]"
+            #Write-Host " [Client Push: N/A]"
         }
 
     }
