@@ -703,7 +703,7 @@ function get-VMSummary {
 function Select-MainMenu {
     while ($true) {
         $preOptions = [ordered]@{}
-        $preOptions += @{ "*G1" = ""; "*G" = "---  Global Options%cyan%cyan"; "V" = "Global VM Options `t $(get-VMOptionsSummary)%gray%green" }
+        $preOptions += @{ "*G" = "---  Global Options%cyan%cyan"; "V" = "Global VM Options `t $(get-VMOptionsSummary)%gray%green" }
         if ($Global:Config.cmOptions) {
             $preOptions += @{"C" = "Global CM Options `t $(get-CMOptionsSummary)%gray%green" }
         }
