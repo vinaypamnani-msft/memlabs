@@ -1684,7 +1684,7 @@ Function Show-Summary {
 
     Write-Verbose "ContainsPS: $containsPS ContainsDPMP: $containsDPMP ContainsMember: $containsMember ContainsPassive: $containsPassive"
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
-        if ($fixedConfig.cmOptions.install -eq $true -and $containsPS) {
+        if ($deployConfig.cmOptions.install -eq $true -and $containsPS) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
 
 
@@ -1723,7 +1723,7 @@ Function Show-Summary {
         }
 
         if ($containsMember) {
-            if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $fixedConfig.cmOptions.install -eq $true) {
+            if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
                 Write-Host " [Client Push: Yes]"
             }
             else {
