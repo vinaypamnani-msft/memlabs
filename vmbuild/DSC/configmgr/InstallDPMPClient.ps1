@@ -51,6 +51,7 @@ if (-not $DPNames) {
 
 Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
 Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
+Write-DscStatus "Client push candidates are '$ClientNames'"
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
