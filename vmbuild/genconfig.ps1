@@ -3118,7 +3118,7 @@ function Select-VirtualMachines {
                                 }
                             }
                             else {
-                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not $virtualMachine.Role -eq "DC") {
+                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not ($virtualMachine.Role -eq "DC")) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Add SQL" }
                                     }
