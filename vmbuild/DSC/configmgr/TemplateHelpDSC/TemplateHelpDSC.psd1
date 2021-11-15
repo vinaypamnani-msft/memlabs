@@ -6,6 +6,7 @@ RootModule = 'TemplateHelpDSC.psm1'
 DscResourcesToExport = @(
     'InstallADK',
     'InstallSSMS',
+    'InstallDotNet472',
     'InstallAndConfigWSUS',
     'InstallAZCopy',
     'WriteConfigurationFile',

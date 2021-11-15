@@ -148,6 +148,8 @@ class InstallSSMS {
                 Write-Verbose "Installing SSMS..."
                 & $cmd $arg1 $arg2 $arg3 | out-null
                 Write-Verbose "SSMS Installed Successfully!"
+
+                # Reboot
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
@@ -175,6 +177,70 @@ class InstallSSMS {
     }
 
     [InstallSSMS] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
+class InstallDotNet472 {
+    [DscProperty(Key)]
+    [string] $DownloadUrl
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [void] Set() {
+
+        # Download
+        $setup = "C:\temp\NDP472-KB4054530-x86-x64-AllOS-ENU.exe"
+        if (!(Test-Path $setup)) {
+            Write-Verbose "Downloading .NET 4.7.2 Full from $($this.DownloadUrl)..."
+            Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
+        }
+
+        # Install
+        $cmd = $setup
+        $arg1 = "/q"
+        $arg2 = "/norestart"
+
+        try {
+            Write-Verbose "Installing .NET 4.7.2..."
+            & $cmd $arg1 $arg2 | out-null
+
+            while ($true) {
+                Start-Sleep -Seconds 15
+                $process = Get-Process "NDP472-KB4054530-x86-x64-AllOS-ENU" -ErrorAction SilentlyContinue
+                if ($null -eq $process) {
+                    break
+                }
+            }
+            Start-Sleep -Seconds 120 ## Buffer Wait
+            Write-Verbose ".NET 4.7.2 Installed Successfully!"
+
+            # Reboot
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            throw "Failed to install .NET with below error: $ErrorMessage"
+        }
+    }
+
+    [bool] Test() {
+
+        $NetVersion = (Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP' -Recurse | Get-ItemProperty -Name version -EA 0 `
+            | Where-Object { $_.PSChildName -Match '^(?!S)\p{L}' } | Select-Object PSChildName, version) `
+        | Where-Object { $_.PsChildName -eq "Full" } | Select-Object Version
+
+        if ($NetVersion -and [Version]($NetVersion.Version) -gt [Version]"4.7.3061") {
+            return $true
+        }
+
+        return $false
+    }
+
+    [InstallDotNet472] Get() {
         return $this
     }
 }
