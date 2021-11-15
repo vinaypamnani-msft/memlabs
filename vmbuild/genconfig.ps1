@@ -2960,7 +2960,7 @@ function Add-NewVMForRole {
                 }
             }
             else {
-                write-log "Adding new DPMP for sitecode $newSiteCode"
+                #write-log "Adding new DPMP for sitecode $newSiteCode"
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
             }
         }
