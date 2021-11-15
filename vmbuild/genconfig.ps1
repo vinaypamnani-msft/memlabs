@@ -106,13 +106,13 @@ function Select-ConfigMenu {
         $customOptions = [ordered]@{ "1" = "Create New Domain" }
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
         $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]"; }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)"; "3" = "Load Sample Configuration"; "4" = "Load saved config from File"; "*B3" = ""; }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load Sample Configuration"; "4" = "Load saved config from File"; "*B3" = ""; }
         $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
         $vmsTotal = (Get-List -Type VM | Measure-Object).Count
         $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
         $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
         $disk = Get-Volume -DriveLetter E
-        $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]"; }
+        $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%cyan"; }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%Yellow%Yellow" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%yellow%yellow"; "P" = "Show Passwords" }
 
         $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" }).Count
@@ -121,7 +121,7 @@ function Select-ConfigMenu {
             $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow" }
         }
         Write-Host
-        Write-Host "---  Create Config"
+        Write-Host -ForegroundColor cyan "---  Create Config"
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine
 
         write-Verbose "1 response $response"
@@ -702,32 +702,46 @@ function get-VMSummary {
 
 function Select-MainMenu {
     while ($true) {
-        $customOptions = [ordered]@{}
-        $customOptions += @{"1" = "Global VM Options `t`t $(get-VMOptionsSummary)" }
+        $preOptions = [ordered]@{}
+        $preOptions += @{ "*G1" = ""; "*G" = "---  Global Options%cyan%cyan"; "V" = "Global VM Options `t $(get-VMOptionsSummary)%gray%green" }
         if ($Global:Config.cmOptions) {
-            $customOptions += @{"2" = "Global CM Options `t`t $(get-CMOptionsSummary)" }
+            $preOptions += @{"C" = "Global CM Options `t $(get-CMOptionsSummary)%gray%green" }
         }
-        $customOptions += @{"3" = "Virtual Machines `t`t $(get-VMSummary)" }
-        $customOptions += @{ "S" = "Save and Exit" }
+        $preOptions += @{ "*V1" = ""; "*V" = "---  Virtual Machines%cyan%cyan" }
+        $customOptions = [ordered]@{}
+        #$customOptions += @{"3" = "Virtual Machines `t`t $(get-VMSummary)" }
+
+        $i = 0
+        #$valid = Get-TestResult -SuccessOnError
+        foreach ($virtualMachine in $global:config.virtualMachines) {
+
+            $i = $i + 1
+            $name = Get-VMString $virtualMachine
+            $customOptions += @{"$i" = "$name%white%green" }
+            #write-Option "$i" "$($name)"
+        }
+
+        $customOptions += [ordered]@{ "N" = "New Virtual Machine%DarkGreen%Green"; "*D1" = ""; "*D" = "---  Deployment%cyan%cyan"; "S" = "Save Configuration and Exit%gray%green" }
         if ($InternalUseOnly.IsPresent) {
             $customOptions += @{ "D" = "Deploy Config%Green%Green" }
         }
         if ($enableDebug) {
             $customOptions += @{ "R" = "Return deployConfig" }
         }
+        #write-Option -color DarkGreen -Color2 Green "N" "New Virtual Machine"
 
-        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -Test:$false
+        $response = Get-Menu -Prompt "Select menu option" -OptionArray $optionArray -AdditionalOptions $customOptions -preOptions $preOptions -Test:$false
         write-Verbose "response $response"
         if (-not $response) {
             continue
         }
         switch ($response.ToLowerInvariant()) {
-            "1" { Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" }
-            "2" { Select-Options -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" }
-            "3" { Select-VirtualMachines }
+            "v" { Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" }
+            "c" { Select-Options -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" }
             "d" { return $true }
             "s" { return $false }
             "r" { return Test-Configuration -InputObject $Global:Config }
+            default { Select-VirtualMachines $response }
         }
     }
 }
@@ -1688,6 +1702,8 @@ function Get-Menu {
         [string] $CurrentValue,
         [Parameter(Mandatory = $false, HelpMessage = "Additional Menu options, in dictionary format.. X = Exit")]
         [object] $additionalOptions = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Pre Menu options, in dictionary format.. X = Exit")]
+        [object] $preOptions = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
         [bool] $Test = $true,
         [Parameter(Mandatory = $false, HelpMessage = "Supress newline")]
@@ -1698,22 +1714,10 @@ function Get-Menu {
         write-Host
         Write-Verbose "4 Get-Menu"
     }
-    $i = 0
 
-    foreach ($option in $OptionArray) {
-        $i = $i + 1
-        if (-not [String]::IsNullOrWhiteSpace($option)) {
-            Write-Option $i $option
-        }
-    }
-
-    if ($null -ne $additionalOptions) {
-        foreach ($item in $additionalOptions.keys) {
-            $value = $additionalOptions."$($item)"
-            if ($item.StartsWith("*")) {
-                write-host $value
-                continue
-            }
+    if ($null -ne $preOptions) {
+        foreach ($item in $preOptions.keys) {
+            $value = $preOptions."$($item)"
             $color1 = "DarkGreen"
             $color2 = "Green"
 
@@ -1727,12 +1731,53 @@ function Get-Menu {
                 if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
                     $color2 = $TextValue[2]
                 }
+                if ($item.StartsWith("*")) {
+                    write-host -ForeGroundColor $color1 $TextValue[0]
+                    continue
+                }
                 Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
             }
         }
     }
 
-    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $additionalOptions -TestBeforeReturn:$Test
+
+    $i = 0
+
+    foreach ($option in $OptionArray) {
+        $i = $i + 1
+        if (-not [String]::IsNullOrWhiteSpace($option)) {
+            Write-Option $i $option
+        }
+    }
+
+    if ($null -ne $additionalOptions) {
+        foreach ($item in $additionalOptions.keys) {
+            $value = $additionalOptions."$($item)"
+
+            $color1 = "DarkGreen"
+            $color2 = "Green"
+
+            #Write-Host -ForegroundColor DarkGreen [$_] $value
+            if (-not [String]::IsNullOrWhiteSpace($item)) {
+                $TextValue = $value -split "%"
+
+                if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
+                    $color1 = $TextValue[1]
+                }
+                if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
+                    $color2 = $TextValue[2]
+                }
+                if ($item.StartsWith("*")) {
+                    write-host -ForeGroundColor $color1 $TextValue[0]
+                    continue
+                }
+                Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
+            }
+        }
+    }
+    $totalOptions = $preOptions + $additionalOptions
+
+    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $i = 0
@@ -2407,10 +2452,7 @@ function Select-Options {
         if ($null -ne $additionalOptions) {
             foreach ($item in $additionalOptions.keys) {
                 $value = $additionalOptions."$($item)"
-                if ($item.StartsWith("*")) {
-                    write-host $value
-                    continue
-                }
+
                 $color1 = "DarkGreen"
                 $color2 = "Green"
 
@@ -2423,6 +2465,10 @@ function Select-Options {
                     }
                     if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
                         $color2 = $TextValue[2]
+                    }
+                    if ($item.StartsWith("*")) {
+                        write-host -ForegroundColor $color1 $TextValue[0]
+                        continue
                     }
                     Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
                 }
@@ -2644,7 +2690,7 @@ function get-VMString {
         [object] $virtualMachine
     )
 
-    $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(15, " ")
+    $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(19, " ")
     $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(16, " ")
     $mem = $($virtualMachine.memory).PadLEft(4, " ")
     $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
@@ -2686,7 +2732,7 @@ function get-VMString {
         $name += "$($virtualMachine.sqlInstanceName) ($($virtualMachine.sqlInstanceDir))]"
     }
 
-    return $name
+    return "$name"
 }
 
 function Add-NewVMForRole {
@@ -2973,18 +3019,25 @@ function Get-ListOfPossibleFileServers {
 
 
 function Select-VirtualMachines {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "pre supplied response")]
+        [string] $response = $null
+    )
     while ($true) {
         Write-Host
         Write-Verbose "8 Select-VirtualMachines"
-        $i = 0
-        #$valid = Get-TestResult -SuccessOnError
-        foreach ($virtualMachine in $global:config.virtualMachines) {
-            $i = $i + 1
-            $name = Get-VMString $virtualMachine
-            write-Option "$i" "$($name)"
+        if (-not $response) {
+            $i = 0
+            #$valid = Get-TestResult -SuccessOnError
+            foreach ($virtualMachine in $global:config.virtualMachines) {
+                $i = $i + 1
+                $name = Get-VMString $virtualMachine
+                write-Option "$i" "$($name)"
+            }
+            write-Option -color DarkGreen -Color2 Green "N" "New Virtual Machine"
+            $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
         }
-        write-Option -color DarkGreen -Color2 Green "N" "New Virtual Machine"
-        $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
@@ -3008,14 +3061,14 @@ function Select-VirtualMachines {
                         $newValue = "Start"
                         while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                             Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                            $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks"; "A" = "Add Additional Disk" }
+                            $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%cyan%cyan"; "A" = "Add Additional Disk" }
                             if ($null -eq $virtualMachine.additionalDisks) {
                             }
                             else {
                                 $customOptions += [ordered]@{"R" = "Remove Last Additional Disk" }
                             }
                             if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
-                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr"; "S" = "Configure SQL (Set local or remote SQL)" }
+                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr%cyan"; "S" = "Configure SQL (Set local or remote SQL)" }
                                 $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
                                 if ($PassiveNode) {
                                     $customOptions += [ordered]@{"H" = "Remove HA" }
@@ -3027,18 +3080,18 @@ function Select-VirtualMachines {
                             else {
                                 if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL"; "S" = "Add SQL" }
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Add SQL" }
                                     }
                                     else {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL"; "X" = "Remove SQL" }
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "X" = "Remove SQL" }
                                     }
                                 }
                             }
 
-                            $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management"; "D" = "Delete this VM%Red%Red" }
+                            $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%cyan"; "D" = "Delete this VM%Red%Red" }
                             $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $i -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
                             if (([string]::IsNullOrEmpty($newValue))) {
-                                break VMLoop
+                                return
                             }
                             if ($newValue -eq "REFRESH") {
                                 continue VMLoop
