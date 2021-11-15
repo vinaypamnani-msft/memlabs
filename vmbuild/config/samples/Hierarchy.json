@@ -3,7 +3,6 @@
         "version": "current-branch",
         "install": true,
         "updateToLatest": false,
-        "installDPMPRoles": true,
         "pushClientToDomainMembers": true
     },
     "vmOptions": {
@@ -61,7 +60,9 @@
             },
             "memory": "3GB",
             "virtualProcs": 4,
-            "siteCode":"PS1"
+            "siteCode":"PS1",
+            "InstallMP": true,
+            "InstallDP": true
         },
         {
             "vmName": "W10Client1",

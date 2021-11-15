@@ -658,7 +658,7 @@ function get-CMOptionsSummary {
 
     $options = $Global:Config.cmOptions
     $ver = "[$($options.version)]".PadRight(21)
-    $Output = "$ver [Install $($options.install)] [Update $($options.updateToLatest)] [DPMP $($options.installDPMPRoles)] [Push Clients $($options.pushClientToDomainMembers)]"
+    $Output = "$ver [Install $($options.install)] [Update $($options.updateToLatest)] [Push Clients $($options.pushClientToDomainMembers)]"
     return $Output
 }
 
@@ -1230,6 +1230,15 @@ function Select-Config {
             $configSelected.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configSelected.vmOptions.domainAdminName
         }
         $configSelected.vmOptions.PsObject.properties.Remove('domainAdminName')
+    }
+    if ($null -ne $configSelected.cmOptions.installDPMPRoles){
+        $configSelected.cmOptions.PsObject.properties.Remove('installDPMPRoles')
+        foreach ($vm in $configSelected.virtualMachines){
+            if ($vm.Role -eq "DPMP"){
+                $vm  | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $true -Force
+                $vm  | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $true -Force
+            }
+        }
     }
 
     return $configSelected
@@ -2950,6 +2959,8 @@ function Add-NewVMForRole {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallDP' -Value $true
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallMP' -Value $true
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
                 if ($test) {
@@ -2993,7 +3004,6 @@ function Add-NewVMForRole {
                 version                   = "current-branch"
                 install                   = $true
                 updateToLatest            = $false
-                installDPMPRoles          = $true
                 pushClientToDomainMembers = $true
             }
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
