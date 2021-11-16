@@ -1235,8 +1235,8 @@ function Select-Config {
         $configSelected.cmOptions.PsObject.properties.Remove('installDPMPRoles')
         foreach ($vm in $configSelected.virtualMachines){
             if ($vm.Role -eq "DPMP"){
-                $vm  | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $true -Force
-                $vm  | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $true -Force
+                $vm  | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
+                $vm  | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
             }
         }
     }
@@ -2959,8 +2959,8 @@ function Add-NewVMForRole {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallDP' -Value $true
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallMP' -Value $true
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $true
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $true
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
                 if ($test) {

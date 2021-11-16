@@ -61,8 +61,8 @@
             "memory": "3GB",
             "virtualProcs": 4,
             "siteCode":"PS1",
-            "InstallMP": true,
-            "InstallDP": true
+            "installMP": true,
+            "installDP": true
         },
         {
             "vmName": "W10Client1",
