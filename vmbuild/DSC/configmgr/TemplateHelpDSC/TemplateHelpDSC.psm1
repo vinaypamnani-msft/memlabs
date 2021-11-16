@@ -26,17 +26,18 @@ class InstallADK {
     [void] Set() {
         $_adkpath = $this.ADKPath
         if (!(Test-Path $_adkpath)) {
-            #ADK 2004 (19041)
-            $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120254"
+            # $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120254" # ADK 2004 (19041)
+            $adkurl = "https://go.microsoft.com/fwlink/?linkid=2165884"   # ADK Win11
             Start-BitsTransfer -Source $adkurl -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
         $_adkWinPEpath = $this.ADKWinPEPath
         if (!(Test-Path $_adkWinPEpath)) {
-            #ADK add-on (19041)
-            $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"
+            # $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"  # ADK add-on (19041)
+            $adkurl = "https://go.microsoft.com/fwlink/?linkid=2166133"  # ADK Win11
             Start-BitsTransfer -Source $adkurl -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
         }
+
         #Install DeploymentTools
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
         while (!(Test-Path $adkinstallpath)) {
@@ -105,8 +106,19 @@ class InstallADK {
         $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
         $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\Windows Kits\Installed Roots")
         if ($subKey) {
+            $tool1 = $tool2 = $tool3 = $false
             if ($null -ne $subKey.GetValue('KitsRoot10')) {
                 if ($subKey.GetValueNames() | Where-Object { $subkey.GetValue($_) -like "*Deployment Tools*" }) {
+                    $tool1 = $true
+                }
+                if ($subKey.GetValueNames() | Where-Object { $subkey.GetValue($_) -like "*Windows PE*" }) {
+                    $tool2 = $true
+                }
+                if ($subKey.GetValueNames() | Where-Object { $subkey.GetValue($_) -like "*User State Migration*" }) {
+                    $tool3 = $true
+                }
+
+                if ($tool1 -and $tool2 -and $tool3) {
                     return $true
                 }
             }
