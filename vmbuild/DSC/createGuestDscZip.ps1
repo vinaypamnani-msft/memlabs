@@ -1,6 +1,5 @@
 param(
-    $configPath,
-    [System.Management.Automation.PSCredential]$creds,
+    $configName,
     $vmName,
     [switch]$force
 )
@@ -10,8 +9,8 @@ if (-not $vmName) {
     return
 }
 
-if (-not $configPath) {
-    Write-Host "Specify configPath."
+if (-not $configName) {
+    Write-Host "Specify configName."
     return
 }
 
@@ -61,7 +60,8 @@ if ($Common.Initialized) {
 . "..\Common.ps1"
 
 # Create dummy file so config doesn't fail
-$result = Test-Configuration -FilePath $ConfigPath
+$userConfig = Get-UserConfiguration -Configuration $configName
+$result = Test-Configuration -InputObject $userConfig.Config
 $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
 $result.DeployConfig.parameters.ThisMachineName = $ThisVM.vmName
 $result.DeployConfig.parameters.ThisMachineRole = $ThisVM.role
@@ -100,8 +100,9 @@ switch (($role)) {
 }
 Write-Host "Creating a test config for $role in C:\Temp"
 
-if ($creds) { $adminCreds = $creds }
+if ($Common.LocalAdmin) { $adminCreds = $Common.LocalAdmin }
 else { $adminCreds = Get-Credential }
+
 . ".\$dscFolder\$($role)Configuration.ps1"
 
 # Configuration Data
