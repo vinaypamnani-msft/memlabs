@@ -755,12 +755,6 @@ function Test-ValidRolePassiveSite {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which already contains a passive site server." -ReturnObject $ReturnObject -Warning
             }
         }
-        else {
-            $assVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
-            if (($assVM | Measure-Object).Count -ne 0) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which already exists in Hyper-V for VM [$($assVM.vmName)]." -ReturnObject $ReturnObject -Warning
-            }
-        }
     }
 }
 
@@ -793,6 +787,39 @@ function Test-ValidRoleFileServer {
 
         if (-not $fdrive) {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain F drive. FileServer must contain E and F drives." -ReturnObject $ReturnObject -Warning
+        }
+    }
+
+}
+
+function Test-ValidRoleDPMP {
+    param (
+        [object] $VM,
+        [object] $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
+
+    # Server OS
+    if ($VM.installMP) {
+        Test-ValidVmServerOS -VM $VM -ReturnObject $return
+    }
+
+    if (-not $VM.siteCode) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain siteCode; When deploying $vmRole Role, you must specify the siteCode of a Primary Site Server." -ReturnObject $ReturnObject -Warning
+    }
+    else {
+        $psInConfig = $ConfigObject.virtualMachines | Where-Object { $_.sitecode -eq $VM.siteCode -and ($_.role -eq "Primary") }
+        if (-not $psInConfig) {
+            $psVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
+            if (($psVM | Measure-Object).Count -eq 0) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Primary Site Server." -ReturnObject $ReturnObject -Warning
+            }
         }
     }
 
@@ -1044,8 +1071,9 @@ function Test-Configuration {
 
         $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
 
-        # Server OS
-        Test-ValidVmServerOS -VM $DPMPVM -ReturnObject $return
+        foreach ($VM in $DPMPVM) {
+            Test-ValidRoleDPMP -VM $VM -ReturnObject $return
+        }
 
         if (-not $containsPS -and -not $deployConfig.parameters.ExistingPSName) {
             Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode/subnet was not found." -ReturnObject $return -Warning
@@ -1562,11 +1590,17 @@ function Get-List {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                             if ($vmState -eq "Running" -and (-not $inProgress)) {
                                 try {
-                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "SiteCode" } -SuppressLog
+                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
                                     $siteCode = $siteCodeFromVM.ScriptBlockOutput
-                                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                    Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
-                                    Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                                    if (-not $siteCode) {
+                                        $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                                        $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                                    }
+                                    if ($siteCode) {
+                                        $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
+                                        Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
+                                        Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                                    }
                                 }
                                 catch {
                                     Write-Log "Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
@@ -1692,7 +1726,7 @@ Function Show-Summary {
                 Write-GreenCheck "ConfigMgr will be updated to latest"
             }
             else {
-                Write-RedX "ConfigMgr will NOT be updated to latest"
+                Write-RedX "ConfigMgr will NOT updated to latest"
             }
             $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PSVM.ParentSiteCode) {
@@ -1769,9 +1803,6 @@ Function Show-Summary {
         Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
         if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
             $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-            if ($PassiveVM){
-                Write-GreenCheck "ConfigMgr Passive node will be installed on $($PassiveVM.vmName)" -NoNewLine
-            }
         }
         else {
             Write-RedX "ConfigMgr will not be installed."
@@ -1854,6 +1885,9 @@ function Copy-SampleConfigs {
         if ($copyFile) {
             Write-Log "Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly -Verbose
             Copy-Item -Path $sampleFile -Destination $configFile -Force
+        }
+    }
+}
         }
     }
 }
