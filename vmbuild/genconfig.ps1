@@ -770,8 +770,8 @@ function Select-MainMenu {
 
                 write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"
                 #Invoke-Expression  ".\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName -confirm:$false"
-                & ".\dsc\createGuestDscZip.ps1" @params
-                Set-Location $PSScriptRoot
+                & ".\dsc\createGuestDscZip.ps1" @params | Out-Host
+                Set-Location $PSScriptRoot | Out-Null
             }
             default { Select-VirtualMachines $response }
         }
