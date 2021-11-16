@@ -848,11 +848,17 @@ function Get-NewMachineName {
         [String] $OS,
         [Parameter(Mandatory = $false, HelpMessage = "Site Code")]
         [String] $SiteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "Install MP")]
+        [Bool] $InstallMP,
+        [Parameter(Mandatory = $false, HelpMessage = "Install DP")]
+        [Bool] $InstallDP,
+        [Parameter(Mandatory = $false, HelpMessage = "Current Machine Name")]
+        [String] $CurrentName,
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
         [Object] $ConfigToCheck = $global:config
     )
 
-
+    #Get-PSCallStack | Out-Host
     $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
     $ConfigCount = ($ConfigToCheckvirtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
@@ -956,6 +962,25 @@ function Get-NewMachineName {
     #        return $($PSVM.SiteCode) + $role
     #    }
     #}
+
+    if ($role -eq "DPMP") {
+        $RoleName = $siteCode + $role
+        if ($InstallMP -and -not $InstallDP) {
+            $RoleName = $siteCode + "MP"
+            #$RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role -and ($_.installMP -eq $true -or $null -eq $_.installMP)} | Measure-Object).Count
+            #$ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role -and $_.installMP -eq $true -and $CurrentName -ne $_.vmName} | Measure-Object).count
+            $RoleCount = 0
+            $ConfigCount = 0
+        }
+        if ($InstallDP -and -not $InstallMP) {
+            $RoleName = $siteCode + "DP"
+            #$RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role -and ($_.installDP -eq $true -or $null -eq $_.installDP)} | Measure-Object).Count
+            #$ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role -and $_.installDP -eq $true -and $CurrentName -ne $_.vmName} | Measure-Object).count
+            $RoleCount = 0
+            $ConfigCount = 0
+        }
+
+    }
     if ($Role -eq "FileServer") {
         $RoleName = "FS"
         $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
@@ -1421,6 +1446,11 @@ function Show-ExistingNetwork {
         $SiteCode = $result
     }
 
+    if ($role -eq "DPMP"){
+        $SiteCode = Get-SiteCodeForDPMP -Domain $domain
+        #write-host "Get-SiteCodeForDPMP return $SiteCode"
+    }
+
     [string]$subnet = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1).Subnet
     if ($role -ne "InternetClient" -and $role -ne "AADClient" -and $role -ne "PassiveSite") {
         $subnet = Select-ExistingSubnets -Domain $domain -Role $role
@@ -1429,6 +1459,7 @@ function Show-ExistingNetwork {
             return $null
         }
     }
+
     Write-verbose "[Show-ExistingNetwork] Calling Get-ExistingConfig '$domain' '$subnet' '$role' '$SiteCode'"
     $newConfig = Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -ParentSiteCode $ParentSiteCode -SiteCode $Sitecode
     return $newConfig
@@ -2020,7 +2051,46 @@ Function Get-ParentSiteCodeMenu {
     }
 }
 
+Function Get-SiteCodeForDPMP {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue,
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [string] $Domain
+    )
+    $valid = $false
+    #Get-PSCallStack | out-host
+    while ($valid -eq $false) {
+        $siteCodes = @()
+        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -first 1).SiteCode
+        if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
+            $siteCodes += $tempSiteCode
+        }
+        if ($Domain) {
+            $siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
+        }
+        if ($siteCodes.Length -eq 0) {
+            Write-Host
+            write-host "No valid site codes are eligible to accept this DPMP"
+            return $null
+        }
+        else {
+            #write-host $siteCodes
+        }
+        $result = $null
+        while (-not $result) {
+            $result = Get-Menu -Prompt "Select sitecode to connect DPMP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false
+        }
+        if ($result.ToLowerInvariant() -eq "x") {
+            return $null
+        }
+        else {
+            return $result
 
+        }
+    }
+}
 Function Get-SiteCodeMenu {
     [CmdletBinding()]
     param (
@@ -2033,44 +2103,27 @@ Function Get-SiteCodeMenu {
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [Object] $ConfigToCheck = $global:config
     )
-    $valid = $false
+
     #Get-PSCallStack | out-host
-    while ($valid -eq $false) {
-        $siteCodes = @()
-        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -first 1).SiteCode
-        if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-            $siteCodes += $tempSiteCode
-        }
-        $siteCodes += Get-ExistingSiteServer -DomainName $ConfigToCheck.vmOptions.domainName -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
-        if ($siteCodes.Length -eq 0) {
-            Write-Host
-            write-host "No valid site codes are eligible to accept this DPMP"
+    $result = Get-SiteCodeForDPMP -CurrentValue $CurrentValue -Domain $configToCheck.vmoptions.domainName
+
+    if ($result.ToLowerInvariant() -eq "x") {
+        $property."$name" = $null
+    }
+    else {
+        $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -Force
+        #$property."$name" = $result
+    }
+    if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+        return
+    }
+    else {
+        if ($property."$name" -eq $CurrentValue) {
             return
-        }
-        else {
-            #write-host $siteCodes
-        }
-        $result = $null
-        while (-not $result) {
-            $result = Get-Menu -Prompt "Select sitecode to connect DPMP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false
-        }
-        if ($result.ToLowerInvariant() -eq "x") {
-            $property."$name" = $null
-        }
-        else {
-            $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -Force
-            #$property."$name" = $result
-        }
-        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
-            return
-        }
-        else {
-            if ($property."$name" -eq $value) {
-                return
-            }
         }
     }
 }
+
 
 Function Get-SqlVersionMenu {
     [CmdletBinding()]
@@ -2367,6 +2420,14 @@ function Get-AdditionalValidations {
                     $Passive.remoteContentLibVM = $value
                 }
             }
+        }
+        "installMP" {
+            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
+            $property.vmName = $newName
+        }
+        "installDP" {
+            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
+            $property.vmName = $newName
         }
         "siteCode" {
             if ($property.RemoteSQLVM) {
@@ -2678,6 +2739,8 @@ function Select-Options {
                     }
                     if ($property.role -eq "DPMP") {
                         Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
+                        $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
+                        $property.vmName = $newName
                         continue MainLoop
                     }
                 }
@@ -3012,12 +3075,14 @@ function Add-NewVMForRole {
                 }
                 else {
                     Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
+
                 }
             }
             else {
                 #write-log "Adding new DPMP for sitecode $newSiteCode"
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
             }
+            $siteCode = $virtualMachine.siteCode
         }
         "FileServer" {
             $virtualMachine.memory = "3GB"
