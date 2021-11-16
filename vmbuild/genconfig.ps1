@@ -2910,6 +2910,14 @@ function get-VMString {
             $SiteCode += "->$($virtualMachine.ParentSiteCode)"
         }
         $name += "  CM [SiteCode $SiteCode]"
+        if ($virtualMachine.role -eq "DPMP"){
+            if ($virtualMachine.installMP){
+                $name += " [MP]"
+            }
+            if ($virtualMachine.installDP){
+                $name += " [DP]"
+            }
+        }
     }
 
     if ($virtualMachine.remoteSQLVM) {
