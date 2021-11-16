@@ -965,6 +965,8 @@ function Get-NewMachineName {
 
     if ($role -eq "DPMP") {
         $RoleName = $siteCode + $role
+        $RoleCount = 0
+        $ConfigCount = 0
         if ($InstallMP -and -not $InstallDP) {
             $RoleName = $siteCode + "MP"
             #$RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role -and ($_.installMP -eq $true -or $null -eq $_.installMP)} | Measure-Object).Count
@@ -1453,7 +1455,7 @@ function Show-ExistingNetwork {
 
     [string]$subnet = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1).Subnet
     if ($role -ne "InternetClient" -and $role -ne "AADClient" -and $role -ne "PassiveSite") {
-        $subnet = Select-ExistingSubnets -Domain $domain -Role $role
+        $subnet = Select-ExistingSubnets -Domain $domain -Role $role -SiteCode $SiteCode
         Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
         if ([string]::IsNullOrWhiteSpace($subnet)) {
             return $null
@@ -1618,6 +1620,8 @@ function Select-ExistingSubnets {
         [String] $Domain,
         [Parameter(Mandatory = $false, HelpMessage = "Role")]
         [String] $Role,
+        [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
+        [String] $SiteCode,
         [Parameter(Mandatory = $false, HelpMessage = "config")]
         [object] $ConfigToCheck
     )
@@ -1711,7 +1715,7 @@ function Select-ExistingSubnets {
                 break
             }
         }
-        $valid = Get-TestResult -Config (Get-ExistingConfig -Domain $Domain -Subnet $response -Role $Role -test:$true) -SuccessOnWarning
+        $valid = Get-TestResult -Config (Get-ExistingConfig -Domain $Domain -Subnet $response -Role $Role -SiteCode $sitecode -test:$true) -SuccessOnWarning
     }
     Write-Verbose "[Select-ExistingSubnets] Subnet response = $response"
     return [string]$response
@@ -3494,7 +3498,7 @@ $currentBranch = (& git branch) -match '\*'
 if ($currentBranch -and $currentBranch -notmatch "main") {
     $psdLastWriteTime = (Get-ChildItem ".\DSC\configmgr\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
     $psmLastWriteTime = (Get-ChildItem ".\DSC\configmgr\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
-    $zipLastWriteTime = (Get-ChildItem ".\DSC\configmgr\DSC.zip").LastWriteTime
+    $zipLastWriteTime = (Get-ChildItem ".\DSC\configmgr\DSC.zip").LastWriteTime+(New-TimeSpan -Minutes 1)
     if ($psdLastWriteTime -gt $zipLastWriteTime -or $psmLastWriteTime -gt $zipLastWriteTime) {
         $params = @{configName = "standalone.json"; vmName = "CM-DC1" }
         & ".\dsc\createGuestDscZip.ps1" @params | Out-Host
