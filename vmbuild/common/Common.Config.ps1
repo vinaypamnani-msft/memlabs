@@ -1692,7 +1692,7 @@ Function Show-Summary {
                 Write-GreenCheck "ConfigMgr will be updated to latest"
             }
             else {
-                Write-RedX "ConfigMgr will NOT updated to latest"
+                Write-RedX "ConfigMgr will NOT be updated to latest"
             }
             $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PSVM.ParentSiteCode) {
@@ -1769,6 +1769,9 @@ Function Show-Summary {
         Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
         if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
             $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
+            if ($PassiveVM){
+                Write-GreenCheck "ConfigMgr Passive node will be installed on $($PassiveVM.vmName)" -NoNewLine
+            }
         }
         else {
             Write-RedX "ConfigMgr will not be installed."

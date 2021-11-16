@@ -189,10 +189,13 @@ function Select-DomainMenu {
         #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
 
         $customOptions = [ordered]@{
-            "1" = "Stop VMs in domain";
-            "2" = "Start VMs in domain";
-            "3" = "Compact all VHDX's in domain (requires domain to be stopped)";
-            "S" = "Snapshot all VM's in domain"
+            "*d1" = "---  VM Management%cyan";
+            "1" = "Stop VMs in domain%white%green";
+            "2" = "Start VMs in domain%white%green";
+            "3" = "Compact all VHDX's in domain (requires domain to be stopped)%white%green";
+            "*S" ="";
+            "*S1" = "---  Snapshot Management%cyan"
+            "S" = "Snapshot all VM's in domain%white%green"
         }
         $checkPoint = $null
         $DC = get-list -type vm  -DomainName $domain | Where-Object { $_.role -eq "DC" }
@@ -200,9 +203,9 @@ function Select-DomainMenu {
             $checkPoint = Get-VMCheckpoint -VMName $DC.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
         }
         if ($checkPoint) {
-            $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot"; "X" = "Delete (merge) domain Snapshots" }
+            $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%white%green"; "X" = "Delete (merge) domain Snapshots%white%green" }
         }
-        $customOptions += [ordered]@{"D" = "Delete VMs in Domain%Yellow%Red" }
+        $customOptions += [ordered]@{"*Z" = "";"*Z1"="---  Danger Zone%cyan"; "D" = "Delete VMs in Domain%Yellow%Red" }
         $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions
 
         write-Verbose "1 response $response"
