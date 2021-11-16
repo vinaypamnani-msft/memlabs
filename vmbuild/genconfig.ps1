@@ -13,7 +13,7 @@ $return = [PSCustomObject]@{
 # Set Debug & Verbose
 $enableVerbose = if ($PSBoundParameters.Verbose -eq $true) { $true } else { $false };
 $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false };
-
+$DebugPreference = "SilentlyContinue"
 if (-not $InternalUseOnly.IsPresent) {
     if ($Common.Initialized) {
         $Common.Initialized = $false
@@ -734,7 +734,6 @@ function Select-MainMenu {
             $customOptions += [ordered]@{ "R" = "Return deployConfig" }
             $customOptions += [ordered]@{ "Z" = "Generate DSC.Zip" }
         }
-        #write-Option -color DarkGreen -Color2 Green "N" "New Virtual Machine"
 
         $response = Get-Menu -Prompt "Select menu option" -OptionArray $optionArray -AdditionalOptions $customOptions -preOptions $preOptions -Test:$false
         write-Verbose "response $response"
@@ -767,12 +766,12 @@ function Select-MainMenu {
                 }
 
 
-                $params = @{configName=$filename;vmName=$vmName}
+                $params = @{configName=$filename;vmName=$vmName;Debug=$false}
 
                 write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"
-                Invoke-Expression  ".\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName -confirm:$false"
-                #& ".\dsc\createGuestDscZip.ps1" @params
-                return $null
+                #Invoke-Expression  ".\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName -confirm:$false"
+                & ".\dsc\createGuestDscZip.ps1" @params
+                Set-Location $PSScriptRoot
             }
             default { Select-VirtualMachines $response }
         }
