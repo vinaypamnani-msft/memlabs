@@ -27,11 +27,13 @@ $configDir = Join-Path $PSScriptRoot "config"
 $sampleDir = Join-Path $PSScriptRoot "config\samples"
 
 Write-Host -ForegroundColor Cyan ""
-Write-Host -ForegroundColor Cyan "New-Lab Configuration generator:"
-Write-Host -ForegroundColor Cyan "You can use this tool to customize most options."
+Write-Host -ForegroundColor Green "New-Lab Configuration generator:"
+Write-Host -ForegroundColor Cyan "You can use this tool to customize your MemLabs deployment."
 Write-Host -ForegroundColor Cyan "Press Ctrl-C to exit without saving."
 Write-Host -ForegroundColor Cyan ""
-
+Write-Host -ForegroundColor White "Select the " -NoNewline
+Write-Host -ForegroundColor Yellow "numbers or letters" -NoNewline
+Write-Host -ForegroundColor White " on the left side of the options menu to navigate."
 function write-help {
     $color = [System.ConsoleColor]::DarkGray
     Write-Host -ForegroundColor $color "Press " -NoNewline
@@ -140,9 +142,9 @@ function Select-ConfigMenu {
             "P" {
                 Write-Host
                 Write-Host "Password for all accounts is: " -NoNewline
-                Write-Host -foregroundColor Green "$($Common.LocalAdmin.GetNetworkCredential().Password)"
+                Write-Host -foregroundColor Green "$($Global:Common.LocalAdmin.GetNetworkCredential().Password)"
                 Write-Host
-                get-list -type vm | Where-Object { $_.Role -eq "DC" } | ft domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
+                get-list -type vm | Where-Object { $_.Role -eq "DC" } | Format-Table domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
             }
             Default {}
         }
@@ -730,6 +732,7 @@ function Select-MainMenu {
         }
         if ($enableDebug) {
             $customOptions += [ordered]@{ "R" = "Return deployConfig" }
+            $customOptions += [ordered]@{ "Z" = "Generate DSC.Zip" }
         }
         #write-Option -color DarkGreen -Color2 Green "N" "New Virtual Machine"
 
@@ -744,6 +747,29 @@ function Select-MainMenu {
             "d" { return $true }
             "s" { return $false }
             "r" { return Test-Configuration -InputObject $Global:Config }
+            "z" {
+                $i = 0
+                $filename = Save-Config $Global:Config
+                #$creds = New-Object System.Management.Automation.PSCredential ($Global:Config.vmOptions.adminName, $Global:Common.LocalAdmin.GetNetworkCredential().Password)
+                foreach ($virtualMachine in $global:config.virtualMachines) {
+                    $i = $i + 1
+                    $name = Get-VMString $virtualMachine
+                    write-Option "$i" "$($name)"
+                }
+                $response = get-ValidResponse "Which VM do you want" $i $null
+                $i = 0
+                foreach ($virtualMachine in $global:config.virtualMachines) {
+                    $i = $i + 1
+                    if ($i -eq $response) {
+                        $vmName = $global:config.vmOptions.prefix + $virtualMachine.vmName
+                        break
+                    }
+                }
+
+                write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"
+                & .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName
+                return $null
+            }
             default { Select-VirtualMachines $response }
         }
     }
@@ -1913,6 +1939,18 @@ function get-ValidResponse {
             }
         }
         catch {}
+        if (-not $responseValid){
+            $validResponses = @()
+            if ($max -gt 0){
+            $validResponses += 1..$max
+            }
+            if ($additionalOptions){
+                $validResponses += $additionalOptions.Keys |Where-Object {-not $_.StartsWith("*")}
+            }
+            write-host -ForegroundColor Red "Invalid response.  " -NoNewline
+            write-host "Valid Responses are: " -NoNewline
+            write-host -ForegroundColor Green "$($validResponses -join ",")"
+        }
         if ($TestBeforeReturn.IsPresent -and $responseValid) {
             $responseValid = Get-TestResult -SuccessOnError
         }
@@ -3375,10 +3413,11 @@ function Save-Config {
     }
 
     $config | ConvertTo-Json -Depth 3 | Out-File $filename
-    $return.ConfigFileName = Split-Path -Path $fileName -Leaf
+    #$return.ConfigFileName = Split-Path -Path $fileName -Leaf
     Write-Host "Saved to $filename"
     Write-Host
     Write-Verbose "11"
+    return Split-Path -Path $fileName -Leaf
 }
 $Global:Config = $null
 $Global:Config = Select-ConfigMenu
@@ -3435,7 +3474,7 @@ while ($valid -eq $false) {
     }
 }
 
-Save-Config $Global:Config
+$return.ConfigFileName =  Save-Config $Global:Config
 
 if (-not $InternalUseOnly.IsPresent) {
     Write-Host "You may deploy this configuration by running the following command:"
