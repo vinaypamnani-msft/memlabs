@@ -1888,6 +1888,3 @@ function Copy-SampleConfigs {
         }
     }
 }
-        }
-    }
-}
