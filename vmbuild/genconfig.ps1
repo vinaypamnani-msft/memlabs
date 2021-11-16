@@ -192,12 +192,12 @@ function Select-DomainMenu {
 
         $customOptions = [ordered]@{
             "*d1" = "---  VM Management%cyan";
-            "1" = "Stop VMs in domain%white%green";
-            "2" = "Start VMs in domain%white%green";
-            "3" = "Compact all VHDX's in domain (requires domain to be stopped)%white%green";
-            "*S" ="";
+            "1"   = "Stop VMs in domain%white%green";
+            "2"   = "Start VMs in domain%white%green";
+            "3"   = "Compact all VHDX's in domain (requires domain to be stopped)%white%green";
+            "*S"  = "";
             "*S1" = "---  Snapshot Management%cyan"
-            "S" = "Snapshot all VM's in domain%white%green"
+            "S"   = "Snapshot all VM's in domain%white%green"
         }
         $checkPoint = $null
         $DC = get-list -type vm  -DomainName $domain | Where-Object { $_.role -eq "DC" }
@@ -207,7 +207,7 @@ function Select-DomainMenu {
         if ($checkPoint) {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%white%green"; "X" = "Delete (merge) domain Snapshots%white%green" }
         }
-        $customOptions += [ordered]@{"*Z" = "";"*Z1"="---  Danger Zone%cyan"; "D" = "Delete VMs in Domain%Yellow%Red" }
+        $customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%cyan"; "D" = "Delete VMs in Domain%Yellow%Red" }
         $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions
 
         write-Verbose "1 response $response"
@@ -766,7 +766,7 @@ function Select-MainMenu {
                 }
 
 
-                $params = @{configName=$filename;vmName=$vmName;Debug=$false}
+                $params = @{configName = $filename; vmName = $vmName; Debug = $false }
 
                 write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"
                 #Invoke-Expression  ".\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName -confirm:$false"
@@ -1263,10 +1263,10 @@ function Select-Config {
         }
         $configSelected.vmOptions.PsObject.properties.Remove('domainAdminName')
     }
-    if ($null -ne $configSelected.cmOptions.installDPMPRoles){
+    if ($null -ne $configSelected.cmOptions.installDPMPRoles) {
         $configSelected.cmOptions.PsObject.properties.Remove('installDPMPRoles')
-        foreach ($vm in $configSelected.virtualMachines){
-            if ($vm.Role -eq "DPMP"){
+        foreach ($vm in $configSelected.virtualMachines) {
+            if ($vm.Role -eq "DPMP") {
                 $vm  | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
                 $vm  | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
             }
@@ -1942,13 +1942,13 @@ function get-ValidResponse {
             }
         }
         catch {}
-        if (-not $responseValid){
+        if (-not $responseValid) {
             $validResponses = @()
-            if ($max -gt 0){
-            $validResponses += 1..$max
+            if ($max -gt 0) {
+                $validResponses += 1..$max
             }
-            if ($additionalOptions){
-                $validResponses += $additionalOptions.Keys |Where-Object {-not $_.StartsWith("*")}
+            if ($additionalOptions) {
+                $validResponses += $additionalOptions.Keys | Where-Object { -not $_.StartsWith("*") }
             }
             write-host -ForegroundColor Red "Invalid response.  " -NoNewline
             write-host "Valid Responses are: " -NoNewline
@@ -3422,6 +3422,20 @@ function Save-Config {
     Write-Verbose "11"
     return Split-Path -Path $fileName -Leaf
 }
+
+# Automatically update DSC.Zip
+
+$currentBranch = (& git branch) -match '\*'
+if ($currentBranch -and $currentBranch -notmatch "main") {
+    $psdLastWriteTime = (Get-ChildItem ".\DSC\configmgr\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
+    $psmLastWriteTime = (Get-ChildItem ".\DSC\configmgr\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
+    $zipLastWriteTime = (Get-ChildItem ".\DSC\configmgr\DSC.zip").LastWriteTime
+    if ($psdLastWriteTime -gt $zipLastWriteTime -or $psmLastWriteTime -gt $zipLastWriteTime) {
+        $params = @{configName = "standalone.json"; vmName = "CM-DC1" }
+        & ".\dsc\createGuestDscZip.ps1" @params | Out-Host
+        Set-Location $PSScriptRoot | Out-Null
+    }
+}
 $Global:Config = $null
 $Global:Config = Select-ConfigMenu
 
@@ -3477,7 +3491,7 @@ while ($valid -eq $false) {
     }
 }
 
-$return.ConfigFileName =  Save-Config $Global:Config
+$return.ConfigFileName = Save-Config $Global:Config
 
 if (-not $InternalUseOnly.IsPresent) {
     Write-Host "You may deploy this configuration by running the following command:"
