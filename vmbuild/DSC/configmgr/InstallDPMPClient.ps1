@@ -15,19 +15,19 @@ $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMach
 # DPs
 $DPNames = @()
 $DPNames += ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installDP -eq $true) }).vmName # DP's in current config
-$DPNames += ($deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installDP -eq $true -or $null -eq $_.installDP) }).vmName # Existing DP's from previous deployments with siteCode
+# $DPNames += ($deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installDP -eq $true -or $null -eq $_.installDP) }).vmName # Existing DP's from previous deployments with siteCode
 
 # MPs
 $MPNames = @()
 $MPNames += ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installMP -eq $true) }).vmName # MP's in current config
-$MPNames += ($deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installMP -eq $true -or $null -eq $_.installMP) }).vmName # Existing MP's from previous deployments with siteCode
+# $MPNames += ($deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installMP -eq $true -or $null -eq $_.installMP) }).vmName # Existing MP's from previous deployments with siteCode
 
 # Existing DPMP roles without siteCode property (older deployments) but in the same subnet as Primary
-if ($ThisVM.hidden) {
-    $ThisExistingVM = $deployConfig.existingVMs | Where-Object ($_.vmName -eq $ThisVM.vmName)
-    $DPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network -and ($_.installDP -eq $true -or $null -eq $_.installDP) }
-    $MPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network -and ($_.installMP -eq $true -or $null -eq $_.installMP) }
-}
+# if ($ThisVM.hidden) {
+#     $ThisExistingVM = $deployConfig.existingVMs | Where-Object ($_.vmName -eq $ThisVM.vmName)
+#     $DPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network -and ($_.installDP -eq $true -or $null -eq $_.installDP) }
+#     $MPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network -and ($_.installMP -eq $true -or $null -eq $_.installMP) }
+# }
 
 # Trim nulls/blanks
 $DPNames = $DPNames | Where-Object { $_ -and $_.Trim() }
