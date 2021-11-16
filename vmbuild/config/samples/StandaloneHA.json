@@ -79,8 +79,8 @@
             "memory": "3GB",
             "virtualProcs": 4,
             "siteCode": "PRI",
-            "InstallMP": true,
-            "InstallDP": true
+            "installMP": true,
+            "installDP": true
         },
         {
             "vmName": "W10Client1",
