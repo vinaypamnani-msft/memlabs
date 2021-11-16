@@ -661,7 +661,7 @@ try {
 
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
-    Write-Log "Starting deployment. Review VMBuild.$domainName.log"
+    Write-Log "Starting deployment. Review VMBuild.$domainName.log" -Activity
     $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainName.log"
 
     # Download required files
@@ -900,7 +900,7 @@ try {
         # Determine SQL CU URL for VM to download. This is done here instead of inside $VM_Create because we need $Common.AzureFileList
         $sqlCUUrl = $null
         if ($createVM -and $currentItem.sqlVersion) {
-            $sqlFile = $Common.AzureFileList.ISO | Where-Object {$_.id -eq $currentItem.sqlVersion}
+            $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
             $sqlCUUrl = $sqlFile.cuURL
         }
 

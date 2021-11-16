@@ -553,7 +553,7 @@ function Test-NetworkSwitch {
 
     $text = & netsh routing ip nat show interface
     if ($text -like "*$interfaceAlias*") {
-        Write-Log "Get-NetworkSwitch: '$interfaceAlias' interface is already present in NAT." -Success
+        Write-Log "Get-NetworkSwitch: '$interfaceAlias' interface is already present in NAT."
         return $true
     }
     else {
@@ -578,7 +578,7 @@ function Test-NetworkSwitch {
         return $true
     }
     else {
-        Write-Log "Get-NetworkSwitch: Unable to add '$interfaceAlias' to NAT."
+        Write-Log "Get-NetworkSwitch: Unable to add '$interfaceAlias' to NAT." -Failure
         return $false
     }
 }
@@ -611,7 +611,7 @@ function Test-DHCPScope {
 
     $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
     if ($scope) {
-        Write-Log "Test-DHCPScope: '$scopeID' scope is already present in DHCP." -Success
+        Write-Log "Test-DHCPScope: '$scopeID' scope is already present in DHCP."
         $createScope = $false
     }
     else {
