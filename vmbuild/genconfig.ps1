@@ -766,8 +766,12 @@ function Select-MainMenu {
                     }
                 }
 
+
+                $params = @{configName=$filename;vmName=$vmName}
+
                 write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"
-                & .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName
+                Invoke-Expression  ".\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName -confirm:$false"
+                #& ".\dsc\createGuestDscZip.ps1" @params
                 return $null
             }
             default { Select-VirtualMachines $response }

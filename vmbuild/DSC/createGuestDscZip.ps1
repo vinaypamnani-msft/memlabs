@@ -58,7 +58,7 @@ if ($Common.Initialized) {
     $Common.Initialized = $false
 }
 . "..\Common.ps1"
-
+$ConfirmPreference = $false
 # Create dummy file so config doesn't fail
 $userConfig = Get-UserConfiguration -Configuration $configName
 $result = Test-Configuration -InputObject $userConfig.Config
@@ -82,7 +82,7 @@ $dscFolder = "configmgr"
 
 # Create local compressed file and inject appropriate appropriate TemplateHelpDSC
 Write-Host "Creating DSC.zip for $dscFolder.."
-Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$dscFolder\DSC.zip -Force
+Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$dscFolder\DSC.zip -Force -Confirm:$false
 Write-Host "Adding $dscFolder TemplateHelpDSC to DSC.ZIP.."
 Compress-Archive -Path .\$dscFolder\TemplateHelpDSC -Update -DestinationPath .\$dscFolder\DSC.zip
 
