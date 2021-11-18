@@ -1220,10 +1220,10 @@ function New-DeployConfig {
         # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
         $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         if ($PassiveVM) {
-            $ActiveVMinConfig = $virtualMachines | Where-Object { $_.siteCode -eq $PassiveVM.siteCode -and $_.vmName -ne $PassiveVM.vmName }
+            $ActiveVMinConfig = $virtualMachines | Where-Object { $_.role -in "CAS", "Primary" -and $_.siteCode -eq $PassiveVM.siteCode -and $_.vmName -ne $PassiveVM.vmName }
             $activeVMName = $ActiveVMinConfig.vmName
             if (-not $ActiveVMinConfig) {
-                $ActiveVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PassiveVM.siteCode | Where-Object { $_.role -ne "PassiveSite" }
+                $ActiveVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PassiveVM.siteCode | Where-Object { $_.role -in "CAS", "Primary" }
                 $existingActiveVMName = $ActiveVM.vmName
             }
 
