@@ -501,7 +501,7 @@ function Remove-MissingServersFromGroup {
         if ($item.properties.displayName -in $completeServerList -or $item.properties.name -in $completeServerList) {
             continue;
         }
-        Write-Log ("[Remove-MissingServersFromGroup] Removing $($item.properties.displayName)") -LogOnly
+        Write-Log ("[Remove-MissingServersFromGroup] Removing $($item.properties.displayName)") -LogOnly -Verbose
         $findGroup.group.RemoveChild($item) | out-null
     }
 
@@ -549,14 +549,14 @@ function Add-RDCManServerToGroup {
         $findservers = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName }
 
         foreach ($item in $findservers) {
-            Write-Log ("Removing $($item.properties.displayName)") -LogOnly
+            Write-Log ("Removing $($item.properties.displayName)") -LogOnly -Verbose
             $findGroup.group.RemoveChild($item)
         }
     }
 
     $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName } | Select-Object -First 1
     if ($null -eq $findserver) {
-        Write-Log "Add-RDCManServerToGroup: Added $displayName to RDG Group" -LogOnly
+        Write-Log "Add-RDCManServerToGroup: Added $displayName to RDG Group" -LogOnly -Verbose
         $subgroup = $groupFromTemplate.group
         $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
         $newserver = $server.clone()
@@ -626,7 +626,7 @@ function Get-RDCManGroupToModify {
         $findGroup = $existing.ImportNode($findGroup, $true)
     }
     else {
-        Write-Log "Get-RDCManGroupToModify: Found existing group entry named $domain in current xml." -LogOnly
+        Write-Log "Get-RDCManGroupToModify: Found existing group entry named $domain in current xml." -LogOnly -Verbose
     }
     return $findGroup
 }
