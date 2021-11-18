@@ -117,8 +117,7 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%cyan"; }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%gray%green" ; "D" = "Domain Hyper-V management (Start/Stop/Compact/Delete)%gray%green"; "P" = "Show Passwords" }
 
-        $pendingCount = @()
-        $pendingCount += (get-list -type VM | Where-Object { $_.InProgress -eq "True" }).Count
+        $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
 
         if ($pendingCount -gt 0 ) {
             $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow" }
