@@ -51,10 +51,11 @@ Set-Location "$($SiteCode):\" @initParams
 # Get info for Passive Site Server
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
-$SSVM = $deployConfig.virtualMachines | Where-Object { $_.siteCode -eq $ThisVM.siteCode -and $_.vmName -ne $ThisVm.vmName }
+$SSVM = $deployConfig.virtualMachines | Where-Object { $_.siteCode -eq $ThisVM.siteCode -and $_.role -eq "PassiveSite" }
 $shareName = $SiteCode
 $sharePath = "E:\$shareName"
 $remoteLibVMName = $SSVM.remoteContentLibVM
+if ($remoteLibVMName -is [string]) {$remoteLibVMName = $remoteLibVMName.Trim() }
 $computersToAdd = @("$($SSVM.vmName)$", "$($ThisMachineName)$")
 $contentLibShare = "\\$remoteLibVMName\$shareName\ContentLib"
 
