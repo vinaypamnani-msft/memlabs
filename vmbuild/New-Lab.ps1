@@ -216,6 +216,19 @@ $VM_Create = {
         return
     }
 
+    $Fix_DefaultProfile = {
+        Remove-Item -Path "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache" -Force -Recurse | Out-Null
+        Remove-Item -Path "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache" -Force -Recurse | Out-Null
+        Remove-Item -Path "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat" -Force | Out-Null
+    }
+
+    Write-Log "PSJOB: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
+
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile" -WhatIf:$WhatIf
+    if ($result.ScriptBlockFailed) {
+        Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
+    }
+
     # Boot To OOBE?
     $bootToOOBE = $currentItem.role -eq "AADClient"
     if ($bootToOOBE) {
@@ -930,6 +943,7 @@ try {
     Write-Log "Main: Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
     $failedCount = 0
     $successCount = 0
+    $warningCount = 0
     do {
         $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
         foreach ($job in $runningJobs) {
@@ -946,6 +960,10 @@ try {
                 Write-Host $jobOutput -ForegroundColor Red
                 $failedCount++
             }
+            elseif ($jobOutput.ToString().StartsWith("WARNING")) {
+                Write-Host $jobOutput -ForegroundColor Yellow
+                $warningCount++
+            }
             else {
                 Write-Host $jobOutput -ForegroundColor Green
                 $successCount++
@@ -961,7 +979,7 @@ try {
     } until ($runningJobs.Count -eq 0)
 
     Write-Log "Main: Job Completion Status." -Activity
-    Write-Log "Main: $successCount jobs completed successfully, $failedCount failed."
+    Write-Log "Main: $successCount jobs completed successfully; $warningCount warnings, $failedCount failures."
 
     $timer.Stop()
 
