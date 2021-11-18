@@ -9,30 +9,49 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $DomainName = $DomainFullName.Split(".")[0]
-$DPMPName = $deployConfig.parameters.DPMPName
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+
+# DPs
+$DPNames = @()
+$DPNames += ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installDP -eq $true) }).vmName # DP's in current config
+# $DPNames += ($deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installDP -eq $true -or $null -eq $_.installDP) }).vmName # Existing DP's from previous deployments with siteCode
+
+# MPs
+$MPNames = @()
+$MPNames += ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installMP -eq $true) }).vmName # MP's in current config
+# $MPNames += ($deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installMP -eq $true -or $null -eq $_.installMP) }).vmName # Existing MP's from previous deployments with siteCode
+
+# Existing DPMP roles without siteCode property (older deployments) but in the same subnet as Primary
+# if ($ThisVM.hidden) {
+#     $ThisExistingVM = $deployConfig.existingVMs | Where-Object ($_.vmName -eq $ThisVM.vmName)
+#     $DPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network -and ($_.installDP -eq $true -or $null -eq $_.installDP) }
+#     $MPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network -and ($_.installMP -eq $true -or $null -eq $_.installMP) }
+# }
+
+# Trim nulls/blanks
+$DPNames = $DPNames | Where-Object { $_ -and $_.Trim() }
+$MPNames = $MPNames | Where-Object { $_ -and $_.Trim() }
+
 $ClientNames = $deployConfig.parameters.DomainMembers
 $cm_svc = "$DomainName\cm_svc"
-$installDPMPRoles = $deployConfig.cmOptions.installDPMPRoles
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 $networkSubnet = $deployConfig.vmOptions.network
 
-# exit if rerunning DSC to add passive site
-if ($null -ne $deployConfig.parameters.ExistingActiveName) {
-    Write-DscStatus "Skip DP/MP/Client install since we're adding Passive site server"
-    return
+# Add DPMP on Site Server if none specified
+if (-not $MPNames) {
+    Write-DscStatus "Client Push is true and no MP's found. Forcing MP Role on $($deployConfig.parameters.ThisMachineName) to allow client push to work."
+    $MPNames += $deployConfig.parameters.ThisMachineName
 }
 
-# overwrite installDPMPRoles to true if client push is true
-if ($pushClients) {
-    Write-DscStatus "Client Push is true. Forcing installDPMPRoles to true to allow client push to work."
-    $installDPMPRoles = $true
+if (-not $DPNames) {
+    Write-DscStatus "Client Push is true and no DP's found. Forcing DP Role on $($deployConfig.parameters.ThisMachineName) to allow client push to work."
+    $DPNames += $deployConfig.parameters.ThisMachineName
 }
 
-# No DPMP specified, install on PS site server
-if (-not $DPMPName -and $installDPMPRoles) {
-    $DPMPName = $deployConfig.parameters.ThisMachineName
-    Write-DscStatus "installDPMPRoles is true but no DPMP specified. Installing roles on $DPMPName."
-}
+Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
+Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
+Write-DscStatus "Client push candidates are '$ClientNames'"
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -83,9 +102,15 @@ if (Test-Path $cm_svc_file) {
     Start-Sleep -Seconds 5
 }
 
+
 # Enable EHTTP, some components are still installing and they reset it to Disabled.
 # Keep setting it every 30 seconds, 10 times and bail...
 $attempts = 0
+if ($ThisVM.hidden) {
+    # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
+    $attempts = 10
+}
+
 $enabled = $false
 Write-DscStatus "Enabling e-HTTP"
 do {
@@ -104,96 +129,136 @@ else {
     Write-DscStatus "e-HTTP was enabled."
 }
 
-# exit if nothing to do
-if (-not $installDPMPRoles -and -not $pushClients) {
-    Write-DscStatus "Skipping DPMP and Client setup. installDPMPRoles and pushClientToDomainMembers options are set to false."
-    $Configuration.InstallClient.Status = 'NotRequested'
-    $Configuration.InstallDP.Status = 'NotRequested'
-    $Configuration.InstallMP.Status = 'NotRequested'
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    return
-}
-
 # Restart services to make sure push account is acknowledged by CCM
 Write-DscStatus "Restarting services"
 Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
 Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
 
-# Create Site system Server
-#============
-$DPMPFQDN = $DPMPName + "." + $DomainFullName
-$SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
-if (!$SystemServer) {
-    Write-DscStatus "Creating new CM Site System server on $DPMPFQDN"
-    New-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN | Out-File $global:StatusLog -Append
-    Start-Sleep -Seconds 5
-    $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPMPFQDN
-}
+# TODO: $Configuration.InstallDP status won't be accurate if multiple DP's are in config.
+foreach ($DPName in $DPNames) {
 
-# Install DP
-#============
-$Configuration.InstallDP.Status = 'Running'
-$Configuration.InstallDP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    if ([string]::IsNullOrWhiteSpace($DPName)) {
+        continue
+    }
 
-if ((Get-CMDistributionPoint -SiteSystemServerName $DPMPFQDN).count -ne 1) {
-    Write-DscStatus "Adding Distribution Point role on $DPMPFQDN"
-    $Date = [DateTime]::Now.AddYears(30)
-    Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
-    Start-Sleep -Seconds 5
+    $DPFQDN = $DPName + "." + $DomainFullName
+    $Configuration.InstallDP.Status = 'Running'
+    $Configuration.InstallDP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-    if ((Get-CMDistributionPoint -SiteSystemServerName $DPMPFQDN).count -eq 1) {
-        Write-DscStatus "DP Role added on $DPMPFQDN"
+    $i = 0
+    $installFailure = $false
+    do {
+
+        $i++
+
+        # Create Site system Server
+        #============
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN
+        if (-not $SystemServer) {
+            Write-DscStatus "Creating new CM Site System server on $DPFQDN"
+            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 15
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN
+        }
+
+        # Install DP
+        #============
+        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN
+        if (-not $dpinstalled) {
+            Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role."
+            $Date = [DateTime]::Now.AddYears(30)
+            Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-DscStatus "DP Role detected on $DPFQDN"
+            $dpinstalled = $true
+        }
+
+        if ($i -gt 10) {
+            Write-DscStatus "No Progress after $i tries, Giving up."
+            $installFailure = $true
+        }
+
+        Start-Sleep -Seconds 10
+
+    } until ($dpinstalled -or $installFailure)
+
+    if ($dpinstalled) {
         $Configuration.InstallDP.Status = 'Completed'
         $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     }
     else {
-        Write-DscStatus "Failed to add DP Role on $DPMPFQDN"
+
         $Configuration.InstallDP.Status = 'Failed'
         $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     }
-}
-else {
-    Write-DscStatus "DP Role already installed on $DPMPFQDN"
+
 }
 
-# Install MP
-#============
-$Configuration.InstallMP.Status = 'Running'
-$Configuration.InstallMP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+# TODO: $Configuration.InstallMP status won't be accurate if multiple DP's are in config.
+foreach ($MPName in $MPNames) {
 
-if ((Get-CMManagementPoint -SiteSystemServerName $DPMPFQDN).count -ne 1) {
+    if ([string]::IsNullOrWhiteSpace($MPName)) {
+        continue
+    }
 
-    Write-DscStatus "Adding Management Point role on $DPMPFQDN"
-    Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
-    Start-Sleep -Seconds 5
+    $MPFQDN = $MPName + "." + $DomainFullName
+    $Configuration.InstallMP.Status = 'Running'
+    $Configuration.InstallMP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-    if ((Get-CMManagementPoint -SiteSystemServerName $DPMPFQDN).count -eq 1) {
-        Write-DscStatus "MP Role added on $DPMPFQDN"
+    $i = 0
+    $installFailure = $false
+    do {
+
+        $i++
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
+        if (-not $SystemServer) {
+            Write-DscStatus "Creating new CM Site System server on $MPFQDN"
+            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 15
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
+        }
+
+        $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
+        if (-not $mpinstalled) {
+            Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
+            Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-DscStatus "MP Role detected on $MPFQDN"
+            $mpinstalled = $true
+        }
+
+        if ($i -gt 10) {
+            Write-DscStatus "No Progress after $i tries, Giving up."
+            $installFailure = $true
+        }
+
+        Start-Sleep -Seconds 10
+
+    } until ($mpinstalled -or $installFailure)
+
+    if ($mpinstalled) {
         $Configuration.InstallMP.Status = 'Completed'
         $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     }
     else {
-        Write-DscStatus "Failed to add MP Role on $DPMPFQDN"
         $Configuration.InstallMP.Status = 'Failed'
         $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     }
 }
-else {
-    Write-DscStatus "MP Role already installed on $DPMPFQDN"
-}
 
-# Push Clients
-#==============
-if (-not $pushClients) {
-    Write-DscStatus "Skipping Client Push. pushClientToDomainMembers options is set to false."
-    $Configuration.InstallClient.Status = 'NotRequested'
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+# exit if rerunning DSC to add passive site
+if ($null -ne $deployConfig.parameters.ExistingActiveName) {
+    Write-DscStatus "Skip Client Push since we're adding Passive site server"
     return
 }
 
@@ -221,6 +286,15 @@ Write-DscStatus "Invoking AD system discovery"
 Start-Sleep -Seconds 5
 Invoke-CMSystemDiscovery
 Start-Sleep -Seconds 5
+
+# Push Clients
+#==============
+if (-not $pushClients) {
+    Write-DscStatus "Skipping Client Push. pushClientToDomainMembers options is set to false."
+    $Configuration.InstallClient.Status = 'NotRequested'
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
 
 # Wait for collection to populate
 $CollectionName = "All Systems"

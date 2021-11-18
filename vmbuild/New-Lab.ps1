@@ -1,3 +1,4 @@
+[CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
     [string]$Configuration,
@@ -22,9 +23,12 @@ if ($Common.Initialized) {
     $Common.Initialized = $false
 }
 
-# Set Verbose
-$enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
 $NewLabsuccess = $false
+
+# Set Debug & Verbose
+$enableVerbose = if ($PSBoundParameters.Verbose -eq $true) { $true } else { $false };
+$enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false };
+
 # Dot source common
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
@@ -93,6 +97,7 @@ $VM_Create = {
     $deployConfig = $using:deployConfig
     $forceNew = $using:ForceNew
     $createVM = $using:CreateVM
+    $sqlCUUrl = $using:sqlCUUrl
 
     # Change log location
     $domainName = $using:domainName
@@ -132,9 +137,20 @@ $VM_Create = {
         }
 
         # Create VM
-        $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig -WhatIf:$using:WhatIf
+        if ($currentItem.role -eq "OSDClient") {
+            $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -OSDClient -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig -WhatIf:$using:WhatIf
+        }
+        else {
+            $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -ForceNew:$forceNew -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig -WhatIf:$using:WhatIf
+        }
         if (-not $created) {
             Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild.log." -Failure -OutputStream -HostOnly
+            return
+        }
+
+        if ($currentItem.role -eq "OSDClient") {
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
+            Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
             return
         }
 
@@ -198,6 +214,19 @@ $VM_Create = {
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
+    }
+
+    $Fix_DefaultProfile = {
+        Remove-Item -Path "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache" -Force -Recurse | Out-Null
+        Remove-Item -Path "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache" -Force -Recurse | Out-Null
+        Remove-Item -Path "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat" -Force | Out-Null
+    }
+
+    Write-Log "PSJOB: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
+
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile" -WhatIf:$WhatIf
+    if ($result.ScriptBlockFailed) {
+        Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
     }
 
     # Boot To OOBE?
@@ -279,7 +308,7 @@ $VM_Create = {
         }
 
         # Copy SQL CU file to VM
-        Copy-Item -ToSession $ps -Path $sqlCUPath -Destination "C:\temp\SQL_CU\$sqlCUFileName" -Force
+        # Copy-Item -ToSession $ps -Path $sqlCUPath -Destination "C:\temp\SQL_CU\$sqlCUFileName" -Force
 
         # Eject ISO from guest
         Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
@@ -312,6 +341,7 @@ $VM_Create = {
         $currentItem = $using:currentItem
         $adminCreds = $using:Common.LocalAdmin
         $deployConfig = $using:deployConfig
+        $sqlCUUrl = $using:sqlCUUrl
 
         # Set current role
 
@@ -355,6 +385,10 @@ $VM_Create = {
         $configFilePath = "C:\staging\DSC\deployConfig.json"
         $deployConfig.parameters.ThisMachineName = $currentItem.vmName
         $deployConfig.parameters.ThisMachineRole = $currentItem.role   # Don't override this to DomainMember, otherwise DSC won't run MPDP config
+
+        if ($sqlCUUrl) {
+            $deployConfig.parameters.ThisSQLCUURL = $sqlCUUrl
+        }
 
         "Writing DSC config to $configFilePath" | Out-File $log -Append
         $deployConfig | ConvertTo-Json -Depth 3 | Out-File $configFilePath -Force -Confirm:$false
@@ -552,7 +586,6 @@ $VM_Create = {
     }
 }
 
-Set-QuickEdit -DisableQuickEdit
 Clear-Host
 
 try {
@@ -577,8 +610,14 @@ try {
     else {
         Write-Log "Main: No Configuration specified. Calling genconfig." -Activity
         Set-Location $PSScriptRoot
-        $result = ./genconfig.ps1 -InternalUseOnly
+        $result = ./genconfig.ps1 -InternalUseOnly -Verbose:$enableVerbose -Debug:$enableDebug
 
+        # genconfig was called with -Debug true, and returned DeployConfig instead of ConfigFileName
+        if ($result.DeployConfig) {
+            return $result
+        }
+
+        # genconfig specified not to deploy
         if (-not $result.DeployNow) {
             return
         }
@@ -609,7 +648,7 @@ try {
         }
 
     }
-
+    Set-QuickEdit -DisableQuickEdit
     # Timer
     $timer = New-Object -TypeName System.Diagnostics.Stopwatch
     $timer.Start()
@@ -635,7 +674,7 @@ try {
 
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
-    Write-Log "Starting deployment. Review VMBuild.$domainName.log"
+    Write-Log "Starting deployment. Review VMBuild.$domainName.log" -Activity
     $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainName.log"
 
     # Download required files
@@ -719,7 +758,7 @@ try {
         }
     }
 
-    Write-Log "Main: Creating RDCMan file for specified config" -Activity
+    # Generate RDCMan file
     New-RDCManFile $deployConfig $global:Common.RdcManFilePath
 
     # Array to store PS jobs
@@ -731,6 +770,7 @@ try {
     $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
     $existingDC = $deployConfig.parameters.ExistingDCName
     $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
@@ -763,6 +803,43 @@ try {
                 SQLInstanceDir  = $existingCASVM.SQLInstanceDir
                 role            = "CAS"
                 hidden          = $true
+            }
+        }
+    }
+
+    # Add DPMP to existing PS
+    # $existingPSName = $deployConfig.parameters.ExistingPSName
+    #
+    # if ($containsDPMP -and $existingPSName) {
+    #     $existingPSVM = (get-list -Type VM | where-object { $_.vmName -eq $existingPSName })
+    #     $deployConfig.virtualMachines += [PSCustomObject]@{
+    #         vmName          = $existingPSVM.vmName
+    #         role            = $existingPSVM.role
+    #         siteCode        = $existingPSVM.siteCode
+    #         RemoteSQLVM     = $existingPSVM.remoteSQLVM
+    #         SQLInstanceName = $existingPSVM.SQLInstanceName
+    #         SQLVersion      = $existingPSVM.SQLVersion
+    #         SQLInstanceDir  = $existingPSVM.SQLInstanceDir
+    #         hidden          = $true
+    #     }
+    #
+    # }
+    #
+    if ($containsDPMP) {
+        $DPMPs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
+        foreach ($dpmp in $DPMPS) {
+            $existingPrimary = (get-list -type VM -Domainname $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $($dpmp.siteCode) })
+            if ($existingPrimary -and $deployConfig.virtualMachines.vmName -notcontains $existingPrimary.vmName) {
+                $deployConfig.virtualMachines += [PSCustomObject]@{
+                    vmName          = $existingPrimary.vmName
+                    role            = $existingPrimary.role
+                    siteCode        = $existingPrimary.siteCode
+                    RemoteSQLVM     = $existingPrimary.remoteSQLVM
+                    SQLInstanceName = $existingPrimary.SQLInstanceName
+                    SQLVersion      = $existingPrimary.SQLVersion
+                    SQLInstanceDir  = $existingPrimary.SQLInstanceDir
+                    hidden          = $true
+                }
             }
         }
     }
@@ -814,6 +891,10 @@ try {
         }
     }
 
+    if ($enableDebug) {
+        return $deployConfig
+    }
+
     Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
 
     # New scenario
@@ -828,6 +909,13 @@ try {
         # Existing DC scenario
         $CreateVM = $true
         if ($currentItem.hidden -eq $true) { $CreateVM = $false }
+
+        # Determine SQL CU URL for VM to download. This is done here instead of inside $VM_Create because we need $Common.AzureFileList
+        $sqlCUUrl = $null
+        if ($createVM -and $currentItem.sqlVersion) {
+            $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
+            $sqlCUUrl = $sqlFile.cuURL
+        }
 
         $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
 
@@ -855,6 +943,7 @@ try {
     Write-Log "Main: Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
     $failedCount = 0
     $successCount = 0
+    $warningCount = 0
     do {
         $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
         foreach ($job in $runningJobs) {
@@ -871,6 +960,10 @@ try {
                 Write-Host $jobOutput -ForegroundColor Red
                 $failedCount++
             }
+            elseif ($jobOutput.ToString().StartsWith("WARNING")) {
+                Write-Host $jobOutput -ForegroundColor Yellow
+                $warningCount++
+            }
             else {
                 Write-Host $jobOutput -ForegroundColor Green
                 $successCount++
@@ -886,18 +979,18 @@ try {
     } until ($runningJobs.Count -eq 0)
 
     Write-Log "Main: Job Completion Status." -Activity
-    Write-Log "Main: $successCount jobs completed successfully, $failedCount failed."
+    Write-Log "Main: $successCount jobs completed successfully; $warningCount warnings, $failedCount failures."
 
     $timer.Stop()
-    Write-Host
 
     if (Test-Path "C:\tools\rdcman.exe") {
-        Write-Log "RDCMan.exe is located in C:\tools\rdcman.exe" -Success
         $roles = $deployConfig.virtualMachines | Select-Object -ExpandProperty Role
-        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient") -or ($roles -Contains "DomainMember") -or ($roles -Contains "WorkgroupMember")) {
+        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient") -or ($roles -Contains "DomainMember") -or ($roles -Contains "WorkgroupMember") -or ($roles -Contains "OSDClient") -or ($roles -Contains "DPMP")) {
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         }
     }
+
+    Write-Host
     Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
     $NewLabsuccess = $true
 }
@@ -906,7 +999,7 @@ catch {
 }
 finally {
     # Ctrl + C brings us here :)
-    if ($NewLabsuccess -ne $true){
+    if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs" -LogOnly
     }
     $Common.Initialized = $false

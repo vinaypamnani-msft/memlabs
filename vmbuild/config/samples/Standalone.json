@@ -3,7 +3,6 @@
         "version": "current-branch",
         "install": true,
         "updateToLatest": false,
-        "installDPMPRoles": true,
         "pushClientToDomainMembers": true
     },
     "vmOptions": {
@@ -55,7 +54,10 @@
                 "E": "250GB"
             },
             "memory": "3GB",
-            "virtualProcs": 4
+            "virtualProcs": 4,
+            "siteCode": "PRI",
+            "InstallMP": true,
+            "InstallDP": true
         },
         {
             "vmName": "W10Client1",

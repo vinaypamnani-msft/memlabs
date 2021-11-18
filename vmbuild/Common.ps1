@@ -553,7 +553,7 @@ function Test-NetworkSwitch {
 
     $text = & netsh routing ip nat show interface
     if ($text -like "*$interfaceAlias*") {
-        Write-Log "Get-NetworkSwitch: '$interfaceAlias' interface is already present in NAT." -Success
+        Write-Log "Get-NetworkSwitch: '$interfaceAlias' interface is already present in NAT."
         return $true
     }
     else {
@@ -578,7 +578,7 @@ function Test-NetworkSwitch {
         return $true
     }
     else {
-        Write-Log "Get-NetworkSwitch: Unable to add '$interfaceAlias' to NAT."
+        Write-Log "Get-NetworkSwitch: Unable to add '$interfaceAlias' to NAT." -Failure
         return $false
     }
 }
@@ -611,7 +611,7 @@ function Test-DHCPScope {
 
     $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
     if ($scope) {
-        Write-Log "Test-DHCPScope: '$scopeID' scope is already present in DHCP." -Success
+        Write-Log "Test-DHCPScope: '$scopeID' scope is already present in DHCP."
         $createScope = $false
     }
     else {
@@ -632,19 +632,23 @@ function Test-DHCPScope {
 
     try {
         $HashArguments = @{
-            ScopeId = $scopeID
-            Router  = $ConfigParams.DHCPDefaultGateway
+            ScopeId   = $scopeID
+            Router    = $ConfigParams.DHCPDefaultGateway
+            DnsDomain = $ConfigParams.DomainName
         }
 
         if ($ConfigParams.DCName) {
             $dcnet = Get-Vm -Name $ConfigParams.DCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
         }
 
+        if (-not $dcnet -and $ConfigParams.ExistingDCName) {
+            $dcnet = Get-Vm -Name $ConfigParams.ExistingDCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+        }
+
         if ($dcnet) {
             $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
             $HashArguments.Add("DnsServer", $dcIpv4)
             $HashArguments.Add("WinsServer", $dcIpv4)
-            $HashArguments.Add("DnsDomain", $ConfigParams.DomainName)
         }
         else {
             $HashArguments.Add("DnsServer", $ConfigParams.DHCPDNSAddress)
@@ -704,14 +708,16 @@ function New-VmNote {
         $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
 
         $vmNote = [PSCustomObject]@{
-            inProgress = $InProgress
-            success    = $Successful
-            role       = $ThisVM.role
-            deployedOS = $ThisVM.operatingSystem
-            domain     = $DeployConfig.vmOptions.domainName
-            adminName  = $DeployConfig.vmOptions.adminName
-            network    = $DeployConfig.vmOptions.network
-            prefix     = $DeployConfig.vmOptions.prefix
+            inProgress           = $InProgress
+            success              = $Successful
+            role                 = $ThisVM.role
+            deployedOS           = $ThisVM.operatingSystem
+            domain               = $DeployConfig.vmOptions.domainName
+            adminName            = $DeployConfig.vmOptions.adminName
+            network              = $DeployConfig.vmOptions.network
+            prefix               = $DeployConfig.vmOptions.prefix
+            memLabsVersion       = $Common.MemLabsVersion
+            memLabsDeployVersion = $Common.MemLabsVersion
         }
 
         foreach ($prop in $ThisVM.PSObject.Properties) {
@@ -810,7 +816,7 @@ function New-VirtualMachine {
         [string]$VmName,
         [Parameter(Mandatory = $true)]
         [string]$VmPath,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
         [string]$SourceDiskPath,
         [Parameter(Mandatory = $true)]
         [string]$Memory,
@@ -827,6 +833,8 @@ function New-VirtualMachine {
         [Parameter()]
         [PsCustomObject] $DeployConfig,
         [Parameter(Mandatory = $false)]
+        [switch]$OSDClient,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -839,7 +847,7 @@ function New-VirtualMachine {
     Write-Log "New-VirtualMachine: $VmName`: Creating Virtual Machine"
 
     # Test if source file exists
-    if (-not (Test-Path $SourceDiskPath)) {
+    if (-not (Test-Path $SourceDiskPath) -and (-not $OSDClient.IsPresent)) {
         Write-Log "New-VirtualMachine: $VmName`: $SourceDiskPath not found. Cannot create new VM."
         return $false
     }
@@ -888,10 +896,20 @@ function New-VirtualMachine {
     # Copy sysprepped image to VM location
     $osDiskName = "$($VmName)_OS.vhdx"
     $osDiskPath = Join-Path $vm.Path $osDiskName
-    $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
-    if (-not $worked) {
-        Write-Log "New-VirtualMachine: $VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
-        return $false
+
+    if (-not $OSDClient.IsPresent) {
+        $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
+        if (-not $worked) {
+            Write-Log "New-VirtualMachine: $VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+            return $false
+        }
+    }
+    else {
+        $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
+        if (-not $worked) {
+            Write-Log "New-VirtualMachine: $VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+            return $false
+        }
     }
 
     Write-Log "New-VirtualMachine: $VmName`: Enabling Hyper-V Guest Services"
@@ -920,6 +938,7 @@ function New-VirtualMachine {
     Write-Log "New-VirtualMachine: $VmName`: Adding virtual disk $osDiskPath"
     Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0
 
+
     Write-Log "New-VirtualMachine: $VmName`: Adding a DVD drive"
     Add-VMDvdDrive -VMName $VmName
 
@@ -946,10 +965,20 @@ function New-VirtualMachine {
 
     # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
     if ($null -ne $f_file) {
-        Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net
+        if (-not $OSDClient.IsPresent) {
+            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net
+        }
+        else {
+            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd
+        }
     }
     else {
-        Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net
+        if (-not $OSDClient.IsPresent) {
+            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net
+        }
+        else {
+            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd
+        }
     }
 
     try {
@@ -1318,8 +1347,15 @@ function Get-StorageConfig {
 
         # Get image list from storage location
         $updateList = $true
-        $fileListPath = Join-Path $Common.AzureFilesPath "_fileList.json"
-        $fileListLocation = "$($StorageConfig.StorageLocation)/_fileList.json"
+
+        # Set file name based on git branch
+        $fileListName = "_fileList.json"
+        $currentBranch = (& git branch) -match '\*'
+        if ($currentBranch -and $currentBranch -notmatch "main") {
+            $fileListName = "_fileList_develop.json"
+        }
+        $fileListPath = Join-Path $Common.AzureFilesPath $fileListName
+        $fileListLocation = "$($StorageConfig.StorageLocation)/$fileListName"
 
         # See if image list needs to be updated
         if (Test-Path $fileListPath) {
@@ -1572,19 +1608,21 @@ function Set-SupportedOptions {
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
-        "AADClient"
+        "AADClient",
+        "OSDClient"
     )
 
     $rolesForExisting = @(
-        "DPMP",
         "CAS",
         "Primary",
         "PassiveSite",
         "FileServer",
+        "DPMP",
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
-        "AADClient"
+        "AADClient",
+        "OSDClient"
     )
 
     $cmVersions = @(
@@ -1632,6 +1670,7 @@ if (-not $Common.Initialized) {
 
     # Common global props
     $global:Common = [PSCustomObject]@{
+        MemLabsVersion        = "211118"
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files

@@ -259,7 +259,7 @@ function Test-ValidVmOptions {
         $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) | Select-Object -First 1 }
         if ($existingSubnet) {
             if ($($ConfigObject.vmoptions.domainName) -ne $($existingSubnet.Domain)) {
-                Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
             }
             $CASorPRI = ($ConfigObject.virtualMachines.role -contains "CAS") -or (($ConfigObject.virtualMachines.role -contains "Primary"))
             if ($CASorPRI) {
@@ -297,9 +297,9 @@ function Test-ValidCmOptions {
     }
 
     # installDPMPRoles
-    if ($ConfigObject.cmOptions.installDPMPRoles -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.installDPMPRoles has an invalid value [$($ConfigObject.cmOptions.installDPMPRoles)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
-    }
+    #if ($ConfigObject.cmOptions.installDPMPRoles -isnot [bool]) {
+    #    Add-ValidationMessage -Message "CM Options Validation: cmOptions.installDPMPRoles has an invalid value [$($ConfigObject.cmOptions.installDPMPRoles)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    #}
 
     # pushClientToDomainMembers
     if ($ConfigObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
@@ -333,8 +333,10 @@ function Test-ValidVmSupported {
     }
 
     # Supported OS
-    if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+    if ($VM.role -ne "OSDClient") {
+        if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
+            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+        }
     }
 
     # Supported DSC Roles for Existing scenario
@@ -674,16 +676,16 @@ function Test-ValidRoleCSPS {
     }
 
     $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode }
-    foreach ($siteServer in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant() -and $siteServer.role -ne "PassiveSite") {
-            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
+    foreach ($vmWithSiteCode in $otherVMs) {
+        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary")) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
         }
     }
 
     $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $null -ne $_.siteCode }
-    foreach ($siteServer in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $siteServer.siteCode.ToUpperInvariant()) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($siteServer.vmName)]." -ReturnObject $ReturnObject -Failure
+    foreach ($vmWithSiteCode in $otherVMs) {
+        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary")) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -753,12 +755,6 @@ function Test-ValidRolePassiveSite {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which already contains a passive site server." -ReturnObject $ReturnObject -Warning
             }
         }
-        else {
-            $assVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
-            if (($assVM | Measure-Object).Count -ne 0) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which already exists in Hyper-V for VM [$($assVM.vmName)]." -ReturnObject $ReturnObject -Warning
-            }
-        }
     }
 }
 
@@ -791,6 +787,39 @@ function Test-ValidRoleFileServer {
 
         if (-not $fdrive) {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain F drive. FileServer must contain E and F drives." -ReturnObject $ReturnObject -Warning
+        }
+    }
+
+}
+
+function Test-ValidRoleDPMP {
+    param (
+        [object] $VM,
+        [object] $ReturnObject
+    )
+
+    if (-not $VM) {
+        throw
+    }
+
+    $vmName = $VM.vmName
+    $vmRole = $VM.role
+
+    # Server OS
+    if ($VM.installMP) {
+        Test-ValidVmServerOS -VM $VM -ReturnObject $return
+    }
+
+    if (-not $VM.siteCode) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain siteCode; When deploying $vmRole Role, you must specify the siteCode of a Primary Site Server." -ReturnObject $ReturnObject -Warning
+    }
+    else {
+        $psInConfig = $ConfigObject.virtualMachines | Where-Object { $_.sitecode -eq $VM.siteCode -and ($_.role -eq "Primary") }
+        if (-not $psInConfig) {
+            $psVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
+            if (($psVM | Measure-Object).Count -eq 0) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Primary Site Server." -ReturnObject $ReturnObject -Warning
+            }
         }
     }
 
@@ -942,7 +971,7 @@ function Test-Configuration {
 
             # Minimum SQL Memory
             if ($VM.memory / 1 -lt 4GB) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using SQL." -ReturnObject $ReturnObject -Failure
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using SQL." -ReturnObject $return -Failure
             }
         }
 
@@ -1042,16 +1071,12 @@ function Test-Configuration {
 
         $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
 
-        if ($containsPS) {
-            # DPMP VM count -eq 1
-            if (Test-SingleRole -VM $DPMPVM -ReturnObject $return) {
-
-                # Server OS
-                Test-ValidVmServerOS -VM $DPMPVM -ReturnObject $return
-            }
+        foreach ($VM in $DPMPVM) {
+            Test-ValidRoleDPMP -VM $VM -ReturnObject $return
         }
-        else {
-            Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site. DPMP Role can only be deployed with a Primary Site." -ReturnObject $return -Warning
+
+        if (-not $containsPS -and -not $deployConfig.parameters.ExistingPSName) {
+            Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode/subnet was not found." -ReturnObject $return -Warning
         }
 
     }
@@ -1165,10 +1190,10 @@ function New-DeployConfig {
             $DCName = $existingDCName
         }
 
-        # CSName (prefer name in config over existing)
         $containsPS = $configObject.virtualMachines.role -contains "Primary"
         $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         if ($PSVM) {
+            # CSName (prefer name in config over existing)
             $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode ($PSVM.parentSiteCode | Select-Object -First 1) # Bypass failures, validation would fail if we had multiple
             $existingCSName = ($existingCS | Where-Object { $_.role -ne "PassiveSite" }).vmName
             $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
@@ -1189,6 +1214,7 @@ function New-DeployConfig {
             # Set existing PS from same subnet as current config - we don't allow multiple primary sites in same subnet
             $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
             $existingPSName = ($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
+
         }
 
         # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
@@ -1233,7 +1259,6 @@ function New-DeployConfig {
             CSName             = $CSName
             PSName             = $PSName
             ActiveVMName       = $activeVMName
-            DPMPName           = ($virtualMachines | Where-Object { $_.role -eq "DPMP" }).vmName
             DomainMembers      = $clientsCsv
             Scenario           = $scenario
             DHCPScopeId        = $configObject.vmOptions.Network
@@ -1248,6 +1273,7 @@ function New-DeployConfig {
             ExistingActiveName = $existingActiveVMName
             ThisMachineName    = $null
             ThisMachineRole    = $null
+            ThisSQLCUURL       = $null
         }
 
         $existingVMs = Get-List -Type VM -DomainName $configObject.vmOptions.domainName
@@ -1344,7 +1370,7 @@ function Get-ExistingSiteServer {
         $existingValue = @()
         foreach ($vm in $vmList) {
             $so = $null
-            if ($vm.siteCode) {
+            if ($vm.role -in "CAS", "Primary", "Secondary") {
                 if ($PSBoundParameters.ContainsKey("SiteCode") -and $vm.siteCode.ToLowerInvariant() -eq $SiteCode.ToLowerInvariant()) {
 
                     $so = [PSCustomObject]@{
@@ -1542,11 +1568,43 @@ function Get-List {
                     if ($vmNoteObject.role -in "CAS", "Primary", "PassiveSite") {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                             if ($vmState -eq "Running" -and (-not $inProgress)) {
-                                $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" }
-                                $siteCode = $siteCodeFromVM.ScriptBlockOutput
-                                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
-                                Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                                try {
+                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                                    $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
+                                    Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
+                                    Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                                }
+                                catch {
+                                    Write-Log "Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                }
+                            }
+                            else {
+                                Write-Log "Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                            }
+                        }
+                    }
+
+                    # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
+                    if ($vmNoteObject.role -eq "DPMP") {
+                        if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
+                            if ($vmState -eq "Running" -and (-not $inProgress)) {
+                                try {
+                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
+                                    $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                                    if (-not $siteCode) {
+                                        $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                                        $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                                    }
+                                    if ($siteCode) {
+                                        $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
+                                        Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
+                                        Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                                    }
+                                }
+                                catch {
+                                    Write-Log "Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                }
                             }
                             else {
                                 Write-Log "Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
@@ -1558,7 +1616,8 @@ function Get-List {
                     $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
 
                     foreach ($prop in $vmNoteObject.PSObject.Properties) {
-                        $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+                        $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
+                        $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                     }
                 }
 
@@ -1581,23 +1640,23 @@ function Get-List {
         }
 
         if ($Type -eq "Subnet") {
-            return $return | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
         }
 
         if ($Type -eq "Prefix") {
-            return $return | Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
         }
 
         if ($Type -eq "UniqueDomain") {
-            return $return | Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniqueSubnet") {
-            return $return | Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniquePrefix") {
-            return $return | Select-Object -ExpandProperty Prefix -Unique -ErrorAction SilentlyContinue
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Prefix -Unique -ErrorAction SilentlyContinue
         }
 
     }
@@ -1650,15 +1709,16 @@ Function Show-Summary {
         }
     }
 
+    $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
     #$CHECKMARK = ([char]8730)
-    $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
-    $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
-    $containsMember = $deployConfig.virtualMachines.role -contains "DomainMember"
-    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    $containsPS = $fixedConfig.role -contains "Primary"
+    $containsDPMP = $fixedConfig.role -contains "DPMP"
+    $containsMember = $fixedConfig.role -contains "DomainMember"
+    $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
     Write-Verbose "ContainsPS: $containsPS ContainsDPMP: $containsDPMP ContainsMember: $containsMember ContainsPassive: $containsPassive"
-    if ($null -ne $($deployConfig.cmOptions) -and $containsPS -and $deployConfig.cmOptions.install -eq $true) {
-        if ($deployConfig.cmOptions.install -eq $true) {
+    if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
+        if ($deployConfig.cmOptions.install -eq $true -and $containsPS) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
 
 
@@ -1668,7 +1728,7 @@ Function Show-Summary {
             else {
                 Write-RedX "ConfigMgr will NOT updated to latest"
             }
-            $PSVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" }
+            $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PSVM.ParentSiteCode) {
                 Write-GreenCheck "ConfigMgr Primary server Will join a Heirarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
             }
@@ -1681,38 +1741,68 @@ Function Show-Summary {
         }
 
 
-        if (($deployConfig.cmOptions.installDPMPRoles -or $deployConfig.cmOptions.pushClientToDomainMembers) -and $deployConfig.cmOptions.install -eq $true) {
+        if ($deployConfig.cmOptions.install -eq $true) {
+            $foundDP = $false
+            $foundMP = $false
 
-            If ($containsDPMP) {
-                $DPMP = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
-                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName)" -NoNewLine
+            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and $_.InstallMP }
+            if ($DPMP) {
+                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")"
+                $foundDP = $true
+                $foundMP = $true
             }
-            else {
-                $PSVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" }
-                Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)" -NoNewLine
+
+            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and -not $_.InstallMP }
+            if ($DPMP) {
+                Write-GreenCheck "DP role will be installed on $($DPMP.vmName -Join ",")"
+                $foundDP = $true
             }
+            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallMP -and -not $_.InstallDP }
+            if ($DPMP) {
+                Write-GreenCheck "MP role will be installed on $($DPMP.vmName -Join ",")"
+                $foundMP = $true
+            }
+
+            if (-not $foundDP -or -not $foundMP) {
+                $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
+                if ($PSVM) {
+                    if (-not $foundDP -and -not $foundMP) {
+                        Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)"
+                    }
+                    else {
+                        if (-not $foundDP) {
+                            Write-GreenCheck "DP role will be installed on Primary Site Server $($PSVM.vmName)"
+                        }
+                        if (-not $foundMP) {
+                            Write-GreenCheck "MP role will be installed on Primary Site Server $($PSVM.vmName)"
+                        }
+                    }
+                }
+            }
+
         }
         else {
-            Write-RedX "DPMP roles will not be installed" -NoNewLine
+            Write-RedX "DPMP roles will not be installed"
         }
 
         if ($containsMember) {
-            if ($deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                Write-Host " [Client Push: Yes]"
+            if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
+                $MemberNames = ($fixedConfig | Where-Object { $_.Role -eq "DomainMember" }).vmName
+                Write-GreenCheck "Client Push: Yes [$($MemberNames -join ",")]"
             }
             else {
-                Write-Host " [Client Push: No]"
+                Write-RedX "Client Push: No"
             }
         }
         else {
-            Write-Host " [Client Push: N/A]"
+            #Write-Host " [Client Push: N/A]"
         }
 
     }
     else {
         Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
         if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
-            $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+            $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
         }
         else {
             Write-RedX "ConfigMgr will not be installed."
@@ -1720,7 +1810,7 @@ Function Show-Summary {
     }
 
     if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
-        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+        $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
         Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
     }
     if (-not $null -eq $($deployConfig.vmOptions)) {
@@ -1735,15 +1825,26 @@ Function Show-Summary {
         Write-Host " [Network $($deployConfig.vmOptions.network)]"
         Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
 
-        $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
+        $totalMemory = $fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
         $totalMemory = $totalMemory.Sum / 1GB
         $availableMemory = Get-AvailableMemoryGB
         Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine"
     }
-    Write-GreenCheck "Domain Admin account: $($deployConfig.vmOptions.adminName)  Password: $($Common.LocalAdmin.GetNetworkCredential().Password)"
-    $out = $deployConfig.virtualMachines | Where-Object { -not $_.hidden } `
-    | Format-table vmName, role, operatingSystem, memory,
+    Write-GreenCheck "Domain Admin account: " -NoNewLine
+    Write-Host -ForegroundColor Green "$($deployConfig.vmOptions.adminName)" -NoNewline
+    Write-Host " Password: " -NoNewLine
+    Write-Host -ForegroundColor Green "$($Common.LocalAdmin.GetNetworkCredential().Password)"
+
+    $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,
     @{Label = "Procs"; Expression = { $_.virtualProcs } },
+    @{Label = "SiteCode"; Expression = {
+            $SiteCode = $_.siteCode
+            if ($_.ParentSiteCode) {
+                $SiteCode += "->$($_.ParentSiteCode)"
+            }
+            $SiteCode
+        }
+    },
     @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
     @{Label = "SQL"; Expression = {
             if ($null -ne $_.SqlVersion) {

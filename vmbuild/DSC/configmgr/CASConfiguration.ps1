@@ -35,6 +35,7 @@
     else {
         # SQL Instance Location
         $installSQL = $true
+        $sqlUpdateEnabled = $false
         $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
         $SQLInstanceName = "MSSQLSERVER"
         if ($ThisVM.sqlInstanceDir) {
@@ -42,6 +43,11 @@
         }
         if ($ThisVM.sqlInstanceName) {
             $SQLInstanceName = $ThisVM.sqlInstanceName
+        }
+        if ($deployConfig.parameters.ThisSQLCUURL) {
+            $sqlUpdateEnabled = $true
+            $sqlCUURL = $deployConfig.parameters.ThisSQLCUURL
+            $sqlCuDownloadPath = Join-Path "C:\Temp\SQL_CU" (Split-Path -Path $sqlCUURL -Leaf)
         }
     }
 
@@ -102,8 +108,19 @@
             VM        = $ThisVM | ConvertTo-Json
         }
 
+        WriteStatus InstallDotNet {
+            DependsOn = "[InitializeDisks]InitDisks"
+            Status    = "Installing .NET 4.7.2"
+        }
+
+        InstallDotNet472 DotNet {
+            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/1f5af042-d0e4-4002-9c59-9ba66bcf15f6/089f837de42708daacaae7c04b7494db/ndp472-kb4054530-x86-x64-allos-enu.exe"
+            Ensure      = "Present"
+            DependsOn   = "[WriteStatus]InstallDotNet"
+        }
+
         SetCustomPagingFile PagingSettings {
-            DependsOn   = "[InitializeDisks]InitDisks"
+            DependsOn   = "[InstallDotNet472]DotNet"
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
@@ -195,9 +212,32 @@
 
         if ($installSQL) {
 
-            WriteStatus InstallSQL {
-                DependsOn = '[InstallADK]ADKInstall'
-                Status    = "Installing SQL Server ($SQLInstanceName instance)"
+            if ($sqlUpdateEnabled) {
+
+                WriteStatus DownloadSQLCU {
+                    DependsOn = '[InstallADK]ADKInstall'
+                    Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
+                }
+
+                DownloadFile DownloadSQLCU {
+                    DownloadUrl = $sqlCUURL
+                    FilePath    = $sqlCuDownloadPath
+                    Ensure      = "Present"
+                    DependsOn = "[WriteStatus]DownloadSQLCU"
+
+                }
+
+                WriteStatus InstallSQL {
+                    DependsOn = '[DownloadFile]DownloadSQLCU'
+                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                }
+
+            }
+            else {
+                WriteStatus InstallSQL {
+                    DependsOn = '[InstallADK]ADKInstall'
+                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                }
             }
 
             SqlSetup InstallSQL {
@@ -206,12 +246,12 @@
                 SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
                 Features            = 'SQLENGINE,CONN,BC'
                 SourcePath          = 'C:\temp\SQL'
-                UpdateEnabled       = 'True'
+                UpdateEnabled       = $sqlUpdateEnabled
                 UpdateSource        = "C:\temp\SQL_CU"
                 SQLSysAdminAccounts = $SQLSysAdminAccounts
                 TcpEnabled          = $true
                 UseEnglish          = $true
-                DependsOn           = '[InstallADK]ADKInstall'
+                DependsOn           = '[WriteStatus]InstallSQL'
             }
 
             SqlMemory SetSqlMemory {

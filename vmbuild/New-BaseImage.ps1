@@ -21,6 +21,8 @@ param (
     [switch]$ForceTools,
     [Parameter(Mandatory = $false, HelpMessage = "Indicate if the script should continue, without bginfo in the filesToInject\staging\bginfo directory")]
     [switch]$IgnoreBginfo,
+    [Parameter(Mandatory = $false, HelpMessage = "Indicate if the script should pause after customization, allowing user to make additional changes.")]
+    [switch]$PauseAfterCustomization,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
     [switch]$WhatIf
 )
@@ -248,6 +250,19 @@ $connected = Wait-ForVm -VmName $VmName -PathToVerify "C:\staging\Customization.
 if (-not $connected) {
     Write-Log "Main: Could not verify if customization finished in allotted time. Exiting!" -Failure
     return
+}
+
+###################
+# PAUSE IF NEEDED
+###################
+if ($PauseAfterCustomization.IsPresent) {
+    $ready = $false
+    do {
+        $response = Read-Host -Prompt "Main: Pausing for post-customization changes. Press [y] to confinue"
+        if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
+            $ready = $true
+        }
+    } until ($ready)
 }
 
 ###################
