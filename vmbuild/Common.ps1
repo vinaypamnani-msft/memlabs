@@ -708,14 +708,16 @@ function New-VmNote {
         $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
 
         $vmNote = [PSCustomObject]@{
-            inProgress = $InProgress
-            success    = $Successful
-            role       = $ThisVM.role
-            deployedOS = $ThisVM.operatingSystem
-            domain     = $DeployConfig.vmOptions.domainName
-            adminName  = $DeployConfig.vmOptions.adminName
-            network    = $DeployConfig.vmOptions.network
-            prefix     = $DeployConfig.vmOptions.prefix
+            inProgress           = $InProgress
+            success              = $Successful
+            role                 = $ThisVM.role
+            deployedOS           = $ThisVM.operatingSystem
+            domain               = $DeployConfig.vmOptions.domainName
+            adminName            = $DeployConfig.vmOptions.adminName
+            network              = $DeployConfig.vmOptions.network
+            prefix               = $DeployConfig.vmOptions.prefix
+            memLabsVersion       = $Common.MemLabsVersion
+            memLabsDeployVersion = $Common.MemLabsVersion
         }
 
         foreach ($prop in $ThisVM.PSObject.Properties) {
@@ -1668,6 +1670,7 @@ if (-not $Common.Initialized) {
 
     # Common global props
     $global:Common = [PSCustomObject]@{
+        MemLabsVersion        = "211118"
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
