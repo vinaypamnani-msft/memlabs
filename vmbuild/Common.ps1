@@ -632,19 +632,23 @@ function Test-DHCPScope {
 
     try {
         $HashArguments = @{
-            ScopeId = $scopeID
-            Router  = $ConfigParams.DHCPDefaultGateway
+            ScopeId   = $scopeID
+            Router    = $ConfigParams.DHCPDefaultGateway
+            DnsDomain = $ConfigParams.DomainName
         }
 
         if ($ConfigParams.DCName) {
             $dcnet = Get-Vm -Name $ConfigParams.DCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
         }
 
+        if (-not $dcnet -and $ConfigParams.ExistingDCName) {
+            $dcnet = Get-Vm -Name $ConfigParams.ExistingDCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+        }
+
         if ($dcnet) {
             $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
             $HashArguments.Add("DnsServer", $dcIpv4)
             $HashArguments.Add("WinsServer", $dcIpv4)
-            $HashArguments.Add("DnsDomain", $ConfigParams.DomainName)
         }
         else {
             $HashArguments.Add("DnsServer", $ConfigParams.DHCPDNSAddress)
