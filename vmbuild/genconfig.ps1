@@ -108,6 +108,9 @@ function Select-ConfigMenu {
         $customOptions = [ordered]@{ "1" = "Create New Domain%white%green" }
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
         $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%white%green"; }
+        if ($null -ne $Global:SavedConfig) {
+            $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%green%green" }
+        }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load Sample Configuration%gray%green"; "4" = "Load saved config from File%gray%green"; "*B3" = ""; }
         $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
         $vmsTotal = (Get-List -Type VM | Measure-Object).Count
@@ -136,6 +139,10 @@ function Select-ConfigMenu {
             "2" { $SelectedConfig = Show-ExistingNetwork }
             "3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "4" { $SelectedConfig = Select-Config $configDir -NoMore }
+            "!" {
+                $SelectedConfig = $Global:SavedConfig
+                $Global:SavedConfig = $null
+            }
             "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
             "f" { Select-DeletePending }
             "d" { Select-DomainMenu }
@@ -737,6 +744,7 @@ function get-VMSummary {
 
 function Select-MainMenu {
     while ($true) {
+        $global:StartOver = $false
         $preOptions = [ordered]@{}
         $preOptions += [ordered]@{ "*G" = "---  Global Options%cyan%cyan"; "V" = "Global VM Options `t $(get-VMOptionsSummary)%gray%green" }
         if ($Global:Config.cmOptions) {
@@ -756,7 +764,7 @@ function Select-MainMenu {
             #write-Option "$i" "$($name)"
         }
 
-        $customOptions += [ordered]@{ "N" = "New Virtual Machine%DarkGreen%Green"; "*D1" = ""; "*D" = "---  Deployment%cyan%cyan"; "S" = "Save Configuration and Exit%gray%green" }
+        $customOptions += [ordered]@{ "N" = "New Virtual Machine%DarkGreen%Green"; "*D1" = ""; "*D" = "---  Deployment%cyan%cyan"; "!" = "Return to main menu%gray%green"; "S" = "Save Configuration and Exit%gray%green" }
         if ($InternalUseOnly.IsPresent) {
             $customOptions += [ordered]@{ "D" = "Deploy Config%Green%Green" }
         }
@@ -776,6 +784,10 @@ function Select-MainMenu {
             "d" { return $true }
             "s" { return $false }
             "r" { return Test-Configuration -InputObject $Global:Config }
+            "!" {
+                $global:StartOver = $true
+                return $false
+            }
             "z" {
                 $i = 0
                 $filename = Save-Config $Global:Config
@@ -2549,7 +2561,7 @@ function Get-AdditionalValidations {
                         $VM.SiteCode = $value
                     }
                 }
-                if ($SecVM){
+                if ($SecVM) {
                     $SecVM.parentSiteCode = $value
                 }
             }
@@ -3422,7 +3434,7 @@ function Select-VirtualMachines {
                                     if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
                                         $virtualMachine.memory = "4GB"
                                     }
-                                    if ($virtualMachine.role -eq "Secondary"){
+                                    if ($virtualMachine.role -eq "Secondary") {
                                         if ($($virtualMachine.memory) / 1GB -lt "6GB" / 1GB) {
                                             $virtualMachine.memory = "6GB"
                                         }
@@ -3601,61 +3613,70 @@ if ($currentBranch -and $currentBranch -notmatch "main") {
         Set-Location $PSScriptRoot | Out-Null
     }
 }
-$Global:Config = $null
-$Global:Config = Select-ConfigMenu
+$Global:SavedConfig = $null
+do {
+    $Global:Config = $null
+    $Global:Config = Select-ConfigMenu
 
-start-sleep -seconds 1
-$Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
-$Global:AddToExisting = $false
-$existingDCName = $Global:DeployConfig.parameters.existingDCName
-if (-not [string]::IsNullOrWhiteSpace($existingDCName)) {
-    $Global:AddToExisting = $true
-}
-$valid = $false
-while ($valid -eq $false) {
-
-    $return.DeployNow = Select-MainMenu
-    if ($return.DeployNow -is [PSCustomObject]) {
-        return $return.DeployNow
+    start-sleep -seconds 1
+    $Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
+    $Global:AddToExisting = $false
+    $existingDCName = $Global:DeployConfig.parameters.existingDCName
+    if (-not [string]::IsNullOrWhiteSpace($existingDCName)) {
+        $Global:AddToExisting = $true
     }
-    $c = Test-Configuration -InputObject $Global:Config
-    Write-Host
-    Write-Verbose "12"
+    $valid = $false
+    while ($valid -eq $false) {
 
-    if ($c.Valid) {
-        $valid = $true
-    }
-    else {
-        if ($return.DeployNow -eq $false) {
+        $return.DeployNow = Select-MainMenu
+        if ($global:StartOver -eq $true) {
+            Write-Host -ForegroundColor Yellow "Saving Configuration..."
+            $Global:SavedConfig = $global:config
             Write-Host
-            write-host -ForegroundColor Yellow "WARNING: Configuration is not valid. Saving is not advised. Proceed with caution."
-            Write-Host -ForegroundColor Red "Configuration contains the following errors: `r`n$($c.Message)`r`n"
-            write-host
+            $global:StartOver = $false
+            break
+        }
+        if ($return.DeployNow -is [PSCustomObject]) {
+            return $return.DeployNow
+        }
+        $c = Test-Configuration -InputObject $Global:Config
+        Write-Host
+        Write-Verbose "12"
+
+        if ($c.Valid) {
             $valid = $true
         }
         else {
-            Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)`r`n"
-            Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
+            if ($return.DeployNow -eq $false) {
+                Write-Host
+                write-host -ForegroundColor Yellow "WARNING: Configuration is not valid. Saving is not advised. Proceed with caution."
+                Write-Host -ForegroundColor Red "Configuration contains the following errors: `r`n$($c.Message)`r`n"
+                write-host
+                $valid = $true
+            }
+            else {
+                Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)`r`n"
+                Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
+            }
         }
-    }
 
-    if ($valid) {
-        Show-Summary ($c.DeployConfig)
-        Write-Host
-        Write-verbose "13"
-        if ($return.DeployNow -eq $true) {
-            Write-Host -ForegroundColor Green "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
-        }
-        Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
-        $response = Read-Host2 -Prompt "Everything correct? (Y/n)" -HideHelp
-        if (-not [String]::IsNullOrWhiteSpace($response)) {
-            if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                $valid = $false
+        if ($valid) {
+            Show-Summary ($c.DeployConfig)
+            Write-Host
+            Write-verbose "13"
+            if ($return.DeployNow -eq $true) {
+                Write-Host -ForegroundColor Green "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
+            }
+            Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
+            $response = Read-Host2 -Prompt "Everything correct? (Y/n)" -HideHelp
+            if (-not [String]::IsNullOrWhiteSpace($response)) {
+                if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                    $valid = $false
+                }
             }
         }
     }
-}
-
+} while ($null -ne $Global:SavedConfig)
 $return.ConfigFileName = Save-Config $Global:Config
 
 if (-not $InternalUseOnly.IsPresent) {
