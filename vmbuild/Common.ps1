@@ -38,11 +38,11 @@ function Write-Log {
     # Get caller function name and add it to Text
     try {
         $caller = (Get-PSCallStack | Select-Object Command, Location, Arguments)[1].Command
-        if ($caller -and $caller -eq "<ScriptBlock>") {$caller = "Main"}
-        if (-not $caller) { $caller = "<ScriptBlock>" }
+        if ($caller -and $caller -like "*.ps1") {$caller = $caller -replace ".ps1", ""}
+        if (-not $caller) { $caller = "<Script>" }
     }
     catch {
-        $caller = "<ScriptBlock>"
+        $caller = "<Script>"
     }
 
     $Text = "[$caller] $Text"
