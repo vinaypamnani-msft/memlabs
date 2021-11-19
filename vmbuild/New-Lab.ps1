@@ -283,8 +283,19 @@ $VM_Create = {
     }
     Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC\$cmDscFolder" -Destination "C:\staging\DSC" -Recurse -Container -Force
 
+    $expandArchive = {
+        try{
+        Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force
+        }
+        catch {
+            #Timhe - Attempt to fix error: ERROR: Invoke-VmCommand: CON-PS1SITE: Failed to run ' Expand-Archive -Path "C:\staging\DSC$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC$using:cmDscFolder\modules" -Force '. Error: Exception calling "ExtractToFile" with "3" argument(s): "The file 'C:\staging\DSC\configmgr\modules\dscmetadata.json' already exists."
+            #11/19/2021 09:56:59:274 ERROR: PSJOB: CON-PS1SITE: DSC: Failed to extract PS modules inside the VM.
+            Remove-Item "C:\staging\DSC\$using:cmDscFolder\modules" -Filter *.* -Force -Confirm:$false
+            Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force
+        }
+    }
     # Extract DSC modules
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force } -WhatIf:$WhatIf
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $expandArchive -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
