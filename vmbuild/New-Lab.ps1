@@ -987,11 +987,12 @@ function Add-ExistingVMToDeployConfig{
 
             $incrementCount = $true
             foreach ($line in $jobOutput) {
-                if ($line.ToString().StartsWith("ERROR")) {
+                $line = $line.ToString().Trim()
+                if ($line.StartsWith("ERROR")) {
                     Write-Host $line -ForegroundColor Red
                     if ($incrementCount) { $failedCount++ }
                 }
-                elseif ($line.ToString().StartsWith("WARNING")) {
+                elseif ($line.StartsWith("WARNING")) {
                     Write-Host $line -ForegroundColor Yellow
                     if ($incrementCount) { $warningCount++ }
                 }
