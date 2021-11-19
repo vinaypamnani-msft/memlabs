@@ -1326,7 +1326,7 @@ function Get-ExistingForDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
-        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember")]
+        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember", "Secondary")]
         [string]$Role
     )
 
@@ -1423,7 +1423,7 @@ function Get-ExistingForSubnet {
         [Parameter(Mandatory = $true, HelpMessage = "Subnet")]
         [string]$Subnet,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
-        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember")]
+        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember", "Secondary")]
         [string]$Role
     )
 

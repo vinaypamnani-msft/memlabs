@@ -192,8 +192,8 @@ function Select-DomainMenu {
 
         $customOptions = [ordered]@{
             "*d1" = "---  VM Management%cyan";
-            "1"   = "Stop VMs in domain%white%green";
-            "2"   = "Start VMs in domain%white%green";
+            "1"   = "Start VMs in domain%white%green";
+            "2"   = "Stop VMs in domain%white%green";
             "3"   = "Compact all VHDX's in domain (requires domain to be stopped)%white%green";
             "*S"  = "";
             "*S1" = "---  Snapshot Management%cyan"
@@ -216,8 +216,8 @@ function Select-DomainMenu {
         }
 
         switch ($response.ToLowerInvariant()) {
-            "1" { Select-StopDomain -domain $domain }
-            "2" { Select-StartDomain -domain $domain }
+            "2" { Select-StopDomain -domain $domain }
+            "1" { Select-StartDomain -domain $domain }
             "3" { select-OptimizeDomain -domain $domain }
             "d" {
                 Select-DeleteDomain -domain $domain
@@ -270,6 +270,7 @@ function select-SnapshotDomain {
 
     write-host
     Write-Host "$domain has been CheckPointed"
+    Select-StartDomain -domain $domain
 
 }
 
@@ -569,7 +570,7 @@ function Select-StopDomain {
         }
 
         $vmsname = $running | Select-Object -ExpandProperty vmName
-        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)";"C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
+        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
 
         if ([string]::IsNullOrWhiteSpace($response)) {
@@ -586,15 +587,15 @@ function Select-StopDomain {
             }
             foreach ($vm in $vms) {
                 if ($nonCriticalOnly -eq $true) {
-                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
+                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "Secondary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
                         continue
                     }
                 }
-                if ($criticalOnly -eq $true){
-                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
+                if ($criticalOnly -eq $true) {
+                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "Secondary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
 
                     }
-                    else{
+                    else {
                         continue
                     }
                 }
@@ -700,6 +701,7 @@ function get-VMSummary {
     $numDCs = ($vms | Where-Object { $_.Role -eq "DC" } | Measure-Object).Count
     $numDPMP = ($vms | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $numPri = ($vms | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
+    $numSec = ($vms | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
     $numCas = ($vms | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
     $numMember = ($vms | Where-Object { $_.Role -eq "WorkgroupMember" -or $_.Role -eq "AADClient" -or $_.Role -eq "InternetClient" -or ($_.Role -eq "DomainMember" -and $null -eq $_.SqlVersion) } | Measure-Object).Count
     $numSQL = ($vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
@@ -712,6 +714,9 @@ function get-VMSummary {
     }
     if ($numPri -gt 0 ) {
         $RoleList += "[Primary]"
+    }
+    if ($numSec -gt 0 ) {
+        $RoleList += "[Secondary]"
     }
     if ($numDPMP -gt 0 ) {
         $RoleList += "[DPMP]"
@@ -967,7 +972,7 @@ function Get-NewMachineName {
         }
     }
 
-    if (($role -eq "Primary") -or ($role -eq "CAS") -or ($role -eq "PassiveSite")) {
+    if (($role -eq "Primary") -or ($role -eq "CAS") -or ($role -eq "PassiveSite") -or ($role -eq "Secondary")) {
         if ([String]::IsNullOrWhiteSpace($SiteCode)) {
             $newSiteCode = Get-NewSiteCode $Domain -Role $Role
         }
@@ -1053,10 +1058,19 @@ function Get-NewSiteCode {
         return "CS" + ($NumberOfCAS + 1)
         #}
     }
-    $NumberOfPrimaries = (Get-ExistingForDomain -DomainName $Domain -Role Primary | Measure-Object).Count
-    #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
+    if ($role -eq "Primary") {
+        $NumberOfPrimaries = (Get-ExistingForDomain -DomainName $Domain -Role Primary | Measure-Object).Count
+        #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
 
-    return "PS" + ($NumberOfPrimaries + 1)
+        return "PS" + ($NumberOfPrimaries + 1)
+    }
+
+    if ($role -eq "Secondary") {
+        $NumberOfSecondaries = (Get-ExistingForDomain -DomainName $Domain -Role Secondary | Measure-Object).Count
+        #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
+
+        return "SS" + ($NumberOfSecondaries + 1)
+    }
 }
 
 function Get-ValidDomainNames {
@@ -1337,6 +1351,7 @@ Function Get-DomainStatsLine {
     $stats = ""
     $ExistingCasCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
     $ExistingPriCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
+    $ExistingSecCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
     $ExistingDPMPCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $ExistingSQLCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
     $ExistingSubnetCount = (Get-List -Type VM -Domain $DomainName | Select-Object -Property Subnet -unique | measure-object).Count
@@ -1351,6 +1366,9 @@ Function Get-DomainStatsLine {
     }
     if ($ExistingPriCount -gt 0) {
         $stats += "[Primary VMs: $ExistingPriCount] "
+    }
+    if ($ExistingSecCount -gt 0) {
+        $stats += "[Secondary VMs: $ExistingSecCount] "
     }
     if ($ExistingSQLCount -gt 0) {
         $stats += "[SQL VMs: $ExistingSQLCount] "
@@ -1438,13 +1456,26 @@ function Show-ExistingNetwork {
             #$existingSiteCodes += ($global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
 
             $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
-            $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions -Test $false
+            $result = Get-Menu -Prompt "Select CAS sitecode to connect Primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions -Test $false
             if ($result.ToLowerInvariant() -eq "x") {
                 $ParentSiteCode = $null
             }
             else {
                 $ParentSiteCode = $result
             }
+            Get-TestResult -SuccessOnError | out-null
+        }
+    }
+
+    if ($role -eq "Secondary") {
+        $ExistingPriCount = (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
+        if ($ExistingPriCount -gt 0) {
+
+            $existingSiteCodes = @()
+            $existingSiteCodes += (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "Primary" }).SiteCode
+
+            $result = Get-Menu -Prompt "Select Primary sitecode to connect Secondary to:" -OptionArray $existingSiteCodes -CurrentValue $value  -Test $false
+            $parentsiteCode = $result
             Get-TestResult -SuccessOnError | out-null
         }
     }
@@ -1515,6 +1546,7 @@ function Format-Roles {
         switch ($role) {
             "CAS and Primary" { $newRoles += "$($role.PadRight($padding))`t[New CAS and Primary Site]" }
             "Primary" { $newRoles += "$($role.PadRight($padding))`t[New Primary site (Standalone or join a CAS)]" }
+            "Secondary" { $newRoles += "$($role.PadRight($padding))`t[New Secondary site (Attach to Primary)]" }
             "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]" }
             "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site]" }
             "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain]" }
@@ -1570,6 +1602,9 @@ function Select-RolesForNew {
     }
     if ($global:config.VirtualMachines.role -contains "Primary") {
         $existingRoles.Remove("Primary")
+    }
+    if ($global:config.VirtualMachines.role -contains "Secondary") {
+        $existingRoles.Remove("Secondary")
     }
     if ($global:config.VirtualMachines.role -contains "CAS") {
         $existingRoles.Remove("CAS")
@@ -1660,6 +1695,9 @@ function Select-ExistingSubnets {
         if ($configToCheck.virtualMachines.role -contains "CAS") {
             $Role = "CAS"
         }
+        if ($configToCheck.virtualMachines.role -contains "Secondary") {
+            $Role = "Secondary"
+        }
     }
     while ($valid -eq $false) {
 
@@ -1668,12 +1706,13 @@ function Select-ExistingSubnets {
         $subnetList += Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Get-Unique
 
         $subnetListNew = @()
-        if ($Role -eq "Primary" -or $Role -eq "CAS") {
+        if ($Role -eq "Primary" -or $Role -eq "CAS" -or $Role -eq "Secondary") {
             foreach ($subnet in $subnetList) {
                 # If a subnet has a Primary or a CAS in it.. we can not add either.
                 $existingRolePri = Get-ExistingForSubnet -Subnet $subnet -Role Primary
                 $existingRoleCAS = Get-ExistingForSubnet -Subnet $subnet -Role CAS
-                if ($null -eq $existingRolePri -and $null -eq $existingRoleCAS) {
+                $existingRoleSec = Get-ExistingForSubnet -Subnet $subnet -Role Secondary
+                if ($null -eq $existingRolePri -and $null -eq $existingRoleCAS -and $null -eq $existingRoleSec) {
                     $subnetListNew += $subnet
                 }
             }
@@ -1687,7 +1726,7 @@ function Select-ExistingSubnets {
             if ($sb -eq "Internet") {
                 continue
             }
-            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode -and ($_.Role -eq "Primary" -or $_.Role -eq "CAS") } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
+            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode -and ($_.Role -eq "Primary" -or $_.Role -eq "CAS" -or $_.Role -eq "Secondary") } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
             if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
                 $subnetListModified += "$sb"
             }
@@ -2096,8 +2135,13 @@ Function Get-SiteCodeForDPMP {
         if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
             $siteCodes += $tempSiteCode
         }
+        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" } | Select-Object -first 1).SiteCode
+        if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
+            $siteCodes += $tempSiteCode
+        }
         if ($Domain) {
             $siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
+            $siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object -ExpandProperty SiteCode -Unique
         }
         if ($siteCodes.Length -eq 0) {
             Write-Host
@@ -2499,10 +2543,14 @@ function Get-AdditionalValidations {
             }
             if ($property.role -eq "Primary") {
                 $VM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                $SecVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Secondary" }
                 if ($VM) {
                     if ($VM.siteCode -eq $CurrentValue ) {
                         $VM.SiteCode = $value
                     }
+                }
+                if ($SecVM){
+                    $SecVM.parentSiteCode = $value
                 }
             }
         }
@@ -3073,6 +3121,16 @@ function Add-NewVMForRole {
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
 
         }
+        "Secondary" {
+            $virtualMachine.memory = "4GB"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ParentSiteCode' -Value $ParentSiteCode
+            $virtualMachine.operatingSystem = $OperatingSystem
+            $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
+            $disk = [PSCustomObject]@{"E" = "250GB" }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+        }
         "PassiveSite" {
             $virtualMachine.memory = "4GB"
             $NewFSServer = $true
@@ -3144,7 +3202,7 @@ function Add-NewVMForRole {
 
     $ConfigToModify.virtualMachines += $virtualMachine
 
-    if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "DPMP") {
+    if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "DPMP" -or $role -eq "Secondary") {
         if ($null -eq $ConfigToModify.cmOptions) {
             $newCmOptions = [PSCustomObject]@{
                 version                   = "current-branch"
@@ -3363,6 +3421,11 @@ function Select-VirtualMachines {
                                     $virtualMachine.virtualProcs = 4
                                     if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
                                         $virtualMachine.memory = "4GB"
+                                    }
+                                    if ($virtualMachine.role -eq "Secondary"){
+                                        if ($($virtualMachine.memory) / 1GB -lt "6GB" / 1GB) {
+                                            $virtualMachine.memory = "6GB"
+                                        }
                                     }
                                 }
                             }
