@@ -109,7 +109,7 @@ function Select-ConfigMenu {
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
         $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%white%green"; }
         if ($null -ne $Global:SavedConfig) {
-            $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%green%green" }
+            $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%white%green" }
         }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load Sample Configuration%gray%green"; "4" = "Load saved config from File%gray%green"; "*B3" = ""; }
         $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
@@ -1201,6 +1201,9 @@ function Select-NewDomainConfig {
         $customOptions = [ordered]@{ "1" = "CAS and Primary%gray%green"; "2" = "Primary Site only%gray%green"; "3" = "Tech Preview (NO CAS)%red%green" ; "4" = "No ConfigMgr%yellow%green"; }
         $response = $null
         while (-not $response) {
+            Write-Host
+            Write-Host -ForegroundColor Yellow "Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
+
             $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
             if ([string]::IsNullOrWhiteSpace($response)) {
                 return
@@ -1594,7 +1597,7 @@ function Select-RolesForExisting {
 
     $existingRoles2 = Format-Roles $existingRoles2
 
-    $OptionArray = @{ "H" = "Convert an existing CAS or Primary to HA" }
+    $OptionArray = @{ "H" = "Enable High Availability (HA) on an Existing Site Server" }
 
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue "DomainMember" -additionalOptions $OptionArray
 
@@ -3372,10 +3375,10 @@ function Select-VirtualMachines {
                                 $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr%cyan"; "S" = "Configure SQL (Set local or remote SQL)" }
                                 $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
                                 if ($PassiveNode) {
-                                    $customOptions += [ordered]@{"H" = "Remove HA" }
+                                    $customOptions += [ordered]@{"H" = "Remove High Availibility (HA) - Removes the Passive Site Server" }
                                 }
                                 else {
-                                    $customOptions += [ordered]@{"H" = "Enable HA" }
+                                    $customOptions += [ordered]@{"H" = "Enable High Availibility (HA) - Adds a Passive Site Server" }
                                 }
                             }
                             else {
