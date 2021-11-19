@@ -86,23 +86,6 @@ $installed = $false
 do {
 
     $i++
-    $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
-
-    if ($state) {
-        Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds 30
-    }
-
-    if (0 -eq $i % 10 -and (-not $state)) {
-        Write-DscStatus "No Progress after $i tries, Adding secondary site server again on $secondaryFQDN"
-        New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
-            -PrimarySiteCode $SecondaryVM.parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-            -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
-
-        if ($i -gt 31) {
-            Write-DscStatus "No Progress for adding secondary site server after $i tries, giving up." -Failure
-            $installFailure = $true
-        }
-    }
 
     $siteStatus = Get-CMSite -SiteCode $secondarySiteCode
     if ($siteStatus -and $siteStatus.Status -eq 1) {
@@ -112,6 +95,26 @@ do {
     if ($siteStatus -and $siteStatus.Status -eq 3) {
         Write-DscStatus "Adding secondary site server failed. Review details in ConfigMgr Console." -Failure
         $installFailure = $true
+    }
+
+    $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+
+    if ($state) {
+        Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds 30
+    }
+
+    if (-not $state) {
+        if (0 -eq $i % 10) {
+            Write-DscStatus "No Progress after $i tries, Adding secondary site server again on $secondaryFQDN"
+            New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
+                -PrimarySiteCode $SecondaryVM.parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
+                -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
+        }
+
+        if ($i -gt 31) {
+            Write-DscStatus "No Progress for adding secondary site server after $i tries, giving up." -Failure
+            $installFailure = $true
+        }
     }
 
     Start-Sleep -Seconds 30
