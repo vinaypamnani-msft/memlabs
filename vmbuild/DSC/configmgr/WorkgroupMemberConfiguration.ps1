@@ -138,18 +138,17 @@
             DependsOn = "[FileReadAccessShare]SMBShare"
         }
 
-        WriteConfigurationFile WriteWorkgroupMemberFinished {
-            Role      = "WorkgroupMember"
-            LogPath   = $LogPath
-            WriteNode = "WorkgroupMemberFinished"
-            Status    = "Passed"
-            Ensure    = "Present"
+        WriteStatus Complete {
             DependsOn = "[FileReadAccessShare]SMBShare"
+            Status    = "Complete!"
         }
 
-        WriteStatus Complete {
-            DependsOn = "[WriteConfigurationFile]WriteWorkgroupMemberFinished"
-            Status    = "Complete!"
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
         }
     }
 }

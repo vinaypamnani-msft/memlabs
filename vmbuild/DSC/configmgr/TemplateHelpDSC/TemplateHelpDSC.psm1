@@ -298,12 +298,13 @@ class InstallAndConfigWSUS {
 }
 
 [DscResource()]
-class WriteConfigurationFile {
-    [DscProperty(Key)]
-    [string] $Role
+class WriteEvent {
 
     [DscProperty(Mandatory)]
     [string] $LogPath
+
+    [DscProperty(Mandatory = $false)]
+    [string] $FileName
 
     [DscProperty(Key)]
     [string] $WriteNode
@@ -318,11 +319,14 @@ class WriteConfigurationFile {
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
-        $_Role = $this.Role
+        $_FileName = "DSC_Events"
+        if ($this.FileName) {
+            $_FileName = $this.FileName
+        }
         $_Node = $this.WriteNode
         $_Status = $this.Status
         $_LogPath = $this.LogPath
-        $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_Role.json"
+        $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_FileName.json"
         $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
         $Configuration.$_Node.Status = $_Status
@@ -332,93 +336,109 @@ class WriteConfigurationFile {
     }
 
     [bool] Test() {
-        $_Role = $this.Role
+        $_FileName = "DSC_Events"
+        if ($this.FileName) {
+            $_FileName = $this.FileName
+        }
         $_LogPath = $this.LogPath
         $Configuration = ""
-        $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_Role.json"
+        $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_FileName.json"
         if (Test-Path -Path $ConfigurationFile) {
             $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
         }
         else {
-            [hashtable]$Actions = @{
-                MachineJoinDomain       = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
+            if (-not $this.FileName) { # For named-file, caller must ensure file exists with required nodes.
+                [hashtable]$Actions = @{
+                    MachineJoinDomain       = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    CSJoinDomain            = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    PSJoinDomain            = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DPMPJoinDomain          = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DomainMemberJoinDomain  = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DelegateControl         = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    SCCMinstall             = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DPMPFinished            = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DomainMemberFinished    = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    PassiveReady            = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    SecondaryReady          = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    WorkgroupMemberFinished = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    ConfigurationFinished   = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
                 }
-                CSJoinDomain            = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                PSJoinDomain            = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DPMPJoinDomain          = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DomainMemberJoinDomain  = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DelegateControl         = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                SCCMinstall             = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DPMPFinished            = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DomainMemberFinished    = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                PassiveReady            = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                WorkgroupMemberFinished = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
+                $Configuration = New-Object -TypeName psobject -Property $Actions
+                $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
             }
-            $Configuration = New-Object -TypeName psobject -Property $Actions
-            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
         }
 
         return $false
     }
 
-    [WriteConfigurationFile] Get() {
+    [WriteEvent] Get() {
         return $this
     }
 }
 
 [DscResource()]
-class WaitForConfigurationFile {
-    [DscProperty(Key)]
-    [string] $Role
+class WaitForEvent {
 
     [DscProperty(Key)]
     [string] $MachineName
 
     [DscProperty(Mandatory)]
     [string] $LogFolder
+
+    [DscProperty(Mandatory = $false)]
+    [string] $FileName
 
     [DscProperty(Key)]
     [string] $ReadNode
@@ -433,14 +453,18 @@ class WaitForConfigurationFile {
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
-        $_Role = $this.Role
+        $_FileName = "DSC_Events"
+        if ($this.FileName) {
+            $_FileName = $this.FileName
+        }
+
         $_FilePath = "\\$($this.MachineName)\$($this.LogFolder)"
-        $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
+        $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
 
         while (!(Test-Path $ConfigurationFile)) {
             Write-Verbose "Wait for configuration file to exist on $($this.MachineName), will try 60 seconds later..."
             Start-Sleep -Seconds 60
-            $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
+            $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
         }
 
         $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
@@ -452,9 +476,12 @@ class WaitForConfigurationFile {
     }
 
     [bool] Test() {
-        $_Role = $this.Role
+        $_FileName = "DSC_Events"
+        if ($this.FileName) {
+            $_FileName = $this.FileName
+        }
         $_FilePath = "\\$($this.MachineName)\$($this.LogFolder)"
-        $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
+        $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
 
         if (!(Test-Path $ConfigurationFile)) { return $false }
 
@@ -467,7 +494,7 @@ class WaitForConfigurationFile {
 
     }
 
-    [WaitForConfigurationFile] Get() {
+    [WaitForEvent] Get() {
         return $this
     }
 }

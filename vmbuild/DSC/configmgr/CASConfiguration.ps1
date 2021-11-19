@@ -189,8 +189,7 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        WriteConfigurationFile WriteJoinDomain {
-            Role      = "CAS"
+        WriteEvent WriteJoinDomain {
             LogPath   = $LogPath
             WriteNode = "MachineJoinDomain"
             Status    = "Passed"
@@ -199,7 +198,7 @@
         }
 
         WriteStatus ADKInstall {
-            DependsOn = "[WriteConfigurationFile]WriteJoinDomain"
+            DependsOn = "[WriteEvent]WriteJoinDomain"
             Status    = "Downloading and installing ADK"
         }
 
@@ -319,8 +318,7 @@
                 Status    = "Wait for $PSName to join domain"
             }
 
-            WaitForConfigurationFile WaitPSJoinDomain {
-                Role          = "Primary"
+            WaitForEvent WaitPSJoinDomain {
                 MachineName   = $PSName
                 LogFolder     = $LogFolder
                 ReadNode      = "MachineJoinDomain"
@@ -332,7 +330,7 @@
             AddUserToLocalAdminGroup AddUserToLocalAdminGroup {
                 Name       = $PrimarySiteName
                 DomainName = $DomainName
-                DependsOn  = "[WaitForConfigurationFile]WaitPSJoinDomain"
+                DependsOn  = "[WaitForEvent]WaitPSJoinDomain"
             }
 
             FileReadAccessShare CMSourceSMBShare {
@@ -359,8 +357,7 @@
                 Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to be ready"
             }
 
-            WaitForConfigurationFile WaitPassive {
-                Role          = "PassiveSite"
+            WaitForEvent WaitPassive {
                 MachineName   = $PassiveVM.vmName
                 LogFolder     = $LogFolder
                 ReadNode      = "PassiveReady"
@@ -378,7 +375,7 @@
                     InstanceName            = $SQLInstanceName
                     LoginMustChangePassword = $false
                     PsDscRunAsCredential    = $CMAdmin
-                    DependsOn               = '[WaitForConfigurationFile]WaitPassive'
+                    DependsOn               = '[WaitForEvent]WaitPassive'
                 }
 
                 SqlRole addsysadmin {
@@ -413,8 +410,7 @@
 
         }
 
-        WaitForConfigurationFile DelegateControl {
-            Role          = "DC"
+        WaitForEvent DelegateControl {
             MachineName   = $DCName
             LogFolder     = $LogFolder
             ReadNode      = "DelegateControl"
@@ -428,7 +424,7 @@
             if ($installSQL) {
 
                 WriteStatus RunScriptWorkflow {
-                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
+                    DependsOn = "[WaitForEvent]DelegateControl"
                     Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
                 }
 
@@ -437,22 +433,21 @@
 
                 # Wait for SQLVM
                 WriteStatus WaitSQL {
-                    DependsOn = "[WaitForConfigurationFile]DelegateControl"
+                    DependsOn = "[WaitForEvent]DelegateControl"
                     Status    = "Waiting for remote SQL VM $($ThisVM.remoteSQLVM) to finish configuration."
                 }
 
-                WaitForConfigurationFile WaitSQL {
-                    Role          = "DomainMember"
+                WaitForEvent WaitSQL {
                     MachineName   = $ThisVM.remoteSQLVM
                     LogFolder     = $LogFolder
-                    ReadNode      = "DomainMemberFinished"
+                    ReadNode      = "ConfigurationFinished"
                     ReadNodeValue = "Passed"
                     Ensure        = "Present"
-                    DependsOn     = "[WaitForConfigurationFile]DelegateControl"
+                    DependsOn     = "[WaitForEvent]DelegateControl"
                 }
 
                 WriteStatus RunScriptWorkflow {
-                    DependsOn = "[WaitForConfigurationFile]WaitSQL"
+                    DependsOn = "[WaitForEvent]WaitSQL"
                     Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
                 }
 
@@ -468,8 +463,8 @@
                 DependsOn      = "[WriteStatus]RunScriptWorkflow"
             }
 
-            WaitForConfigurationFile WorkflowComplete {
-                Role          = "ScriptWorkflow"
+            WaitForEvent WorkflowComplete {
+                FileName      = "ScriptWorkflow"
                 MachineName   = $ThisMachineName
                 LogFolder     = $LogFolder
                 ReadNode      = "ScriptWorkflow"
@@ -479,7 +474,7 @@
             }
 
             WriteStatus Complete {
-                DependsOn = "[WaitForConfigurationFile]WorkflowComplete"
+                DependsOn = "[WaitForEvent]WorkflowComplete"
                 Status    = "Complete!"
             }
 
@@ -490,6 +485,14 @@
                 DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
                 Status    = "Complete!"
             }
+        }
+
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
         }
     }
 }

@@ -1615,6 +1615,7 @@ function Set-SupportedOptions {
     $rolesForExisting = @(
         "CAS",
         "Primary",
+        "Secondary",
         "PassiveSite",
         "FileServer",
         "DPMP",

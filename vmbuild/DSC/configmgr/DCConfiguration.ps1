@@ -55,10 +55,17 @@
         $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
     }
 
+    # Secondary Site
+    $containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
+    if ($containsSecondary) {
+        $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+    }
+
     $waitOnServers = @()
     if ($PSName) { $waitOnServers += $PSName }
     if ($PassiveVM) { $waitOnServers += $PassiveVM.vmName }
     if ($CSName) { $waitOnServers += $CSName }
+    if ($SecondaryVM) { $waitOnServers += $SecondaryVM.vmName }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -273,8 +280,7 @@
             $waitOnDependency += "[DelegateControl]Add$server"
         }
 
-        WriteConfigurationFile WriteDelegateControlfinished {
-            Role      = "DC"
+        WriteEvent WriteDelegateControlfinished {
             LogPath   = $LogPath
             WriteNode = "DelegateControl"
             Status    = "Passed"
@@ -283,31 +289,29 @@
         }
 
         if ($PSName) {
-            WriteConfigurationFile WritePSJoinDomain {
-                Role      = "DC"
+            WriteEvent WritePSJoinDomain {
                 LogPath   = $LogPath
                 WriteNode = "PSJoinDomain"
                 Status    = "Passed"
                 Ensure    = "Present"
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
             }
         }
 
         if ($CSName) {
-            WriteConfigurationFile WriteCSJoinDomain {
-                Role      = "DC"
+            WriteEvent WriteCSJoinDomain {
                 LogPath   = $LogPath
                 WriteNode = "CSJoinDomain"
                 Status    = "Passed"
                 Ensure    = "Present"
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
             }
         }
 
         if (-not ($PSName -or $CSName)) {
 
             WriteStatus Complete {
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
                 Status    = "Complete!"
             }
 
@@ -315,7 +319,7 @@
         else {
 
             WriteStatus WaitExtSchema {
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
                 Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
             }
 
@@ -323,7 +327,7 @@
                 MachineName = if ($Configuration -eq 'Standalone') { $PSName } else { $CSName }
                 ExtFolder   = $CM
                 Ensure      = "Present"
-                DependsOn   = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn   = "[WriteEvent]WriteDelegateControlfinished"
             }
 
             WriteStatus Complete {
@@ -331,6 +335,14 @@
                 Status    = "Complete!"
             }
 
+        }
+
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
         }
     }
 }

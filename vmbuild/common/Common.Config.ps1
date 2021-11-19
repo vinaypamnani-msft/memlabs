@@ -1209,12 +1209,11 @@ function New-DeployConfig {
             $PSName = $PSVM.vmName
         }
 
-        # PSName
+        # TODO: Re-do this logic... PSName
         if (-not $PSName) {
             # Set existing PS from same subnet as current config - we don't allow multiple primary sites in same subnet
-            $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-            $existingPSName = ($existingPS | Where-Object { $_.role -ne "PassiveSite" }).vmName
-
+            $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -Role "Primary" | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+            $existingPSName = $existingPS.vmName
         }
 
         # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
@@ -1230,6 +1229,17 @@ function New-DeployConfig {
             # Add prefix to FS
             if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
                 $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
+            }
+        }
+
+        # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
+        $SecondaryVM = $virtualMachines | Where-Object { $_.role -eq "Secondary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+        if ($SecondaryVM) {
+            $PSinConfig = $virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $SecondaryVM.parentSiteCode }
+            $existingPSName = $PSinConfig.vmName
+            if (-not $PSinConfig) {
+                $ParentVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $SecondaryVM.parentSiteCode -Role "Primary"
+                $existingPSName = $ParentVM.vmName
             }
         }
 
@@ -1348,7 +1358,7 @@ function Get-ExistingSiteServer {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name")]
         [string]$DomainName,
         [Parameter(Mandatory = $false, HelpMessage = "Role")]
-        [ValidateSet("CAS", "Primary")]
+        [ValidateSet("CAS", "Primary", "Secondary")]
         [string]$Role,
         [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
         [string]$SiteCode

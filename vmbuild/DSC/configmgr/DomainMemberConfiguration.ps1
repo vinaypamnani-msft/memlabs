@@ -208,8 +208,7 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        WriteConfigurationFile WriteJoinDomain {
-            Role      = "DomainMember"
+        WriteEvent WriteJoinDomain {
             LogPath   = $LogPath
             WriteNode = "MachineJoinDomain"
             Status    = "Passed"
@@ -222,7 +221,7 @@
             if ($sqlUpdateEnabled) {
 
                 WriteStatus DownloadSQLCU {
-                    DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
+                    DependsOn = '[WriteEvent]WriteJoinDomain'
                     Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
                 }
 
@@ -242,7 +241,7 @@
             }
             else {
                 WriteStatus InstallSQL {
-                    DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
+                    DependsOn = '[WriteEvent]WriteJoinDomain'
                     Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
                 }
             }
@@ -277,8 +276,7 @@
                     Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to join domain"
                 }
 
-                WaitForConfigurationFile WaitPassive {
-                    Role          = "PassiveSite"
+                WaitForEvent WaitPassive {
                     MachineName   = $PassiveVM.vmName
                     LogFolder     = $LogFolder
                     ReadNode      = "MachineJoinDomain"
@@ -294,7 +292,7 @@
                     InstanceName            = $SQLInstanceName
                     LoginMustChangePassword = $false
                     PsDscRunAsCredential    = $CMAdmin
-                    DependsOn               = '[WaitForConfigurationFile]WaitPassive'
+                    DependsOn               = '[WaitForEvent]WaitPassive'
                 }
 
                 SqlRole addsysadmin {
@@ -354,7 +352,7 @@
         else {
 
             WriteStatus AddLocalAdmin {
-                DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
+                DependsOn = '[WriteEvent]WriteJoinDomain'
                 Status    = "Adding cm_svc domain account to Local Administrators group"
             }
 
@@ -390,18 +388,17 @@
             }
         }
 
-        WriteConfigurationFile WriteDomainMemberFinished {
-            Role      = "DomainMember"
-            LogPath   = $LogPath
-            WriteNode = "DomainMemberFinished"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup"
-        }
-
         WriteStatus Complete {
             DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup"
             Status    = "Complete!"
+        }
+
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
         }
     }
 }

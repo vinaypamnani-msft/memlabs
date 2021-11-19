@@ -217,16 +217,31 @@ $VM_Create = {
     }
 
     $Fix_DefaultProfile = {
-        Remove-Item -Path "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache" -Force -Recurse | Out-Null
-        Remove-Item -Path "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache" -Force -Recurse | Out-Null
-        Remove-Item -Path "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat" -Force | Out-Null
+        $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
+        $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
+        $path3 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat"
+        if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse | Out-Null }
+        if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse | Out-Null }
+        if (Test-Path $path3) { Remove-Item -Path $path3 -Force | Out-Null }
     }
 
     Write-Log "PSJOB: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
-
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
+    }
+
+    $Stop_RunningDSC = {
+        # Stop any existing DSC runs
+        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
+        Stop-DscConfiguration -Verbose -Force -ErrorAction SilentlyContinue
+        # Get-Process wmiprvse* -ErrorAction SilentlyContinue | Where-Object {$_.modules.ModuleName -like "*DSC*"} | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Log "PSJOB: $($currentItem.vmName): Stopping any previously running DSC Configurations."
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's" -WhatIf:$WhatIf
+    if ($result.ScriptBlockFailed) {
+        Write-Log "PSJOB: $($currentItem.vmName): Failed to stop any running DSC's." -Warning -OutputStream
     }
 
     # Boot To OOBE?
@@ -344,7 +359,6 @@ $VM_Create = {
         $sqlCUUrl = $using:sqlCUUrl
 
         # Set current role
-
         switch (($currentItem.role)) {
             "DPMP" { $dscRole = "DomainMember" }
             "FileServer" { $dscRole = "DomainMember" }
@@ -391,6 +405,10 @@ $VM_Create = {
         }
 
         "Writing DSC config to $configFilePath" | Out-File $log -Append
+        if (Test-Path $configFilePath) {
+            $newName = $configFilePath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
+            Rename-Item -Path $configFilePath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+        }
         $deployConfig | ConvertTo-Json -Depth 3 | Out-File $configFilePath -Force -Confirm:$false
 
         # Compile config, to create MOF
@@ -428,8 +446,8 @@ $VM_Create = {
             Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
         }
 
-        # Rename the Role.json file, if it exists for DC re-run
-        $jsonPath = Join-Path "C:\staging\DSC" "$($currentItem.role).json"
+        # Rename the DSC_Events.json file, if it exists for DSC re-run
+        $jsonPath = Join-Path "C:\staging\DSC" "DSC_Events.json"
         if (Test-Path $jsonPath) {
             $newName = $jsonPath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
             Rename-Item -Path $jsonPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
@@ -771,6 +789,7 @@ try {
     $existingDC = $deployConfig.parameters.ExistingDCName
     $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
     $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
+    $containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
@@ -881,8 +900,26 @@ try {
         }
     }
 
+    if ($containsSecondary) {
+        $existingPS = $deployConfig.parameters.ExistingPSName
+        if ($existingPS) {
+            $existingPSVM = (get-list -Type VM | where-object { $_.vmName -eq $existingPS })
+            $deployConfig.virtualMachines += [PSCustomObject]@{
+                vmName          = $existingPSVM.vmName
+                role            = $existingPSVM.role
+                siteCode        = $existingPSVM.siteCode
+                RemoteSQLVM     = $existingPSVM.remoteSQLVM
+                SQLInstanceName = $existingPSVM.SQLInstanceName
+                SQLVersion      = $existingPSVM.SQLVersion
+                SQLInstanceDir  = $existingPSVM.SQLInstanceDir
+                hidden          = $true
+            }
+        }
+    }
+
+
     # Add exising DC to list
-    if ($existingDC -and ($containsPS -or $containsPassive)) {
+    if ($existingDC -and ($containsPS -or $containsPassive -or $containsSecondary)) {
         # create a dummy VM object for the existingDC
         $deployConfig.virtualMachines += [PSCustomObject]@{
             vmName = $existingDC
@@ -956,17 +993,22 @@ try {
             Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
 
-            if ($jobOutput.ToString().StartsWith("ERROR")) {
-                Write-Host $jobOutput -ForegroundColor Red
-                $failedCount++
-            }
-            elseif ($jobOutput.ToString().StartsWith("WARNING")) {
-                Write-Host $jobOutput -ForegroundColor Yellow
-                $warningCount++
-            }
-            else {
-                Write-Host $jobOutput -ForegroundColor Green
-                $successCount++
+            $incrementCount = $true
+            foreach ($line in $jobOutput) {
+                if ($line.ToString().StartsWith("ERROR")) {
+                    Write-Host $line -ForegroundColor Red
+                    if ($incrementCount) { $failedCount++ }
+                }
+                elseif ($line.ToString().StartsWith("WARNING")) {
+                    Write-Host $line -ForegroundColor Yellow
+                    if ($incrementCount) { $warningCount++ }
+                }
+                else {
+                    Write-Host $line -ForegroundColor Green
+                    if ($incrementCount) { $successCount++ }
+                }
+
+                $incrementCount = $false
             }
 
             Write-Progress -Id $job.Id -Activity $job.Name -Completed

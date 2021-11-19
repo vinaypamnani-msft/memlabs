@@ -1,4 +1,4 @@
-configuration PassiveSiteConfiguration
+configuration SecondaryConfiguration
 {
     param
     (
@@ -9,7 +9,7 @@ configuration PassiveSiteConfiguration
     )
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc', 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
@@ -19,10 +19,9 @@ configuration PassiveSiteConfiguration
     $DCName = $deployConfig.parameters.DCName
 
     # Passive Site Config Props
-    $ContentLibVMName = $ThisVM.remoteContentLibVM
-    $ActiveVMName = $deployConfig.parameters.ActiveVMName
-    if (-not $ActiveVMName) {
-        $ActiveVMName = $deployConfig.parameters.ExistingActiveName
+    $PSName = $deployConfig.parameters.PSName
+    if (-not $PSName) {
+        $PSName = $deployConfig.parameters.ExistingPSName
     }
 
     # Log share
@@ -147,30 +146,17 @@ configuration PassiveSiteConfiguration
             DependsOn = "[WriteEvent]WriteJoinDomain"
         }
 
-        WriteStatus ADKInstall {
-            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
-            Status    = "Downloading and installing ADK"
-        }
-
-        InstallADK ADKInstall {
-            ADKPath      = "C:\temp\adksetup.exe"
-            ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-            Ensure       = "Present"
-            DependsOn    = "[AddNtfsPermissions]AddNtfsPerms"
-        }
-
         WriteStatus SSMS {
-            DependsOn = "[InstallADK]ADKInstall"
+            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
             Status    = "Downloading and installing SQL Management Studio"
         }
 
         InstallSSMS SSMS {
             DownloadUrl = "https://aka.ms/ssmsfullsetup"
             Ensure      = "Present"
-            DependsOn   = "[InstallADK]ADKInstall"
+            DependsOn   = "[WriteStatus]SSMS"
         }
 
-        # TODO: DelegateControl won't work for passive, but it'll just pass this since the node had been set before... Need DC DSC re-run.
         WriteStatus WaitDelegate {
             DependsOn = "[InstallSSMS]SSMS"
             Status    = "Wait for DC to assign permissions to Systems Management container"
@@ -185,51 +171,37 @@ configuration PassiveSiteConfiguration
             DependsOn     = "[InstallSSMS]SSMS"
         }
 
-        WriteStatus WaitFS {
-            DependsOn = "[WaitForEvent]DelegateControl"
-            Status    = "Waiting for Content Lib VM $ContentLibVMName to finish configuration."
-        }
-
         AddUserToLocalAdminGroup AddActiveLocalAdmin {
-            Name       = "$ActiveVMName$"
+            Name       = "$PSName$"
             DomainName = $DomainName
             DependsOn  = "[WaitForEvent]DelegateControl"
         }
 
-        WaitForEvent WaitFS {
-            MachineName   = $ContentLibVMName
-            LogFolder     = $LogFolder
-            ReadNode      = "ConfigurationFinished"
-            ReadNodeValue = "Passed"
-            Ensure        = "Present"
-            DependsOn     = "[AddUserToLocalAdminGroup]AddActiveLocalAdmin"
-        }
-
-        WriteEvent WritePassiveReady {
+        WriteEvent WriteSecondaryReady {
             LogPath   = $LogPath
-            WriteNode = "PassiveReady"
+            WriteNode = "SecondaryReady"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WaitForEvent]WaitFS"
+            DependsOn = "[AddUserToLocalAdminGroup]AddActiveLocalAdmin"
         }
 
-        WriteStatus WaitActive {
-            DependsOn = "[WriteEvent]WritePassiveReady"
-            Status    = "Waiting for Site Server $ActiveVMName to finish configuration."
+        WriteStatus WaitPrimary {
+            DependsOn = "[WriteEvent]WriteSecondaryReady"
+            Status    = "Waiting for Site Server $PSName to finish configuration."
         }
 
-        WaitForEvent WaitActive {
-            MachineName   = $ActiveVMName
+        WaitForEvent WaitPrimary {
+            MachineName   = $PSName
             LogFolder     = $LogFolder
             FileName      = "ScriptWorkflow"
             ReadNode      = "ScriptWorkflow"
             ReadNodeValue = "Completed"
             Ensure        = "Present"
-            DependsOn     = "[WriteStatus]WaitActive"
+            DependsOn     = "[WriteStatus]WaitPrimary"
         }
 
         WriteStatus Complete {
-            DependsOn = "[WaitForEvent]WaitActive"
+            DependsOn = "[WaitForEvent]WaitPrimary"
             Status    = "Complete!"
         }
 

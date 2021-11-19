@@ -54,6 +54,7 @@ if (!(Test-Path $ProvisionToolPath)) {
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+$containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
 
 # Script Workflow json file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -149,6 +150,11 @@ else {
                     StartTime = ''
                     EndTime   = ''
                 }
+                InstallSecondary = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
                 ScriptWorkflow               = @{
                     Status    = 'NotStart'
                     StartTime = ''
@@ -159,15 +165,13 @@ else {
     }
 
     if ($containsPassive) {
-
         $Actions += @{
-            InstallPassive   = @{
+            InstallPassive = @{
                 Status    = 'NotStart'
                 StartTime = ''
                 EndTime   = ''
             }
         }
-
     }
 
     $Configuration = New-Object -TypeName psobject -Property $Actions
@@ -213,6 +217,15 @@ if ($containsPassive) {
 
     # Install Passive Site Server
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPassiveSiteServer.ps1"
+    . $ScriptFile $ConfigFilePath $LogPath
+
+}
+
+
+if ($containsSecondary) {
+
+    # Install Secondary Site Server
+    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
 
 }
