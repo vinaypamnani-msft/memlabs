@@ -89,7 +89,7 @@ do {
     $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
 
     if ($state) {
-        Write-DscStatus "Adding secondary site server on $secondaryFQDN`: $($state.Status)" -RetrySeconds 60
+        Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds 30
     }
 
     if (0 -eq $i % 10 -and (-not $state)) {
@@ -114,7 +114,7 @@ do {
         $installFailure = $true
     }
 
-    Start-Sleep -Seconds 60
+    Start-Sleep -Seconds 30
 
 } until ($installed -or $installFailure)
 

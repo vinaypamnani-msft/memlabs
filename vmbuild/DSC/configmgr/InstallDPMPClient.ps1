@@ -252,10 +252,12 @@ $dpCount = (Get-CMDistributionPoint -SiteCode $SiteCode | Measure-Object).Count
 $mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
 
 if ($dpCount -eq 0) {
+    Write-DscStatus "No DP's were found in this site. Forcing DP install on Site Server $ThisMachineName"
     Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName)
 }
 
 if ($mpCount -eq 0) {
+    Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName"
     Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName)
 }
 
