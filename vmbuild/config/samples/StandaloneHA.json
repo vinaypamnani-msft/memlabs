@@ -48,10 +48,11 @@
         },
         {
             "vmName": "PRIFS",
-            "role": "DomainMember",
+            "role": "FileServer",
             "operatingSystem": "Server 2022",
             "additionalDisks": {
-                "E": "400GB"
+                "E": "400GB",
+                "F": "400GB"
             },
             "memory": "4GB",
             "virtualProcs": 4
