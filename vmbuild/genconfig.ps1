@@ -239,10 +239,10 @@ function select-SnapshotDomain {
         [string] $domain
     )
     Write-Host
-    Write-Host -ForegroundColor Yellow "It is reccommended to stop VM's before snapshotting. Please select which VM's to stop."
+    Write-Host -ForegroundColor Yellow "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
     Select-StopDomain -domain $domain
     $vms = get-list -type vm -DomainName $domain
-
+    Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources" -Activity
     foreach ($vm in $vms) {
         $complete = $false
         $tries = 0
