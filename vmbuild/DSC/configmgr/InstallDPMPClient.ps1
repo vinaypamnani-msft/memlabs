@@ -39,15 +39,15 @@ $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 $networkSubnet = $deployConfig.vmOptions.network
 
 # Add DPMP on Site Server if none specified
-if (-not $MPNames) {
-    Write-DscStatus "Client Push is true and no MP's found. Forcing MP Role on $($deployConfig.parameters.ThisMachineName) to allow client push to work."
-    $MPNames += $deployConfig.parameters.ThisMachineName
-}
+# if (-not $MPNames) {
+#     Write-DscStatus "Client Push is true and no MP's found. Forcing MP Role on $($deployConfig.parameters.ThisMachineName) to allow client push to work."
+#     $MPNames += $deployConfig.parameters.ThisMachineName
+# }
 
-if (-not $DPNames) {
-    Write-DscStatus "Client Push is true and no DP's found. Forcing DP Role on $($deployConfig.parameters.ThisMachineName) to allow client push to work."
-    $DPNames += $deployConfig.parameters.ThisMachineName
-}
+# if (-not $DPNames) {
+#     Write-DscStatus "Client Push is true and no DP's found. Forcing DP Role on $($deployConfig.parameters.ThisMachineName) to allow client push to work."
+#     $DPNames += $deployConfig.parameters.ThisMachineName
+# }
 
 Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
 Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
@@ -134,20 +134,18 @@ Write-DscStatus "Restarting services"
 Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
 Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
 
-# TODO: $Configuration.InstallDP status won't be accurate if multiple DP's are in config.
-foreach ($DPName in $DPNames) {
 
-    if ([string]::IsNullOrWhiteSpace($DPName)) {
-        continue
-    }
-
-    $DPFQDN = $DPName + "." + $DomainFullName
-    $Configuration.InstallDP.Status = 'Running'
-    $Configuration.InstallDP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+function Install-DP {
+    param (
+        [Parameter()]
+        [string]
+        $ServerFQDN
+    )
 
     $i = 0
     $installFailure = $false
+    $DPFQDN = $ServerFQDN
+
     do {
 
         $i++
@@ -184,35 +182,19 @@ foreach ($DPName in $DPNames) {
         Start-Sleep -Seconds 10
 
     } until ($dpinstalled -or $installFailure)
-
-    if ($dpinstalled) {
-        $Configuration.InstallDP.Status = 'Completed'
-        $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    }
-    else {
-
-        $Configuration.InstallDP.Status = 'Failed'
-        $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    }
-
 }
 
-# TODO: $Configuration.InstallMP status won't be accurate if multiple DP's are in config.
-foreach ($MPName in $MPNames) {
-
-    if ([string]::IsNullOrWhiteSpace($MPName)) {
-        continue
-    }
-
-    $MPFQDN = $MPName + "." + $DomainFullName
-    $Configuration.InstallMP.Status = 'Running'
-    $Configuration.InstallMP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+function Install-MP {
+    param (
+        [Parameter()]
+        [string]
+        $ServerFQDN
+    )
 
     $i = 0
     $installFailure = $false
+    $MPFQDN = $ServerFQDN
+
     do {
 
         $i++
@@ -243,17 +225,38 @@ foreach ($MPName in $MPNames) {
         Start-Sleep -Seconds 10
 
     } until ($mpinstalled -or $installFailure)
+}
 
-    if ($mpinstalled) {
-        $Configuration.InstallMP.Status = 'Completed'
-        $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+foreach ($DPName in $DPNames) {
+
+    if ([string]::IsNullOrWhiteSpace($DPName)) {
+        continue
     }
-    else {
-        $Configuration.InstallMP.Status = 'Failed'
-        $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
+    $DPFQDN = $DPName + "." + $DomainFullName
+    Install-DP -ServerFQDN $DPFQDN
+}
+
+foreach ($MPName in $MPNames) {
+
+    if ([string]::IsNullOrWhiteSpace($MPName)) {
+        continue
     }
+
+    $MPFQDN = $MPName + "." + $DomainFullName
+    Install-MP -ServerFQDN $MPFQDN
+}
+
+# Force install DP/MP on PS Site Server if none present
+$dpCount = (Get-CMDistributionPoint -SiteCode $SiteCode | Measure-Object).Count
+$mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
+
+if ($dpCount -eq 0) {
+    Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName)
+}
+
+if ($mpCount -eq 0) {
+    Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName)
 }
 
 # exit if rerunning DSC to add passive site
