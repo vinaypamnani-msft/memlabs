@@ -434,6 +434,10 @@ function Select-StartDomain {
         [string] $response = $null
     )
 
+    if ($response) {
+        $preResponse = $response
+    }
+    $response = $null
     while ($true) {
         Write-Host
 
@@ -451,10 +455,15 @@ function Select-StartDomain {
 
         $vmsname = $notRunning | Select-Object -ExpandProperty vmName
         $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" }
-        while ($null -eq $response) {
+
+        if (-not $preResponse) {
             $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
-            break
         }
+        else {
+            $response = $preResponse
+            $preResponse = $null
+        }
+
 
         if ([string]::IsNullOrWhiteSpace($response)) {
             return
@@ -464,6 +473,7 @@ function Select-StartDomain {
             if ($response -eq "C") {
                 $CriticalOnly = $true
             }
+            $response = $null
             $dc = $vms | Where-Object { $_.Role -eq "DC" }
             $sqlServers = $vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
             $cas = $vms | Where-Object { $_.Role -eq "CAS" }
@@ -517,8 +527,9 @@ function Select-StartDomain {
             }
             get-job | wait-job | out-null
             get-job | remove-job | out-null
-            get-list -type VM -ResetCache | out-null
+            #get-list -type VM -ResetCache | out-null
             if ($CriticalOnly -eq $false) {
+                get-list -type VM -ResetCache | out-null
                 return
             }
             else {
@@ -529,10 +540,13 @@ function Select-StartDomain {
             start-vm $response
             get-job | wait-job | out-null
             get-job | remove-job | out-null
-            get-list -type VM -ResetCache | out-null
+            #get-list -type VM -ResetCache | out-null
+            $response = $null
         }
     }
+    get-list -type VM -ResetCache | out-null
 }
+
 
 function Select-StopDomain {
     [CmdletBinding()]
@@ -555,21 +569,32 @@ function Select-StopDomain {
         }
 
         $vmsname = $running | Select-Object -ExpandProperty vmName
-        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "C" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)" }
+        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)";"C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
 
         if ([string]::IsNullOrWhiteSpace($response)) {
             return
         }
-        if ($response -eq "A" -or $response -eq "C") {
+        if ($response -eq "A" -or $response -eq "C" -or $response -eq "N") {
 
             $nonCriticalOnly = $false
-            if ($response -eq "C") {
+            if ($response -eq "N") {
                 $nonCriticalOnly = $true
+            }
+            if ($response -eq "C") {
+                $criticalOnly = $true
             }
             foreach ($vm in $vms) {
                 if ($nonCriticalOnly -eq $true) {
                     if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
+                        continue
+                    }
+                }
+                if ($criticalOnly -eq $true){
+                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
+
+                    }
+                    else{
                         continue
                     }
                 }
@@ -1448,7 +1473,7 @@ function Show-ExistingNetwork {
         $SiteCode = $result
     }
 
-    if ($role -eq "DPMP"){
+    if ($role -eq "DPMP") {
         $SiteCode = Get-SiteCodeForDPMP -Domain $domain
         #write-host "Get-SiteCodeForDPMP return $SiteCode"
     }
@@ -2910,11 +2935,11 @@ function get-VMString {
             $SiteCode += "->$($virtualMachine.ParentSiteCode)"
         }
         $name += "  CM [SiteCode $SiteCode]"
-        if ($virtualMachine.role -eq "DPMP"){
-            if ($virtualMachine.installMP){
+        if ($virtualMachine.role -eq "DPMP") {
+            if ($virtualMachine.installMP) {
                 $name += " [MP]"
             }
-            if ($virtualMachine.installDP){
+            if ($virtualMachine.installDP) {
                 $name += " [DP]"
             }
         }
@@ -3506,7 +3531,7 @@ $currentBranch = (& git branch) -match '\*'
 if ($currentBranch -and $currentBranch -notmatch "main") {
     $psdLastWriteTime = (Get-ChildItem ".\DSC\configmgr\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
     $psmLastWriteTime = (Get-ChildItem ".\DSC\configmgr\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
-    $zipLastWriteTime = (Get-ChildItem ".\DSC\configmgr\DSC.zip").LastWriteTime+(New-TimeSpan -Minutes 1)
+    $zipLastWriteTime = (Get-ChildItem ".\DSC\configmgr\DSC.zip").LastWriteTime + (New-TimeSpan -Minutes 1)
     if ($psdLastWriteTime -gt $zipLastWriteTime -or $psmLastWriteTime -gt $zipLastWriteTime) {
         $params = @{configName = "standalone.json"; vmName = "CM-DC1" }
         & ".\dsc\createGuestDscZip.ps1" @params | Out-Host

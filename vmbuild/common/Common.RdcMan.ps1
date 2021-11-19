@@ -310,7 +310,8 @@ function New-RDCManFileFromHyperV {
     }
 
     Install-RDCman
-    foreach ($domain in (Get-List -Type UniqueDomain -ResetCache)) {
+    $domainList = (Get-List -Type UniqueDomain -ResetCache)
+    foreach ($domain in $domainList) {
         Write-Verbose "New-RDCManFileFromHyperV: Adding all machines from Domain $domain"
         $findGroup = $null
         $findGroup = Get-RDCManGroupToModify $domain $group $findGroup $groupFromTemplate $existing
