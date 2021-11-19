@@ -99,7 +99,7 @@ do {
             -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
 
         if ($i -gt 31) {
-            Write-DscStatus "No Progress for adding secondary site server after $i tries, giving up." -Falure
+            Write-DscStatus "No Progress for adding secondary site server after $i tries, giving up." -Failure
             $installFailure = $true
         }
     }
@@ -110,7 +110,7 @@ do {
     }
 
     if ($siteStatus -and $siteStatus.Status -eq 3) {
-        Write-DscStatus "Adding secondary site server failed. Review details in ConfigMgr Console." -Falure
+        Write-DscStatus "Adding secondary site server failed. Review details in ConfigMgr Console." -Failure
         $installFailure = $true
     }
 

@@ -231,7 +231,7 @@ do {
         Write-DscStatus "No Progress after $i tries, Adding passive site server again on $passiveFQDN`: $($state.SubStageName)"
         Add-CMPassiveSite -InstallDirectory $SMSInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
         if ($i -gt 31) {
-            Write-DscStatus "No Progress for adding passive site server after $i tries, giving up." -Falure
+            Write-DscStatus "No Progress for adding passive site server after $i tries, giving up." -Failure
             $installFailure = $true
         }
     }
