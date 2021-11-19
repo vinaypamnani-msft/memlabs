@@ -284,14 +284,15 @@ $VM_Create = {
     Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC\$cmDscFolder" -Destination "C:\staging\DSC" -Recurse -Container -Force
 
     $expandArchive = {
-        try{
-        Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force
+        try {
+            Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force -confirm:$false
         }
         catch {
             #Timhe - Attempt to fix error: ERROR: Invoke-VmCommand: CON-PS1SITE: Failed to run ' Expand-Archive -Path "C:\staging\DSC$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC$using:cmDscFolder\modules" -Force '. Error: Exception calling "ExtractToFile" with "3" argument(s): "The file 'C:\staging\DSC\configmgr\modules\dscmetadata.json' already exists."
             #11/19/2021 09:56:59:274 ERROR: PSJOB: CON-PS1SITE: DSC: Failed to extract PS modules inside the VM.
+            start-sleep -Seconds 120
             Remove-Item "C:\staging\DSC\$using:cmDscFolder\modules" -Filter *.* -Force -Confirm:$false
-            Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force
+            Expand-Archive -Path "C:\staging\DSC\$using:cmDscFolder\DSC.zip" -DestinationPath "C:\staging\DSC\$using:cmDscFolder\modules" -Force -confirm:$false
         }
     }
     # Extract DSC modules
@@ -810,67 +811,65 @@ try {
         }
     }
 
+
+function Add-ExistingVMToDeployConfig{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Existing VM Name")]
+        [string] $vmName,
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $configToModify,
+        [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
+        [bool] $hidden = $true
+    )
+    $existingVM = (get-list -Type VM | where-object { $_.vmName -eq $vmName })
+    if (-not $existingVM){
+        Write-Log "[Add-ExistingVMToDeployConfig] Not adding $vmName as it does not exist as an existing VM"
+        return
+    }
+    if ($configToModify.virtualMachines.vmName -contains $existingVM.vmName){
+        Write-Log "[Add-ExistingVMToDeployConfig] Not adding $vmName as it already exists in deployConfig"
+        return
+    }
+    $newVMObject = [PSCustomObject]@{
+        vmName          = $vmName
+        role            = $existingVM.role
+        hidden          = $hidden
+    }
+
+    if ($existingVM.siteCode){
+        $newVMObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $existingVM.siteCode -Force
+    }
+    if ($existingVM.parentSiteCode){
+        $newVMObject | Add-Member -MemberType NoteProperty -Name "parentSiteCode" -Value $existingVM.parentSiteCode -Force
+    }
+    if ($existingVM.SQLInstanceName){
+        $newVMObject | Add-Member -MemberType NoteProperty -Name "SQLInstanceName" -Value $existingVM.SQLInstanceName -Force
+    }
+    if ($existingVM.SQLVersion){
+        $newVMObject | Add-Member -MemberType NoteProperty -Name "SQLVersion" -Value $existingVM.SQLVersion -Force
+    }
+    if ($existingVM.SQLInstanceDir){
+        $newVMObject | Add-Member -MemberType NoteProperty -Name "SQLInstanceDir" -Value $existingVM.SQLInstanceDir -Force
+    }
+    if ($existingVM.RemoteSQLVM){
+        $newVMObject | Add-Member -MemberType NoteProperty -Name "RemoteSQLVM" -Value $existingVM.RemoteSQLVM -Force
+    }
+    $configToModify.virtualMachines +=  $newVMObject
+}
+
     # Existing CAS scenario
     $existingCAS = $deployConfig.parameters.ExistingCASName
 
     if ($existingCAS -and $containsPS) {
-        $existingSQLVMName = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS }).RemoteSQLVM
-        # create a dummy VM object for the existingCAS
-        if ($existingSQLVMName) {
-            $deployConfig.virtualMachines += [PSCustomObject]@{
-                vmName      = $existingCAS
-                role        = "CAS"
-                RemoteSQLVM = $existingSQLVMName
-                hidden      = $true
-            }
-        }
-        else {
-            $existingCASVM = (get-list -Type VM | where-object { $_.vmName -eq $existingCAS })
-            $deployConfig.virtualMachines += [PSCustomObject]@{
-                vmName          = $existingCAS
-                SQLInstanceName = $existingCASVM.SQLInstanceName
-                SQLVersion      = $existingCASVM.SQLVersion
-                SQLInstanceDir  = $existingCASVM.SQLInstanceDir
-                role            = "CAS"
-                hidden          = $true
-            }
-        }
+        Add-ExistingVMToDeployConfig -vmName $existingCAS -configToModify $deployConfig
     }
 
-    # Add DPMP to existing PS
-    # $existingPSName = $deployConfig.parameters.ExistingPSName
-    #
-    # if ($containsDPMP -and $existingPSName) {
-    #     $existingPSVM = (get-list -Type VM | where-object { $_.vmName -eq $existingPSName })
-    #     $deployConfig.virtualMachines += [PSCustomObject]@{
-    #         vmName          = $existingPSVM.vmName
-    #         role            = $existingPSVM.role
-    #         siteCode        = $existingPSVM.siteCode
-    #         RemoteSQLVM     = $existingPSVM.remoteSQLVM
-    #         SQLInstanceName = $existingPSVM.SQLInstanceName
-    #         SQLVersion      = $existingPSVM.SQLVersion
-    #         SQLInstanceDir  = $existingPSVM.SQLInstanceDir
-    #         hidden          = $true
-    #     }
-    #
-    # }
-    #
     if ($containsDPMP) {
         $DPMPs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
         foreach ($dpmp in $DPMPS) {
             $existingPrimary = (get-list -type VM -Domainname $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $($dpmp.siteCode) })
-            if ($existingPrimary -and $deployConfig.virtualMachines.vmName -notcontains $existingPrimary.vmName) {
-                $deployConfig.virtualMachines += [PSCustomObject]@{
-                    vmName          = $existingPrimary.vmName
-                    role            = $existingPrimary.role
-                    siteCode        = $existingPrimary.siteCode
-                    RemoteSQLVM     = $existingPrimary.remoteSQLVM
-                    SQLInstanceName = $existingPrimary.SQLInstanceName
-                    SQLVersion      = $existingPrimary.SQLVersion
-                    SQLInstanceDir  = $existingPrimary.SQLInstanceDir
-                    hidden          = $true
-                }
-            }
+            Add-ExistingVMToDeployConfig -vmName $existingPrimary.vmName -configToModify $deployConfig
         }
     }
 
@@ -886,27 +885,9 @@ try {
             if ($existingActive) {
                 $existingActiveVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActive })
                 if ($existingActiveVM.remoteSQLVM) {
-                    $sqlVM = (get-list -Type VM | where-object { $_.vmName -eq $existingActiveVM.remoteSQLVM })
-                    $deployConfig.virtualMachines += [PSCustomObject]@{
-                        vmName          = $sqlVM.vmName
-                        SQLInstanceName = $sqlVM.SQLInstanceName
-                        SQLVersion      = $sqlVM.SQLVersion
-                        SQLInstanceDir  = $sqlVM.SQLInstanceDir
-                        role            = "DomainMember"
-                        hidden          = $true
-                    }
+                    Add-ExistingVMToDeployConfig -vmName $existingActiveVM.remoteSQLVM -configToModify $deployConfig
                 }
-
-                $deployConfig.virtualMachines += [PSCustomObject]@{
-                    vmName          = $existingActiveVM.vmName
-                    role            = $existingActiveVM.role
-                    siteCode        = $existingActiveVM.siteCode
-                    RemoteSQLVM     = $existingActiveVM.remoteSQLVM
-                    SQLInstanceName = $existingActiveVM.SQLInstanceName
-                    SQLVersion      = $existingActiveVM.SQLVersion
-                    SQLInstanceDir  = $existingActiveVM.SQLInstanceDir
-                    hidden          = $true
-                }
+                Add-ExistingVMToDeployConfig -vmName$existingActiveVM.vmName -configToModify $deployConfig
             }
         }
     }
@@ -914,29 +895,14 @@ try {
     if ($containsSecondary) {
         $existingPS = $deployConfig.parameters.ExistingPSName
         if ($existingPS) {
-            $existingPSVM = (get-list -Type VM | where-object { $_.vmName -eq $existingPS })
-            $deployConfig.virtualMachines += [PSCustomObject]@{
-                vmName          = $existingPSVM.vmName
-                role            = $existingPSVM.role
-                siteCode        = $existingPSVM.siteCode
-                RemoteSQLVM     = $existingPSVM.remoteSQLVM
-                SQLInstanceName = $existingPSVM.SQLInstanceName
-                SQLVersion      = $existingPSVM.SQLVersion
-                SQLInstanceDir  = $existingPSVM.SQLInstanceDir
-                hidden          = $true
-            }
+            Add-ExistingVMToDeployConfig -vmName $existingPS -configToModify $deployConfig
         }
     }
-
 
     # Add exising DC to list
     if ($existingDC -and ($containsPS -or $containsPassive -or $containsSecondary)) {
         # create a dummy VM object for the existingDC
-        $deployConfig.virtualMachines += [PSCustomObject]@{
-            vmName = $existingDC
-            role   = "DC"
-            hidden = $true
-        }
+        Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $deployConfig
     }
 
     if ($enableDebug) {
