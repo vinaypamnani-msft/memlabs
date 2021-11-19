@@ -3121,7 +3121,7 @@ function Add-NewVMForRole {
 
         }
         "Secondary" {
-            $virtualMachine.memory = "8GB"
+            $virtualMachine.memory = "4GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ParentSiteCode' -Value $ParentSiteCode
             $virtualMachine.operatingSystem = $OperatingSystem
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
@@ -3420,6 +3420,11 @@ function Select-VirtualMachines {
                                     $virtualMachine.virtualProcs = 4
                                     if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
                                         $virtualMachine.memory = "4GB"
+                                    }
+                                    if ($virtualMachine.role -eq "Secondary"){
+                                        if ($($virtualMachine.memory) / 1GB -lt "6GB" / 1GB) {
+                                            $virtualMachine.memory = "6GB"
+                                        }
                                     }
                                 }
                             }
