@@ -86,12 +86,7 @@ $installed = $false
 do {
 
     $i++
-    $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime -Descending | Select-Object -Last 1
-
-    if ($state.Status.StartsWith("[Fail")) {
-        $installFailure = $true
-        Write-DscStatus "Failed to add secondary site server on $secondaryFQDN. Reason: $($state.Status)" -Failure
-    }
+    $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
 
     if ($state) {
         Write-DscStatus "Adding secondary site server on $secondaryFQDN`: $($state.Status)" -RetrySeconds 60
@@ -112,6 +107,11 @@ do {
     $siteStatus = Get-CMSite -SiteCode $secondarySiteCode
     if ($siteStatus -and $siteStatus.Status -eq 1) {
         $installed = $true
+    }
+
+    if ($siteStatus -and $siteStatus.Status -eq 3) {
+        Write-DscStatus "Adding secondary site server failed. Review details in ConfigMgr Console." -Falure
+        $installFailure = $true
     }
 
     Start-Sleep -Seconds 60
