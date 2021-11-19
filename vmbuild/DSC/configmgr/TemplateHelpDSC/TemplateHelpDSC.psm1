@@ -399,7 +399,7 @@ class WriteEvent {
                         StartTime = ''
                         EndTime   = ''
                     }
-                    SecondaryReady          = @{
+                    ReadyForPrimary          = @{
                         Status    = 'NotStart'
                         StartTime = ''
                         EndTime   = ''

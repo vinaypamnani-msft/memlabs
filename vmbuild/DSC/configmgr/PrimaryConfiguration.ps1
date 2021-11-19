@@ -441,9 +441,9 @@
 
                 $waitOnDependency = @()
 
-                WriteStatus WaitDomainMember {
+                WriteStatus WaitServerReady {
                     DependsOn = "[WaitForEvent]DelegateControl"
-                    Status    = "Waiting for $($waitOnServers -join ',') to finish configuration."
+                    Status    = "Waiting for $($waitOnServers -join ',') to be ready."
                 }
 
                 foreach ($server in $waitOnServers) {
@@ -451,10 +451,10 @@
                     WaitForEvent "WaitFor$server" {
                         MachineName   = $server
                         LogFolder     = $LogFolder
-                        ReadNode      = "ConfigurationFinished"
+                        ReadNode      = "ReadyForPrimary"
                         ReadNodeValue = "Passed"
                         Ensure        = "Present"
-                        DependsOn     = "[WriteStatus]WaitDomainMember"
+                        DependsOn     = "[WriteStatus]WaitServerReady"
                     }
 
                     $waitOnDependency += "[WaitForEvent]WaitFor$server"

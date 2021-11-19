@@ -177,16 +177,16 @@ configuration SecondaryConfiguration
             DependsOn  = "[WaitForEvent]DelegateControl"
         }
 
-        WriteEvent WriteSecondaryReady {
+        WriteEvent ReadyForPrimary {
             LogPath   = $LogPath
-            WriteNode = "SecondaryReady"
+            WriteNode = "ReadyForPrimary"
             Status    = "Passed"
             Ensure    = "Present"
             DependsOn = "[AddUserToLocalAdminGroup]AddActiveLocalAdmin"
         }
 
         WriteStatus WaitPrimary {
-            DependsOn = "[WriteEvent]WriteSecondaryReady"
+            DependsOn = "[WriteEvent]ReadyForPrimary"
             Status    = "Waiting for Site Server $PSName to finish configuration."
         }
 

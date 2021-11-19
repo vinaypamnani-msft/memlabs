@@ -393,6 +393,14 @@
             Status    = "Complete!"
         }
 
+        WriteEvent DPMPReady {
+            LogPath   = $LogPath
+            WriteNode = "ReadyForPrimary"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
+        }
+
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
