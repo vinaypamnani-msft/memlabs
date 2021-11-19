@@ -3624,7 +3624,6 @@ do {
     $Global:Config = $null
     $Global:Config = Select-ConfigMenu
 
-    start-sleep -seconds 1
     $Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
     $Global:AddToExisting = $false
     $existingDCName = $Global:DeployConfig.parameters.existingDCName
@@ -3633,13 +3632,12 @@ do {
     }
     $valid = $false
     while ($valid -eq $false) {
-
+        $global:StartOver = $false
         $return.DeployNow = Select-MainMenu
         if ($global:StartOver -eq $true) {
             Write-Host -ForegroundColor Yellow "Saving Configuration..."
             $Global:SavedConfig = $global:config
             Write-Host
-            $global:StartOver = $false
             break
         }
         if ($return.DeployNow -is [PSCustomObject]) {
@@ -3659,6 +3657,7 @@ do {
                 Write-Host -ForegroundColor Red "Configuration contains the following errors: `r`n$($c.Message)`r`n"
                 write-host
                 $valid = $true
+                break
             }
             else {
                 Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)`r`n"
@@ -3678,11 +3677,15 @@ do {
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                     $valid = $false
+                }else{
+                    break
                 }
+            }else{
+                break
             }
         }
     }
-} while ($null -ne $Global:SavedConfig)
+} while ($null -ne $Global:SavedConfig -and $global:StartOver -eq $true)
 $return.ConfigFileName = Save-Config $Global:Config
 
 if (-not $InternalUseOnly.IsPresent) {
