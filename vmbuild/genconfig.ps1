@@ -1476,10 +1476,10 @@ function Show-ExistingNetwork {
             $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
             $result = Get-Menu -Prompt "Select CAS sitecode to connect Primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions -Test $false
             if ($result.ToLowerInvariant() -eq "x") {
-                $ParentSiteCode = $null
+                $parentSiteCode = $null
             }
             else {
-                $ParentSiteCode = $result
+                $parentSiteCode = $result
             }
             Get-TestResult -SuccessOnError | out-null
         }
@@ -1537,7 +1537,7 @@ function Show-ExistingNetwork {
     }
 
     Write-verbose "[Show-ExistingNetwork] Calling Get-ExistingConfig '$domain' '$subnet' '$role' '$SiteCode'"
-    $newConfig = Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -ParentSiteCode $ParentSiteCode -SiteCode $Sitecode
+    $newConfig = Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -parentSiteCode $parentSiteCode -SiteCode $Sitecode
     return $newConfig
 }
 function Select-RolesForExistingList {
@@ -1813,7 +1813,7 @@ function Get-ExistingConfig {
         [Parameter(Mandatory = $true, HelpMessage = "Role")]
         [String] $Role,
         [Parameter(Mandatory = $false, HelpMessage = "Parent Site code, if we are deploying a primary in a heirarchy")]
-        [string] $ParentSiteCode = $null,
+        [string] $parentSiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
         [string] $SiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
@@ -1828,7 +1828,7 @@ function Get-ExistingConfig {
         $adminUser = "admin"
     }
 
-    Write-Verbose "[Get-ExistingConfig] Generating $Domain $Subnet $role $ParentSiteCode"
+    Write-Verbose "[Get-ExistingConfig] Generating $Domain $Subnet $role $parentSiteCode"
 
     #    $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
     $prefix = get-PrefixForDomain -Domain $Domain
@@ -1850,7 +1850,7 @@ function Get-ExistingConfig {
         virtualMachines = $()
     }
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated $($configGenerated.vmOptions.domainName)"
-    Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -ParentSiteCode $ParentSiteCode -SiteCode $SiteCode -Quiet:$true -test:$test
+    Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -parentSiteCode $parentSiteCode -SiteCode $SiteCode -Quiet:$true -test:$test
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated"
     return $configGenerated
 }
@@ -2556,7 +2556,7 @@ function Get-AdditionalValidations {
             if ($property.role -eq "CAS") {
                 $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
                 if ($PRIVM) {
-                    $PRIVM.ParentSiteCode = $value
+                    $PRIVM.parentSiteCode = $value
                 }
             }
             if ($property.role -eq "Primary") {
@@ -2814,7 +2814,7 @@ function Select-Options {
                     Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
                 }
-                "ParentSiteCode" {
+                "parentSiteCode" {
                     Get-ParentSiteCodeMenu -property $property -name $name -CurrentValue $value
                     continue MainLoop
                 }
@@ -2989,16 +2989,16 @@ function get-VMString {
 
     if ($virtualMachine.siteCode -and $virtualMachine.cmInstallDir) {
         $SiteCode = $virtualMachine.siteCode
-        if ($virtualMachine.ParentSiteCode) {
-            $SiteCode += "->$($virtualMachine.ParentSiteCode)"
+        if ($virtualMachine.parentSiteCode) {
+            $SiteCode += "->$($virtualMachine.parentSiteCode)"
         }
         $name += "  CM [SiteCode $SiteCode ($($virtualMachine.cmInstallDir))]"
     }
 
     if ($virtualMachine.siteCode -and -not $virtualMachine.cmInstallDir) {
         $SiteCode = $virtualMachine.siteCode
-        if ($virtualMachine.ParentSiteCode) {
-            $SiteCode += "->$($virtualMachine.ParentSiteCode)"
+        if ($virtualMachine.parentSiteCode) {
+            $SiteCode += "->$($virtualMachine.parentSiteCode)"
         }
         $name += "  CM [SiteCode $SiteCode]"
         if ($virtualMachine.role -eq "DPMP") {
@@ -3039,7 +3039,7 @@ function Add-NewVMForRole {
         [Parameter(Mandatory = $false, HelpMessage = "Force VM Name. Otherwise auto-generated")]
         [string] $Name = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary in a Heirarchy")]
-        [string] $ParentSiteCode = $null,
+        [string] $parentSiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite or a DPMP")]
         [string] $SiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Override default OS")]
@@ -3118,13 +3118,13 @@ function Add-NewVMForRole {
         }
         "Primary" {
             $existingCAS = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-            if ([string]::IsNullOrWhiteSpace($ParentSiteCode)) {
-                $ParentSiteCode = $null
+            if ([string]::IsNullOrWhiteSpace($parentSiteCode)) {
+                $parentSiteCode = $null
                 if ($existingCAS -eq 1) {
-                    $ParentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
+                    $parentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
                 }
             }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ParentSiteCode' -Value $ParentSiteCode
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
@@ -3141,7 +3141,7 @@ function Add-NewVMForRole {
         }
         "Secondary" {
             $virtualMachine.memory = "4GB"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ParentSiteCode' -Value $ParentSiteCode
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
             $virtualMachine.operatingSystem = $OperatingSystem
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -3152,7 +3152,7 @@ function Add-NewVMForRole {
         "PassiveSite" {
             $virtualMachine.memory = "4GB"
             $NewFSServer = $true
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SiteCode' -Value $SiteCode
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
@@ -3237,7 +3237,7 @@ function Add-NewVMForRole {
     }
 
     if ($existingPrimary -gt 0) {
-        ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).ParentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
+        ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).parentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).siteCode
     }
 
     if ($existingDPMP -eq 0) {
@@ -3549,9 +3549,9 @@ function Remove-VMFromConfig {
         }
     }
     if ($DeletedVM.Role -eq "CAS") {
-        $primaryParentSideCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).ParentSiteCode
+        $primaryParentSideCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).parentSiteCode
         if ($primaryParentSideCode -eq $DeletedVM.SiteCode) {
-            ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).ParentSiteCode = $null
+            ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).parentSiteCode = $null
         }
 
     }
