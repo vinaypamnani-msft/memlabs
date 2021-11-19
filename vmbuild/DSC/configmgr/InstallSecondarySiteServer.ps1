@@ -86,8 +86,8 @@ $installed = $false
 do {
 
     $i++
-
     $siteStatus = Get-CMSite -SiteCode $secondarySiteCode
+
     if ($siteStatus -and $siteStatus.Status -eq 1) {
         $installed = $true
     }
@@ -97,23 +97,24 @@ do {
         $installFailure = $true
     }
 
-    $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+    if ($siteStatus -and $siteStatus.Status -eq 2) {
+        $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
 
-    if ($state) {
-        Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds 30
-    }
-
-    if (-not $state) {
-        if (0 -eq $i % 10) {
-            Write-DscStatus "No Progress after $i tries, Adding secondary site server again on $secondaryFQDN"
-            New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
-                -PrimarySiteCode $SecondaryVM.parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
+        if ($state) {
+            Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds 30
         }
 
-        if ($i -gt 31) {
-            Write-DscStatus "No Progress for adding secondary site server after $i tries, giving up." -Failure
-            $installFailure = $true
+        if (-not $state) {
+            if (0 -eq $i % 20) {
+                Write-DscStatus "No Progress reported after $($i * 30) seconds, restarting SMS_Executive"
+                Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 60
+            }
+
+            if ($i -gt 61) {
+                Write-DscStatus "No Progress for adding secondary site reported after $($i * 30) seconds, giving up." -Failure
+                $installFailure = $true
+            }
         }
     }
 
