@@ -31,7 +31,7 @@ function Get-UserConfiguration {
     }
 
     try {
-        Write-Log "Get-UserConfiguration: Loading $configPath." -LogOnly
+        Write-Log "Loading $configPath." -LogOnly
         $config = Get-Content $configPath -Force | ConvertFrom-Json
         $return.Loaded = $true
         $return.Config = $config
@@ -113,7 +113,7 @@ function Get-FilesForConfiguration {
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
     }
 
-    Write-Log "Get-FilesForConfiguration: Downloading/Verifying Files required by specified config..." -Activity
+    Write-Log "Downloading/Verifying Files required by specified config..." -Activity
 
     $allSuccess = $true
 
@@ -1348,7 +1348,7 @@ function Get-ExistingForDomain {
 
     }
     catch {
-        Write-Log "Get-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
+        Write-Log "Failed to get existing $Role from $DomainName. $_" -Failure
         return $null
     }
 }
@@ -1413,7 +1413,7 @@ function Get-ExistingSiteServer {
 
     }
     catch {
-        Write-Log "Get-ExistingSiteServer: Failed to get existing site servers. $_" -Failure
+        Write-Log "Failed to get existing site servers. $_" -Failure
         return $null
     }
 }
@@ -1441,7 +1441,7 @@ function Get-ExistingForSubnet {
 
     }
     catch {
-        Write-Log "Get-ExistingForSubnet: Failed to get existing $Role from $Subnet. $_" -Failure
+        Write-Log "Failed to get existing $Role from $Subnet. $_" -Failure
         return $null
     }
 }
@@ -1462,7 +1462,7 @@ function Get-SubnetList {
 
     }
     catch {
-        Write-Log "Get-SubnetList: Failed to get subnet list. $_" -Failure -LogOnly
+        Write-Log "Failed to get subnet list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -1473,7 +1473,7 @@ function Get-DomainList {
         return (Get-List -Type UniqueDomain)
     }
     catch {
-        Write-Log "Get-DomainList: Failed to get domain list. $_" -Failure -LogOnly
+        Write-Log "Failed to get domain list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -1507,7 +1507,7 @@ function Get-List {
 
         if ($null -eq $global:vm_List) {
 
-            Write-Log "Get-List: Obtaining '$Type' list and caching it." -Verbose
+            Write-Log "Obtaining '$Type' list and caching it." -Verbose
             $return = @()
             $virtualMachines = Get-VM
 
@@ -1518,12 +1518,12 @@ function Get-List {
                         $vmNoteObject = $vm.Notes | ConvertFrom-Json
                     }
                     else {
-                        Write-Log "Get-List: VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
+                        Write-Log "VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
                         #continue
                     }
                 }
                 catch {
-                    Write-Log "Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
+                    Write-Log "Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
                     #continue
                 }
 
@@ -1582,15 +1582,15 @@ function Get-List {
                                     $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                                     $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                    Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
+                                    Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
                                     Set-VMNote -vmName $vmName -vmNote $vmNoteObject
                                 }
                                 catch {
-                                    Write-Log "Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                    Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
                                 }
                             }
                             else {
-                                Write-Log "Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                                Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                             }
                         }
                     }
@@ -1608,16 +1608,16 @@ function Get-List {
                                     }
                                     if ($siteCode) {
                                         $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                        Write-Log "Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
+                                        Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
                                         Set-VMNote -vmName $vmName -vmNote $vmNoteObject
                                     }
                                 }
                                 catch {
-                                    Write-Log "Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                    Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
                                 }
                             }
                             else {
-                                Write-Log "Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                                Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                             }
                         }
                     }
@@ -1671,7 +1671,7 @@ function Get-List {
 
     }
     catch {
-        Write-Log "Get-List: Failed to get '$Type' list. $_" -Failure -LogOnly
+        Write-Log "Failed to get '$Type' list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -1877,7 +1877,7 @@ function Copy-SampleConfigs {
     $realConfigPath = $Common.ConfigPath
     $sampleConfigPath = Join-Path $Common.ConfigPath "samples"
 
-    Write-Log "Copy-SampleConfigs: Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
+    Write-Log "Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
     foreach ($item in Get-ChildItem $sampleConfigPath -File -Filter *.json) {
         $copyFile = $true
         $sampleFile = $item.FullName
@@ -1887,13 +1887,13 @@ function Copy-SampleConfigs {
             $sampleFileHash = Get-FileHash $sampleFile
             $configFileHash = Get-FileHash $configFile
             if ($configFileHash -ne $sampleFileHash) {
-                Write-Log "Copy-SampleConfigs: Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
+                Write-Log "Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
                 $copyFile = $false
             }
         }
 
         if ($copyFile) {
-            Write-Log "Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly -Verbose
+            Write-Log "Copying $fileName to config directory." -LogOnly -Verbose
             Copy-Item -Path $sampleFile -Destination $configFile -Force
         }
     }

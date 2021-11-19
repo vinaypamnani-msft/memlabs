@@ -238,7 +238,6 @@ function Select-DomainMenu {
     }
 }
 
-
 function select-SnapshotDomain {
     [CmdletBinding()]
     param (
@@ -249,7 +248,8 @@ function select-SnapshotDomain {
     Write-Host -ForegroundColor Yellow "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
     Select-StopDomain -domain $domain
     $vms = get-list -type vm -DomainName $domain
-    Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources" -Activity
+    Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
+    Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
     foreach ($vm in $vms) {
         $complete = $false
         $tries = 0
@@ -310,6 +310,8 @@ function select-RestoreSnapshotDomain {
         $startAll = "A"
     }
 
+    Write-Log "Restoring Virtual Machines in '$domain' to previous snapshot" -Activity
+
     foreach ($vm in $vms) {
         $complete = $false
         $tries = 0
@@ -364,6 +366,7 @@ function select-DeleteSnapshotDomain {
         [string] $domain
     )
 
+    Write-Log "Removing previous snapshots of Virtual Machines in '$domain'" -Activity
     $vms = get-list -type vm -DomainName $domain
 
     foreach ($vm in $vms) {
@@ -395,7 +398,7 @@ function select-DeleteSnapshotDomain {
     }
 
     write-host
-    Write-Host "$domain has been CheckPointed"
+    Write-Host "$domain snapshots have been merged"
 
 }
 
@@ -1037,7 +1040,7 @@ function Get-NewMachineName {
     while ($true) {
         $NewName = $RoleName + ($TotalCount + $i)
         if ($null -eq $ConfigToCheck) {
-            write-log "[Get-NewMachineName] Config is NULL..  Machine names will not be checked. Please notify someone of this bug."
+            write-log "Config is NULL..  Machine names will not be checked. Please notify someone of this bug."
             #break
         }
         if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName } | Measure-Object).Count -eq 0) {

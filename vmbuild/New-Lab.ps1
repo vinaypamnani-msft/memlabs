@@ -51,13 +51,13 @@ if (-not $NoWindowResize.IsPresent) {
 
     }
     catch {
-        Write-Log "Main: Failed to set window size. $_" -LogOnly -Warning
+        Write-Log "Failed to set window size. $_" -LogOnly -Warning
     }
 }
 
 # Validate token exists
 if ($Common.FatalError) {
-    Write-Log "Main: Critical Failure! $($Common.FatalError)" -Failure
+    Write-Log "Critical Failure! $($Common.FatalError)" -Failure
     return
 }
 
@@ -321,11 +321,6 @@ $VM_Create = {
         $sqlIso = $sqlFiles.filename | Where-Object { $_.EndsWith(".iso") }
         $sqlIsoPath = Join-Path $using:Common.AzureFilesPath $sqlIso
 
-        # SQL CU Path and FileName
-        $sqlCU = $sqlFiles.filename | Where-Object { $_.EndsWith(".exe") }
-        $sqlCUPath = Join-Path $using:Common.AzureFilesPath $sqlCU
-        $sqlCUFileName = Split-Path $sqlCUPath -Leaf
-
         # Add SQL ISO to guest
         Set-VMDvdDrive -VMName $currentItem.vmName -Path $sqlIsoPath
 
@@ -526,7 +521,7 @@ $VM_Create = {
 
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
-        Write-Log "$($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
+        Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
         # Retry once before exiting
         $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration" -WhatIf:$WhatIf
         if ($result.ScriptBlockFailed) {
@@ -641,11 +636,11 @@ try {
             $userConfig = $configResult.Config
             Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
             Write-Log "### START." -Success
-            Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+            Write-Log "Validating specified configuration: $Configuration" -Activity
         }
         else {
             Write-Log "### START." -Success
-            Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+            Write-Log "Validating specified configuration: $Configuration" -Activity
             Write-Log $configResult.Message -Failure
             Write-Host
             return
@@ -653,7 +648,7 @@ try {
 
     }
     else {
-        Write-Log "Main: No Configuration specified. Calling genconfig." -Activity
+        Write-Log "No Configuration specified. Calling genconfig." -Activity
         Set-Location $PSScriptRoot
         $result = ./genconfig.ps1 -InternalUseOnly -Verbose:$enableVerbose -Debug:$enableDebug
 
@@ -681,12 +676,12 @@ try {
             Clear-Host
             Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
             Write-Log "### START." -Success
-            Write-Log "Main: Using $($result.ConfigFileName) provided by genconfig" -Activity
-            Write-Log "Main: genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
+            Write-Log "Using $($result.ConfigFileName) provided by genconfig" -Activity
+            Write-Log "genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
         }
         else {
             Write-Log "### START." -Success
-            Write-Log "Main: Validating specified configuration: $Configuration" -Activity
+            Write-Log "Validating specified configuration: $Configuration" -Activity
             Write-Log $configResult.Message -Failure
             Write-Host
             return
@@ -703,16 +698,16 @@ try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
         if ($testConfigResult.Valid) {
             $deployConfig = $testConfigResult.DeployConfig
-            Write-Log "Main: Config validated successfully." -Success
+            Write-Log "Config validated successfully." -Success
         }
         else {
-            Write-Log "Main: Config validation failed. `r`n$($testConfigResult.Message)" -Failure
+            Write-Log "Config validation failed. `r`n$($testConfigResult.Message)" -Failure
             Write-Host
             return
         }
     }
     catch {
-        Write-Log "Main: Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
+        Write-Log "Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
         Write-Host
         return
     }
@@ -726,12 +721,12 @@ try {
     $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
     if (-not $success) {
         Write-Host
-        Write-Log "Main: Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
+        Write-Log "Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
         Start-Sleep -Seconds 120
         $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
         if (-not $success) {
             $timer.Stop()
-            Write-Log "Main: Failed to download all required files. Exiting." -Failure
+            Write-Log "Failed to download all required files. Exiting." -Failure
             return
         }
     }
@@ -745,35 +740,35 @@ try {
     }
 
     # Test if hyper-v switch exists, if not create it
-    Write-Log "Main: Creating/verifying whether a Hyper-V switch for specified network exists." -Activity
+    Write-Log "Creating/verifying whether a Hyper-V switch for specified network exists." -Activity
     $switch = Test-NetworkSwitch -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
     if (-not $switch) {
-        Write-Log "Main: Failed to verify/create Hyper-V switch for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
+        Write-Log "Failed to verify/create Hyper-V switch for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
         return
     }
 
     # Test if DHCP scope exists, if not create it
-    Write-Log "Main: Creating/verifying DHCP scope options for specified network." -Activity
+    Write-Log "Creating/verifying DHCP scope options for specified network." -Activity
     $worked = Test-DHCPScope -ConfigParams $deployConfig.parameters
     if (-not $worked) {
-        Write-Log "Main: Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
+        Write-Log "Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
         return
     }
 
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
     if ($containsIN) {
-        Write-Log "Main: Creating/verifying whether a Hyper-V switch for 'Internet' network exists." -Activity
+        Write-Log "Creating/verifying whether a Hyper-V switch for 'Internet' network exists." -Activity
         $internetSwitchName = "Internet"
         $internetSubnet = "172.31.250.0"
         $switch = Test-NetworkSwitch -NetworkName $internetSwitchName -NetworkSubnet $internetSubnet -DomainName $internetSwitchName
         if (-not $switch) {
-            Write-Log "Main: Failed to verify/create Hyper-V switch for 'Internet' network ($internetSwitchName). Exiting." -Failure
+            Write-Log "Failed to verify/create Hyper-V switch for 'Internet' network ($internetSwitchName). Exiting." -Failure
             return
         }
 
         # Test if DHCP scope exists, if not create it
-        Write-Log "Main: Creating/verifying DHCP scope options for the 'Internet' network." -Activity
+        Write-Log "Creating/verifying DHCP scope options for the 'Internet' network." -Activity
         $dummyParams = [PSCustomObject]@{
             DHCPScopeId        = $internetSubnet
             DHCPScopeName      = $internetSwitchName
@@ -784,7 +779,7 @@ try {
         }
         $worked = Test-DHCPScope -ConfigParams $dummyParams
         if (-not $worked) {
-            Write-Log "Main: Failed to verify/create DHCP Scope for the 'Internet' network. Exiting." -Failure
+            Write-Log "Failed to verify/create DHCP Scope for the 'Internet' network. Exiting." -Failure
             return
         }
     }
@@ -795,9 +790,9 @@ try {
     # Remove existing jobs
     $existingJobs = Get-Job
     if ($existingJobs) {
-        Write-Log "Main: Stopping and removing existing jobs." -Verbose -LogOnly
+        Write-Log "Stopping and removing existing jobs." -Verbose -LogOnly
         foreach ($job in $existingJobs) {
-            Write-Log "Main: Removing job $($job.Id) with name $($job.Name)" -Verbose -LogOnly
+            Write-Log "Removing job $($job.Id) with name $($job.Name)" -Verbose -LogOnly
             $job | Stop-Job -ErrorAction SilentlyContinue
             $job | Remove-Job -ErrorAction SilentlyContinue
         }
@@ -820,7 +815,7 @@ try {
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
-        Write-Log "Main: Attempting to remove existing DNS Records" -Activity -HostOnly
+        Write-Log "Attempting to remove existing DNS Records" -Activity -HostOnly
         foreach ($item in $deployConfig.virtualMachines) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
         }
@@ -839,11 +834,11 @@ function Add-ExistingVMToDeployConfig{
     )
     $existingVM = (get-list -Type VM | where-object { $_.vmName -eq $vmName })
     if (-not $existingVM){
-        Write-Log "[Add-ExistingVMToDeployConfig] Not adding $vmName as it does not exist as an existing VM"
+        Write-Log "Not adding $vmName as it does not exist as an existing VM"
         return
     }
     if ($configToModify.virtualMachines.vmName -contains $existingVM.vmName){
-        Write-Log "[Add-ExistingVMToDeployConfig] Not adding $vmName as it already exists in deployConfig"
+        Write-Log "Not adding $vmName as it already exists in deployConfig"
         return
     }
     $newVMObject = [PSCustomObject]@{
@@ -892,7 +887,7 @@ function Add-ExistingVMToDeployConfig{
     if ($containsPassive) {
         $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
         if (($PassiveVM | Measure-Object).Count -ne 1) {
-            Write-Log "Main: Two Passive site servers found in deployment. We only support adding one at a time." -Failure
+            Write-Log "Two Passive site servers found in deployment. We only support adding one at a time." -Failure
             return
         }
         else {
@@ -924,14 +919,14 @@ function Add-ExistingVMToDeployConfig{
         return $deployConfig
     }
 
-    Write-Log "Main: Creating Virtual Machine Deployment Jobs" -Activity
+    Write-Log "Creating Virtual Machine Deployment Jobs" -Activity
 
     # New scenario
     $CreateVM = $true
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
         if ($WhatIf) {
-            Write-Log "Main: Will start a job for VM $($currentItem.vmName)"
+            Write-Log "Will start a job for VM $($currentItem.vmName)"
             continue
         }
 
@@ -949,27 +944,27 @@ function Add-ExistingVMToDeployConfig{
         $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
 
         if ($Err.Count -ne 0) {
-            Write-Log "Main: Failed to start job for VM $($currentItem.vmName). $Err" -Failure
+            Write-Log "Failed to start job for VM $($currentItem.vmName). $Err" -Failure
             $job_created_no++
         }
         else {
-            Write-Log "Main: Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
+            Write-Log "Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
             $jobs += $job
             $job_created_yes++
         }
     }
     if ($job_created_no -eq 0) {
-        Write-Log "Main: Created $job_created_yes jobs for VM deployment."
+        Write-Log "Created $job_created_yes jobs for VM deployment."
     }
     else {
-        Write-Log "Main: Created $job_created_yes jobs for VM deployment. Failed to create $job_created_no jobs."
+        Write-Log "Created $job_created_yes jobs for VM deployment. Failed to create $job_created_no jobs."
     }
 
     Write-Log "Deployment Summary" -Activity -HostOnly
     Write-Host
     Show-Summary -deployConfig $deployConfig
 
-    Write-Log "Main: Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
+    Write-Log "Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
     $failedCount = 0
     $successCount = 0
     $warningCount = 0
@@ -1013,8 +1008,8 @@ function Add-ExistingVMToDeployConfig{
 
     } until ($runningJobs.Count -eq 0)
 
-    Write-Log "Main: Job Completion Status." -Activity
-    Write-Log "Main: $successCount jobs completed successfully; $warningCount warnings, $failedCount failures."
+    Write-Log "Job Completion Status." -Activity
+    Write-Log "$successCount jobs completed successfully; $warningCount warnings, $failedCount failures."
 
     $timer.Stop()
 

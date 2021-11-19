@@ -12,12 +12,12 @@ function Remove-VirtualMachine {
 
     $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
     if ($vmTest) {
-        Write-Log "Remove-Lab: VM '$VmName' exists. Removing." -SubActivity -HostOnly
+        Write-Log "VM '$VmName' exists. Removing." -SubActivity -HostOnly
         if ($vmTest.State -ne "Off") {
             $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf
         }
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf
-        Write-Log "Remove-Lab: $VmName`: Purging $($vmTest.Path) folder..." -HostOnly
+        Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
         Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
     }
 }
@@ -32,7 +32,7 @@ function Remove-DhcpScope {
 
     $dhcpScope = Get-DhcpServerv4Scope -ScopeID $ScopeId -ErrorAction SilentlyContinue
     if ($dhcpScope) {
-        Write-Log "Remove-Lab: DHCP Scope '$ScopeId' exists. Removing." -SubActivity -HostOnly
+        Write-Log "DHCP Scope '$ScopeId' exists. Removing." -SubActivity -HostOnly
         $dhcpScope | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
     }
 }
@@ -44,7 +44,7 @@ function Remove-Orphaned {
         [switch] $WhatIf
     )
 
-    Write-Log "Main: Remove-Orphaned called" -Activity -HostOnly
+    Write-Log "Removing orphaned virtual machines called" -Activity -HostOnly
     $virtualMachines = Get-List -Type VM
     foreach ($vm in $virtualMachines) {
 
@@ -93,7 +93,7 @@ function Remove-InProgress {
         [switch] $WhatIf
     )
 
-    Write-Log "Main: Remove-InProgress called" -Activity -HostOnly
+    Write-Log "Removing In-Progress Virtual Machines" -Activity -HostOnly
 
     if ($DomainName) {
         $virtualMachines = Get-List -Type VM -DomainName $DomainName
@@ -119,7 +119,7 @@ function Remove-Domain {
         [switch] $WhatIf
     )
 
-    Write-Log "Main: Remove-Domain called for '$DomainName' domain." -Activity -HostOnly
+    Write-Log "Removing virtual machines for '$DomainName' domain." -Activity -HostOnly
     $vmsToDelete = Get-List -Type VM -DomainName $DomainName
     $scopesToDelete = Get-SubnetList -DomainName $DomainName
 
@@ -146,7 +146,7 @@ function Remove-All {
         [switch] $WhatIf
     )
 
-    Write-Log "Main: Remove-All called" -Activity -HostOnly
+    Write-Log "Removing ALL virtual machines" -Activity -HostOnly
     $vmsToDelete = Get-List -Type VM
     $scopesToDelete = Get-SubnetList
 
