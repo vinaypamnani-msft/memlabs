@@ -192,8 +192,8 @@ function Select-DomainMenu {
 
         $customOptions = [ordered]@{
             "*d1" = "---  VM Management%cyan";
-            "1"   = "Stop VMs in domain%white%green";
-            "2"   = "Start VMs in domain%white%green";
+            "1"   = "Start VMs in domain%white%green";
+            "2"   = "Stop VMs in domain%white%green";
             "3"   = "Compact all VHDX's in domain (requires domain to be stopped)%white%green";
             "*S"  = "";
             "*S1" = "---  Snapshot Management%cyan"
@@ -216,8 +216,8 @@ function Select-DomainMenu {
         }
 
         switch ($response.ToLowerInvariant()) {
-            "1" { Select-StopDomain -domain $domain }
-            "2" { Select-StartDomain -domain $domain }
+            "2" { Select-StopDomain -domain $domain }
+            "1" { Select-StartDomain -domain $domain }
             "3" { select-OptimizeDomain -domain $domain }
             "d" {
                 Select-DeleteDomain -domain $domain
@@ -270,6 +270,7 @@ function select-SnapshotDomain {
 
     write-host
     Write-Host "$domain has been CheckPointed"
+    Select-StartDomain -domain $domain
 
 }
 
