@@ -676,7 +676,7 @@ function Select-DeleteDomain {
 
 function Select-DeletePending {
 
-    get-list -Type VM | Where-Object { $_.InProgress -eq "True" } | Format-Table | Out-Host
+    get-list -Type VM | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Subnet, SQLVersion | Out-Host
     Write-Host "Please confirm these VM's are not currently in process of being deployed."
     Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
     $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
