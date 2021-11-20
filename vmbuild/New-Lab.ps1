@@ -181,7 +181,7 @@ $VM_Create = {
     }
 
     # Assign DHCP reservation for PS/CS
-    if ($currentItem.role -in "Primary", "CAS") {
+    if ($currentItem.role -in "Primary", "CAS" -and (-not $currentItem.hidden)) {
         try {
             $vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop
             if ($vmnet) {
