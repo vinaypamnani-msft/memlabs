@@ -31,7 +31,7 @@ function Get-UserConfiguration {
     }
 
     try {
-        Write-Log "Loading $configPath." -LogOnly
+        Write-Log "Get-UserConfiguration: Get-UserConfiguration: Loading $configPath." -LogOnly
         $config = Get-Content $configPath -Force | ConvertFrom-Json
         $return.Loaded = $true
         $return.Config = $config
@@ -113,7 +113,7 @@ function Get-FilesForConfiguration {
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
     }
 
-    Write-Log "Downloading/Verifying Files required by specified config..." -Activity
+    Write-Log "Get-FilesForConfiguration: Get-FilesForConfiguration: Downloading/Verifying Files required by specified config..." -Activity
 
     $allSuccess = $true
 
@@ -1348,7 +1348,7 @@ function Get-ExistingForDomain {
 
     }
     catch {
-        Write-Log "Failed to get existing $Role from $DomainName. $_" -Failure
+        Write-Log "Get-ExistingGorDometn: Fai-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
         return $null
     }
 }
@@ -1413,7 +1413,7 @@ function Get-ExistingSiteServer {
 
     }
     catch {
-        Write-Log "Failed to get existing site servers. $_" -Failure
+        Write-Log "Get-ExistingSiteServer: Get-ExistingSiteServer: Failed to get existing site servers. $_" -Failure
         return $null
     }
 }
@@ -1441,7 +1441,7 @@ function Get-ExistingForSubnet {
 
     }
     catch {
-        Write-Log "Failed to get existing $Role from $Subnet. $_" -Failure
+        Write-Log "Get-ExistingGorSubnet: Fet-ExistingForSubnet: Failed to get existing $Role from $Subnet. $_" -Failure
         return $null
     }
 }
@@ -1462,7 +1462,7 @@ function Get-SubnetList {
 
     }
     catch {
-        Write-Log "Failed to get subnet list. $_" -Failure -LogOnly
+        Write-Log "Get-SubnetList: Get-SubnetList: Failed to get subnet list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -1473,7 +1473,7 @@ function Get-DomainList {
         return (Get-List -Type UniqueDomain)
     }
     catch {
-        Write-Log "Failed to get domain list. $_" -Failure -LogOnly
+        Write-Log "Get-DomainList: Get-DomainList: Failed to get domain list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -1507,7 +1507,7 @@ function Get-List {
 
         if ($null -eq $global:vm_List) {
 
-            Write-Log "Obtaining '$Type' list and caching it." -Verbose
+            Write-Log "Get-List: Get-List: Obtaining '$Type' list and caching it." -Verbose
             $return = @()
             $virtualMachines = Get-VM
 
@@ -1518,12 +1518,12 @@ function Get-List {
                         $vmNoteObject = $vm.Notes | ConvertFrom-Json
                     }
                     else {
-                        Write-Log "VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
+                        Write-Log "Get-List: Get-List: VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
                         #continue
                     }
                 }
                 catch {
-                    Write-Log "Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
+                    Write-Log "Get-List: Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
                     #continue
                 }
 
@@ -1582,15 +1582,15 @@ function Get-List {
                                     $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                                     $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                    Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
+                                    Write-Log "Get-List: Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
                                     Set-VMNote -vmName $vmName -vmNote $vmNoteObject
                                 }
                                 catch {
-                                    Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                    Write-Log "Get-List: Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
                                 }
                             }
                             else {
-                                Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                                Write-Log "Get-List: Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                             }
                         }
                     }
@@ -1608,16 +1608,16 @@ function Get-List {
                                     }
                                     if ($siteCode) {
                                         $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                        Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
+                                        Write-Log "Get-List: Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
                                         Set-VMNote -vmName $vmName -vmNote $vmNoteObject
                                     }
                                 }
                                 catch {
-                                    Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                    Write-Log "Get-List: Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
                                 }
                             }
                             else {
-                                Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                                Write-Log "Get-List: Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                             }
                         }
                     }
@@ -1671,7 +1671,7 @@ function Get-List {
 
     }
     catch {
-        Write-Log "Failed to get '$Type' list. $_" -Failure -LogOnly
+        Write-Log "Get-List: Get-List: Failed to get '$Type' list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -1722,13 +1722,14 @@ Function Show-Summary {
     $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
     #$CHECKMARK = ([char]8730)
     $containsPS = $fixedConfig.role -contains "Primary"
+    $containsSecondary = $fixedConfig.role -contains "Secondary"
     $containsDPMP = $fixedConfig.role -contains "DPMP"
     $containsMember = $fixedConfig.role -contains "DomainMember"
     $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
     Write-Verbose "ContainsPS: $containsPS ContainsDPMP: $containsDPMP ContainsMember: $containsMember ContainsPassive: $containsPassive"
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
-        if ($deployConfig.cmOptions.install -eq $true -and $containsPS) {
+        if ($deployConfig.cmOptions.install -eq $true -and ($containsPS -or $containsSecondary)) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
 
 
@@ -1739,11 +1740,27 @@ Function Show-Summary {
                 Write-RedX "ConfigMgr will NOT updated to latest"
             }
             $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-            if ($PSVM.ParentSiteCode) {
-                Write-GreenCheck "ConfigMgr Primary server Will join a Heirarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
+            if ($PSVM) {
+                if ($PSVM.ParentSiteCode) {
+                    Write-GreenCheck "ConfigMgr Primary server will join a Hierarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
+                }
+                else {
+                    Write-GreenCheck "Primary server with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
+                }
             }
-            else {
-                Write-GreenCheck "Primary server with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
+
+            $SSVM = $fixedConfig | Where-Object { $_.Role -eq "Secondary" }
+            if ($SSVM) {
+                Write-GreenCheck "Secondary Site will be installed: $($SSVM.SiteCode) -> $($SSVM.ParentSiteCode)"
+            }
+            if ($containsPS) {
+                if ($containsPassive) {
+                    $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
+                    Write-GreenCheck "(High Availability) ConfigMgr site server in passive mode will be installed for SiteCode $($PassiveVM.SiteCode)"
+                }
+                else {
+                    Write-RedX "(High Availability) No ConfigMgr site server in passive mode will be installed"
+                }
             }
         }
         else {
@@ -1833,7 +1850,7 @@ Function Show-Summary {
         }
 
         Write-Host " [Network $($deployConfig.vmOptions.network)]"
-        Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
+        #Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
 
         $totalMemory = $fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
         $totalMemory = $totalMemory.Sum / 1GB
@@ -1877,7 +1894,7 @@ function Copy-SampleConfigs {
     $realConfigPath = $Common.ConfigPath
     $sampleConfigPath = Join-Path $Common.ConfigPath "samples"
 
-    Write-Log "Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
+    Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
     foreach ($item in Get-ChildItem $sampleConfigPath -File -Filter *.json) {
         $copyFile = $true
         $sampleFile = $item.FullName
@@ -1887,13 +1904,13 @@ function Copy-SampleConfigs {
             $sampleFileHash = Get-FileHash $sampleFile
             $configFileHash = Get-FileHash $configFile
             if ($configFileHash -ne $sampleFileHash) {
-                Write-Log "Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
+                Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
                 $copyFile = $false
             }
         }
 
         if ($copyFile) {
-            Write-Log "Copying $fileName to config directory." -LogOnly -Verbose
+            Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly -Verbose
             Copy-Item -Path $sampleFile -Destination $configFile -Force
         }
     }
