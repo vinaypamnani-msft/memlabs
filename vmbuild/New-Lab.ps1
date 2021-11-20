@@ -181,7 +181,7 @@ $VM_Create = {
     }
 
     # Assign DHCP reservation for PS/CS
-    if ($currentItem.role -in "Primary", "CAS" -and (-not $currentItem.hidden)) {
+    if ($currentItem.role -in "Primary", "CAS", "Secondary" -and (-not $currentItem.hidden)) {
         try {
             $vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop
             if ($vmnet) {
@@ -193,6 +193,10 @@ $VM_Create = {
                 if ($currentItem.role -eq "Primary") {
                     Remove-DhcpServerv4Reservation -IPAddress ($network + ".10") -ErrorAction SilentlyContinue
                     Add-DhcpServerv4Reservation -ScopeId $deployConfig.vmOptions.network -IPAddress ($network + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop
+                }
+                if ($currentItem.role -eq "Secondary") {
+                    Remove-DhcpServerv4Reservation -IPAddress ($network + ".15") -ErrorAction SilentlyContinue
+                    Add-DhcpServerv4Reservation -ScopeId $deployConfig.vmOptions.network -IPAddress ($network + ".15") -ClientId $vmnet.MacAddress -Description "Reservation for Secondary" -ErrorAction Stop
                 }
             }
         }
