@@ -1020,10 +1020,7 @@ try {
     $timer.Stop()
 
     if (Test-Path "C:\tools\rdcman.exe") {
-        $roles = $deployConfig.virtualMachines | Select-Object -ExpandProperty Role
-        if (($roles -Contains "InternetClient") -or ($roles -Contains "AADClient") -or ($roles -Contains "DomainMember") -or ($roles -Contains "WorkgroupMember") -or ($roles -Contains "OSDClient") -or ($roles -Contains "DPMP")) {
-            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
-        }
+        New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
     }
 
     Write-Host
