@@ -9,13 +9,15 @@ configuration SecondaryConfiguration
     )
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc', 'SqlServerDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
+    $DName = $DomainName.Split(".")[0]
+    $DomainAdminName = $deployConfig.vmOptions.adminName
     $DCName = $deployConfig.parameters.DCName
 
     # Passive Site Config Props
@@ -23,6 +25,31 @@ configuration SecondaryConfiguration
     if (-not $PSName) {
         $PSName = $deployConfig.parameters.ExistingPSName
     }
+
+    # SQL Setup
+    $installSQL = $false
+    $sqlUpdateEnabled = $false
+    if ($ThisVM.sqlVersion) {
+        $installSQL = $true
+        $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
+        $SQLInstanceName = "MSSQLSERVER"
+        if ($ThisVM.sqlInstanceDir) {
+            $SQLInstanceDir = $ThisVM.sqlInstanceDir
+        }
+        if ($ThisVM.sqlInstanceName) {
+            $SQLInstanceName = $ThisVM.sqlInstanceName
+        }
+        if ($deployConfig.parameters.ThisSQLCUURL) {
+            $sqlUpdateEnabled = $true
+            $sqlCUURL = $deployConfig.parameters.ThisSQLCUURL
+            $sqlCuDownloadPath = Join-Path "C:\Temp\SQL_CU" (Split-Path -Path $sqlCUURL -Leaf)
+        }
+    }
+
+
+    $cm_admin = "$DNAME\$DomainAdminName"
+    $SQLSysAdminAccounts = @("NT AUTHORITY\SYSTEM", $cm_admin)
+    $SQLSysAdminAccounts += "$DName\$PSName$"
 
     # Log share
     $LogFolder = "DSC"
@@ -141,9 +168,88 @@ configuration SecondaryConfiguration
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
         }
 
-        AddNtfsPermissions AddNtfsPerms {
-            Ensure    = "Present"
-            DependsOn = "[WriteEvent]WriteJoinDomain"
+        if ($installSQL) {
+
+            if ($sqlUpdateEnabled) {
+
+                WriteStatus DownloadSQLCU {
+                    DependsOn = '[WriteEvent]WriteJoinDomain'
+                    Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
+                }
+
+                DownloadFile DownloadSQLCU {
+                    DownloadUrl = $sqlCUURL
+                    FilePath    = $sqlCuDownloadPath
+                    Ensure      = "Present"
+                    DependsOn   = "[WriteStatus]DownloadSQLCU"
+
+                }
+
+                WriteStatus InstallSQL {
+                    DependsOn = '[DownloadFile]DownloadSQLCU'
+                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                }
+
+            }
+            else {
+                WriteStatus InstallSQL {
+                    DependsOn = '[WriteEvent]WriteJoinDomain'
+                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                }
+            }
+
+            SqlSetup InstallSQL {
+                InstanceName        = $SQLInstanceName
+                InstanceDir         = $SQLInstanceDir
+                SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
+                Features            = 'SQLENGINE,CONN,BC'
+                SourcePath          = 'C:\temp\SQL'
+                UpdateEnabled       = $sqlUpdateEnabled
+                UpdateSource        = "C:\temp\SQL_CU"
+                SQLSysAdminAccounts = $SQLSysAdminAccounts
+                TcpEnabled          = $true
+                UseEnglish          = $true
+                DependsOn           = '[WriteStatus]InstallSQL'
+            }
+
+            SqlMemory SetSqlMemory {
+                DependsOn    = '[SqlSetup]InstallSQL'
+                Ensure       = 'Present'
+                DynamicAlloc = $false
+                MinMemory    = 2048
+                MaxMemory    = 6144
+                InstanceName = $SQLInstanceName
+            }
+
+            WriteStatus ChangeToLocalSystem {
+                DependsOn = "[SqlMemory]SetSqlMemory"
+                Status    = "Configuring SQL services to use LocalSystem"
+            }
+
+            ChangeSqlInstancePort SqlInstancePort {
+                SQLInstanceName = $SQLInstanceName
+                SQLInstancePort = 2433
+                Ensure          = "Present"
+                DependsOn       = "[WriteStatus]ChangeToLocalSystem"
+            }
+
+            ChangeSQLServicesAccount ChangeToLocalSystem {
+                SQLInstanceName = $SQLInstanceName
+                Ensure          = "Present"
+                DependsOn       = "[ChangeSqlInstancePort]SqlInstancePort"
+            }
+
+            AddNtfsPermissions AddNtfsPerms {
+                Ensure    = "Present"
+                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+            }
+
+        }
+        else {
+            AddNtfsPermissions AddNtfsPerms {
+                Ensure    = "Present"
+                DependsOn = '[WriteEvent]WriteJoinDomain'
+            }
         }
 
         WriteStatus SSMS {

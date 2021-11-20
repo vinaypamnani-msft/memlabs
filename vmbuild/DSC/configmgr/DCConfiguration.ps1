@@ -29,14 +29,21 @@
         $setNetwork = $false
     }
 
-    # AD Site Name
-    if ($PSName) {
-        $PSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PSName }
-        if ($PSVM) { $ADSiteName = $PSVM.siteCode }
+    # AD Sites
+    $adsites = @()
+
+    foreach($vm in $deployConfig.virtualMachines | Where-Object {(-not $_.hidden) -and $_.role -in "Primary","Secondary"}) {
+        $adsites += [PSCustomObject]@{
+                SiteCode  = $vm.siteCode
+                Subnet    = $deployConfig.vmOptions.network
+            }
     }
 
-    if (-not $ADSiteName) {
-        $ADSiteName = "vmbuild"
+    foreach($vm in $deployConfig.existingVMs | Where-Object {$_.role -in "Primary","Secondary"}) {
+        $adsites += [PSCustomObject]@{
+                SiteCode  = $vm.siteCode
+                Subnet    = $vm.network
+            }
     }
 
     # Domain Admin User name
@@ -161,23 +168,29 @@
             DependsOn        = "[ADUser]Admin"
         }
 
-        ADReplicationSite ADSite {
-            Ensure    = 'Present'
-            Name      = $ADSiteName
-            DependsOn = "[ADGroup]AddToSchemaAdmin"
-        }
+        $adSiteDependency = @()
+        foreach ($site in $adsites) {
 
-        ADReplicationSubnet ADSubnet {
-            Name        = "$DHCP_ScopeId/24"
-            Site        = $ADSiteName
-            Location    = $ADSiteName
-            Description = 'Created by vmbuild'
-            DependsOn   = "[ADReplicationSite]ADSite"
+            ADReplicationSite "ADSite$($site.SiteCode)" {
+                Ensure    = 'Present'
+                Name      = $site.SiteCode
+                DependsOn = "[ADGroup]AddToSchemaAdmin"
+            }
+
+            ADReplicationSubnet "ADSubnet$($site.SiteCode)" {
+                Name        = "$($site.Subnet)/24"
+                Site        = $site.SiteCode
+                Location    = $site.SiteCode
+                Description = 'Created by vmbuild'
+                DependsOn   = "[ADReplicationSite]ADSite$($site.SiteCode)"
+            }
+
+            $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($site.SiteCode)"
         }
 
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = "[ADReplicationSubnet]ADSubnet"
+            DependsOn = $adSiteDependency
         }
 
         OpenFirewallPortForSCCM OpenFirewall {

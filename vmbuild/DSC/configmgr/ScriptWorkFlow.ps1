@@ -186,6 +186,12 @@ if ($scenario -eq "Standalone") {
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
 
+    if ($containsSecondary) {
+        # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
+
     #Install DP/MP/Client
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
@@ -207,6 +213,12 @@ if ($scenario -eq "Hierarchy") {
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPSForHierarchy.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
 
+        if ($containsSecondary) {
+            # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+            $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+
         #Install DP/MP/Client
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
@@ -214,20 +226,9 @@ if ($scenario -eq "Hierarchy") {
 }
 
 if ($containsPassive) {
-
     # Install Passive Site Server
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPassiveSiteServer.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
-
-}
-
-
-if ($containsSecondary) {
-
-    # Install Secondary Site Server
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
-    . $ScriptFile $ConfigFilePath $LogPath
-
 }
 
 Write-DscStatus "Finished setting up ConfigMgr."

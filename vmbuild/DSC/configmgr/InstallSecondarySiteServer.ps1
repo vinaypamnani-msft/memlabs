@@ -67,10 +67,16 @@ try {
 
     $Date = [DateTime]::Now.AddYears(30)
     $FileSetting = New-CMInstallationSourceFile -CopyFromParentSiteServer
-    $SQLSetting = New-CMSqlServerSetting -CopySqlServerExpressOnSecondarySite
+    $SQLSetting = New-CMSqlServerSetting -CopySqlServerExpressOnSecondarySite -SqlServerServiceBrokerPort 4022 -SqlServerServicePort 1433
     if ($SecondaryVM.sqlVersion) {
-        # TODO: Add remote SQL Setting
+        if ($SecondaryVM.sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
+            $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -SqlServerServiceBrokerPort 4022
+        }
+        else {
+            $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -InstanceName $SecondaryVM.sqlInstanceName -SqlServerServiceBrokerPort 4022
+        }
     }
+
     New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
         -PrimarySiteCode $SecondaryVM.parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
         -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
@@ -121,6 +127,20 @@ do {
     Start-Sleep -Seconds 30
 
 } until ($installed -or $installFailure)
+
+if ($installed) {
+    # Wait for replication ready
+    $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
+    Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'"
+    Start-Sleep -Seconds 30
+    while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
+        Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)%'" -RetrySeconds 60
+        Start-Sleep -Seconds 60
+        $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
+    }
+
+    Write-DscStatus "Secondary installation complete. Replication link is 'Active'."
+}
 
 # Update actions file
 $Configuration.InstallSecondary.Status = 'Completed'
