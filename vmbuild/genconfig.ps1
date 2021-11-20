@@ -2513,6 +2513,10 @@ function Get-AdditionalValidations {
             }
         }
         "installMP" {
+            if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -eq "Secondary") {
+                write-host -ForegroundColor Yellow "Can not install an MP for a secondary site"
+                $property.installMP = $false
+            }
             $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
             $property.vmName = $newName
         }
@@ -2560,15 +2564,28 @@ function Get-AdditionalValidations {
                 }
             }
             if ($property.role -eq "Primary") {
-                $VM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                $VMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
                 $SecVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Secondary" }
-                if ($VM) {
-                    if ($VM.siteCode -eq $CurrentValue ) {
-                        $VM.SiteCode = $value
+                if ($VMs) {
+                    foreach ($VM in $VMS) {
+                        if ($VM.siteCode -eq $CurrentValue ) {
+                            $VM.SiteCode = $value
+                        }
                     }
                 }
                 if ($SecVM) {
                     $SecVM.parentSiteCode = $value
+                }
+            }
+
+            if ($property.role -eq "Secondary") {
+                $VMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                if ($VMs) {
+                    foreach ($VM in $VMS) {
+                        if ($VM.siteCode -eq $CurrentValue ) {
+                            $VM.SiteCode = $value
+                        }
+                    }
                 }
             }
         }
@@ -3188,7 +3205,6 @@ function Add-NewVMForRole {
                 }
                 else {
                     Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
-
                 }
             }
             else {
@@ -3196,6 +3212,9 @@ function Add-NewVMForRole {
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
             }
             $siteCode = $virtualMachine.siteCode
+            if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $siteCode) -eq "Secondary") {
+                $virtualMachine.installMP = $false
+            }
         }
         "FileServer" {
             $virtualMachine.memory = "3GB"
@@ -3206,7 +3225,12 @@ function Add-NewVMForRole {
     }
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
-        $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig
+        if ($virtualMachine.InstallMP -or $virtualMachine.InstallDP) {
+            $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig -InstallMP $virtualMachine.installMP -InstallDP $virtualMachine.installDP
+        }
+        else {
+            $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig
+        }
         Write-Verbose "Machine Name Generated $machineName"
     }
     else {
@@ -3262,6 +3286,29 @@ function Add-NewVMForRole {
     if ($ReturnMachineName) {
         return $machineName
     }
+}
+
+function get-RoleForSitecode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Sitecode")]
+        [string] $siteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToCheck = $global:config
+    )
+
+    $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    $configVMs = @()
+    $configVMs += $configToCheck.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($configVMs.Count -eq 1) {
+        return ($configVMs | Select-Object -First 1).Role
+    }
+    $existingVMs = @()
+    $existingVMs += get-list -type VM -domain $ConfigToCheck.vmOptions.DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($existingVMs.Count -eq 1) {
+        return ($existingVMs | Select-Object -First 1).Role
+    }
+    return $null
 }
 
 function select-FileServerMenu {
@@ -3387,10 +3434,20 @@ function Select-VirtualMachines {
                             else {
                                 if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not ($virtualMachine.Role -eq "DC")) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Add SQL" }
+                                        if ($virtualMachine.Role -eq "Secondary") {
+                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Use Full SQL for Secondary Site" }
+                                        }
+                                        else {
+                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Add SQL" }
+                                        }
                                     }
                                     else {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "X" = "Remove SQL" }
+                                        if ($virtualMachine.Role -eq "Secondary") {
+                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
+                                        }
+                                        else {
+                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "X" = "Remove SQL" }
+                                        }
                                     }
                                 }
                             }
@@ -3677,10 +3734,12 @@ do {
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                     $valid = $false
-                }else{
+                }
+                else {
                     break
                 }
-            }else{
+            }
+            else {
                 break
             }
         }
