@@ -48,7 +48,7 @@
 
     # Domain Admin Name
     $DomainAdminName = $deployConfig.vmOptions.adminName
-    $cm_admin = "$DNAME\$DomainAdminName"
+
 
     # SQL Setup
     $installSQL = $false
@@ -70,14 +70,7 @@
         }
     }
 
-    $SQLSysAdminAccounts = @($cm_admin)
-    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
-    if ($containsPassive) {
-        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-        foreach ($vm in $PassiveVM) {
-            $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
-        }
-    }
+    $SQLSysAdminAccounts = $deployConfig.thisParams.SQLSysAdminAccounts
 
     # Set PS name to existing PS name, if PS not in config
     if (-not $PSName) {
@@ -358,38 +351,19 @@
 
         }
 
-        AddUserToLocalAdminGroup AddADUserToLocalAdminGroup {
-            Name       = "cm_svc"
-            DomainName = $DomainName
-            DependsOn  = "[WriteStatus]AddLocalAdmin"
-        }
+        $addUserDependancy = @()
+        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
 
-        if ($PSName) {
-            AddUserToLocalAdminGroup AddPSLocalAdmin {
-                Name       = "$PSName$"
+            AddUserToLocalAdminGroup "AddADUserToLocalAdminGroup$user" {
+                Name       = $user
                 DomainName = $DomainName
                 DependsOn  = "[WriteStatus]AddLocalAdmin"
             }
-        }
-
-        if ($PSPassiveName) {
-            AddUserToLocalAdminGroup AddPassiveLocalAdmin {
-                Name       = "$PSPassiveName$"
-                DomainName = $DomainName
-                DependsOn  = "[WriteStatus]AddLocalAdmin"
-            }
-        }
-
-        if ($CSName) {
-            AddUserToLocalAdminGroup AddCSLocalAdmin {
-                Name       = "$CSName$"
-                DomainName = $DomainName
-                DependsOn  = "[WriteStatus]AddLocalAdmin"
-            }
+            $addUserDependancy += "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup$user"
         }
 
         WriteStatus Complete {
-            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup"
+            DependsOn = $addUserDependancy
             Status    = "Complete!"
         }
 

@@ -23,7 +23,6 @@
 
     # Domain Admin User name
     $DomainAdminName = $deployConfig.vmOptions.adminName
-    $cm_admin = "$DNAME\$DomainAdminName"
 
     # CM Options
     $InstallConfigMgr = $deployConfig.cmOptions.install
@@ -51,14 +50,7 @@
     }
 
     # Passive Site Server
-    $SQLSysAdminAccounts = @($cm_admin, 'BUILTIN\Administrators')
-    $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
-    if ($containsPassive) {
-        $PassiveVM = $containsPassive
-        foreach ($vm in $PassiveVM) {
-            $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
-        }
-    }
+    $SQLSysAdminAccounts = $deployConfig.thisParams.SQLSysAdminAccounts
 
     # Log share
     $LogFolder = "DSC"
@@ -519,12 +511,23 @@
 
         }
 
+        $addUserDependancy = @()
+        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
+
+            AddUserToLocalAdminGroup "AddADUserToLocalAdminGroup$user" {
+                Name       = $user
+                DomainName = $DomainName
+                DependsOn  = "[WriteStatus]Complete"
+            }
+            $addUserDependancy += "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup$user"
+        }
+
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
+            DependsOn = "$addUserDependancy"
         }
     }
 }

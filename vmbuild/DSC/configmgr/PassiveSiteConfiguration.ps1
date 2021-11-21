@@ -190,10 +190,20 @@ configuration PassiveSiteConfiguration
             Status    = "Waiting for Content Lib VM $ContentLibVMName to finish configuration."
         }
 
-        AddUserToLocalAdminGroup AddActiveLocalAdmin {
-            Name       = "$ActiveVMName$"
-            DomainName = $DomainName
-            DependsOn  = "[WaitForEvent]DelegateControl"
+        #AddUserToLocalAdminGroup AddActiveLocalAdmin {
+        #    Name       = "$ActiveVMName$"
+        #    DomainName = $DomainName
+        #    DependsOn  = "[WaitForEvent]DelegateControl"
+        #}
+        $addUserDependancy = @()
+        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
+
+            AddUserToLocalAdminGroup "AddADUserToLocalAdminGroup$user" {
+                Name       = $user
+                DomainName = $DomainName
+                DependsOn  = "[WaitForEvent]DelegateControl"
+            }
+            $addUserDependancy += "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup$user"
         }
 
         WaitForEvent WaitFS {
@@ -202,7 +212,7 @@ configuration PassiveSiteConfiguration
             ReadNode      = "ConfigurationFinished"
             ReadNodeValue = "Passed"
             Ensure        = "Present"
-            DependsOn     = "[AddUserToLocalAdminGroup]AddActiveLocalAdmin"
+            DependsOn     = $addUserDependancy
         }
 
         WriteEvent WritePassiveReady {

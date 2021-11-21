@@ -52,14 +52,7 @@
     }
 
     # Passive Site Server
-    $SQLSysAdminAccounts = @($cm_admin, 'BUILTIN\Administrators')
-    $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
-    if ($containsPassive) {
-        $PassiveVM = $containsPassive
-        foreach ($vm in $PassiveVM) {
-            $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
-        }
-    }
+    $SQLSysAdminAccounts = $deployConfig.thisParams.SQLSysAdminAccounts
 
     # Log share
     $LogFolder = "DSC"
@@ -327,16 +320,26 @@
                 DependsOn     = "[DownloadSCCM]DownLoadSCCM"
             }
 
-            AddUserToLocalAdminGroup AddUserToLocalAdminGroup {
-                Name       = $PrimarySiteName
-                DomainName = $DomainName
-                DependsOn  = "[WaitForEvent]WaitPSJoinDomain"
+            #AddUserToLocalAdminGroup AddUserToLocalAdminGroup {
+            #    Name       = $PrimarySiteName
+            #    DomainName = $DomainName
+            #    DependsOn  = "[WaitForEvent]WaitPSJoinDomain"
+            #}
+            $addUserDependancy = @()
+            foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
+
+                AddUserToLocalAdminGroup "AddADUserToLocalAdminGroup$user" {
+                    Name       = $user
+                    DomainName = $DomainName
+                    DependsOn  = "[WaitForEvent]WaitPSJoinDomain"
+                }
+                $addUserDependancy += "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup$user"
             }
 
             FileReadAccessShare CMSourceSMBShare {
                 Name      = $CM
                 Path      = "c:\$CM"
-                DependsOn = "[AddUserToLocalAdminGroup]AddUserToLocalAdminGroup"
+                DependsOn = $addUserDependancy
             }
         }
         else {

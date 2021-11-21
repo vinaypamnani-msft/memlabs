@@ -1364,6 +1364,10 @@ function Add-PerVMSettings {
         MachineName = $thisVM.vmName
     }
 
+    # All DSC's should at minimum be adding cm_svc as a local admin.. Array will be appended if more local admins are needed
+    $cm_svc = "cm_svc"
+    $LocalAdminAccounts = @($cm_svc)
+
     #Get the current network from get-list or config
     $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
     if ($thisVMObject.network) {
@@ -1378,6 +1382,29 @@ function Add-PerVMSettings {
         $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
         $sqlCUUrl = $sqlFile.cuURL
         $thisParams | Add-Member -MemberType NoteProperty -Name "sqlCUURL" -Value $sqlCUUrl -Force
+
+
+        $DomainAdminName = $deployConfig.vmOptions.adminName
+        $DomainName = $deployConfig.parameters.domainName
+        $DName = $DomainName.Split(".")[0]
+        $cm_admin = "$DNAME\$DomainAdminName"
+        $SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM',$cm_admin, 'BUILTIN\Administrators')
+        $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
+        if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary")
+        {
+            $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
+        }
+        if ($SiteServerVM) {
+            $SQLSysAdminAccounts += "$DNAME\$($SiteServerVM.vmName)$"
+            $LocalAdminAccounts += "$($SiteServerVM.vmName)$"
+            $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.siteCode -type VM
+            if ($passiveNodeVM) {
+                $SQLSysAdminAccounts += "$DNAME\$($passiveNodeVM.vmName)$"
+                $LocalAdminAccounts += "$($passiveNodeVM.vmName)$"
+            }
+        }
+        $thisParams | Add-Member -MemberType NoteProperty -Name "SQLSysAdminAccounts" -Value $SQLSysAdminAccounts -Force
+
     }
 
     #Get the SiteServer this VM's SiteCode reports to.  If it has a passive node, get that as -P
@@ -1416,12 +1443,30 @@ function Add-PerVMSettings {
         $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
         if ($ActiveVM) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "ActiveNodeVM" -Value $ActiveVM -Force
+            $LocalAdminAccounts += "$($ActiveVM.vmName)$"
+            if ($ActiveVM.Role -eq "CAS") {
+                $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $ActiveVM.siteCode }
+                if ($primaryVM) {
+                    $LocalAdminAccounts += "$($primaryVM.vmName)$"
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                    if ($PassiveVM) {
+                        $LocalAdminAccounts += "$($PassiveVM.vmName)$"
+                    }
+                }
+            }
         }
     }
     #If this is a CAS, get the primary we are also deploying at the same time.
     if ($thisVM.role -eq "CAS") {
-        $primaryName = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $thisVM.siteCode }
-        $thisParams | Add-Member -MemberType NoteProperty -Name "PrimaryVM" -Value $primaryName -Force
+        $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $thisVM.siteCode }
+        if ($primaryVM) {
+            $thisParams | Add-Member -MemberType NoteProperty -Name "PrimaryVM" -Value $primaryVM -Force
+            $LocalAdminAccounts += "$($primaryVM.vmName)$"
+            $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+            if ($PassiveVM) {
+                $LocalAdminAccounts += "$($PassiveVM.vmName)$"
+            }
+        }
     }
     #If this is a primary, see if we have any secondaries reporting to it
     if ($thisVM.role -eq "Primary") {
@@ -1432,13 +1477,29 @@ function Add-PerVMSettings {
         $thisParams | Add-Member -MemberType NoteProperty -Name "ReportingSecondaries" -Value $reportingSecondaries -Force
     }
 
+
+    if ($thisVM.role -eq "Secondary") {
+        $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $thisVM.parentSiteCode }
+        if ($primaryVM) {
+            $thisParams | Add-Member -MemberType NoteProperty -Name "PrimaryVM" -Value $primaryVM -Force
+            $LocalAdminAccounts += "$($primaryVM.vmName)$"
+            $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+            if ($PassiveVM) {
+                $LocalAdminAccounts += "$($PassiveVM.vmName)$"
+            }
+        }
+    }
+
     #If we have a passive server for a site server, record it here, only check config, as it couldnt already exist
     if ($thisVM.role -in "CAS", "Primary") {
         $passiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" -and $_.SiteCode -eq $thisVM.siteCode }
         if ($passiveVM) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "PassiveVM" -Value $passiveVM -Force
+            $LocalAdminAccounts += "$($passiveVM.vmName)$"
         }
     }
+
+    $thisParams | Add-Member -MemberType NoteProperty -Name "LocalAdminAccounts" -Value $LocalAdminAccounts -Force
 
     $thisParams | ConvertTo-Json -Depth 3 | out-Host
     $deployConfig | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $thisParams -Force
@@ -1757,7 +1818,7 @@ function Get-PassiveSiteServerForSiteCode {
             return ($existingVMs | Select-Object -First 1).vmName
         }
         else {
-            eturn ($existingVMs | Select-Object -First 1)
+            return ($existingVMs | Select-Object -First 1)
         }
     }
     return $null

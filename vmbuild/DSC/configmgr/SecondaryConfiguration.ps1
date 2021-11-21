@@ -46,10 +46,7 @@ configuration SecondaryConfiguration
         }
     }
 
-
-    $cm_admin = "$DNAME\$DomainAdminName"
-    $SQLSysAdminAccounts = @("NT AUTHORITY\SYSTEM", $cm_admin)
-    $SQLSysAdminAccounts += "$DName\$PSName$"
+    $SQLSysAdminAccounts = $deployConfig.thisParams.SQLSysAdminAccounts
 
     # Log share
     $LogFolder = "DSC"
@@ -277,10 +274,20 @@ configuration SecondaryConfiguration
             DependsOn     = "[InstallSSMS]SSMS"
         }
 
-        AddUserToLocalAdminGroup AddActiveLocalAdmin {
-            Name       = "$PSName$"
-            DomainName = $DomainName
-            DependsOn  = "[WaitForEvent]DelegateControl"
+        #AddUserToLocalAdminGroup AddActiveLocalAdmin {
+        #    Name       = "$PSName$"
+        #    DomainName = $DomainName
+        #    DependsOn  = "[WaitForEvent]DelegateControl"
+        #}
+        $addUserDependancy = @()
+        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
+
+            AddUserToLocalAdminGroup "AddADUserToLocalAdminGroup$user" {
+                Name       = $user
+                DomainName = $DomainName
+                DependsOn  = "[WaitForEvent]DelegateControl"
+            }
+            $addUserDependancy += "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup$user"
         }
 
         WriteEvent ReadyForPrimary {
@@ -288,7 +295,7 @@ configuration SecondaryConfiguration
             WriteNode = "ReadyForPrimary"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[AddUserToLocalAdminGroup]AddActiveLocalAdmin"
+            DependsOn = $addUserDependancy
         }
 
         WriteStatus WaitPrimary {
