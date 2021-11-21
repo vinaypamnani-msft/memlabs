@@ -67,10 +67,10 @@ $result.DeployConfig.parameters.ThisMachineName = $ThisVM.vmName
 $result.DeployConfig.parameters.ThisMachineRole = $ThisVM.role
 $role  = $ThisVM.role
 
-if ($ThisVM.sqlVersion) {
-    $sqlFile = $Common.AzureFileList.ISO | Where-Object {$_.id -eq $ThisVM.sqlVersion}
-    $result.DeployConfig.parameters.ThisSQLCUURL = $sqlFile.cuURL
-}
+#if ($ThisVM.sqlVersion) {
+#    $sqlFile = $Common.AzureFileList.ISO | Where-Object {$_.id -eq $ThisVM.sqlVersion}
+#    $result.DeployConfig.parameters.ThisSQLCUURL = $sqlFile.cuURL
+#}
 
 # Dump config to file, for debugging
 #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
