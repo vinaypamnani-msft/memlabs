@@ -326,14 +326,16 @@
             #    DependsOn  = "[WaitForEvent]WaitPSJoinDomain"
             #}
             $addUserDependancy = @()
+            $i = 0
             foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
-
-                AddUserToLocalAdminGroup "AddADUserToLocalAdminGroup$user" {
+                $i++
+                $NodeName = "AddADUserToLocalAdminGroup$($i)"
+                AddUserToLocalAdminGroup "$NodeName" {
                     Name       = $user
                     DomainName = $DomainName
                     DependsOn  = "[WaitForEvent]WaitPSJoinDomain"
                 }
-                $addUserDependancy += "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup$user"
+                $addUserDependancy += "[AddUserToLocalAdminGroup]$NodeName"
             }
 
             FileReadAccessShare CMSourceSMBShare {
