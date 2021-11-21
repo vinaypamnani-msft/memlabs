@@ -39,9 +39,9 @@ configuration SecondaryConfiguration
         if ($ThisVM.sqlInstanceName) {
             $SQLInstanceName = $ThisVM.sqlInstanceName
         }
-        if ($deployConfig.parameters.ThisSQLCUURL) {
+        if ($deployConfig.thisParams.sqlCUURL) {
             $sqlUpdateEnabled = $true
-            $sqlCUURL = $deployConfig.parameters.ThisSQLCUURL
+            $sqlCUURL = $deployConfig.thisParams.sqlCUURL
             $sqlCuDownloadPath = Join-Path "C:\Temp\SQL_CU" (Split-Path -Path $sqlCUURL -Leaf)
         }
     }
