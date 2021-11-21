@@ -2413,7 +2413,8 @@ Function Get-RoleMenu {
 
     $valid = $false
     while ($valid -eq $false) {
-        if ($Global:AddToExisting -eq $true) {
+        $DC = Get-List -type VM -domain $global:config.vmOptions.domainName | Where-Object {$_.Role -eq "DC"}
+        if ($DC) {
             $role = Get-Menu "Select Role" $(Select-RolesForExistingList) $CurrentValue -Test:$false
             $property."$name" = $role
         }

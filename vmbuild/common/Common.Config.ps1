@@ -1420,9 +1420,11 @@ function Add-PerVMSettings {
             $PrimaryServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
             if ($PrimaryServerVM) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServer" -Value $PrimaryServerVM -Force
+                $LocalAdminAccounts += "$($PrimaryServerVM.vmName)$"
                 $PassivePrimaryVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -siteCode $PrimaryServerVM.SiteCode -type VM
                 if ($PassivePrimaryVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServer-P" -Value $PassivePrimaryVM -Force
+                    $LocalAdminAccounts += "$($PassivePrimaryVM.vmName)$"
                 }
 
             }
@@ -1499,6 +1501,7 @@ function Add-PerVMSettings {
         }
     }
 
+    $LocalAdminAccounts = $LocalAdminAccounts | Get-Unique
     $thisParams | Add-Member -MemberType NoteProperty -Name "LocalAdminAccounts" -Value $LocalAdminAccounts -Force
 
     $thisParams | ConvertTo-Json -Depth 3 | out-Host
