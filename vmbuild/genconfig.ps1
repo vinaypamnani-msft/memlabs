@@ -3288,28 +3288,7 @@ function Add-NewVMForRole {
     }
 }
 
-function get-RoleForSitecode {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Sitecode")]
-        [string] $siteCode,
-        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
-        [object] $ConfigToCheck = $global:config
-    )
 
-    $SiteServerRoles = @("Primary", "Secondary", "CAS")
-    $configVMs = @()
-    $configVMs += $configToCheck.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
-    if ($configVMs.Count -eq 1) {
-        return ($configVMs | Select-Object -First 1).Role
-    }
-    $existingVMs = @()
-    $existingVMs += get-list -type VM -domain $ConfigToCheck.vmOptions.DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
-    if ($existingVMs.Count -eq 1) {
-        return ($existingVMs | Select-Object -First 1).Role
-    }
-    return $null
-}
 
 function select-FileServerMenu {
     [CmdletBinding()]

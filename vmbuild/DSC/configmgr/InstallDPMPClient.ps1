@@ -117,30 +117,31 @@ function Install-DP {
 
         # Create Site system Server
         #============
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         if (-not $SystemServer) {
-            Write-DscStatus "Creating new CM Site System server on $DPFQDN"
+            Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
             New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         }
 
         # Install DP
         #============
-        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN
+        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         if (-not $dpinstalled) {
             Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role."
             $Date = [DateTime]::Now.AddYears(30)
-            Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+            #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+            Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 60
         }
         else {
-            Write-DscStatus "DP Role detected on $DPFQDN"
+            Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
             $dpinstalled = $true
         }
 
         if ($i -gt 10) {
-            Write-DscStatus "No Progress after $i tries, Giving up."
+            Write-DscStatus "No Progress after $i tries, Giving up on $DPFQDN SiteCode: $ServerSiteCode ."
             $installFailure = $true
         }
 
@@ -231,7 +232,7 @@ foreach ($DP in $DPs) {
     Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode
 }
 
-foreach ($MP in $MPNames) {
+foreach ($MP in $MPs) {
 
     if ([string]::IsNullOrWhiteSpace($MP.ServerName)) {
         continue

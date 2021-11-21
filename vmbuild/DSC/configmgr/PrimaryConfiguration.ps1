@@ -78,7 +78,11 @@
     # DomainMembers to wait before running Script Workflow
     $waitOnServers = @()
     if ($ThisVM.remoteSQLVM -and -not $ThisVM.hidden) { $waitOnServers += $ThisVM.remoteSQLVM }
-    foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) }) {
+    $waitOnSiteCodes = @()
+    $waitOnSiteCodes += $ThisVM.siteCode
+    $waitOnSiteCodes += $deployConfig.thisParams.ReportingSecondaries
+    $waitOnSiteCodes = $waitOnSiteCodes | Where-Object { $_ -and $_.Trim() }
+    foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -in $waitOnSiteCodes }) {
         $waitOnServers += $dpmp.vmName
     }
 

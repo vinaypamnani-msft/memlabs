@@ -87,6 +87,9 @@ function Write-JobProgress {
 
 # Create VM script block
 $VM_Create = {
+    param (
+        [object]$deployConfig
+    )
 
     # Dot source common
     . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
@@ -94,7 +97,7 @@ $VM_Create = {
     # Get required variables from parent scope
     $cmDscFolder = $using:cmDscFolder
     $currentItem = $using:currentItem
-    $deployConfig = $using:deployConfig
+    # $deployConfig = $using:deployConfig
     $forceNew = $using:ForceNew
     $createVM = $using:CreateVM
     $sqlCUUrl = $using:sqlCUUrl
@@ -523,6 +526,7 @@ $VM_Create = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures." -WhatIf:$WhatIf
     }
 
+
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
@@ -533,7 +537,6 @@ $VM_Create = {
             return
         }
     }
-
     # Wait for DSC, timeout after X minutes
     # Write-Log "PSJOB: $($currentItem.vmName): Waiting for $($currentItem.role) role configuration via DSC." -OutputStream
 
@@ -882,9 +885,9 @@ try {
     if ($containsDPMP) {
         $DPMPs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
         foreach ($dpmp in $DPMPS) {
-            $existingPrimary = (get-list -type VM -Domainname $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $($dpmp.siteCode) })
-            if ($existingPrimary) {
-                Add-ExistingVMToDeployConfig -vmName $existingPrimary.vmName -configToModify $deployConfig
+            $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -siteCode $dpmp.siteCode
+            if ($DPMPPrimary) {
+                Add-ExistingVMToDeployConfig -vmName $DPMPPrimary -configToModify $deployConfig
             }
         }
     }
@@ -921,16 +924,119 @@ try {
         Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $deployConfig
     }
 
-    if ($enableDebug) {
-        return $deployConfig
+    Write-Log "Creating Virtual Machine Deployment Jobs" -Activity
+
+
+    function Add-PerVMSettings {
+        [CmdletBinding()]
+        param (
+            [Parameter(Mandatory = $true, HelpMessage = "Config to Modify")]
+            [object] $deployConfig,
+            [Parameter(Mandatory = $true, HelpMessage = "Current Item")]
+            [object] $thisVM
+        )
+
+        #Get the current Machine Name
+        $thisParams = [pscustomobject]@{
+            MachineName = $thisVM.vmName
+        }
+
+        #Get the current network from get-list or config
+        $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
+        if ($thisVMObject.network) {
+            $thisParams | Add-Member -MemberType NoteProperty -Name "network" -Value $thisVMObject.network -Force
+        }
+        else {
+            $thisParams | Add-Member -MemberType NoteProperty -Name "network" -Value $deployConfig.vmOptions.network -Force
+        }
+
+        #Get the CU URL
+        if ($thisVM.sqlVersion) {
+            $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
+            $sqlCUUrl = $sqlFile.cuURL
+            $thisParams | Add-Member -MemberType NoteProperty -Name "sqlCUURL" -Value $sqlCUUrl -Force
+        }
+
+        #Get the SiteServer this VM's SiteCode reports to.  If it has a passive node, get that as -P
+        if ($thisVM.siteCode) {
+            $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode
+            $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer" -Value $SiteServer -Force
+            $passiveSiteServer = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode
+            if ($passiveSiteServer) {
+                $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer-P" -Value $passiveSiteServer -Force
+            }
+            #If we report to a Secondary, get the Primary as well, and passive as -P
+            if ((get-RoleForSitecode -ConfigTocheck $deployConfig -siteCode $thisVM.siteCode) -eq "Secondary") {
+                $PrimaryServer = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode
+                if ($PrimaryServer) {
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServer" -Value $PrimaryServer -Force
+                    $PrimaryVM = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $PrimaryServer
+                    $PassivePrimaryVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -siteCode $PrimaryVM.SiteCode
+                    if ($PassivePrimaryVM) {
+                        $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServer-P" -Value $PassivePrimaryVM -Force
+                    }
+
+                }
+            }
+        }
+        #Get the VM Name of the Parent Site Code Site Server
+        if ($thisVM.parentSiteCode) {
+            $parentSiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode
+            $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServer" -Value $parentSiteServer -Force
+            $passiveSiteServer = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode
+            if ($passiveSiteServer) {
+                $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServer-P" -Value $passiveSiteServer -Force
+            }
+        }
+
+        #if this is a Passive Node, get the active node name
+        if ($thisVM.role -eq "PassiveSite") {
+            $activeNode = $deployConfig.virtualMachines | Where-Object { $_.Role -in "Primary", "CAS" -and $_.siteCode -eq $thisVM.siteCode }
+            $thisParams | Add-Member -MemberType NoteProperty -Name "ActiveNode" -Value $activeNode -Force
+        }
+        #If this is a CAS, get the primary we are also deploying at the same time.
+        if ($thisVM.role -eq "CAS") {
+            $primaryName = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $thisVM.siteCode }
+            $thisParams | Add-Member -MemberType NoteProperty -Name "PrimaryName" -Value $primaryName -Force
+        }
+        #If this is a primary, see if we have any secondaries reporting to it
+        if ($thisVM.role -eq "Primary") {
+            $reportingSecondaries = @()
+            $reportingSecondaries += ($deployConfig.virtualMachines | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }).siteCode
+            $reportingSecondaries += (get-list -type vm -domain $deployConfig.vmOptions.domainName | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }).siteCode
+            $reportingSecondaries = $reportingSecondaries | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+            $thisParams | Add-Member -MemberType NoteProperty -Name "ReportingSecondaries" -Value $reportingSecondaries -Force
+        }
+
+        #If we have a passive server for a site server, record it here
+        if ($thisVM.role -in "CAS", "Primary") {
+            $passiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" -and $_.SiteCode -eq $thisVM.siteCode }
+            if ($passiveVM) {
+                $thisParams | Add-Member -MemberType NoteProperty -Name "PassiveName" -Value $passiveVM.vmName -Force
+            }
+        }
+
+        $thisParams | ConvertTo-Json -Depth 3 | out-Host
+        $deployConfig | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $thisParams -Force
     }
 
-    Write-Log "Creating Virtual Machine Deployment Jobs" -Activity
+    function Remove-PerVMSettings {
+        [CmdletBinding()]
+        param (
+            [Parameter(Mandatory = $true, HelpMessage = "Config to Modify")]
+            [object] $deployConfig
+        )
+        $deployConfig.PsObject.Members.Remove('this')
+    }
 
     # New scenario
     $CreateVM = $true
     foreach ($currentItem in $deployConfig.virtualMachines) {
-
+        $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+        Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
+        if ($enableDebug) {
+           continue
+        }
         if ($WhatIf) {
             Write-Log "Will start a job for VM $($currentItem.vmName)"
             continue
@@ -947,7 +1053,7 @@ try {
             $sqlCUUrl = $sqlFile.cuURL
         }
 
-        $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+        $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ArgumentList $deployConfigCopy -ErrorAction Stop -ErrorVariable Err
 
         if ($Err.Count -ne 0) {
             Write-Log "Failed to start job for VM $($currentItem.vmName). $Err" -Failure
@@ -958,7 +1064,9 @@ try {
             $jobs += $job
             $job_created_yes++
         }
+        #Remove-PerVMSettings -deployConfig $deployConfigCopy
     }
+
     if ($job_created_no -eq 0) {
         Write-Log "Created $job_created_yes jobs for VM deployment."
     }
@@ -969,7 +1077,9 @@ try {
     Write-Log "Deployment Summary" -Activity -HostOnly
     Write-Host
     Show-Summary -deployConfig $deployConfig
-
+    if ($enableDebug) {
+        return $deployConfig
+    }
     Write-Log "Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
     $failedCount = 0
     $successCount = 0

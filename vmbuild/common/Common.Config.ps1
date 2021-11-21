@@ -31,7 +31,7 @@ function Get-UserConfiguration {
     }
 
     try {
-        Write-Log "Get-UserConfiguration: Get-UserConfiguration: Loading $configPath." -LogOnly
+        Write-Log "Get-UserConfiguration: Get-UserConfiguration: Get-UserConfiguration: Loading $configPath." -LogOnly
         $config = Get-Content $configPath -Force | ConvertFrom-Json
         $return.Loaded = $true
         $return.Config = $config
@@ -113,7 +113,7 @@ function Get-FilesForConfiguration {
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
     }
 
-    Write-Log "Get-FilesForConfiguration: Get-FilesForConfiguration: Downloading/Verifying Files required by specified config..." -Activity
+    Write-Log "Get-FilesForConfiguration: Get-FilesForConfiguration: Get-FilesForConfiguration: Downloading/Verifying Files required by specified config..." -Activity
 
     $allSuccess = $true
 
@@ -814,11 +814,11 @@ function Test-ValidRoleDPMP {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain siteCode; When deploying $vmRole Role, you must specify the siteCode of a Primary Site Server." -ReturnObject $ReturnObject -Warning
     }
     else {
-        $psInConfig = $ConfigObject.virtualMachines | Where-Object { $_.sitecode -eq $VM.siteCode -and ($_.role -eq "Primary") }
+        $psInConfig = $ConfigObject.virtualMachines | Where-Object { $_.sitecode -eq $VM.siteCode -and ($_.role -in "Primary","Secondary") }
         if (-not $psInConfig) {
             $psVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
             if (($psVM | Measure-Object).Count -eq 0) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Primary Site Server." -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Primary Site Server or Secondary Site Server." -ReturnObject $ReturnObject -Warning
             }
         }
     }
@@ -1348,7 +1348,7 @@ function Get-ExistingForDomain {
 
     }
     catch {
-        Write-Log "Get-ExistingGorDometn: Fai-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
+        Write-Log "Get-ExistingGorDometn: Gai-ExistingForDometn: Fai-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
         return $null
     }
 }
@@ -1413,7 +1413,7 @@ function Get-ExistingSiteServer {
 
     }
     catch {
-        Write-Log "Get-ExistingSiteServer: Get-ExistingSiteServer: Failed to get existing site servers. $_" -Failure
+        Write-Log "Get-ExistingSiteServer: Get-ExistingSiteServer: Get-ExistingSiteServer: Failed to get existing site servers. $_" -Failure
         return $null
     }
 }
@@ -1441,10 +1441,135 @@ function Get-ExistingForSubnet {
 
     }
     catch {
-        Write-Log "Get-ExistingGorSubnet: Fet-ExistingForSubnet: Failed to get existing $Role from $Subnet. $_" -Failure
+        Write-Log "Get-ExistingGorSubnet: Get-ExistingForSubnet: Fet-ExistingForSubnet: Failed to get existing $Role from $Subnet. $_" -Failure
         return $null
     }
 }
+
+function Get-SiteServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
+        [object] $SiteCode
+    )
+    $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    $configVMs = @()
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($configVMs) {
+        return ($configVMs | Select-Object -First 1).vmName
+    }
+    $existingVMs = @()
+    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($existingVMs) {
+        return ($existingVMs | Select-Object -First 1).vmName
+    }
+    return $null
+}
+function get-RoleForSitecode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Sitecode")]
+        [string] $siteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToCheck = $global:config
+    )
+
+    $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    $configVMs = @()
+    $configVMs += $configToCheck.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($configVMs.Count -eq 1) {
+        return ($configVMs | Select-Object -First 1).Role
+    }
+    $existingVMs = @()
+    $existingVMs += get-list -type VM -domain $ConfigToCheck.vmOptions.DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($existingVMs.Count -eq 1) {
+        return ($existingVMs | Select-Object -First 1).Role
+    }
+    return $null
+}
+function Get-SiteServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
+        [object] $SiteCode
+    )
+    $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    $configVMs = @()
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($configVMs) {
+        return ($configVMs | Select-Object -First 1).vmName
+    }
+    $existingVMs = @()
+    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($existingVMs) {
+        return ($existingVMs | Select-Object -First 1).vmName
+    }
+    return $null
+}
+function Get-VMObjectFromConfigOrExisting {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $true, HelpMessage = "vmName")]
+        [object] $vmName
+    )
+
+    $vm = Get-List -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.vmName -eq $vmName }
+    if ($vm) {
+        return $vm
+    }
+
+    $vm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
+    if ($vm) {
+        return $vm
+    }
+}
+function Get-PrimarySiteServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
+        [object] $SiteCode
+    )
+    $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode
+    $roleforSite = get-RoleForSitecode -ConfigToCheck $deployConfig -siteCode $SiteCode
+    if ($roleforSite -eq "Primary") {
+        return $SiteServer
+    }
+    if ($roleforSite -eq "Secondary") {
+        $SiteServerVM = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $SiteServer
+        $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.parentSiteCode
+        return $SiteServer
+    }
+}
+function Get-PassiveSiteServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
+        [object] $SiteCode
+    )
+    $SiteServerRoles = @("PassiveSite")
+    $configVMs = @()
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($configVMs) {
+        return ($configVMs | Select-Object -First 1).vmName
+    }
+    $existingVMs = @()
+    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($existingVMs) {
+        return ($existingVMs | Select-Object -First 1).vmName
+    }
+    return $null
+}
+
 
 function Get-SubnetList {
 
@@ -1462,7 +1587,7 @@ function Get-SubnetList {
 
     }
     catch {
-        Write-Log "Get-SubnetList: Get-SubnetList: Failed to get subnet list. $_" -Failure -LogOnly
+        Write-Log "Get-SubnetList: Get-SubnetList: Get-SubnetList: Failed to get subnet list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -1473,7 +1598,7 @@ function Get-DomainList {
         return (Get-List -Type UniqueDomain)
     }
     catch {
-        Write-Log "Get-DomainList: Get-DomainList: Failed to get domain list. $_" -Failure -LogOnly
+        Write-Log "Get-DomainList: Get-DomainList: Get-DomainList: Failed to get domain list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -1507,7 +1632,7 @@ function Get-List {
 
         if ($null -eq $global:vm_List) {
 
-            Write-Log "Get-List: Get-List: Obtaining '$Type' list and caching it." -Verbose
+            Write-Log "Get-List: Get-List: Get-List: Obtaining '$Type' list and caching it." -Verbose
             $return = @()
             $virtualMachines = Get-VM
 
@@ -1518,12 +1643,12 @@ function Get-List {
                         $vmNoteObject = $vm.Notes | ConvertFrom-Json
                     }
                     else {
-                        Write-Log "Get-List: Get-List: VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
+                        Write-Log "Get-List: Get-List: Get-List: VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
                         #continue
                     }
                 }
                 catch {
-                    Write-Log "Get-List: Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
+                    Write-Log "Get-List: Get-List: Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
                     #continue
                 }
 
@@ -1582,15 +1707,15 @@ function Get-List {
                                     $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                                     $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                    Write-Log "Get-List: Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
+                                    Write-Log "Get-List: Get-List: Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
                                     Set-VMNote -vmName $vmName -vmNote $vmNoteObject
                                 }
                                 catch {
-                                    Write-Log "Get-List: Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                    Write-Log "Get-List: Get-List: Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
                                 }
                             }
                             else {
-                                Write-Log "Get-List: Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                                Write-Log "Get-List: Get-List: Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                             }
                         }
                     }
@@ -1608,16 +1733,16 @@ function Get-List {
                                     }
                                     if ($siteCode) {
                                         $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                        Write-Log "Get-List: Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
+                                        Write-Log "Get-List: Get-List: Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
                                         Set-VMNote -vmName $vmName -vmNote $vmNoteObject
                                     }
                                 }
                                 catch {
-                                    Write-Log "Get-List: Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                    Write-Log "Get-List: Get-List: Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
                                 }
                             }
                             else {
-                                Write-Log "Get-List: Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                                Write-Log "Get-List: Get-List: Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                             }
                         }
                     }
@@ -1671,7 +1796,7 @@ function Get-List {
 
     }
     catch {
-        Write-Log "Get-List: Get-List: Failed to get '$Type' list. $_" -Failure -LogOnly
+        Write-Log "Get-List: Get-List: Get-List: Failed to get '$Type' list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -1836,10 +1961,10 @@ Function Show-Summary {
         }
     }
 
-  #  if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
-   #     $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-   #     Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
-   # }
+    #  if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
+    #     $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
+    #     Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
+    # }
     if (-not $null -eq $($deployConfig.vmOptions)) {
 
         if ($null -eq $deployConfig.parameters.ExistingDCName) {
@@ -1894,7 +2019,7 @@ function Copy-SampleConfigs {
     $realConfigPath = $Common.ConfigPath
     $sampleConfigPath = Join-Path $Common.ConfigPath "samples"
 
-    Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
+    Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
     foreach ($item in Get-ChildItem $sampleConfigPath -File -Filter *.json) {
         $copyFile = $true
         $sampleFile = $item.FullName
@@ -1904,13 +2029,13 @@ function Copy-SampleConfigs {
             $sampleFileHash = Get-FileHash $sampleFile
             $configFileHash = Get-FileHash $configFile
             if ($configFileHash -ne $sampleFileHash) {
-                Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
+                Write-Log "Copy-SampleConfigs: Copy-CampleConfigs: Sopy-SampleConfigs: Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
                 $copyFile = $false
             }
         }
 
         if ($copyFile) {
-            Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly -Verbose
+            Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly -Verbose
             Copy-Item -Path $sampleFile -Destination $configFile -Force
         }
     }
