@@ -530,7 +530,14 @@ function Test-NetworkSwitch {
     $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $NetworkName }
     if (-not $exists) {
         Write-Log "HyperV Network switch for $NetworkName not found. Creating a new one."
-        New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName | Out-Null
+        try{
+        New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Stop| Out-Null
+        }
+        catch{
+            Write-Log "HyperV Network switch for $NetworkName failed. Trying again in 30 seconds"
+            start-sleep -seconds 30
+            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Continue| Out-Null
+        }
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
     }
 

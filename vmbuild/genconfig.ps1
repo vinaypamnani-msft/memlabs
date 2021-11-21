@@ -1491,8 +1491,13 @@ function Show-ExistingNetwork {
 
             $existingSiteCodes = @()
             $existingSiteCodes += (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "Primary" }).SiteCode
-
-            $result = Get-Menu -Prompt "Select Primary sitecode to connect Secondary to:" -OptionArray $existingSiteCodes -CurrentValue $value  -Test $false
+            if ($existingSiteCodes.Count -eq 0) {
+                write-host "No valid primaries found to attach secondary to"
+                return
+            }
+            while (-not $result) {
+                $result = Get-Menu -Prompt "Select Primary sitecode to connect Secondary to" -OptionArray $existingSiteCodes -CurrentValue $value  -Test $false
+            }
             $parentsiteCode = $result
             Get-TestResult -SuccessOnError | out-null
         }
