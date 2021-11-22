@@ -1631,13 +1631,13 @@ function Get-ValidPRISiteCodes {
     )
 
     $existingSiteCodes = @()
-    $existingSiteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Where-Object { $_.network -ne $Config.vmOptions.Network } | Select-Object -ExpandProperty SiteCode
+    $existingSiteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode
 
     if ($Config) {
         $containsPS = $Config.virtualMachines.role -contains "Primary"
         if ($containsPS) {
             $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
-            #We dont support multiple setnets per config yet
+            #We dont support multiple subnets per config yet
             # $existingSiteCodes += $PSVM.siteCode
         }
     }
