@@ -13,17 +13,16 @@
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
-    $PSName = $deployConfig.parameters.PSName
-    $PrimarySiteName = "$PSName$"
+    $PSName = $deployConfig.thisParams.PrimaryVM.vmName
 
     # Domain Admin User name
     $DomainAdminName = $deployConfig.vmOptions.adminName
-    $cm_admin = "$DNAME\$DomainAdminName"
+
 
     # CM Options
     $InstallConfigMgr = $deployConfig.cmOptions.install

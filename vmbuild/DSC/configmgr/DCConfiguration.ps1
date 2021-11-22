@@ -13,11 +13,11 @@
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
-    $PSName = $deployConfig.parameters.PSName
-    $CSName = $deployConfig.parameters.CSName
+    $PSName = $deployConfig.thisParams.PSName
+    $CSName = $deployConfig.thisParams.CSName
 
     $DHCP_DNSAddress = $deployConfig.parameters.DHCPDNSAddress
     $DHCP_DefaultGateway = $deployConfig.parameters.DHCPDefaultGateway
@@ -25,7 +25,7 @@
     $Configuration = $deployConfig.parameters.Scenario
 
     $setNetwork = $true
-    if ($deployConfig.parameters.ExistingDCName) {
+    if ($ThisVM.hidden) {
         $setNetwork = $false
     }
 
@@ -43,22 +43,22 @@
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
     # Passive Site
-    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
-    if ($containsPassive) {
-        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-    }
+    #$containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+    #if ($containsPassive) {
+    #    $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+    #}
 
     # Secondary Site
-    $containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
-    if ($containsSecondary) {
-        $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
-    }
+    #$containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
+    #if ($containsSecondary) {
+    #    $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+    #}
 
-    $waitOnServers = @()
-    if ($PSName) { $waitOnServers += $PSName }
-    if ($PassiveVM) { $waitOnServers += $PassiveVM.vmName }
-    if ($CSName) { $waitOnServers += $CSName }
-    if ($SecondaryVM) { $waitOnServers += $SecondaryVM.vmName }
+    $waitOnServers = $deployConfig.thisParams.ServersToWaitOn
+    #if ($PSName) { $waitOnServers += $PSName }
+    #if ($PassiveVM) { $waitOnServers += $PassiveVM.vmName }
+    #if ($CSName) { $waitOnServers += $CSName }
+    #if ($SecondaryVM) { $waitOnServers += $SecondaryVM.vmName }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)

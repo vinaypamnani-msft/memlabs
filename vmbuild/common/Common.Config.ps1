@@ -1441,6 +1441,32 @@ function Add-PerVMSettings {
         $thisParams | Add-Member -MemberType NoteProperty -Name "network" -Value $deployConfig.vmOptions.network -Force
     }
 
+
+    # DC DSC needs a list of SiteServers to wait on.
+    if ($thisVM.role -eq "DC"){
+        $ServersToWaitOn = @()
+        $thisPSName = $null
+        $thisCSName = $null
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary","CAS","PassiveSite" -and -not $_.hidden }) {
+            $ServersToWaitOn += $vm.vmName
+            if ($vm.Role -eq "Primary"){
+                $thisPSName = $vm.vmName
+            }
+            if ($vm.Role -eq "CAS"){
+                $thisCSName = $vm.vmName
+            }
+        }
+
+        $thisParams | Add-Member -MemberType NoteProperty -Name "ServersToWaitOn" -Value $ServersToWaitOn -Force
+        if ($thisPSName){
+            $thisParams | Add-Member -MemberType NoteProperty -Name "PSName" -Value $thisPSName -Force
+        }
+        if ($thisCSName){
+            $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $thisCSName -Force
+        }
+    }
+
+    #add the SiteCodes and Subnets so DC can add ad sites, and primary can setup BG's
     if ($thisVM.Role -eq "DC" -or $thisVM.Role -eq "Primary") {
         $sitesAndNetworks = @()
         $siteCodes = @()
@@ -1449,20 +1475,20 @@ function Add-PerVMSettings {
                 SiteCode = $vm.siteCode
                 Subnet   = $deployConfig.vmOptions.network
             }
-            if ($vm.siteCode -in $siteCodes){
+            if ($vm.siteCode -in $siteCodes) {
                 Write-Log "Error: $vm.vmName has a sitecode already in use by another Primary or Secondary"
             }
-            $siteCodes+= $vm.siteCode
+            $siteCodes += $vm.siteCode
         }
         foreach ($vm in get-list -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.role -in "Primary", "Secondary" }) {
             $sitesAndNetworks += [PSCustomObject]@{
                 SiteCode = $vm.siteCode
                 Subnet   = $vm.network
             }
-            if ($vm.siteCode -in $siteCodes){
+            if ($vm.siteCode -in $siteCodes) {
                 Write-Log "Error: $vm.vmName has a sitecode already in use by another Primary or Secondary"
             }
-            $siteCodes+= $vm.siteCode
+            $siteCodes += $vm.siteCode
         }
         $thisParams | Add-Member -MemberType NoteProperty -Name "sitesAndNetworks" -Value $sitesAndNetworks -Force
     }
@@ -1569,6 +1595,13 @@ function Add-PerVMSettings {
         $reportingSecondaries += (get-list -type vm -domain $deployConfig.vmOptions.domainName | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }).siteCode
         $reportingSecondaries = $reportingSecondaries | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
         $thisParams | Add-Member -MemberType NoteProperty -Name "ReportingSecondaries" -Value $reportingSecondaries -Force
+
+        # If we are deploying a new CAS at the same time, record it for the DSC
+        $CSName = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and -not $_.hidden -and $thisVM.ParentSiteCode -eq $_.SiteCode}
+        if ($CSName){
+            $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CSName -Force
+        }
+
     }
 
 

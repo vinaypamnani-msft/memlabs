@@ -13,18 +13,14 @@ configuration SecondaryConfiguration
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
-    $DName = $DomainName.Split(".")[0]
-    $DomainAdminName = $deployConfig.vmOptions.adminName
     $DCName = $deployConfig.parameters.DCName
 
     # Passive Site Config Props
-    $PSName = $deployConfig.parameters.PSName
-    if (-not $PSName) {
-        $PSName = $deployConfig.parameters.ExistingPSName
-    }
+    $PSName = $deployConfig.thisParams.PrimarySiteServer.vmName
+
 
     # SQL Setup
     $installSQL = $false

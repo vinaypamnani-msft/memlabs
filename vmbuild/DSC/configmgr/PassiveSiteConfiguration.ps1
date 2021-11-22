@@ -13,17 +13,18 @@ configuration PassiveSiteConfiguration
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
     $DCName = $deployConfig.parameters.DCName
 
     # Passive Site Config Props
     $ContentLibVMName = $ThisVM.remoteContentLibVM
-    $ActiveVMName = $deployConfig.parameters.ActiveVMName
-    if (-not $ActiveVMName) {
-        $ActiveVMName = $deployConfig.parameters.ExistingActiveName
-    }
+
+    $ActiveVMName = $deployConfig.thisParams.ActiveNodeVM.vmName
+    #if (-not $ActiveVMName) {
+    #    $ActiveVMName = $deployConfig.parameters.ExistingActiveName
+    #}
 
     # Log share
     $LogFolder = "DSC"

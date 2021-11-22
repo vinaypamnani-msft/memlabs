@@ -13,13 +13,22 @@
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
-    $CSName = $deployConfig.parameters.CSName
-    $Scenario = $deployConfig.parameters.Scenario
+    $CSName = $deployConfig.thisParams.ParentSiteServer.vmName
+    $Scenario = "Standalone"
+    if ($CSName){
+        $Scenario = "Hierarchy"
+    }
+
+    if ($deployConfig.thisParams.PassiveVM){
+        $containsPassive = $true
+        $PassiveVM = $deployConfig.thisParams.PassiveVM
+    }
+    #$Scenario = $deployConfig.parameters.Scenario
 
     # Domain Admin User name
     $DomainAdminName = $deployConfig.vmOptions.adminName

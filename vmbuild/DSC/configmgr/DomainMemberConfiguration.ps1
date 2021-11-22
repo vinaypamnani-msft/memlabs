@@ -14,24 +14,24 @@
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
 
-    if ($ThisVm.siteCode) {
-        $PSName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-        $PSPassiveName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-        if (-not $PSPassiveName) {
-            $PSPassiveName = ($deployConfig.existingVMs | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-        }
-    }
+    #if ($ThisVm.siteCode) {
+    #    $PSName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
+    #    $PSPassiveName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
+    #    if (-not $PSPassiveName) {
+    #        $PSPassiveName = ($deployConfig.existingVMs | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
+    #    }
+    #}
 
-    if (-not $PSName) {
-        $PSName = $deployConfig.parameters.PSName
-    }
-    $CSName = $deployConfig.parameters.CSName
+    #if (-not $PSName) {
+    #    $PSName = $deployConfig.parameters.PSName
+    #}
+    #$CSName = $deployConfig.parameters.CSName
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Server OS?
