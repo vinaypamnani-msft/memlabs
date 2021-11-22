@@ -56,7 +56,8 @@
         }
     }
 
-    # Passive Site Server
+    # SQL Sysadmin accounts
+    $waitOnDomainJoin = $deployconfig.thisParams.WaitOnDomainJoin
     $SQLSysAdminAccounts = $deployConfig.thisParams.SQLSysAdminAccounts
 
     # Log share
@@ -240,17 +241,34 @@
 
                 }
 
-                WriteStatus InstallSQL {
-                    DependsOn = '[DownloadFile]DownloadSQLCU'
-                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                WriteStatus WaitDomainJoin {
+                    DependsOn = "[DownloadFile]DownloadSQLCU"
+                    Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
                 }
 
             }
             else {
-                WriteStatus InstallSQL {
+                WriteStatus WaitDomainJoin {
                     DependsOn = '[InstallADK]ADKInstall'
-                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                    Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
                 }
+            }
+
+            $waitOnDependency = @('[WriteStatus]WaitDomainJoin')
+            foreach ($server in $waitOnDomainJoin) {
+
+                VerifyComputerJoinDomain "WaitFor$server" {
+                    ComputerName = $server
+                    Ensure       = "Present"
+                    DependsOn    = "[WriteStatus]WaitDomainJoin"
+                }
+
+                $waitOnDependency += "[VerifyComputerJoinDomain]WaitFor$server"
+            }
+
+            WriteStatus InstallSQL {
+                DependsOn = $waitOnDependency
+                Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
             }
 
             SqlSetup InstallSQL {
@@ -267,8 +285,18 @@
                 DependsOn           = '[WriteStatus]InstallSQL'
             }
 
+            # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
+            SqlRole SqlRole {
+                Ensure               = 'Present'
+                ServerRoleName       = 'sysadmin'
+                MembersToInclude     = $SQLSysAdminAccounts
+                InstanceName         = $SQLInstanceName
+                PsDscRunAsCredential = $CMAdmin
+                DependsOn            = "[SqlSetup]InstallSQL"
+            }
+
             SqlMemory SetSqlMemory {
-                DependsOn    = '[SqlSetup]InstallSQL'
+                DependsOn    = '[SqlRole]SqlRole'
                 Ensure       = 'Present'
                 DynamicAlloc = $false
                 MinMemory    = 2048
@@ -342,36 +370,37 @@
             }
 
         }
-
-        if ($Scenario -eq "Hierarchy") {
-
-            WriteStatus WaitCS {
-                DependsOn = "[InstallSSMS]SSMS"
-                Status    = "Waiting for CAS Server $CSName to join domain"
-            }
-
-            WaitForEvent WaitCSJoinDomain {
-                MachineName   = $CSName
-                LogFolder     = $LogFolder
-                ReadNode      = "MachineJoinDomain"
-                ReadNodeValue = "Passed"
-                Ensure        = "Present"
-                DependsOn     = "[InstallSSMS]SSMS"
-            }
-
+        else {
             FileReadAccessShare DomainSMBShareDummy {
                 Name      = $LogFolder
                 Path      = $LogPath
-                DependsOn = "[WaitForEvent]WaitCSJoinDomain"
+                DependsOn = "[InstallSSMS]SSMS"
             }
+        }
 
+        WriteStatus AddLocalAdmins {
+            DependsOn = "[FileReadAccessShare]DomainSMBShareDummy"
+            Status    = "Adding $($deployConfig.thisParams.LocalAdminAccounts -join ',') accounts to Local Administrators group"
+        }
+
+        $addUserDependancy = @('[WriteStatus]AddLocalAdmins')
+        $i = 0
+        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
+            $i++
+            $NodeName = "AddADUserToLocalAdminGroup$($i)"
+            AddUserToLocalAdminGroup "$NodeName" {
+                Name       = $user
+                DomainName = $DomainName
+                DependsOn = "[WriteStatus]AddLocalAdmins"
+            }
+            $addUserDependancy += "[AddUserToLocalAdminGroup]$NodeName"
         }
 
         # There's a passive site server in config
         if ($containsPassive) {
 
             WriteStatus WaitPassive {
-                DependsOn = "[FileReadAccessShare]DomainSMBShareDummy"
+                DependsOn = $addUserDependancy
                 Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to be ready"
             }
 
@@ -384,36 +413,16 @@
                 DependsOn     = "[WriteStatus]WaitPassive"
             }
 
-            if ($installSQL) {
-
-                SqlRole addsysadmin {
-                    Ensure               = 'Present'
-                    ServerRoleName       = 'sysadmin'
-                    MembersToInclude     = $SQLSysAdminAccounts
-                    InstanceName         = $SQLInstanceName
-                    PsDscRunAsCredential = $CMAdmin
-                    DependsOn            = '[WaitForEvent]WaitPassive'
-                }
-
-                WriteStatus WaitDelegate {
-                    DependsOn = "[SqlRole]addsysadmin"
-                    Status    = "Wait for DC to assign permissions to Systems Management container"
-                }
-
+            WriteStatus WaitDelegate {
+                DependsOn = "[WaitForEvent]WaitPassive"
+                Status    = "Wait for DC to assign permissions to Systems Management container"
             }
-            else {
 
-                WriteStatus WaitDelegate {
-                    DependsOn = "[WaitForEvent]WaitPassive"
-                    Status    = "Wait for DC to assign permissions to Systems Management container"
-                }
-
-            }
         }
         else {
 
             WriteStatus WaitDelegate {
-                DependsOn = "[FileReadAccessShare]DomainSMBShareDummy"
+                DependsOn = $addUserDependancy
                 Status    = "Wait for DC to assign permissions to Systems Management container"
             }
 
@@ -508,25 +517,12 @@
 
         }
 
-        $addUserDependancy = @()
-        $i = 0
-        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
-            $i++
-            $NodeName = "AddADUserToLocalAdminGroup$($i)"
-            AddUserToLocalAdminGroup "$NodeName" {
-                Name       = $user
-                DomainName = $DomainName
-                DependsOn  = "[WriteStatus]Complete"
-            }
-            $addUserDependancy += "[AddUserToLocalAdminGroup]$NodeName"
-        }
-
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = $addUserDependancy
+            DependsOn = "[WriteStatus]Complete"
         }
     }
 }

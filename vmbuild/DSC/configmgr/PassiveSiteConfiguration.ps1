@@ -187,11 +187,6 @@ configuration PassiveSiteConfiguration
             Status    = "Waiting for Content Lib VM $ContentLibVMName to finish configuration."
         }
 
-        #AddUserToLocalAdminGroup AddActiveLocalAdmin {
-        #    Name       = "$ActiveVMName$"
-        #    DomainName = $DomainName
-        #    DependsOn  = "[WaitForEvent]DelegateControl"
-        #}
         $addUserDependancy = @()
         $i = 0
         foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
