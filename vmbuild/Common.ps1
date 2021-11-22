@@ -106,7 +106,7 @@ function Write-Log {
     }
 
     # Write to console, if not logOnly and not OutputStream and not verbose
-    If (-not $LogOnly.IsPresent -and -not $OutputStream.IsPresent -and -not $IsVerbose) {
+    If (-not $LogOnly.IsPresent -and -not $OutputStream.IsPresent) {
         Write-Host $Text @HashArguments
     }
 

@@ -344,14 +344,14 @@ function Test-ValidVmSupported {
         # Supported DSC Roles for Existing Scenario
         if ($Common.Supported.RolesForExisting -notcontains $vm.role) {
             $supportedRoles = $Common.Supported.RolesForExisting -join ", "
-            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)]. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
         }
     }
     else {
         # Supported DSC Roles
         if ($Common.Supported.Roles -notcontains $vm.role) {
             $supportedRoles = $Common.Supported.Roles -join ", "
-            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)]. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for a new environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -1387,15 +1387,18 @@ function Add-ExistingVMToDeployConfig {
         [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
         [bool] $hidden = $true
     )
+
+    if ($configToModify.virtualMachines.vmName -contains $existingVM.vmName) {
+        Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
+        return
+    }
+
     $existingVM = (get-list -Type VM | where-object { $_.vmName -eq $vmName })
     if (-not $existingVM) {
-        Write-Log "Not adding $vmName as it does not exist as an existing VM"
+        Write-Log "Not adding $vmName as it does not exist as an existing VM" -LogOnly
         return
     }
-    if ($configToModify.virtualMachines.vmName -contains $existingVM.vmName) {
-        Write-Log "Not adding $vmName as it already exists in deployConfig"
-        return
-    }
+
     $newVMObject = [PSCustomObject]@{
         vmName = $vmName
         role   = $existingVM.role
