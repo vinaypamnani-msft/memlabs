@@ -812,13 +812,8 @@ try {
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
     $job_created_no = 0
-
-    # Existing DC scenario
-    $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
     $existingDC = $deployConfig.parameters.ExistingDCName
-    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
-    $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
-    $containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
+    # Existing DC scenario
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
@@ -831,58 +826,7 @@ try {
 
 
 
-    # Existing CAS scenario
-    #$existingCAS = $deployConfig.parameters.ExistingCASName
-
-    $PriVMS = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
-    foreach ($PriVM in $PriVMS) {
-        $CAS = Get-SiteServerForSiteCode -deployConfig $deployConfig -siteCode $PriVM.parentSiteCode
-        if ($CAS) {
-            Add-ExistingVMToDeployConfig -vmName $CAS -configToModify $deployConfig
-        }
-    }
-
-
-    $DPMPs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
-    foreach ($dpmp in $DPMPS) {
-        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -siteCode $dpmp.siteCode
-        if ($DPMPPrimary) {
-            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary -configToModify $deployConfig
-        }
-    }
-
-
-    # Adding Passive to existing
-    $PassiveVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-
-    foreach ($PassiveVM in $PassiveVMs) {
-        $ActiveNode = Get-SiteServerForSiteCode -deployConfig $deployConfig -siteCode $PassiveVM.siteCode
-        if ($ActiveNode) {
-            $ActiveNodeVM = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $ActiveNode
-            if ($ActiveNodeVM) {
-                if ($ActiveNodeVM.remoteSQLVM) {
-                    Add-ExistingVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $deployConfig
-                }
-                Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $deployConfig
-            }
-        }
-    }
-
-
-    $Secondaries = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
-    foreach ($Secondary in $Secondaries) {
-        $primary = Get-SiteServerForSiteCode -deployConfig $deployConfig -sitecode $Secondary.parentSiteCode
-        #$existingPS = $deployConfig.parameters.ExistingPSName
-        if ($primary) {
-            Add-ExistingVMToDeployConfig -vmName $primary -configToModify $deployConfig
-        }
-    }
-
-    # Add exising DC to list
-    if ($existingDC -and ($containsPS -or $containsPassive -or $containsSecondary)) {
-        # create a dummy VM object for the existingDC
-        Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $deployConfig
-    }
+    Add-ExistingVMsToDeployConfig -config $deployConfig
 
     Write-Log "Creating Virtual Machine Deployment Jobs" -Activity
 

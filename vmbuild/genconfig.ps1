@@ -795,17 +795,19 @@ function Select-MainMenu {
                 $i = 0
                 $filename = Save-Config $Global:Config
                 #$creds = New-Object System.Management.Automation.PSCredential ($Global:Config.vmOptions.adminName, $Global:Common.LocalAdmin.GetNetworkCredential().Password)
-                foreach ($virtualMachine in $global:config.virtualMachines) {
+                $t = Test-Configuration -InputObject $Global:Config
+                Add-ExistingVMsToDeployConfig -config $t.DeployConfig
+                foreach ($virtualMachine in $t.DeployConfig.virtualMachines) {
                     $i = $i + 1
-                    $name = Get-VMString $virtualMachine
+                    $name = $virtualMachine
                     write-Option "$i" "$($name)"
                 }
                 $response = get-ValidResponse "Which VM do you want" $i $null
                 $i = 0
-                foreach ($virtualMachine in $global:config.virtualMachines) {
+                foreach ($virtualMachine in  $t.DeployConfig.virtualMachines) {
                     $i = $i + 1
                     if ($i -eq $response) {
-                        $vmName = $global:config.vmOptions.prefix + $virtualMachine.vmName
+                        $vmName = $virtualMachine.vmName
                         break
                     }
                 }

@@ -1305,6 +1305,70 @@ function New-DeployConfig {
     }
 }
 
+
+function Add-ExistingVMsToDeployConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $config
+    )
+
+    $containsPS = $config.virtualMachines.role -contains "Primary"
+    $existingDC = $config.parameters.ExistingDCName
+    $containsPassive = $config.virtualMachines.role -contains "PassiveSite"
+    $containsSecondary = $config.virtualMachines.role -contains "Secondary"
+
+    $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
+    foreach ($PriVM in $PriVMS) {
+        $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode
+        if ($CAS) {
+            Add-ExistingVMToDeployConfig -vmName $CAS -configToModify $config
+        }
+    }
+
+
+    $DPMPs = $config.virtualMachines | Where-Object { $_.role -eq "DPMP" }
+    foreach ($dpmp in $DPMPS) {
+        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode
+        if ($DPMPPrimary) {
+            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary -configToModify $config
+        }
+    }
+
+
+    # Adding Passive to existing
+    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+
+    foreach ($PassiveVM in $PassiveVMs) {
+        $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode
+        if ($ActiveNode) {
+            $ActiveNodeVM = Get-VMObjectFromConfigOrExisting -deployConfig $config -vmName $ActiveNode
+            if ($ActiveNodeVM) {
+                if ($ActiveNodeVM.remoteSQLVM) {
+                    Add-ExistingVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
+                }
+                Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $config
+            }
+        }
+    }
+
+
+    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+    foreach ($Secondary in $Secondaries) {
+        $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode
+        #$existingPS = $deployConfig.parameters.ExistingPSName
+        if ($primary) {
+            Add-ExistingVMToDeployConfig -vmName $primary -configToModify $config
+        }
+    }
+
+    # Add exising DC to list
+    if ($existingDC -and ($containsPS -or $containsPassive -or $containsSecondary)) {
+        # create a dummy VM object for the existingDC
+        Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $config
+    }
+}
+
 function Add-ExistingVMToDeployConfig {
     [CmdletBinding()]
     param (
@@ -1376,6 +1440,33 @@ function Add-PerVMSettings {
     else {
         $thisParams | Add-Member -MemberType NoteProperty -Name "network" -Value $deployConfig.vmOptions.network -Force
     }
+
+    if ($thisVM.Role -eq "DC" -or $thisVM.Role -eq "Primary") {
+        $sitesAndNetworks = @()
+        $siteCodes = @()
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary" -and -not $_.hidden }) {
+            $sitesAndNetworks += [PSCustomObject]@{
+                SiteCode = $vm.siteCode
+                Subnet   = $deployConfig.vmOptions.network
+            }
+            if ($vm.siteCode -in $siteCodes){
+                Write-Log "Error: $vm.vmName has a sitecode already in use by another Primary or Secondary"
+            }
+            $siteCodes+= $vm.siteCode
+        }
+        foreach ($vm in get-list -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.role -in "Primary", "Secondary" }) {
+            $sitesAndNetworks += [PSCustomObject]@{
+                SiteCode = $vm.siteCode
+                Subnet   = $vm.network
+            }
+            if ($vm.siteCode -in $siteCodes){
+                Write-Log "Error: $vm.vmName has a sitecode already in use by another Primary or Secondary"
+            }
+            $siteCodes+= $vm.siteCode
+        }
+        $thisParams | Add-Member -MemberType NoteProperty -Name "sitesAndNetworks" -Value $sitesAndNetworks -Force
+    }
+
 
     #Get the CU URL
     if ($thisVM.sqlVersion) {
@@ -1693,7 +1784,7 @@ function Get-SiteServerForSiteCode {
     )
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
     $configVMs = @()
-    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden}
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
     if ($configVMs) {
         if ($type -eq "Name") {
             return ($configVMs | Select-Object -First 1).vmName
@@ -1725,7 +1816,7 @@ function get-RoleForSitecode {
 
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
     $configVMs = @()
-    $configVMs += $configToCheck.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden}
+    $configVMs += $configToCheck.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
     if ($configVMs.Count -eq 1) {
         return ($configVMs | Select-Object -First 1).Role
     }
@@ -1749,7 +1840,7 @@ function Get-SiteServerForSiteCode {
     )
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
     $configVMs = @()
-    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden}
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
     if ($configVMs) {
         if ($type -eq "Name") {
             return ($configVMs | Select-Object -First 1).vmName
@@ -1779,7 +1870,7 @@ function Get-VMObjectFromConfigOrExisting {
         [object] $vmName
     )
 
-    $vm = Get-List -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.vmName -eq $vmName -and -not $_.hidden}
+    $vm = Get-List -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.vmName -eq $vmName -and -not $_.hidden }
     if ($vm) {
         return $vm
     }
@@ -1834,7 +1925,7 @@ function Get-PassiveSiteServerForSiteCode {
     )
     $SiteServerRoles = @("PassiveSite")
     $configVMs = @()
-    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden}
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
     if ($configVMs) {
         if ($type -eq "Name") {
             return ($configVMs | Select-Object -First 1).vmName

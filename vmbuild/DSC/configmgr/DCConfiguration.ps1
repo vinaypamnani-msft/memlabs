@@ -30,21 +30,7 @@
     }
 
     # AD Sites
-    $adsites = @()
-
-    foreach($vm in $deployConfig.virtualMachines | Where-Object {(-not $_.hidden) -and $_.role -in "Primary","Secondary"}) {
-        $adsites += [PSCustomObject]@{
-                SiteCode  = $vm.siteCode
-                Subnet    = $deployConfig.vmOptions.network
-            }
-    }
-
-    foreach($vm in $deployConfig.existingVMs | Where-Object {$_.role -in "Primary","Secondary"}) {
-        $adsites += [PSCustomObject]@{
-                SiteCode  = $vm.siteCode
-                Subnet    = $vm.network
-            }
-    }
+    $adsites = $deployConfig.thisParams.sitesAndNetworks
 
     # Domain Admin User name
     $DomainAdminName = $deployConfig.vmOptions.adminName
@@ -169,23 +155,24 @@
         }
 
         $adSiteDependency = @()
+        $i = 0
         foreach ($site in $adsites) {
-
-            ADReplicationSite "ADSite$($site.SiteCode)" {
+            $i++
+            ADReplicationSite "ADSite$($i)" {
                 Ensure    = 'Present'
                 Name      = $site.SiteCode
                 DependsOn = "[ADGroup]AddToSchemaAdmin"
             }
 
-            ADReplicationSubnet "ADSubnet$($site.SiteCode)" {
+            ADReplicationSubnet "ADSubnet$($i)" {
                 Name        = "$($site.Subnet)/24"
                 Site        = $site.SiteCode
                 Location    = $site.SiteCode
                 Description = 'Created by vmbuild'
-                DependsOn   = "[ADReplicationSite]ADSite$($site.SiteCode)"
+                DependsOn   = "[ADReplicationSite]ADSite$($i)"
             }
 
-            $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($site.SiteCode)"
+            $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
         }
 
         AddNtfsPermissions AddNtfsPerms {

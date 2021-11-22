@@ -62,7 +62,10 @@ $ConfirmPreference = $false
 # Create dummy file so config doesn't fail
 $userConfig = Get-UserConfiguration -Configuration $configName
 $result = Test-Configuration -InputObject $userConfig.Config
+Add-ExistingVMsToDeployConfig -config $result.DeployConfig
 $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
+Add-PerVMSettings -deployConfig $result.DeployConfig -thisVM $ThisVM
+
 $result.DeployConfig.parameters.ThisMachineName = $ThisVM.vmName
 $result.DeployConfig.parameters.ThisMachineRole = $ThisVM.role
 $role  = $ThisVM.role
@@ -71,7 +74,8 @@ $role  = $ThisVM.role
 #    $sqlFile = $Common.AzureFileList.ISO | Where-Object {$_.id -eq $ThisVM.sqlVersion}
 #    $result.DeployConfig.parameters.ThisSQLCUURL = $sqlFile.cuURL
 #}
-Add-PerVMSettings -deployConfig $result.DeployConfig -thisVM $ThisVM
+
+
 # Dump config to file, for debugging
 #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
 $filePath = "C:\temp\deployConfig.json"
