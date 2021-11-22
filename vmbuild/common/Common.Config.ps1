@@ -1020,7 +1020,7 @@ function Test-Configuration {
 
             # Valid parent Site Code
             if ($psParentSiteCode) {
-                $casSiteCodes = Get-ValidCASSiteCodes -Config $deployConfig
+                $casSiteCodes = Get-ValidCASSiteCodes -Config $deployConfig -Domain $deployConfig.vmOptions.domainName
                 $parentCodes = $casSiteCodes -join ","
                 if ($psParentSiteCode -notin $casSiteCodes) {
                     Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Parent Site Codes: $parentCodes" -ReturnObject $return -Warning
@@ -1388,10 +1388,9 @@ function Add-PerVMSettings {
         $DomainName = $deployConfig.parameters.domainName
         $DName = $DomainName.Split(".")[0]
         $cm_admin = "$DNAME\$DomainAdminName"
-        $SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM',$cm_admin, 'BUILTIN\Administrators')
+        $SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, 'BUILTIN\Administrators')
         $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
-        if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary")
-        {
+        if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
             $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
         }
         if ($SiteServerVM) {
@@ -1510,21 +1509,49 @@ function Add-PerVMSettings {
 
 function Get-ValidCASSiteCodes {
     param (
+        [Parameter(Mandatory = $false)]
+        [object]$Config,
         [Parameter(Mandatory = $true)]
-        [object]$Config
+        [String]$Domain
     )
 
     $existingSiteCodes = @()
-    $existingSiteCodes += Get-ExistingSiteServer -DomainName $Config.vmOptions.domainName -Role "CAS" | Select-Object -ExpandProperty SiteCode
+    $existingSiteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "CAS" | Select-Object -ExpandProperty SiteCode
 
-    $containsCS = $Config.virtualMachines.role -contains "CAS"
-    if ($containsCS) {
-        $CSVM = $Config.virtualMachines | Where-Object { $_.role -eq "CAS" }
-        $existingSiteCodes += $CSVM.siteCode
+    if ($Config) {
+        $containsCS = $Config.virtualMachines.role -contains "CAS"
+        if ($containsCS) {
+            $CSVM = $Config.virtualMachines | Where-Object { $_.role -eq "CAS" }
+            $existingSiteCodes += $CSVM.siteCode
+        }
     }
 
     return ($existingSiteCodes | Select-Object -Unique)
 }
+
+function Get-ValidPRISiteCodes {
+    param (
+        [Parameter(Mandatory = $false)]
+        [object]$Config,
+        [Parameter(Mandatory = $true)]
+        [String]$Domain
+    )
+
+    $existingSiteCodes = @()
+    $existingSiteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Where-Object { $_.network -ne $Config.vmOptions.Network } | Select-Object -ExpandProperty SiteCode
+
+    if ($Config) {
+        $containsPS = $Config.virtualMachines.role -contains "Primary"
+        if ($containsPS) {
+            $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
+            #We dont support multiple setnets per config yet
+            # $existingSiteCodes += $PSVM.siteCode
+        }
+    }
+
+    return ($existingSiteCodes | Select-Object -Unique)
+}
+
 
 function Get-ExistingForDomain {
     param(

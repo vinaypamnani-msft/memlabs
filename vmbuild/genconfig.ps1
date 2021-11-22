@@ -1409,7 +1409,6 @@ Function Get-DomainStatsLine {
 
 function Show-ExistingNetwork {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-    $Global:AddToExisting = $true
 
     $domainList = @()
 
@@ -1465,44 +1464,44 @@ function Show-ExistingNetwork {
         $role = "PassiveSite"
     }
 
-    if ($role -eq "Primary") {
-        $ExistingCasCount = (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-        if ($ExistingCasCount -gt 0) {
 
-            $existingSiteCodes = @()
-            $existingSiteCodes += (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" }).SiteCode
-            #$existingSiteCodes += ($global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
-
-            $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
-            $result = Get-Menu -Prompt "Select CAS sitecode to connect Primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions -Test $false
-            if ($result.ToLowerInvariant() -eq "x") {
-                $parentSiteCode = $null
-            }
-            else {
-                $parentSiteCode = $result
-            }
-            Get-TestResult -SuccessOnError | out-null
-        }
-    }
-
-    if ($role -eq "Secondary") {
-        $ExistingPriCount = (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
-        if ($ExistingPriCount -gt 0) {
-
-            $existingSiteCodes = @()
-            $existingSiteCodes += (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "Primary" }).SiteCode
-            if ($existingSiteCodes.Count -eq 0) {
-                write-host "No valid primaries found to attach secondary to"
-                return
-            }
-            while (-not $result) {
-                $result = Get-Menu -Prompt "Select Primary sitecode to connect Secondary to" -OptionArray $existingSiteCodes -CurrentValue $value  -Test $false
-            }
-            $parentsiteCode = $result
-            Get-TestResult -SuccessOnError | out-null
-        }
-    }
-
+    $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $domain
+    #if ($role -eq "Primary") {
+    #    $ExistingCasCount = (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
+    #    if ($ExistingCasCount -gt 0) {
+#
+    #        $existingSiteCodes = @()
+    #        $existingSiteCodes += (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" }).SiteCode
+    #        #$existingSiteCodes += ($global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
+#
+    #        $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
+    #        $result = Get-Menu -Prompt "Select CAS sitecode to connect Primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions -Test $false
+    #        if ($result.ToLowerInvariant() -eq "x") {
+    #            $parentSiteCode = $null
+    #        }
+    #        else {
+    #            $parentSiteCode = $result
+    #        }
+    #        Get-TestResult -SuccessOnError | out-null
+    #    }
+    #}
+#
+    #if ($role -eq "Secondary") {
+#
+    #    $priSiteCodes = Get-ValidPRISiteCodes -config $global:config
+    #    if ($priSiteCodes -gt 0) {
+    #        while (-not $result) {
+    #            $result = Get-Menu -Prompt "Select Primary sitecode to connect Secondary to" -OptionArray $priSiteCodes -CurrentValue $value  -Test $false
+    #        }
+    #        $parentsiteCode = $result
+    #        Get-TestResult -SuccessOnError | out-null
+    #    }
+    #    else {
+    #        write-host "No valid primaries found to attach secondary to"
+    #        return
+    #    }
+    #}
+#
     if ($role -eq "PassiveSite") {
         $existingPassive = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
         $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
@@ -2113,6 +2112,47 @@ Function Get-ParentSiteCodeMenu {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [String] $role,
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue,
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [Object] $ConfigToCheck = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "Domain")]
+        [string] $Domain
+    )
+
+    if ($Role -eq "Primary") {
+        $casSiteCodes = Get-ValidCASSiteCodes -config $global:config -domain $Domain
+
+        $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
+        while (-not $result) {
+            $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to" -OptionArray $casSiteCodes -CurrentValue $CurrentValue -additionalOptions $additionalOptions -Test:$false
+        }
+        if ($result.ToLowerInvariant() -eq "x") {
+            return $null
+        }
+        else {
+            return $result
+        }
+    }
+    if ($Role -eq "Secondary") {
+        $priSiteCodes = Get-ValidPRISiteCodes -config $global:config -domain $Domain
+        if (($priSiteCodes | Measure-Object).Count -eq 0)
+        {
+            write-Host "No valid primaries available to connect secondary to."
+            return $null
+        }
+        while (-not $result) {
+            $result = Get-Menu -Prompt "Select Primary sitecode to connect secondary to" -OptionArray $priSiteCodes -CurrentValue $CurrentValue -Test:$false
+        }
+        return $result
+    }
+    return $null
+}
+Function Set-ParentSiteCodeMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
         [Object] $property,
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
@@ -2121,16 +2161,13 @@ Function Get-ParentSiteCodeMenu {
     )
     $valid = $false
     while ($valid -eq $false) {
-        $casSiteCodes = Get-ValidCASSiteCodes -config $global:config
 
-        $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
-        $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to:" -OptionArray $casSiteCodes -CurrentValue $CurrentValue -additionalOptions $additionalOptions -Test:$false
-        if ($result.ToLowerInvariant() -eq "x") {
-            $property."$name" = $null
+
+        $value = Get-ParentSiteCodeMenu -role $property.role -CurrentValue $CurrentValue -domain $global:config.vmOptions.domainName
+        if ($value.Trim()) {
+            $property."$name" = $value
         }
-        else {
-            $property."$name" = $result
-        }
+
         if (Get-TestResult -SuccessOnWarning -NoNewLine) {
             return
         }
@@ -2413,7 +2450,7 @@ Function Get-RoleMenu {
 
     $valid = $false
     while ($valid -eq $false) {
-        $DC = Get-List -type VM -domain $global:config.vmOptions.domainName | Where-Object {$_.Role -eq "DC"}
+        $DC = Get-List -type VM -domain $global:config.vmOptions.domainName | Where-Object { $_.Role -eq "DC" }
         if ($DC) {
             $role = Get-Menu "Select Role" $(Select-RolesForExistingList) $CurrentValue -Test:$false
             $property."$name" = $role
@@ -2838,7 +2875,7 @@ function Select-Options {
                     continue MainLoop
                 }
                 "parentSiteCode" {
-                    Get-ParentSiteCodeMenu -property $property -name $name -CurrentValue $value
+                    Set-ParentSiteCodeMenu -property $property -name $name -CurrentValue $value
                     continue MainLoop
                 }
                 "sqlVersion" {
@@ -3061,7 +3098,7 @@ function Add-NewVMForRole {
         [object] $ConfigToModify = $global:config,
         [Parameter(Mandatory = $false, HelpMessage = "Force VM Name. Otherwise auto-generated")]
         [string] $Name = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary in a Heirarchy")]
+        [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary or Secondary in a Heirarchy")]
         [string] $parentSiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite or a DPMP")]
         [string] $SiteCode = $null,
@@ -3380,11 +3417,12 @@ function Select-VirtualMachines {
         Write-Log -HostOnly -Verbose "response = $response"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
-                $role = Select-RolesForNew
+                #$role = Select-RolesForNew
+                $role = Select-RolesForExisting
                 $os = Select-OSForNew -Role $role
+                $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
 
-
-                Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os
+                Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os -parentSiteCode $parentSiteCode
                 if ($role -eq "DC") {
                     $Global:Config.vmOptions.domainName = select-NewDomainName
                     $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
@@ -3667,11 +3705,7 @@ do {
     $Global:Config = Select-ConfigMenu
 
     $Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
-    $Global:AddToExisting = $false
-    $existingDCName = $Global:DeployConfig.parameters.existingDCName
-    if (-not [string]::IsNullOrWhiteSpace($existingDCName)) {
-        $Global:AddToExisting = $true
-    }
+
     $valid = $false
     while ($valid -eq $false) {
         $global:StartOver = $false
