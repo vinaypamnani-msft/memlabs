@@ -1323,8 +1323,7 @@ function Add-ExistingVMsToDeployConfig {
         $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode -type VM
         if ($CAS) {
             Add-ExistingVMToDeployConfig -vmName $CAS.vmName -configToModify $config
-            if ($CAS.RemoteSQLVM)
-            {
+            if ($CAS.RemoteSQLVM) {
                 Add-ExistingVMToDeployConfig -vmName $CAS.RemoteSQLVM -configToModify $config
             }
         }
@@ -1363,8 +1362,7 @@ function Add-ExistingVMsToDeployConfig {
         #$existingPS = $deployConfig.parameters.ExistingPSName
         if ($primary) {
             Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
-            if ($primary.RemoteSQLVM)
-            {
+            if ($primary.RemoteSQLVM) {
                 Add-ExistingVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
             }
         }
@@ -1439,7 +1437,7 @@ function Add-PerVMSettings {
     # All DSC's should at minimum be adding cm_svc as a local admin.. Array will be appended if more local admins are needed
     $cm_svc = "cm_svc"
     $LocalAdminAccounts = @($cm_svc)
-
+    $WaitOnDomainJoin = @()
     #Get the current network from get-list or config
     $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
     if ($thisVMObject.network) {
@@ -1451,28 +1449,28 @@ function Add-PerVMSettings {
 
 
     # DC DSC needs a list of SiteServers to wait on.
-    if ($thisVM.role -eq "DC"){
+    if ($thisVM.role -eq "DC") {
         $ServersToWaitOn = @()
         $thisPSName = $null
         $thisCSName = $null
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary","CAS","PassiveSite" -and -not $_.hidden }) {
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary", "CAS", "PassiveSite" -and -not $_.hidden }) {
             $ServersToWaitOn += $vm.vmName
-            if ($vm.Role -eq "Primary"){
+            if ($vm.Role -eq "Primary") {
                 $thisPSName = $vm.vmName
-                if ($vm.ParentSiteCode){
+                if ($vm.ParentSiteCode) {
                     $thisCSName = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $vm.ParentSiteCode
                 }
             }
-            if ($vm.Role -eq "CAS"){
+            if ($vm.Role -eq "CAS") {
                 $thisCSName = $vm.vmName
             }
         }
 
         $thisParams | Add-Member -MemberType NoteProperty -Name "ServersToWaitOn" -Value $ServersToWaitOn -Force
-        if ($thisPSName){
+        if ($thisPSName) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "PSName" -Value $thisPSName -Force
         }
-        if ($thisCSName){
+        if ($thisCSName) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $thisCSName -Force
         }
     }
@@ -1518,7 +1516,7 @@ function Add-PerVMSettings {
         $cm_admin = "$DNAME\$DomainAdminName"
         $SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, 'BUILTIN\Administrators')
         $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
-        if (-not $SiteServerVM){
+        if (-not $SiteServerVM) {
             $SiteServerVM = Get-List -Type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
         }
         if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
@@ -1530,10 +1528,12 @@ function Add-PerVMSettings {
         if ($SiteServerVM) {
             $SQLSysAdminAccounts += "$DNAME\$($SiteServerVM.vmName)$"
             $LocalAdminAccounts += "$($SiteServerVM.vmName)$"
+            $WaitOnDomainJoin += $SiteServerVM.vmName
             $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.siteCode -type VM
             if ($passiveNodeVM) {
                 $SQLSysAdminAccounts += "$DNAME\$($passiveNodeVM.vmName)$"
                 $LocalAdminAccounts += "$($passiveNodeVM.vmName)$"
+                $WaitOnDomainJoin += $passiveNodeVM.vmName
             }
             if ($SiteServerVM.Role -eq "CAS") {
                 $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $SiteServerVM.siteCode }
@@ -1541,10 +1541,12 @@ function Add-PerVMSettings {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "PrimaryVM" -Value $primaryVM -Force
                     $LocalAdminAccounts += "$($primaryVM.vmName)$"
                     $SQLSysAdminAccounts += "$DNAME\$($primaryVM.vmName)$"
+                    $WaitOnDomainJoin += $primaryVM.vmName
                     $primaryPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
                     if ($primaryPassiveVM) {
                         $LocalAdminAccounts += "$($primaryPassiveVM.vmName)$"
                         $SQLSysAdminAccounts += "$DNAME\$($primaryPassiveVM.vmName)$"
+                        $WaitOnDomainJoin += $primaryPassiveVM.vmName
                     }
                 }
             }
@@ -1630,19 +1632,18 @@ function Add-PerVMSettings {
         $AllSiteCodes += $thisVM.siteCode
 
         $waitOnServers = @()
-        foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -in $AllSiteCodes -and -not $_.hidden}) {
+        foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -in $AllSiteCodes -and -not $_.hidden }) {
             $waitOnServers += $dpmp.vmName
         }
 
-        $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $ThisVM.siteCode -and $_.role -eq "Secondary" -and -not $_.hidden}
+        $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $ThisVM.siteCode -and $_.role -eq "Secondary" -and -not $_.hidden }
 
-        if ($SecondaryVM)
-        {
+        if ($SecondaryVM) {
             $waitOnServers += SecondaryVM.vmName
         }
         # If we are deploying a new CAS at the same time, record it for the DSC
-        $CSName = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and -not $_.hidden -and $thisVM.ParentSiteCode -eq $_.SiteCode}
-        if ($CSName){
+        $CSName = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and -not $_.hidden -and $thisVM.ParentSiteCode -eq $_.SiteCode }
+        if ($CSName) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CSName.vmName -Force
         }
 
@@ -1670,11 +1671,16 @@ function Add-PerVMSettings {
         }
     }
 
-    if ($SQLSysAdminAccounts){
+    if ($SQLSysAdminAccounts) {
         $SQLSysAdminAccounts = $SQLSysAdminAccounts | Sort-Object | Get-Unique
         $thisParams | Add-Member -MemberType NoteProperty -Name "SQLSysAdminAccounts" -Value $SQLSysAdminAccounts -Force
     }
 
+
+    $WaitOnDomainJoin = $WaitOnDomainJoin | Sort-Object | Get-Unique
+    if ($WaitOnDomainJoin.Count -gt 0) {
+        $thisParams | Add-Member -MemberType NoteProperty -Name "WaitOnDomainJoin" -Value $WaitOnDomainJoin -Force
+    }
 
     $LocalAdminAccounts = $LocalAdminAccounts | Sort-Object | Get-Unique
     $thisParams | Add-Member -MemberType NoteProperty -Name "LocalAdminAccounts" -Value $LocalAdminAccounts -Force
