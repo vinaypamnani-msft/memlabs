@@ -1630,6 +1630,9 @@ function Add-PerVMSettings {
         $reportingSecondaries = $reportingSecondaries | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
         $thisParams | Add-Member -MemberType NoteProperty -Name "ReportingSecondaries" -Value $reportingSecondaries -Force
 
+
+
+
         $AllSiteCodes = $reportingSecondaries
         $AllSiteCodes += $thisVM.siteCode
 
@@ -1644,9 +1647,14 @@ function Add-PerVMSettings {
             $waitOnServers += SecondaryVM.vmName
         }
         # If we are deploying a new CAS at the same time, record it for the DSC
-        $CSName = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and -not $_.hidden -and $thisVM.ParentSiteCode -eq $_.SiteCode }
-        if ($CSName) {
-            $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CSName.vmName -Force
+        $CASVM = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and -not $_.hidden -and $thisVM.ParentSiteCode -eq $_.SiteCode }
+        if ($CASVM) {
+            $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CASVM.vmName -Force
+            $LocalAdminAccounts += "$($CASVM.vmName)$"
+            $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+            if ($CASPassiveVM) {
+                $LocalAdminAccounts += "$($CASPassiveVM.vmName)$"
+            }
         }
 
     }
