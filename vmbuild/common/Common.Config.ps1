@@ -1651,7 +1651,7 @@ function Add-PerVMSettings {
         if ($CASVM) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CASVM.vmName -Force
             $LocalAdminAccounts += "$($CASVM.vmName)$"
-            $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+            $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM
             if ($CASPassiveVM) {
                 $LocalAdminAccounts += "$($CASPassiveVM.vmName)$"
             }
