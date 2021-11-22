@@ -20,11 +20,7 @@ configuration PassiveSiteConfiguration
 
     # Passive Site Config Props
     $ContentLibVMName = $ThisVM.remoteContentLibVM
-
     $ActiveVMName = $deployConfig.thisParams.ActiveNodeVM.vmName
-    #if (-not $ActiveVMName) {
-    #    $ActiveVMName = $deployConfig.parameters.ExistingActiveName
-    #}
 
     # Log share
     $LogFolder = "DSC"

@@ -19,19 +19,6 @@
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
-
-    #if ($ThisVm.siteCode) {
-    #    $PSName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-    #    $PSPassiveName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-    #    if (-not $PSPassiveName) {
-    #        $PSPassiveName = ($deployConfig.existingVMs | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-    #    }
-    #}
-
-    #if (-not $PSName) {
-    #    $PSName = $deployConfig.parameters.PSName
-    #}
-    #$CSName = $deployConfig.parameters.CSName
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Server OS?
@@ -45,10 +32,6 @@
     else {
         $IsServerOS = $false
     }
-
-    # Domain Admin Name
-    $DomainAdminName = $deployConfig.vmOptions.adminName
-
 
     # SQL Setup
     $installSQL = $false
@@ -71,11 +54,6 @@
     }
 
     $SQLSysAdminAccounts = $deployConfig.thisParams.SQLSysAdminAccounts
-
-    # Set PS name to existing PS name, if PS not in config
-    if (-not $PSName) {
-        $PSName = $deployConfig.parameters.ExistingPSName
-    }
 
     # Log share
     $LogFolder = "DSC"

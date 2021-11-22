@@ -16,9 +16,11 @@
     $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
     $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
     $CSName = $deployConfig.thisParams.ParentSiteServer.vmName
+
     $Scenario = "Standalone"
     if ($CSName){
         $Scenario = "Hierarchy"
@@ -28,10 +30,6 @@
         $containsPassive = $true
         $PassiveVM = $deployConfig.thisParams.PassiveVM
     }
-    #$Scenario = $deployConfig.parameters.Scenario
-
-    # Domain Admin User name
-    $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # CM Options
     $InstallConfigMgr = $deployConfig.cmOptions.install
@@ -76,7 +74,7 @@
         $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
     }
 
-    # DomainMembers to wait before running Script Workflow
+    # Servers to wait before running Script Workflow (should not include Passive Site)
     $waitOnServers = @()
     if ($ThisVM.remoteSQLVM -and -not $ThisVM.hidden) { $waitOnServers += $ThisVM.remoteSQLVM }
     $waitOnSiteCodes = @()

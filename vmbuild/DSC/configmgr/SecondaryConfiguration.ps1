@@ -21,7 +21,6 @@ configuration SecondaryConfiguration
     # Passive Site Config Props
     $PSName = $deployConfig.thisParams.PrimarySiteServer.vmName
 
-
     # SQL Setup
     $installSQL = $false
     $sqlUpdateEnabled = $false
@@ -270,11 +269,6 @@ configuration SecondaryConfiguration
             DependsOn     = "[InstallSSMS]SSMS"
         }
 
-        #AddUserToLocalAdminGroup AddActiveLocalAdmin {
-        #    Name       = "$PSName$"
-        #    DomainName = $DomainName
-        #    DependsOn  = "[WaitForEvent]DelegateControl"
-        #}
         $addUserDependancy = @()
         $i = 0
         foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {

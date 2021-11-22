@@ -11,10 +11,10 @@ $scenario = $deployConfig.parameters.Scenario
 $CurrentRole = $deployConfig.parameters.ThisMachineRole
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-$PSName = $deployConfig.parameters.PSName
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+$PSVM = $deployConfig.thisParams.PrimaryVM
 
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
@@ -576,8 +576,6 @@ else {
     $Configuration.PSReadyToUse.Status = 'Running'
     $Configuration.PSReadyToUse.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-
-    $PSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PSName }
 
     if ($PSVM) {
         $PSSiteCode = $PSVM.siteCode

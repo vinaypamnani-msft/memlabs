@@ -16,13 +16,12 @@
     $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
     $PSName = $deployConfig.thisParams.PSName
     $CSName = $deployConfig.thisParams.CSName
 
     $DHCP_DNSAddress = $deployConfig.parameters.DHCPDNSAddress
     $DHCP_DefaultGateway = $deployConfig.parameters.DHCPDefaultGateway
-    $DHCP_ScopeId = $deployConfig.parameters.DHCPScopeId
-    $Configuration = $deployConfig.parameters.Scenario
 
     $setNetwork = $true
     if ($ThisVM.hidden) {
@@ -32,9 +31,6 @@
     # AD Sites
     $adsites = $deployConfig.thisParams.sitesAndNetworks
 
-    # Domain Admin User name
-    $DomainAdminName = $deployConfig.vmOptions.adminName
-
     # Define log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
@@ -42,23 +38,8 @@
     # CM Files folder/share
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
-    # Passive Site
-    #$containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
-    #if ($containsPassive) {
-    #    $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-    #}
-
-    # Secondary Site
-    #$containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
-    #if ($containsSecondary) {
-    #    $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
-    #}
-
+    # Servers for which permissions need to be added to systems management contaienr
     $waitOnServers = $deployConfig.thisParams.ServersToWaitOn
-    #if ($PSName) { $waitOnServers += $PSName }
-    #if ($PassiveVM) { $waitOnServers += $PassiveVM.vmName }
-    #if ($CSName) { $waitOnServers += $CSName }
-    #if ($SecondaryVM) { $waitOnServers += $SecondaryVM.vmName }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
