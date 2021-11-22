@@ -113,7 +113,7 @@ function Get-FilesForConfiguration {
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
     }
 
-    Write-Log "Get-FilesForConfiguration: Get-FilesForConfiguration: Get-FilesForConfiguration: Get-FilesForConfiguration: Get-FilesForConfiguration: Get-FilesForConfiguration: Get-FilesForConfiguration: Get-FilesForConfiguration: Downloading/Verifying Files required by specified config..." -Activity
+    Write-Log "Downloading/Verifying Files required by specified config..." -Activity
 
     $allSuccess = $true
 
