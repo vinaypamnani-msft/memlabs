@@ -1630,7 +1630,7 @@ function Add-PerVMSettings {
         $AllSiteCodes += $thisVM.siteCode
 
         $waitOnServers = @()
-        foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -in $waitOnSiteCodes -and -not $_.hidden}) {
+        foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -in $AllSiteCodes -and -not $_.hidden}) {
             $waitOnServers += $dpmp.vmName
         }
 
