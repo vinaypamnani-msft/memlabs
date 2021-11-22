@@ -388,23 +388,13 @@
 
             if ($installSQL) {
 
-                SqlLogin addsysadmin {
-                    Ensure                  = 'Present'
-                    Name                    = "$DName\$($PassiveVM.vmName)$"
-                    LoginType               = 'WindowsUser'
-                    InstanceName            = $SQLInstanceName
-                    LoginMustChangePassword = $false
-                    PsDscRunAsCredential    = $CMAdmin
-                    DependsOn               = '[WaitForEvent]WaitPassive'
-                }
-
                 SqlRole addsysadmin {
                     Ensure               = 'Present'
                     ServerRoleName       = 'sysadmin'
                     MembersToInclude     = $SQLSysAdminAccounts
                     InstanceName         = $SQLInstanceName
                     PsDscRunAsCredential = $CMAdmin
-                    DependsOn            = '[SqlLogin]addsysadmin'
+                    DependsOn            = '[WaitForEvent]WaitPassive'
                 }
 
                 WriteStatus WaitDelegate {

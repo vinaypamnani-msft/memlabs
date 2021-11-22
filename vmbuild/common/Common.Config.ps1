@@ -1320,9 +1320,13 @@ function Add-ExistingVMsToDeployConfig {
 
     $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
     foreach ($PriVM in $PriVMS) {
-        $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode
+        $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode -type VM
         if ($CAS) {
-            Add-ExistingVMToDeployConfig -vmName $CAS -configToModify $config
+            Add-ExistingVMToDeployConfig -vmName $CAS.vmName -configToModify $config
+            if ($CAS.RemoteSQLVM)
+            {
+                Add-ExistingVMToDeployConfig -vmName $CAS.RemoteSQLVM -configToModify $config
+            }
         }
     }
 
@@ -1355,10 +1359,14 @@ function Add-ExistingVMsToDeployConfig {
 
     $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
     foreach ($Secondary in $Secondaries) {
-        $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode
+        $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM
         #$existingPS = $deployConfig.parameters.ExistingPSName
         if ($primary) {
-            Add-ExistingVMToDeployConfig -vmName $primary -configToModify $config
+            Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
+            if ($primary.RemoteSQLVM)
+            {
+                Add-ExistingVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
+            }
         }
     }
 
@@ -1422,7 +1430,7 @@ function Add-PerVMSettings {
         [Parameter(Mandatory = $true, HelpMessage = "Current Item")]
         [object] $thisVM
     )
-
+    $SQLSysAdminAccounts = @()
     #Get the current Machine Name
     $thisParams = [pscustomobject]@{
         MachineName = $thisVM.vmName
@@ -1497,7 +1505,7 @@ function Add-PerVMSettings {
     }
 
 
-    #Get the CU URL
+    #Get the CU URL, and SQL permissions
     if ($thisVM.sqlVersion) {
         $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
         $sqlCUUrl = $sqlFile.cuURL
@@ -1510,8 +1518,14 @@ function Add-PerVMSettings {
         $cm_admin = "$DNAME\$DomainAdminName"
         $SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, 'BUILTIN\Administrators')
         $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
+        if (-not $SiteServerVM){
+            $SiteServerVM = Get-List -Type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
+        }
         if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
             $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
+        }
+        if (-not $SiteServerVM -and $thisVM.Role -in "Primary", "CAS") {
+            $SiteServerVM = $thisVM
         }
         if ($SiteServerVM) {
             $SQLSysAdminAccounts += "$DNAME\$($SiteServerVM.vmName)$"
@@ -1521,8 +1535,21 @@ function Add-PerVMSettings {
                 $SQLSysAdminAccounts += "$DNAME\$($passiveNodeVM.vmName)$"
                 $LocalAdminAccounts += "$($passiveNodeVM.vmName)$"
             }
+            if ($SiteServerVM.Role -eq "CAS") {
+                $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $SiteServerVM.siteCode }
+                if ($primaryVM) {
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "PrimaryVM" -Value $primaryVM -Force
+                    $LocalAdminAccounts += "$($primaryVM.vmName)$"
+                    $SQLSysAdminAccounts += "$DNAME\$($primaryVM.vmName)$"
+                    $primaryPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                    if ($primaryPassiveVM) {
+                        $LocalAdminAccounts += "$($primaryPassiveVM.vmName)$"
+                        $SQLSysAdminAccounts += "$DNAME\$($primaryPassiveVM.vmName)$"
+                    }
+                }
+            }
         }
-        $thisParams | Add-Member -MemberType NoteProperty -Name "SQLSysAdminAccounts" -Value $SQLSysAdminAccounts -Force
+
 
     }
 
@@ -1629,7 +1656,13 @@ function Add-PerVMSettings {
         }
     }
 
-    $LocalAdminAccounts = $LocalAdminAccounts | Get-Unique
+    if ($SQLSysAdminAccounts){
+        $SQLSysAdminAccounts = $SQLSysAdminAccounts | Sort-Object | Get-Unique
+        $thisParams | Add-Member -MemberType NoteProperty -Name "SQLSysAdminAccounts" -Value $SQLSysAdminAccounts -Force
+    }
+
+
+    $LocalAdminAccounts = $LocalAdminAccounts | Sort-Object | Get-Unique
     $thisParams | Add-Member -MemberType NoteProperty -Name "LocalAdminAccounts" -Value $LocalAdminAccounts -Force
 
     $thisParams | ConvertTo-Json -Depth 3 | out-Host
