@@ -1252,8 +1252,8 @@ function Select-NewDomainConfig {
         }
 
         if ($valid) {
-            write-host -ForegroundColor white "Note: You can only have 1 Primary or Secondary server per subnet.  This is not a product limitation, but MemLabs automatically configures this subnet as a Boundary Group for the specified subnet, and this is needed to prevent overlapping Boundary Groups.  Subnets without a siteserver do not automatically get added to any boundary groups."
-            Write-Host
+            Show-SubnetNote
+
             $valid = $false
             while ($valid -eq $false) {
                 $customOptions = @{ "C" = "Custom Subnet" }
@@ -1675,9 +1675,7 @@ function Select-Subnet {
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [object] $configToCheck = $global:config
     )
-
-    write-host -ForegroundColor white "Note: You can only have 1 Primary or Secondary server per subnet.  This is not a product limitation, but MemLabs automatically configures this subnet as a Boundary Group for the specified subnet, and this is needed to prevent overlapping Boundary Groups.  Subnets without a siteserver do not automatically get added to any boundary groups."
-    Write-Host
+    Show-SubnetNote
 
     if ($configToCheck.virtualMachines.role -contains "DC") {
         $subnetlist = Get-ValidSubnets
@@ -1701,7 +1699,24 @@ function Select-Subnet {
 
 }
 
+function Show-SubnetNote {
+    $noteColor = "cyan"
+    $textColor = "gray"
+    $highlightColor = "darkyellow"
+    Write-Host
+    write-host -ForegroundColor $noteColor "Note: " -NoNewline
+    write-host -foregroundcolor $textColor "You can only have 1 " -NoNewLine
+    write-host -ForegroundColor $highlightColor "Primary" -NoNewLine
+    write-host -ForegroundColor $textColor " or " -NoNewline
+    write-host -ForegroundColor $highlightColor "Secondary" -NoNewLine
+    write-host -ForegroundColor $textColor " server per " -NoNewline
+    write-host -ForegroundColor $highlightColor "subnet" -NoNewline
+    write-host -ForegroundColor $textColor "."
+    write-host -ForegroundColor $textColor "   MemLabs automatically configures this subnet as a Boundary Group for the specified SiteCode."
+    write-host -ForegroundColor $textColor "   This limitation exists to prevent overlapping Boundary Groups."
+    write-host -ForegroundColor $textColor "   Subnets without a siteserver do NOT automatically get added to any boundary groups."
 
+}
 function Select-ExistingSubnets {
     [CmdletBinding()]
     param (
@@ -1763,9 +1778,8 @@ function Select-ExistingSubnets {
                 $subnetListModified += "$sb ($SiteCodes)"
             }
         }
+        Show-SubnetNote
 
-        write-host -ForegroundColor white "Note: You can only have 1 Primary or Secondary server per subnet.  This is not a product limitation, but MemLabs automatically configures this subnet as a Boundary Group for the specified subnet, and this is needed to prevent overlapping Boundary Groups.  Subnets without a siteserver do not automatically get added to any boundary groups."
-        Write-Host
         while ($true) {
             [string]$response = $null
 
@@ -1775,7 +1789,7 @@ function Select-ExistingSubnets {
             }
             if ($subnetListModified.Length -eq 0) {
                 Write-Host
-                Write-Host -ForegroundColor Yellow "No valid subnets for the current roles exist in the domain. Please create a new subnet"
+                Write-Host -ForegroundColor Yellow "No valid subnets for the selected role exists in the domain. Please create a new subnet"
                 $response = "n"
             }
             else {
