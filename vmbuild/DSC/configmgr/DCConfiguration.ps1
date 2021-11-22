@@ -324,7 +324,7 @@
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = if ($Configuration -eq 'Standalone') { $PSName } else { $CSName }
+                MachineName = if ($CSName) { $CSName } else { $PSName }
                 ExtFolder   = $CM
                 Ensure      = "Present"
                 DependsOn   = "[WriteEvent]WriteDelegateControlfinished"

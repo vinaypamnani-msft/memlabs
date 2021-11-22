@@ -1451,6 +1451,9 @@ function Add-PerVMSettings {
             $ServersToWaitOn += $vm.vmName
             if ($vm.Role -eq "Primary"){
                 $thisPSName = $vm.vmName
+                if ($vm.ParentSiteCode){
+                    $thisCSName = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $vm.ParentSiteCode
+                }
             }
             if ($vm.Role -eq "CAS"){
                 $thisCSName = $vm.vmName
