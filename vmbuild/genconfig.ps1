@@ -3419,10 +3419,40 @@ function Select-VirtualMachines {
             if ($response.ToLowerInvariant() -eq "n") {
                 #$role = Select-RolesForNew
                 $role = Select-RolesForExisting
+                if ($role -eq "H") {
+                    $role = "PassiveSite"
+                }
                 $os = Select-OSForNew -Role $role
                 $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
 
-                Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os -parentSiteCode $parentSiteCode
+
+                if ($role -eq "PassiveSite") {
+                    $domain = $global:config.vmOptions.DomainName
+                    $existingPassive = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
+                    $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+
+                    $PossibleSS = @()
+                    foreach ($item in $existingSS) {
+                        if ($existingPassive.SiteCode -contains $item.Sitecode) {
+                            continue
+                        }
+                        $PossibleSS += $item
+                    }
+
+                    if ($PossibleSS.Count -eq 0) {
+                        Write-Host
+                        Write-Host "No siteservers found that are elegible for HA"
+                        return
+                    }
+                    $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false
+                    if ([string]::IsNullOrWhiteSpace($result)) {
+                        return
+                    }
+                    $SiteCode = $result
+                }
+
+
+                Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os -parentSiteCode $parentSiteCode -SiteCode $siteCode
                 if ($role -eq "DC") {
                     $Global:Config.vmOptions.domainName = select-NewDomainName
                     $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)

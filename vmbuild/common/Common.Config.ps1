@@ -1410,9 +1410,11 @@ function Add-PerVMSettings {
     if ($thisVM.siteCode) {
         $SiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
         $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer" -Value $SiteServerVM -Force
+        $LocalAdminAccounts += "$($SiteServerVM.vmName)$"
         $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
         if ($passiveSiteServerVM) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer-P" -Value $passiveSiteServerVM -Force
+            $LocalAdminAccounts += "$($passiveSiteServerVM.vmName)$"
         }
         #If we report to a Secondary, get the Primary as well, and passive as -P
         if ((get-RoleForSitecode -ConfigTocheck $deployConfig -siteCode $thisVM.siteCode) -eq "Secondary") {
@@ -1691,7 +1693,7 @@ function Get-SiteServerForSiteCode {
     )
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
     $configVMs = @()
-    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden}
     if ($configVMs) {
         if ($type -eq "Name") {
             return ($configVMs | Select-Object -First 1).vmName
@@ -1723,7 +1725,7 @@ function get-RoleForSitecode {
 
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
     $configVMs = @()
-    $configVMs += $configToCheck.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    $configVMs += $configToCheck.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden}
     if ($configVMs.Count -eq 1) {
         return ($configVMs | Select-Object -First 1).Role
     }
@@ -1747,7 +1749,7 @@ function Get-SiteServerForSiteCode {
     )
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
     $configVMs = @()
-    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden}
     if ($configVMs) {
         if ($type -eq "Name") {
             return ($configVMs | Select-Object -First 1).vmName
@@ -1777,7 +1779,7 @@ function Get-VMObjectFromConfigOrExisting {
         [object] $vmName
     )
 
-    $vm = Get-List -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.vmName -eq $vmName }
+    $vm = Get-List -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.vmName -eq $vmName -and -not $_.hidden}
     if ($vm) {
         return $vm
     }
@@ -1832,7 +1834,7 @@ function Get-PassiveSiteServerForSiteCode {
     )
     $SiteServerRoles = @("PassiveSite")
     $configVMs = @()
-    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden}
     if ($configVMs) {
         if ($type -eq "Name") {
             return ($configVMs | Select-Object -First 1).vmName
@@ -1867,7 +1869,7 @@ function Get-ActiveSiteServerForSiteCode {
     )
     $SiteServerRoles = @("Primary", "CAS")
     $configVMs = @()
-    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
     if ($configVMs) {
         if ($type -eq "Name") {
             return ($configVMs | Select-Object -First 1).vmName
@@ -1883,7 +1885,7 @@ function Get-ActiveSiteServerForSiteCode {
             return ($existingVMs | Select-Object -First 1).vmName
         }
         else {
-            eturn ($existingVMs | Select-Object -First 1)
+            return ($existingVMs | Select-Object -First 1)
         }
     }
     return $null
