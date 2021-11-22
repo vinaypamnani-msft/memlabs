@@ -1252,6 +1252,8 @@ function Select-NewDomainConfig {
         }
 
         if ($valid) {
+            write-host -ForegroundColor white "Note: You can only have 1 Primary or Secondary server per subnet.  This is not a product limitation, but MemLabs automatically configures this subnet as a Boundary Group for the specified subnet, and this is needed to prevent overlapping Boundary Groups.  Subnets without a siteserver do not automatically get added to any boundary groups."
+            Write-Host
             $valid = $false
             while ($valid -eq $false) {
                 $customOptions = @{ "C" = "Custom Subnet" }
@@ -1471,11 +1473,11 @@ function Show-ExistingNetwork {
     #if ($role -eq "Primary") {
     #    $ExistingCasCount = (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
     #    if ($ExistingCasCount -gt 0) {
-#
+    #
     #        $existingSiteCodes = @()
     #        $existingSiteCodes += (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" }).SiteCode
     #        #$existingSiteCodes += ($global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
-#
+    #
     #        $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
     #        $result = Get-Menu -Prompt "Select CAS sitecode to connect Primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions -Test $false
     #        if ($result.ToLowerInvariant() -eq "x") {
@@ -1487,9 +1489,9 @@ function Show-ExistingNetwork {
     #        Get-TestResult -SuccessOnError | out-null
     #    }
     #}
-#
+    #
     #if ($role -eq "Secondary") {
-#
+    #
     #    $priSiteCodes = Get-ValidPRISiteCodes -config $global:config
     #    if ($priSiteCodes -gt 0) {
     #        while (-not $result) {
@@ -1503,7 +1505,7 @@ function Show-ExistingNetwork {
     #        return
     #    }
     #}
-#
+    #
     if ($role -eq "PassiveSite") {
         $existingPassive = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
         $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
@@ -1674,6 +1676,9 @@ function Select-Subnet {
         [object] $configToCheck = $global:config
     )
 
+    write-host -ForegroundColor white "Note: You can only have 1 Primary or Secondary server per subnet.  This is not a product limitation, but MemLabs automatically configures this subnet as a Boundary Group for the specified subnet, and this is needed to prevent overlapping Boundary Groups.  Subnets without a siteserver do not automatically get added to any boundary groups."
+    Write-Host
+
     if ($configToCheck.virtualMachines.role -contains "DC") {
         $subnetlist = Get-ValidSubnets
         $customOptions = @{ "C" = "Custom Subnet" }
@@ -1759,6 +1764,8 @@ function Select-ExistingSubnets {
             }
         }
 
+        write-host -ForegroundColor white "Note: You can only have 1 Primary or Secondary server per subnet.  This is not a product limitation, but MemLabs automatically configures this subnet as a Boundary Group for the specified subnet, and this is needed to prevent overlapping Boundary Groups.  Subnets without a siteserver do not automatically get added to any boundary groups."
+        Write-Host
         while ($true) {
             [string]$response = $null
 
@@ -2139,8 +2146,7 @@ Function Get-ParentSiteCodeMenu {
     }
     if ($Role -eq "Secondary") {
         $priSiteCodes = Get-ValidPRISiteCodes -config $global:config -domain $Domain
-        if (($priSiteCodes | Measure-Object).Count -eq 0)
-        {
+        if (($priSiteCodes | Measure-Object).Count -eq 0) {
             write-Host "No valid primaries available to connect secondary to."
             return $null
         }
