@@ -1487,7 +1487,7 @@ function Add-PerVMSettings {
                 Subnet   = $deployConfig.vmOptions.network
             }
             if ($vm.siteCode -in $siteCodes) {
-                Write-Log "Error: $vm.vmName has a sitecode already in use by another Primary or Secondary"
+                Write-Log "Error: $($vm.vmName) has a sitecode already in use by another Primary or Secondary"
             }
             $siteCodes += $vm.siteCode
         }
@@ -1497,7 +1497,7 @@ function Add-PerVMSettings {
                 Subnet   = $vm.network
             }
             if ($vm.siteCode -in $siteCodes) {
-                Write-Log "Error: $vm.vmName has a sitecode already in use by another Primary or Secondary"
+                Write-Log "Error: $($vm.vmName) has a sitecode already in use by another Primary or Secondary"
             }
             $siteCodes += $vm.siteCode
         }

@@ -594,7 +594,7 @@ else {
         Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'"
         Start-Sleep -Seconds 30
         while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)%" -RetrySeconds 60
+            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 60
             Start-Sleep -Seconds 60
             $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
         }
