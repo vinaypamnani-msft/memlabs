@@ -1435,7 +1435,7 @@ function Add-PerVMSettings {
     $thisParams = [pscustomobject]@{
         MachineName = $thisVM.vmName
     }
-
+    $thisParams | Add-Member -MemberType NoteProperty -Name "thisVM" -Value $thisVM -Force
     # All DSC's should at minimum be adding cm_svc as a local admin.. Array will be appended if more local admins are needed
     $cm_svc = "cm_svc"
     $LocalAdminAccounts = @($cm_svc)
@@ -1626,10 +1626,24 @@ function Add-PerVMSettings {
         $reportingSecondaries = $reportingSecondaries | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
         $thisParams | Add-Member -MemberType NoteProperty -Name "ReportingSecondaries" -Value $reportingSecondaries -Force
 
+        $AllSiteCodes = $reportingSecondaries
+        $AllSiteCodes += $thisVM.siteCode
+
+        $waitOnServers = @()
+        foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -in $waitOnSiteCodes -and -not $_.hidden}) {
+            $waitOnServers += $dpmp.vmName
+        }
+
+        $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $ThisVM.siteCode -and $_.role -eq "Secondary" -and -not $_.hidden}
+
+        if ($SecondaryVM)
+        {
+            $waitOnServers += SecondaryVM.vmName
+        }
         # If we are deploying a new CAS at the same time, record it for the DSC
         $CSName = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and -not $_.hidden -and $thisVM.ParentSiteCode -eq $_.SiteCode}
         if ($CSName){
-            $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CSName -Force
+            $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CSName.vmName -Force
         }
 
     }
