@@ -1320,11 +1320,13 @@ function Add-ExistingVMsToDeployConfig {
 
     $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
     foreach ($PriVM in $PriVMS) {
-        $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode -type VM
-        if ($CAS) {
-            Add-ExistingVMToDeployConfig -vmName $CAS.vmName -configToModify $config
-            if ($CAS.RemoteSQLVM) {
-                Add-ExistingVMToDeployConfig -vmName $CAS.RemoteSQLVM -configToModify $config
+        if ($PriVM.parentSiteCode) {
+            $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode -type VM
+            if ($CAS) {
+                Add-ExistingVMToDeployConfig -vmName $CAS.vmName -configToModify $config
+                if ($CAS.RemoteSQLVM) {
+                    Add-ExistingVMToDeployConfig -vmName $CAS.RemoteSQLVM -configToModify $config
+                }
             }
         }
     }
@@ -1865,12 +1867,15 @@ function Get-SiteServerForSiteCode {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
         [object] $deployConfig,
-        [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
+        [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
         [object] $SiteCode,
         [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
         [ValidateSet("Name", "VM")]
         [string] $type = "Name"
     )
+    if (-not $SiteCode) {
+        return $null
+    }
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
     $configVMs = @()
     $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }

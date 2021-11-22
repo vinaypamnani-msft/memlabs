@@ -1103,7 +1103,7 @@ function Get-ValidDomainNames {
         "fabrikam.com" = "FAB-" ; "fourthcoffee.com" = "FOR-" ;
         "lamnahealthcare.com" = "LAM-"  ; "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
         "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-";
-        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "TEC-"
+        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" #; "techpreview.com" = "CTP-" #techpreview.com is reserved for tech preview CM Installs
     }
     foreach ($domain in (Get-DomainList)) {
         $ValidDomainNames.Remove($domain.ToLowerInvariant())
@@ -1227,6 +1227,7 @@ function Select-NewDomainConfig {
                 $usedPrefixes = Get-List -Type UniquePrefix
                 if ("CTP-" -notin $usedPrefixes) {
                     $prefix = "CTP-"
+                    $domain = "techpreview.com"
                 }
             }
             "4" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
@@ -1240,7 +1241,9 @@ function Select-NewDomainConfig {
         if ($valid) {
             $valid = $false
             while ($valid -eq $false) {
-                $domain = select-NewDomainName -ConfigToCheck $newConfig
+                if (-not $domain) {
+                    $domain = select-NewDomainName -ConfigToCheck $newConfig
+                }
                 if (-not $prefix) {
                     $prefix = get-PrefixForDomain -Domain $domain
                 }
@@ -1747,7 +1750,7 @@ function Select-ExistingSubnets {
 
         $customOptions = @{ "N" = "add New Subnet to domain" }
         $subnetList = @()
-        $subnetList += Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Get-Unique
+        $subnetList += Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Sort-Object | Get-Unique
 
         $subnetListNew = @()
         if ($Role -eq "Primary" -or $Role -eq "CAS" -or $Role -eq "Secondary") {
