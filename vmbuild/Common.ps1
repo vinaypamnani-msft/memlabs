@@ -38,7 +38,7 @@ function Write-Log {
     # Get caller function name and add it to Text
     try {
         $caller = (Get-PSCallStack | Select-Object Command, Location, Arguments)[1].Command
-        if ($caller -and $caller -like "*.ps1") {$caller = $caller -replace ".ps1", ""}
+        if ($caller -and $caller -like "*.ps1") { $caller = $caller -replace ".ps1", "" }
         if (-not $caller) { $caller = "<Script>" }
     }
     catch {
@@ -105,9 +105,11 @@ function Write-Log {
         Write-Progress -Activity $Text -Status "Failed :(" -Completed
     }
 
-    # Write to console, if not logOnly and not OutputStream and not verbose
+    # Write to console, if not logOnly and not OutputStream
     If (-not $LogOnly.IsPresent -and -not $OutputStream.IsPresent) {
-        Write-Host $Text @HashArguments
+        if (-not $IsVerbose -or ($IsVerbose -and $Common.VerboseEnabled)) {
+            Write-Host $Text @HashArguments
+        }
     }
 
     $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss:fff'
@@ -530,13 +532,13 @@ function Test-NetworkSwitch {
     $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $NetworkName }
     if (-not $exists) {
         Write-Log "HyperV Network switch for $NetworkName not found. Creating a new one."
-        try{
-        New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Stop| Out-Null
+        try {
+            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Stop | Out-Null
         }
-        catch{
+        catch {
             Write-Log "HyperV Network switch for $NetworkName failed. Trying again in 30 seconds"
             start-sleep -seconds 30
-            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Continue| Out-Null
+            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Continue | Out-Null
         }
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
     }
