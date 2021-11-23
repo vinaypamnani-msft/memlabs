@@ -2149,7 +2149,7 @@ function Get-List {
 
         if ($null -eq $global:vm_List) {
 
-            Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Obtaining '$Type' list and caching it." -Verbose
+            Write-Log "Obtaining '$Type' list and caching it." -Verbose
             $return = @()
             $virtualMachines = Get-VM
 
@@ -2160,12 +2160,12 @@ function Get-List {
                         $vmNoteObject = $vm.Notes | ConvertFrom-Json
                     }
                     else {
-                        Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
+                        Write-Log "VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
                         #continue
                     }
                 }
                 catch {
-                    Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
+                    Write-Log "Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
                     #continue
                 }
 
@@ -2224,15 +2224,15 @@ function Get-List {
                                     $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                                     $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                    Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
+                                    Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
                                     Set-VMNote -vmName $vmName -vmNote $vmNoteObject
                                 }
                                 catch {
-                                    Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                    Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
                                 }
                             }
                             else {
-                                Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                                Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                             }
                         }
                     }
@@ -2250,16 +2250,16 @@ function Get-List {
                                     }
                                     if ($siteCode) {
                                         $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                        Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
+                                        Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
                                         Set-VMNote -vmName $vmName -vmNote $vmNoteObject
                                     }
                                 }
                                 catch {
-                                    Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                                    Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
                                 }
                             }
                             else {
-                                Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                                Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                             }
                         }
                     }
@@ -2313,7 +2313,7 @@ function Get-List {
 
     }
     catch {
-        Write-Log "Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Get-List: Failed to get '$Type' list. $_" -Failure -LogOnly
+        Write-Log "Failed to get '$Type' list. $_" -Failure -LogOnly
         return $null
     }
 }
