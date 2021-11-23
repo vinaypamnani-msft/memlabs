@@ -1612,6 +1612,19 @@ function Add-PerVMSettings {
             if ($passiveNodeVM) {
                 Add-VMToAccountLists -thisVM $thisVM -VM $passiveNodeVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
             }
+
+            if ($SiteServerVM.Role -eq "Primary") {
+                $CASVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "CAS" -and $_.SiteCode -eq $SiteServerVM.ParentSiteCode }
+                if ($CASVM) {
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "CASVM" -Value $CASVM -Force
+                    Add-VMToAccountLists -thisVM $thisVM -VM $CASVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+                    $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM
+                    if ($CASPassiveVM) {
+                        Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts   -WaitOnDomainJoin
+                    }
+                }
+            }
+
             if ($SiteServerVM.Role -eq "CAS") {
                 $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $SiteServerVM.siteCode }
                 if ($primaryVM) {
