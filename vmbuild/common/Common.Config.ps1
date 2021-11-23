@@ -1755,7 +1755,7 @@ function Add-PerVMSettings {
 
 
     $SQLSysAdminAccounts = $accountLists.SQLSysAdminAccounts | Sort-Object | Get-Unique
-    if ($WaitOnDomainJoin.Count -gt 0) {
+    if ($SQLSysAdminAccounts.Count -gt 0) {
         $thisParams | Add-Member -MemberType NoteProperty -Name "SQLSysAdminAccounts" -Value $SQLSysAdminAccounts -Force
     }
 
