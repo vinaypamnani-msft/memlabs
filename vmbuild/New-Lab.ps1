@@ -97,10 +97,9 @@ $VM_Create = {
     # Get required variables from parent scope
     $cmDscFolder = $using:cmDscFolder
     $currentItem = $using:currentItem
-    # $deployConfig = $using:deployConfig
     $forceNew = $using:ForceNew
     $createVM = $using:CreateVM
-    #$sqlCUUrl = $using:sqlCUUrl
+    $azureFileList = $using:Common.AzureFileList
 
     # Change log location
     $domainName = $using:domainName
@@ -124,7 +123,7 @@ $VM_Create = {
     }
 
     # Determine which OS image file to use for the VM
-    $imageFile = $Common.AzureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
+    $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
     $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
 
     # Set base VM path
@@ -322,7 +321,7 @@ $VM_Create = {
         Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Activity "Working" -Completed
 
         # Determine which SQL version files should be used
-        $sqlFiles = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
+        $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
 
         # SQL Iso Path
         $sqlIso = $sqlFiles.filename | Where-Object { $_.EndsWith(".iso") }
@@ -846,13 +845,6 @@ try {
         # Existing DC scenario
         $CreateVM = $true
         if ($currentItem.hidden -eq $true) { $CreateVM = $false }
-
-        # Determine SQL CU URL for VM to download. This is done here instead of inside $VM_Create because we need $Common.AzureFileList
-        #$sqlCUUrl = $null
-        #if ($createVM -and $currentItem.sqlVersion) {
-        #    $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
-        #    $sqlCUUrl = $sqlFile.cuURL
-        #}
 
         $job = Start-Job -ScriptBlock $VM_Create -Name $currentItem.vmName -ArgumentList $deployConfigCopy -ErrorAction Stop -ErrorVariable Err
 
