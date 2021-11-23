@@ -75,23 +75,18 @@
         $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
     }
 
-    # Servers to wait before running Script Workflow (should not include Passive Site)
-    $waitOnServers = @()
-    if ($ThisVM.remoteSQLVM -and -not $ThisVM.hidden) { $waitOnServers += $ThisVM.remoteSQLVM }
-    $waitOnSiteCodes = @()
-    $waitOnSiteCodes += $ThisVM.siteCode
+    # Servers to wait before running Script Workflow (should include DPMP/Secondary, but not Passive Site)
+    $waitonReadyForPSServers = @()
+    $waitOnSiteCodes = @($ThisVM.siteCode)
     $waitOnSiteCodes += $deployConfig.thisParams.ReportingSecondaries
     $waitOnSiteCodes = $waitOnSiteCodes | Where-Object { $_ -and $_.Trim() }
+    if ($ThisVM.remoteSQLVM -and -not $ThisVM.hidden) { $waitonReadyForPSServers += $ThisVM.remoteSQLVM }
     foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -in $waitOnSiteCodes }) {
-        $waitOnServers += $dpmp.vmName
+        $waitonReadyForPSServers += $dpmp.vmName
     }
-
-    # Secondary Site
-    $containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
-    if ($containsSecondary) {
-        $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $ThisVM.siteCode -and $_.role -eq "Secondary" }
+    foreach ($secondary in $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }) {
+        $waitonReadyForPSServers += $secondary.vmName
     }
-    if ($SecondaryVM) { $waitOnServers += $SecondaryVM.vmName }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -462,16 +457,16 @@
 
         if ($InstallConfigMgr) {
 
-            if ($waitOnServers) {
+            if ($waitonReadyForPSServers) {
 
                 $waitOnDependency = @()
 
                 WriteStatus WaitServerReady {
                     DependsOn = "[WaitForEvent]DelegateControl"
-                    Status    = "Waiting for $($waitOnServers -join ',') to be ready."
+                    Status    = "Waiting for $($waitonReadyForPSServers -join ',') to be ready."
                 }
 
-                foreach ($server in $waitOnServers) {
+                foreach ($server in $waitonReadyForPSServers) {
 
                     WaitForEvent "WaitFor$server" {
                         MachineName   = $server
