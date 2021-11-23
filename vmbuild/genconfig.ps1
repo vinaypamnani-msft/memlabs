@@ -1613,7 +1613,9 @@ function Select-RolesForExisting {
     }
 
     $existingRoles2 = @()
+    $CurrentValue = $null
 if ($enhance){
+    $CurrentValue = "DomainMember"
     foreach ($item in $existingRoles) {
 
         switch ($item) {
@@ -1634,7 +1636,7 @@ else{
 
     $OptionArray = @{ "H" = $ha_Text }
 
-    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue "DomainMember" -additionalOptions $OptionArray
+    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray
 
     $role = $role.Split("[")[0].Trim()
     if ($role -eq "CAS and Primary") {
@@ -3465,6 +3467,9 @@ function Select-VirtualMachines {
             if ($response.ToLowerInvariant() -eq "n") {
                 #$role = Select-RolesForNew
                 $role = Select-RolesForExisting -enhance:$false
+                if (-not $role){
+                    return
+                }
                 if ($role -eq "H") {
                     $role = "PassiveSite"
                 }
