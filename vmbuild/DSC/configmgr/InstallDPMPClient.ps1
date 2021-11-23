@@ -270,21 +270,7 @@ if ($null -ne $deployConfig.parameters.ExistingActiveName) {
     return
 }
 
-$bgs = @()
-
-foreach ($vm in $deployConfig.virtualMachines | Where-Object { (-not $_.hidden) -and $_.role -in "Primary", "Secondary" }) {
-    $bgs += [PSCustomObject]@{
-        SiteCode = $vm.siteCode
-        Subnet   = $deployConfig.vmOptions.network
-    }
-}
-
-foreach ($vm in $deployConfig.existingVMs | Where-Object { $_.role -in "Primary", "Secondary" }) {
-    $bgs += [PSCustomObject]@{
-        SiteCode = $vm.siteCode
-        Subnet   = $vm.network
-    }
-}
+$bgs = $deployConfig.thisParams.sitesAndNetworks
 
 # Create BGs
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
