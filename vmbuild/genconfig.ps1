@@ -1573,17 +1573,21 @@ function Format-Roles {
     $padding = 22
     foreach ($role in $Roles) {
         switch ($role) {
+            "DC" { $newRoles += "$($role.PadRight($padding))`t[New Domain Controller.. Only 1 allowed per domain!]" }
+            "CAS" { $newRoles += "$($role.PadRight($padding))`t[New CAS.. Only 1 allowed per subnet!]" }
             "CAS and Primary" { $newRoles += "$($role.PadRight($padding))`t[New CAS and Primary Site]" }
             "Primary" { $newRoles += "$($role.PadRight($padding))`t[New Primary site (Standalone or join a CAS)]" }
             "Secondary" { $newRoles += "$($role.PadRight($padding))`t[New Secondary site (Attach to Primary)]" }
             "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]" }
             "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site]" }
+            "DomainMember" { $newRoles += "$($role.PadRight($padding))`t[New VM joined to the domain]" }
             "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain]" }
             "DomainMember (Client)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Client OS joined to the domain]" }
             "WorkgroupMember" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access]" }
             "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]" }
             "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]" }
             "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]" }
+            default {$newRoles += $role}
         }
     }
 
@@ -1592,10 +1596,24 @@ function Format-Roles {
 }
 
 function Select-RolesForExisting {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Enhance Roles")]
+        [bool]$enhance = $true
+    )
+    $existing = get-list -type vm -domain $global:config.vmOptions.domainName | Where-Object {$_.Role -eq "DC"}
+    if ($existing){
+
     $existingRoles = Select-RolesForExistingList
+    $ha_Text = "Enable High Availability (HA) on an Existing Site Server"
+    }
+    else{
+        $existingRoles = Select-RolesForNewList
+        $ha_Text= "Enable High Availability (HA) on a Site Server"
+    }
 
     $existingRoles2 = @()
-
+if ($enhance){
     foreach ($item in $existingRoles) {
 
         switch ($item) {
@@ -1608,10 +1626,13 @@ function Select-RolesForExisting {
             Default { $existingRoles2 += $item }
         }
     }
-
+}
+else{
+    $existingRoles2  = $existingRoles
+}
     $existingRoles2 = Format-Roles $existingRoles2
 
-    $OptionArray = @{ "H" = "Enable High Availability (HA) on an Existing Site Server" }
+    $OptionArray = @{ "H" = $ha_Text }
 
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue "DomainMember" -additionalOptions $OptionArray
 
@@ -3443,7 +3464,7 @@ function Select-VirtualMachines {
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
                 #$role = Select-RolesForNew
-                $role = Select-RolesForExisting
+                $role = Select-RolesForExisting -enhance:$false
                 if ($role -eq "H") {
                     $role = "PassiveSite"
                 }
@@ -3453,8 +3474,17 @@ function Select-VirtualMachines {
 
                 if ($role -eq "PassiveSite") {
                     $domain = $global:config.vmOptions.DomainName
+                    $existingPassive = @()
+                    $existingSS = @()
+
                     $existingPassive = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
                     $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+
+                    $exisitingPassive += $global:config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+                    $existingSS += $global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+
+                    $existingSS = $existingSS | Where-Object {$_}
+                    $exisitingPassive = $exisitingPassive | Where-Object {$_}
 
                     $PossibleSS = @()
                     foreach ($item in $existingSS) {
