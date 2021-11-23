@@ -354,7 +354,7 @@
             Status    = "Complete!"
         }
 
-        WriteEvent DPMPReady {
+        WriteEvent ReadyForPrimary {
             LogPath   = $LogPath
             WriteNode = "ReadyForPrimary"
             Status    = "Passed"
