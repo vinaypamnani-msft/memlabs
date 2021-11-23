@@ -1678,7 +1678,7 @@ function Add-PerVMSettings {
             $waitOnServers += SecondaryVM.vmName
         }
         # If we are deploying a new CAS at the same time, record it for the DSC
-        $CASVM = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and -not $_.hidden -and $thisVM.ParentSiteCode -eq $_.SiteCode }
+        $CASVM = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and $thisVM.ParentSiteCode -eq $_.SiteCode }
         if ($CASVM) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CASVM.vmName -Force
             $LocalAdminAccounts += "$($CASVM.vmName)$"
