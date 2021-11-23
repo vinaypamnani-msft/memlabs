@@ -285,14 +285,37 @@
                 DependsOn           = '[WriteStatus]InstallSQL'
             }
 
+            WriteStatus AddSQLPermissions {
+                DependsOn = "[SqlSetup]InstallSQL"
+                Status    = "Adding SQL logins and roles"
+            }
+
             # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
+            $sqlDependency = @('[WriteStatus]AddSQLPermissions')
+            $i = 0
+            foreach ($account in $SQLSysAdminAccounts | Where-Object {$_ -notlike "BUILTIN*" } ) {
+                $i++
+
+                SqlLogin "AddSqlLogin$i" {
+                    Ensure                  = 'Present'
+                    Name                    = $account
+                    LoginType               = 'WindowsUser'
+                    InstanceName            = $SQLInstanceName
+                    LoginMustChangePassword = $false
+                    PsDscRunAsCredential    = $CMAdmin
+                    DependsOn               = '[WriteStatus]AddSQLPermissions'
+                }
+
+                $sqlDependency += "[SqlLogin]AddSqlLogin$i"
+            }
+
             SqlRole SqlRole {
                 Ensure               = 'Present'
                 ServerRoleName       = 'sysadmin'
                 MembersToInclude     = $SQLSysAdminAccounts
                 InstanceName         = $SQLInstanceName
                 PsDscRunAsCredential = $CMAdmin
-                DependsOn            = "[SqlSetup]InstallSQL"
+                DependsOn            = $sqlDependency
             }
 
             SqlMemory SetSqlMemory {
