@@ -1416,7 +1416,7 @@ function Add-ExistingVMToDeployConfig {
         [bool] $hidden = $true
     )
 
-    if ($configToModify.virtualMachines.vmName -contains $existingVM.vmName) {
+    if ($configToModify.virtualMachines.vmName -contains $vmName) {
         Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
         return
     }
