@@ -196,7 +196,10 @@ function Install-MP {
 
 $DPs = @()
 $MPs = @()
-$ValidSiteCodes = Get-CMSite | Where-Object { $_.SiteCode -eq $SiteCode -or $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
+$ValidSiteCodes = @($SiteCode)
+$ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
+$ValidSiteCodes += $ReportingSiteCodes
+
 foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" } ) {
     if ($dpmp.siteCode -in $ValidSiteCodes) {
         if ($dpmp.installDP) {
@@ -206,9 +209,14 @@ foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DP
             }
         }
         if ($dpmp.installMP) {
-            $MPs += [PSCustomObject]@{
-                ServerName     = $dpmp.vmName
-                ServerSiteCode = $dpmp.siteCode
+            if ($dpmp.siteCode -notin $ReportingSiteCodes) {
+                $MPs += [PSCustomObject]@{
+                    ServerName     = $dpmp.vmName
+                    ServerSiteCode = $dpmp.siteCode
+                }
+            }
+            else {
+                Write-DscStatus "Skip MP role for $($dpmp.vmName) since it's a remote site system in Secondary site"
             }
         }
     }

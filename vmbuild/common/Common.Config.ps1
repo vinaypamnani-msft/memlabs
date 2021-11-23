@@ -261,14 +261,13 @@ function Test-ValidVmOptions {
             if ($($ConfigObject.vmoptions.domainName) -ne $($existingSubnet.Domain)) {
                 Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
             }
-            $CASorPRI = ($ConfigObject.virtualMachines.role -contains "CAS") -or (($ConfigObject.virtualMachines.role -contains "Primary"))
-            if ($CASorPRI) {
-                $existingCASorPRI = @()
-                $existingCASorPRI += Get-List -Type VM | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -eq "CAS") -or ($_.Role -eq "Primary") }
+            $CASorPRIorSEC = ($ConfigObject.virtualMachines.role -contains "CAS") -or (($ConfigObject.virtualMachines.role -contains "Primary")) -or (($ConfigObject.virtualMachines.role -contains "Secondary"))
+            if ($CASorPRIorSEC) {
+                $existingCASorPRIorSEC = @()
+                $existingCASorPRIorSEC += Get-List -Type VM | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -eq "CAS") -or ($_.Role -eq "Primary") -or ($_.Role -eq "Secondary") }
                 if ($existingCASorPRI.Count -gt 0) {
                     Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
                 }
-
             }
         }
 
@@ -604,7 +603,7 @@ function Test-ValidRoleDC {
     }
 }
 
-function Test-ValidRoleCSPS {
+function Test-ValidRoleSiteServer {
     param (
         [object] $VM,
         [object] $ConfigObject,
@@ -619,8 +618,19 @@ function Test-ValidRoleCSPS {
     $vmRole = $VM.role
 
     # Primary/CAS must contain SQL
-    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM) {
+    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM -and $vmRole -ne "Secondary") {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
+    }
+
+    # Secondary parentSiteCode must belong to a Primary
+    if ($VM.parentSiteCode -and $vmRole -eq "Secondary") {
+        $psInConfig = $ConfigObject.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $VM.parentSiteCode }
+        if (-not $psInConfig) {
+            $primary = Get-SiteServerForSiteCode -deployConfig $ConfigObject -sitecode $VM.parentSiteCode -type VM
+            if (-not $primary) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains parentSiteCode [$($VM.parentSiteCode)], but a primary site with this siteCode was not found." -ReturnObject $ReturnObject -Warning
+            }
+        }
     }
 
     # Remote SQL
@@ -647,10 +657,12 @@ function Test-ValidRoleCSPS {
     }
     else {
         # Local SQL
+        $minMem = 6
+        if ($vmRole -eq "Secondary") { $minMem = 3 }
 
         # Minimum Memory
-        if ($VM.memory / 1 -lt 6GB) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 6GB memory when using local SQL." -ReturnObject $ReturnObject -Failure
+        if ($VM.memory / 1 -lt $minMem * 1GB) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of $($minMem)GB memory." -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -677,14 +689,14 @@ function Test-ValidRoleCSPS {
 
     $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode }
     foreach ($vmWithSiteCode in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary")) {
+        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
             Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
         }
     }
 
     $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $null -ne $_.siteCode }
     foreach ($vmWithSiteCode in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary")) {
+        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
             Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
         }
     }
@@ -916,12 +928,13 @@ function Test-Configuration {
         $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
         $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
         $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
+        $containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
     }
     else {
-        $containsCS = $containsPS = $containsDPMP = $containsPassive = $false
+        $containsCS = $containsPS = $containsDPMP = $containsPassive = $containsSecondary = $false
     }
 
-    $needCMOptions = $containsCS -or $containsPS
+    $needCMOptions = $containsCS -or $containsPS -or $containsDPMP -or $containsPassive -or $containsSecondary
 
     # VM Options
     # ===========
@@ -998,7 +1011,7 @@ function Test-Configuration {
             }
 
             # Validate CAS role
-            Test-ValidRoleCSPS -VM $CSVM -ConfigObject $deployConfig -ReturnObject $return
+            Test-ValidRoleSiteServer -VM $CSVM -ConfigObject $deployConfig -ReturnObject $return
 
         }
 
@@ -1016,7 +1029,7 @@ function Test-Configuration {
 
         if (Test-SingleRole -VM $PSVM -ReturnObject $return) {
 
-            Test-ValidRoleCSPS -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
+            Test-ValidRoleSiteServer -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
 
             # Valid parent Site Code
             if ($psParentSiteCode) {
@@ -1045,6 +1058,21 @@ function Test-Configuration {
             }
 
         }
+    }
+
+    # Secondary Validations
+    # ======================
+    if ($containsSecondary) {
+
+        if ($containsPS) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with Primary Site which is currently not supported. Please add Secondary after building the Primary." -ReturnObject $return -Warning
+        }
+
+        $SecondaryVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+        foreach($SECVM in $SecondaryVMs) {
+            Test-ValidRoleSiteServer -VM $SECVM -ConfigObject $deployConfig -ReturnObject $return
+        }
+
     }
 
     # Passive Validations
