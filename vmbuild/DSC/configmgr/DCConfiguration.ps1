@@ -39,7 +39,7 @@
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
     # Servers for which permissions need to be added to systems management contaienr
-    $waitOnServers = $deployConfig.thisParams.ServersToWaitOn
+    $waitOnDomainJoin = $deployConfig.thisParams.ServersToWaitOn
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -239,11 +239,11 @@
 
         WriteStatus WaitDomainJoin {
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
-            Status    = "Waiting for $($waitOnServers -join ',') to join the domain"
+            Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
         }
 
         $waitOnDependency = @()
-        foreach ($server in $waitOnServers) {
+        foreach ($server in $waitOnDomainJoin) {
 
             VerifyComputerJoinDomain "WaitFor$server" {
                 ComputerName = $server
@@ -267,26 +267,6 @@
             Status    = "Passed"
             Ensure    = "Present"
             DependsOn = $waitOnDependency
-        }
-
-        if ($PSName) {
-            WriteEvent WritePSJoinDomain {
-                LogPath   = $LogPath
-                WriteNode = "PSJoinDomain"
-                Status    = "Passed"
-                Ensure    = "Present"
-                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
-            }
-        }
-
-        if ($CSName) {
-            WriteEvent WriteCSJoinDomain {
-                LogPath   = $LogPath
-                WriteNode = "CSJoinDomain"
-                Status    = "Passed"
-                Ensure    = "Present"
-                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
-            }
         }
 
         if (-not ($PSName -or $CSName)) {
