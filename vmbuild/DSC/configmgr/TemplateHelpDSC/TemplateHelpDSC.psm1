@@ -911,6 +911,7 @@ class WaitForDomainReady {
         while (!$testconnection) {
             Write-Verbose "Waiting for Domain ready , will try again 30 seconds later..."
             ipconfig /renew
+            ipconfig /registerdns
             Start-Sleep -Seconds $_WaitSeconds
             $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         }
@@ -928,6 +929,8 @@ class WaitForDomainReady {
             ipconfig /renew
             return $false
         }
+
+        ipconfig /registerdns
         return $true
     }
 
