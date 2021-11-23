@@ -705,6 +705,28 @@ try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
         if ($testConfigResult.Valid) {
             $deployConfig = $testConfigResult.DeployConfig
+            Add-ExistingVMsToDeployConfig -config $deployConfig
+            $InProgessVMs = @()
+
+            foreach ($thisVM in $deployConfig.virtualMachines) {
+                $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
+                if ($thisVMObject.inProgress -eq $true){
+                    $InProgessVMs += $thisVMObject.vmName
+                }
+
+            }
+            if ($InProgessVMs.Count -gt 0){
+                Write-Host
+                write-host -ForegroundColor Blue "*************************************************************************************************************************************"
+                write-host -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
+                write-log "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
+                write-host
+                write-host -ForegroundColor White "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
+                write-host -ForegroundColor Blue "*************************************************************************************************************************************"
+
+                return
+            }
+
             Write-Log "Config validated successfully." -Success
         }
         else {
@@ -826,12 +848,13 @@ try {
 
 
 
-    Add-ExistingVMsToDeployConfig -config $deployConfig
+
 
     Write-Log "Creating Virtual Machine Deployment Jobs" -Activity
 
     # New scenario
     $CreateVM = $true
+
     foreach ($currentItem in $deployConfig.virtualMachines) {
         $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
         Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
