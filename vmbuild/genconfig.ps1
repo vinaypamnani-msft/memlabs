@@ -1509,6 +1509,11 @@ function Show-ExistingNetwork {
     #    }
     #}
     #
+    if ($role -eq "Secondary"){
+        if (-not $parentSiteCode){
+            return
+        }
+    }
     if ($role -eq "PassiveSite") {
         $existingPassive = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
         $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
@@ -3477,6 +3482,12 @@ function Select-VirtualMachines {
                 $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
 
 
+                if ($role -eq "Secondary"){
+                    if (-not $parentSiteCode)
+                    {
+                        return
+                    }
+                }
                 if ($role -eq "PassiveSite") {
                     $domain = $global:config.vmOptions.DomainName
                     $existingPassive = @()

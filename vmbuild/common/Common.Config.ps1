@@ -1473,15 +1473,6 @@ function Add-PerVMSettings {
     $WaitOnDomainJoin = @()
     #Get the current network from get-list or config
     $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
-    if ($thisVMObject.pending -eq $true){
-        Write-Host
-        write-host
-        write-host -ForegroundColor Blue "*************************************************************************************************************************************"
-        write-host -ForegroundColor Red "          WARNING: $($thisVmObject.vmName) IS CURRENTLY IN A PENDING STATE.  DEPLOYMENT IS LIKELY TO FAIL, OR WORSE"
-        write-host -ForegroundColor White "Press Ctrl-C now to cancel."
-        write-host -ForegroundColor Blue "*************************************************************************************************************************************"
-        Start-Sleep -seconds 15
-    }
     if ($thisVMObject.network) {
         $thisParams | Add-Member -MemberType NoteProperty -Name "network" -Value $thisVMObject.network -Force
     }
@@ -1708,7 +1699,7 @@ function Add-PerVMSettings {
         $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $ThisVM.siteCode -and $_.role -eq "Secondary" -and -not $_.hidden }
 
         if ($SecondaryVM) {
-            $waitOnServers += SecondaryVM.vmName
+            $waitOnServers += $SecondaryVM.vmName
         }
         # If we are deploying a new CAS at the same time, record it for the DSC
         $CASVM = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and $thisVM.ParentSiteCode -eq $_.SiteCode }
