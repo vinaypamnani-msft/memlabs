@@ -1895,6 +1895,10 @@ class OpenFirewallPortForSCCM {
                 New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For WorkgroupMember"
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
+
+                # Force reboot, RDP doesn't seem to work until reboot
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
             }
         }
         $StatusPath = "$env:windir\temp\OpenFirewallStatus.txt"
