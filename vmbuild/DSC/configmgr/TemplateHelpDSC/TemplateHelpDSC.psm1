@@ -347,7 +347,8 @@ class WriteEvent {
             $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
         }
         else {
-            if (-not $this.FileName) { # For named-file, caller must ensure file exists with required nodes.
+            if (-not $this.FileName) {
+                # For named-file, caller must ensure file exists with required nodes.
                 [hashtable]$Actions = @{
                     MachineJoinDomain       = @{
                         Status    = 'NotStart'
@@ -399,7 +400,7 @@ class WriteEvent {
                         StartTime = ''
                         EndTime   = ''
                     }
-                    ReadyForPrimary          = @{
+                    ReadyForPrimary         = @{
                         Status    = 'NotStart'
                         StartTime = ''
                         EndTime   = ''
@@ -1860,7 +1861,7 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'Remote Control(RPC Endpoint Mapper) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM Console"
             New-NetFirewallRule -DisplayName 'Remote Assistance(RDP AND RTC) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For SCCM Console"
         }
-        if ($_Role -contains "DomainMember") {
+        if ($_Role -contains "DomainMember", "WorkgroupMember") {
             #Client Push Installation
             Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
@@ -1880,13 +1881,21 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'CM Remote Control' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2701 -Group "For SCCM Client"
 
             #Wake-Up Proxy
-            New-NetFirewallRule -DisplayName 'Wake-Up Proxy' -Profile Any -Direction Outbound -Action Allow -Protocol UDP -LocalPort (25536, 9) -Group "For SCCM Client"
+            New-NetFirewallRule -DisplayName 'Wake-Up Proxy' -Profile Any -Direction Outbound -Action Allow -Protocol UDP -LocalPort @(25536, 9) -Group "For SCCM Client"
 
             #SUP
-            New-NetFirewallRule -DisplayName 'CM Connect SUP' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort (8530, 8531) -Group "For SCCM Client"
+            New-NetFirewallRule -DisplayName 'CM Connect SUP' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(8530, 8531) -Group "For SCCM Client"
 
             #enable firewall public profile
-            Set-NetFirewallProfile -Profile Public -Enabled True
+            if ($_.Role -eq "DomainMember") {
+                Set-NetFirewallProfile -Profile Public -Enabled True
+            }
+
+            if ($_.Role -eq "WorkgroupMember") {
+                New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For WorkgroupMember"
+                New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
+                New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
+            }
         }
         $StatusPath = "$env:windir\temp\OpenFirewallStatus.txt"
         "Finished" >> $StatusPath

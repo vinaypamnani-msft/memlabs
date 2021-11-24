@@ -133,13 +133,24 @@
             DependsOn = "[File]ShareFolder"
         }
 
+        WriteStatus OpenPorts {
+            DependsOn = "[FileReadAccessShare]SMBShare"
+            Status    = "Open required firewall ports"
+        }
+
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
             DependsOn = "[FileReadAccessShare]SMBShare"
         }
 
+        OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
+            Name      = "WorkgroupMember"
+            Role      = "WorkgroupMember"
+        }
+
         WriteStatus Complete {
-            DependsOn = "[FileReadAccessShare]SMBShare"
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
             Status    = "Complete!"
         }
 
