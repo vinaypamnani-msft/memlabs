@@ -256,18 +256,20 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
         }
 
-        $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) | Select-Object -First 1 }
+        $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network)}
         if ($existingSubnet) {
-            if ($($ConfigObject.vmoptions.domainName) -ne $($existingSubnet.Domain)) {
+            if (-not ($($ConfigObject.vmoptions.domainName) -in $($existingSubnet.Domain))) {
                 Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
             }
-            $CASorPRIorSEC = ($ConfigObject.virtualMachines.role -contains "CAS") -or (($ConfigObject.virtualMachines.role -contains "Primary")) -or (($ConfigObject.virtualMachines.role -contains "Secondary"))
+
+            $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object {$_.role -in "CAS","Primary","Secondary"})
             if ($CASorPRIorSEC) {
                 $existingCASorPRIorSEC = @()
-                $existingCASorPRIorSEC += Get-List -Type VM | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -eq "CAS") -or ($_.Role -eq "Primary") -or ($_.Role -eq "Secondary") }
-                if ($existingCASorPRI.Count -gt 0) {
+                $existingCASorPRIorSEC += Get-List -Type VM | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
+                if ($existingCASorPRIorSEC.Count -gt 0) {
                     Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
                 }
+
             }
         }
 
