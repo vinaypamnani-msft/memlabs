@@ -256,13 +256,13 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
         }
 
-        $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network)}
+        $existingSubnet = Get-List -Type Subnet | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) }
         if ($existingSubnet) {
             if (-not ($($ConfigObject.vmoptions.domainName) -in $($existingSubnet.Domain))) {
                 Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
             }
 
-            $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object {$_.role -in "CAS","Primary","Secondary"})
+            $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" })
             if ($CASorPRIorSEC) {
                 $existingCASorPRIorSEC = @()
                 $existingCASorPRIorSEC += Get-List -Type VM | Where-Object { $_.Subnet -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
@@ -1073,8 +1073,14 @@ function Test-Configuration {
     if ($containsSecondary) {
 
         $SecondaryVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
-        foreach ($SECVM in $SecondaryVMs) {
-            Test-ValidRoleSiteServer -VM $SECVM -ConfigObject $deployConfig -ReturnObject $return
+
+        if (Test-SingleRole -VM $SecondaryVMs -ReturnObject $return) {
+
+            # Prep for multi-subnet, but blocked right now by Test-SingleRole
+            foreach ($SECVM in $SecondaryVMs) {
+                Test-ValidRoleSiteServer -VM $SECVM -ConfigObject $deployConfig -ReturnObject $return
+            }
+
         }
 
     }
@@ -1786,7 +1792,7 @@ function Add-PerVMSettings {
         $thisParams | Add-Member -MemberType NoteProperty -Name "LocalAdminAccounts" -Value $LocalAdminAccounts -Force
     }
 
-#    $thisParams | ConvertTo-Json -Depth 4 | out-Host
+    #    $thisParams | ConvertTo-Json -Depth 4 | out-Host
     $deployConfig | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $thisParams -Force
 }
 
