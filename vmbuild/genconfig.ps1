@@ -2179,9 +2179,9 @@ Function Get-ParentSiteCodeMenu {
         $casSiteCodes = Get-ValidCASSiteCodes -config $global:config -domain $Domain
 
         $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
-        while (-not $result) {
+        do {
             $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to" -OptionArray $casSiteCodes -CurrentValue $CurrentValue -additionalOptions $additionalOptions -Test:$false
-        }
+        } while (-not $result)
         if ($result.ToLowerInvariant() -eq "x") {
             return $null
         }
@@ -2195,9 +2195,9 @@ Function Get-ParentSiteCodeMenu {
             write-Host "No valid primaries available to connect secondary to."
             return $null
         }
-        while (-not $result) {
+        do {
             $result = Get-Menu -Prompt "Select Primary sitecode to connect secondary to" -OptionArray $priSiteCodes -CurrentValue $CurrentValue -Test:$false
-        }
+        } while (-not $result)
         return $result
     }
     return $null
