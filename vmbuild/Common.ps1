@@ -1667,6 +1667,20 @@ function Set-SupportedOptions {
 
 }
 
+###################
+### GIT BRANCH  ###
+###################
+$currentBranch = (& git branch) -match '\*'
+$devBranch = $false
+if ($currentBranch -and $currentBranch -notmatch "main") {
+    $devBranch = $true
+}
+
+# Set-StrictMode -Off
+# if ($devBranch) {
+#     Set-StrictMode -Version 1.0
+# }
+
 ####################
 ### DOT SOURCING ###
 ####################
@@ -1688,13 +1702,6 @@ if (-not $Common.Initialized) {
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
     $desktopPath = [Environment]::GetFolderPath("Desktop")
-
-    # Git Branch
-    $currentBranch = (& git branch) -match '\*'
-    $devBranch = $false
-    if ($currentBranch -and $currentBranch -notmatch "main") {
-        $devBranch = $true
-    }
 
     # Common global props
     $global:Common = [PSCustomObject]@{
