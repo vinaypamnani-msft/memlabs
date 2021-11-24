@@ -68,6 +68,8 @@
         $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
     }
 
+    $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+
     $CurrentRole = "CAS"
 
 
