@@ -1786,7 +1786,7 @@ function Add-PerVMSettings {
         $thisParams | Add-Member -MemberType NoteProperty -Name "LocalAdminAccounts" -Value $LocalAdminAccounts -Force
     }
 
-    $thisParams | ConvertTo-Json -Depth 4 | out-Host
+#    $thisParams | ConvertTo-Json -Depth 4 | out-Host
     $deployConfig | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $thisParams -Force
 }
 
