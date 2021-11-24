@@ -1861,7 +1861,7 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'Remote Control(RPC Endpoint Mapper) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM Console"
             New-NetFirewallRule -DisplayName 'Remote Assistance(RDP AND RTC) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For SCCM Console"
         }
-        if ($_Role -contains "DomainMember", "WorkgroupMember") {
+        if ($_Role -contains "DomainMember" -or $_Role -contains "WorkgroupMember") {
             #Client Push Installation
             Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
@@ -1887,11 +1887,11 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'CM Connect SUP' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(8530, 8531) -Group "For SCCM Client"
 
             #enable firewall public profile
-            if ($_.Role -eq "DomainMember") {
+            if ($_Role -notcontains "WorkgroupMember") {
                 Set-NetFirewallProfile -Profile Public -Enabled True
             }
 
-            if ($_.Role -eq "WorkgroupMember") {
+            if ($_Role -contains "WorkgroupMember") {
                 New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For WorkgroupMember"
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
