@@ -1,4 +1,4 @@
-﻿configuration CASConfiguration
+configuration SecondaryConfiguration
 {
     param
     (
@@ -16,30 +16,16 @@
     $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
-    $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
-    $PSName = $deployConfig.thisParams.PrimaryVM.vmName
 
+    # Passive Site Config Props
+    $PSName = $deployConfig.thisParams.PrimarySiteServer.vmName
 
-    if ($deployConfig.thisParams.PassiveVM){
-        $containsPassive = $true
-        $PassiveVM = $deployConfig.thisParams.PassiveVM
-    }
-
-    # Domain Admin User name
-    $DomainAdminName = $deployConfig.vmOptions.adminName
-
-    # CM Options
-    $InstallConfigMgr = $deployConfig.cmOptions.install
-
-    # SQL Instance Location
-    if ($ThisVM.remoteSQLVM) {
-        $installSQL = $false
-    }
-    else {
-        # SQL Instance Location
+    # SQL Setup
+    $installSQL = $false
+    $sqlUpdateEnabled = $false
+    if ($ThisVM.sqlVersion) {
         $installSQL = $true
-        $sqlUpdateEnabled = $false
         $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
         $SQLInstanceName = "MSSQLSERVER"
         if ($ThisVM.sqlInstanceDir) {
@@ -63,22 +49,8 @@
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
 
-    # CM Files folder/share
-    $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-
-    # ConfigMgr Display version
-    if ($CM -eq "CMTP") {
-        $CMDownloadStatus = "Downloading Configuration Manager technical preview"
-    }
-    else {
-        $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
-    }
-
-    $CurrentRole = "CAS"
-
-
+    # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
-    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
     Node LOCALHOST
     {
@@ -119,7 +91,7 @@
         }
 
         InstallFeatureForSCCM InstallFeature {
-            NAME      = $CurrentRole
+            NAME      = "Primary"
             Role      = "Site Server"
             DependsOn = "[SetCustomPagingFile]PagingSettings"
         }
@@ -152,14 +124,9 @@
             Status    = "Open required firewall ports"
         }
 
-        AddNtfsPermissions AddNtfsPerms {
-            Ensure    = "Present"
-            DependsOn = "[JoinDomain]JoinDomain"
-        }
-
         OpenFirewallPortForSCCM OpenFirewall {
-            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
-            Name      = $CurrentRole
+            DependsOn = "[JoinDomain]JoinDomain"
+            Name      = "Primary"
             Role      = "Site Server"
         }
 
@@ -195,24 +162,12 @@
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
         }
 
-        WriteStatus ADKInstall {
-            DependsOn = "[WriteEvent]WriteJoinDomain"
-            Status    = "Downloading and installing ADK"
-        }
-
-        InstallADK ADKInstall {
-            ADKPath      = "C:\temp\adksetup.exe"
-            ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-            Ensure       = "Present"
-            DependsOn    = "[OpenFirewallPortForSCCM]OpenFirewall"
-        }
-
         if ($installSQL) {
 
             if ($sqlUpdateEnabled) {
 
                 WriteStatus DownloadSQLCU {
-                    DependsOn = '[InstallADK]ADKInstall'
+                    DependsOn = '[WriteEvent]WriteJoinDomain'
                     Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
                 }
 
@@ -232,7 +187,7 @@
             }
             else {
                 WriteStatus WaitDomainJoin {
-                    DependsOn = '[InstallADK]ADKInstall'
+                    DependsOn = '[WriteEvent]WriteJoinDomain'
                     Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
                 }
             }
@@ -319,7 +274,7 @@
                 SQLInstanceName = $SQLInstanceName
                 SQLInstancePort = 2433
                 Ensure          = "Present"
-                DependsOn       = "[SqlMemory]SetSqlMemory"
+                DependsOn       = "[WriteStatus]ChangeToLocalSystem"
             }
 
             ChangeSQLServicesAccount ChangeToLocalSystem {
@@ -328,19 +283,22 @@
                 DependsOn       = "[ChangeSqlInstancePort]SqlInstancePort"
             }
 
-            WriteStatus SSMS {
+            AddNtfsPermissions AddNtfsPerms {
+                Ensure    = "Present"
                 DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-                Status    = "Downloading and installing SQL Management Studio"
             }
 
         }
         else {
-
-            WriteStatus SSMS {
-                DependsOn = '[InstallADK]ADKInstall'
-                Status    = "Downloading and installing SQL Management Studio"
+            AddNtfsPermissions AddNtfsPerms {
+                Ensure    = "Present"
+                DependsOn = '[WriteEvent]WriteJoinDomain'
             }
+        }
 
+        WriteStatus SSMS {
+            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
+            Status    = "Downloading and installing SQL Management Studio"
         }
 
         InstallSSMS SSMS {
@@ -349,71 +307,9 @@
             DependsOn   = "[WriteStatus]SSMS"
         }
 
-        WriteStatus DownLoadSCCM {
+        WriteStatus WaitDelegate {
             DependsOn = "[InstallSSMS]SSMS"
-            Status    = $CMDownloadStatus
-        }
-
-        DownloadSCCM DownLoadSCCM {
-            CM        = $CM
-            Ensure    = "Present"
-            DependsOn = "[WriteStatus]DownLoadSCCM"
-        }
-
-        WriteStatus AddLocalAdmins {
-            DependsOn = "[DownloadSCCM]DownLoadSCCM"
-            Status    = "Adding $($deployConfig.thisParams.LocalAdminAccounts -join ',') accounts to Local Administrators group"
-        }
-
-        $addUserDependancy = @('[DownloadSCCM]DownLoadSCCM')
-        $i = 0
-        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
-            $i++
-            $NodeName = "AddADUserToLocalAdminGroup$($i)"
-            AddUserToLocalAdminGroup "$NodeName" {
-                Name       = $user
-                DomainName = $DomainName
-                DependsOn  = "[DownloadSCCM]DownLoadSCCM"
-            }
-            $addUserDependancy += "[AddUserToLocalAdminGroup]$NodeName"
-        }
-
-        FileReadAccessShare CMSourceSMBShare {
-            Name      = $CM
-            Path      = "c:\$CM"
-            DependsOn = $addUserDependancy
-        }
-
-        # There's a passive site server in config
-        if ($containsPassive) {
-
-            WriteStatus WaitPassive {
-                DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
-                Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to be ready"
-            }
-
-            WaitForEvent WaitPassive {
-                MachineName   = $PassiveVM.vmName
-                LogFolder     = $LogFolder
-                ReadNode      = "PassiveReady"
-                ReadNodeValue = "Passed"
-                Ensure        = "Present"
-                DependsOn     = "[WriteStatus]WaitPassive"
-            }
-
-            WriteStatus WaitDelegate {
-                DependsOn = "[WaitForEvent]WaitPassive"
-                Status    = "Wait for DC to assign permissions to Systems Management container"
-            }
-
-        }
-        else {
-
-            WriteStatus WaitDelegate {
-                DependsOn = "[FileReadAccessShare]CMSourceSMBShare"
-                Status    = "Wait for DC to assign permissions to Systems Management container"
-            }
-
+            Status    = "Wait for DC to assign permissions to Systems Management container"
         }
 
         WaitForEvent DelegateControl {
@@ -422,75 +318,48 @@
             ReadNode      = "DelegateControl"
             ReadNodeValue = "Passed"
             Ensure        = "Present"
-            DependsOn     = "[WriteStatus]WaitDelegate"
+            DependsOn     = "[InstallSSMS]SSMS"
         }
 
-        if ($InstallConfigMgr) {
-
-            if ($installSQL) {
-
-                WriteStatus RunScriptWorkflow {
-                    DependsOn = "[WaitForEvent]DelegateControl"
-                    Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
-                }
-
+        $addUserDependancy = @()
+        $i = 0
+        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
+            $i++
+            $NodeName = "AddADUserToLocalAdminGroup$($i)"
+            AddUserToLocalAdminGroup "$NodeName" {
+                Name       = $user
+                DomainName = $DomainName
+                DependsOn  = "[WaitForEvent]DelegateControl"
             }
-            else {
-
-                # Wait for SQLVM
-                WriteStatus WaitSQL {
-                    DependsOn = "[WaitForEvent]DelegateControl"
-                    Status    = "Waiting for remote SQL VM $($ThisVM.remoteSQLVM) to finish configuration."
-                }
-
-                WaitForEvent WaitSQL {
-                    MachineName   = $ThisVM.remoteSQLVM
-                    LogFolder     = $LogFolder
-                    ReadNode      = "ConfigurationFinished"
-                    ReadNodeValue = "Passed"
-                    Ensure        = "Present"
-                    DependsOn     = "[WaitForEvent]DelegateControl"
-                }
-
-                WriteStatus RunScriptWorkflow {
-                    DependsOn = "[WaitForEvent]WaitSQL"
-                    Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
-                }
-
-            }
-
-            RegisterTaskScheduler RunScriptWorkflow {
-                TaskName       = "ScriptWorkFlow"
-                ScriptName     = "ScriptWorkFlow.ps1"
-                ScriptPath     = $PSScriptRoot
-                ScriptArgument = "$ConfigFilePath $LogPath"
-                AdminCreds     = $CMAdmin
-                Ensure         = "Present"
-                DependsOn      = "[WriteStatus]RunScriptWorkflow"
-            }
-
-            WaitForEvent WorkflowComplete {
-                FileName      = "ScriptWorkflow"
-                MachineName   = $ThisMachineName
-                LogFolder     = $LogFolder
-                ReadNode      = "ScriptWorkflow"
-                ReadNodeValue = "Completed"
-                Ensure        = "Present"
-                DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
-            }
-
-            WriteStatus Complete {
-                DependsOn = "[WaitForEvent]WorkflowComplete"
-                Status    = "Complete!"
-            }
-
+            $addUserDependancy += "[AddUserToLocalAdminGroup]$NodeName"
         }
 
-        else {
-            WriteStatus Complete {
-                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-                Status    = "Complete!"
-            }
+        WriteEvent ReadyForPrimary {
+            LogPath   = $LogPath
+            WriteNode = "ReadyForPrimary"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = $addUserDependancy
+        }
+
+        WriteStatus WaitPrimary {
+            DependsOn = "[WriteEvent]ReadyForPrimary"
+            Status    = "Waiting for Site Server $PSName to finish configuration."
+        }
+
+        WaitForEvent WaitPrimary {
+            MachineName   = $PSName
+            LogFolder     = $LogFolder
+            FileName      = "ScriptWorkflow"
+            ReadNode      = "ScriptWorkflow"
+            ReadNodeValue = "Completed"
+            Ensure        = "Present"
+            DependsOn     = "[WriteStatus]WaitPrimary"
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WaitForEvent]WaitPrimary"
+            Status    = "Complete!"
         }
 
         WriteEvent WriteConfigFinished {
@@ -500,5 +369,7 @@
             Ensure    = "Present"
             DependsOn = "[WriteStatus]Complete"
         }
+
     }
+
 }

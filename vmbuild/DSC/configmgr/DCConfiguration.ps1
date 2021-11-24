@@ -13,34 +13,23 @@
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
-    $PSName = $deployConfig.parameters.PSName
-    $CSName = $deployConfig.parameters.CSName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
+    $PSName = $deployConfig.thisParams.PSName
+    $CSName = $deployConfig.thisParams.CSName
 
     $DHCP_DNSAddress = $deployConfig.parameters.DHCPDNSAddress
     $DHCP_DefaultGateway = $deployConfig.parameters.DHCPDefaultGateway
-    $DHCP_ScopeId = $deployConfig.parameters.DHCPScopeId
-    $Configuration = $deployConfig.parameters.Scenario
 
     $setNetwork = $true
-    if ($deployConfig.parameters.ExistingDCName) {
+    if ($ThisVM.hidden) {
         $setNetwork = $false
     }
 
-    # AD Site Name
-    if ($PSName) {
-        $PSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PSName }
-        if ($PSVM) { $ADSiteName = $PSVM.siteCode }
-    }
-
-    if (-not $ADSiteName) {
-        $ADSiteName = "vmbuild"
-    }
-
-    # Domain Admin User name
-    $DomainAdminName = $deployConfig.vmOptions.adminName
+    # AD Sites
+    $adsites = $deployConfig.thisParams.sitesAndNetworks
 
     # Define log share
     $LogFolder = "DSC"
@@ -49,16 +38,8 @@
     # CM Files folder/share
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
-    # Passive Site
-    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
-    if ($containsPassive) {
-        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-    }
-
-    $waitOnServers = @()
-    if ($PSName) { $waitOnServers += $PSName }
-    if ($PassiveVM) { $waitOnServers += $PassiveVM.vmName }
-    if ($CSName) { $waitOnServers += $CSName }
+    # Servers for which permissions need to be added to systems management contaienr
+    $waitOnDomainJoin = $deployConfig.thisParams.ServersToWaitOn
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -154,23 +135,30 @@
             DependsOn        = "[ADUser]Admin"
         }
 
-        ADReplicationSite ADSite {
-            Ensure    = 'Present'
-            Name      = $ADSiteName
-            DependsOn = "[ADGroup]AddToSchemaAdmin"
-        }
+        $adSiteDependency = @()
+        $i = 0
+        foreach ($site in $adsites) {
+            $i++
+            ADReplicationSite "ADSite$($i)" {
+                Ensure    = 'Present'
+                Name      = $site.SiteCode
+                DependsOn = "[ADGroup]AddToSchemaAdmin"
+            }
 
-        ADReplicationSubnet ADSubnet {
-            Name        = "$DHCP_ScopeId/24"
-            Site        = $ADSiteName
-            Location    = $ADSiteName
-            Description = 'Created by vmbuild'
-            DependsOn   = "[ADReplicationSite]ADSite"
+            ADReplicationSubnet "ADSubnet$($i)" {
+                Name        = "$($site.Subnet)/24"
+                Site        = $site.SiteCode
+                Location    = $site.SiteCode
+                Description = 'Created by vmbuild'
+                DependsOn   = "[ADReplicationSite]ADSite$($i)"
+            }
+
+            $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
         }
 
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = "[ADReplicationSubnet]ADSubnet"
+            DependsOn = $adSiteDependency
         }
 
         OpenFirewallPortForSCCM OpenFirewall {
@@ -251,11 +239,11 @@
 
         WriteStatus WaitDomainJoin {
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
-            Status    = "Waiting for $($waitOnServers -join ',') to join the domain"
+            Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
         }
 
         $waitOnDependency = @()
-        foreach ($server in $waitOnServers) {
+        foreach ($server in $waitOnDomainJoin) {
 
             VerifyComputerJoinDomain "WaitFor$server" {
                 ComputerName = $server
@@ -273,8 +261,7 @@
             $waitOnDependency += "[DelegateControl]Add$server"
         }
 
-        WriteConfigurationFile WriteDelegateControlfinished {
-            Role      = "DC"
+        WriteEvent WriteDelegateControlfinished {
             LogPath   = $LogPath
             WriteNode = "DelegateControl"
             Status    = "Passed"
@@ -282,32 +269,10 @@
             DependsOn = $waitOnDependency
         }
 
-        if ($PSName) {
-            WriteConfigurationFile WritePSJoinDomain {
-                Role      = "DC"
-                LogPath   = $LogPath
-                WriteNode = "PSJoinDomain"
-                Status    = "Passed"
-                Ensure    = "Present"
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
-            }
-        }
-
-        if ($CSName) {
-            WriteConfigurationFile WriteCSJoinDomain {
-                Role      = "DC"
-                LogPath   = $LogPath
-                WriteNode = "CSJoinDomain"
-                Status    = "Passed"
-                Ensure    = "Present"
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
-            }
-        }
-
         if (-not ($PSName -or $CSName)) {
 
             WriteStatus Complete {
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
                 Status    = "Complete!"
             }
 
@@ -315,15 +280,15 @@
         else {
 
             WriteStatus WaitExtSchema {
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
                 Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = if ($Configuration -eq 'Standalone') { $PSName } else { $CSName }
+                MachineName = if ($CSName) { $CSName } else { $PSName }
                 ExtFolder   = $CM
                 Ensure      = "Present"
-                DependsOn   = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn   = "[WriteEvent]WriteDelegateControlfinished"
             }
 
             WriteStatus Complete {
@@ -331,6 +296,14 @@
                 Status    = "Complete!"
             }
 
+        }
+
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
         }
     }
 }

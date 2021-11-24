@@ -298,12 +298,13 @@ class InstallAndConfigWSUS {
 }
 
 [DscResource()]
-class WriteConfigurationFile {
-    [DscProperty(Key)]
-    [string] $Role
+class WriteEvent {
 
     [DscProperty(Mandatory)]
     [string] $LogPath
+
+    [DscProperty(Mandatory = $false)]
+    [string] $FileName
 
     [DscProperty(Key)]
     [string] $WriteNode
@@ -318,11 +319,14 @@ class WriteConfigurationFile {
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
-        $_Role = $this.Role
+        $_FileName = "DSC_Events"
+        if ($this.FileName) {
+            $_FileName = $this.FileName
+        }
         $_Node = $this.WriteNode
         $_Status = $this.Status
         $_LogPath = $this.LogPath
-        $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_Role.json"
+        $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_FileName.json"
         $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
         $Configuration.$_Node.Status = $_Status
@@ -332,93 +336,110 @@ class WriteConfigurationFile {
     }
 
     [bool] Test() {
-        $_Role = $this.Role
+        $_FileName = "DSC_Events"
+        if ($this.FileName) {
+            $_FileName = $this.FileName
+        }
         $_LogPath = $this.LogPath
         $Configuration = ""
-        $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_Role.json"
+        $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_FileName.json"
         if (Test-Path -Path $ConfigurationFile) {
             $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
         }
         else {
-            [hashtable]$Actions = @{
-                MachineJoinDomain       = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
+            if (-not $this.FileName) {
+                # For named-file, caller must ensure file exists with required nodes.
+                [hashtable]$Actions = @{
+                    MachineJoinDomain       = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    CSJoinDomain            = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    PSJoinDomain            = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DPMPJoinDomain          = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DomainMemberJoinDomain  = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DelegateControl         = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    SCCMinstall             = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DPMPFinished            = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    DomainMemberFinished    = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    PassiveReady            = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    ReadyForPrimary         = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    WorkgroupMemberFinished = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
+                    ConfigurationFinished   = @{
+                        Status    = 'NotStart'
+                        StartTime = ''
+                        EndTime   = ''
+                    }
                 }
-                CSJoinDomain            = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                PSJoinDomain            = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DPMPJoinDomain          = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DomainMemberJoinDomain  = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DelegateControl         = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                SCCMinstall             = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DPMPFinished            = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                DomainMemberFinished    = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                PassiveReady            = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
-                WorkgroupMemberFinished = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
+                $Configuration = New-Object -TypeName psobject -Property $Actions
+                $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
             }
-            $Configuration = New-Object -TypeName psobject -Property $Actions
-            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
         }
 
         return $false
     }
 
-    [WriteConfigurationFile] Get() {
+    [WriteEvent] Get() {
         return $this
     }
 }
 
 [DscResource()]
-class WaitForConfigurationFile {
-    [DscProperty(Key)]
-    [string] $Role
+class WaitForEvent {
 
     [DscProperty(Key)]
     [string] $MachineName
 
     [DscProperty(Mandatory)]
     [string] $LogFolder
+
+    [DscProperty(Mandatory = $false)]
+    [string] $FileName
 
     [DscProperty(Key)]
     [string] $ReadNode
@@ -433,14 +454,18 @@ class WaitForConfigurationFile {
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
-        $_Role = $this.Role
+        $_FileName = "DSC_Events"
+        if ($this.FileName) {
+            $_FileName = $this.FileName
+        }
+
         $_FilePath = "\\$($this.MachineName)\$($this.LogFolder)"
-        $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
+        $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
 
         while (!(Test-Path $ConfigurationFile)) {
             Write-Verbose "Wait for configuration file to exist on $($this.MachineName), will try 60 seconds later..."
             Start-Sleep -Seconds 60
-            $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
+            $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
         }
 
         $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
@@ -452,9 +477,12 @@ class WaitForConfigurationFile {
     }
 
     [bool] Test() {
-        $_Role = $this.Role
+        $_FileName = "DSC_Events"
+        if ($this.FileName) {
+            $_FileName = $this.FileName
+        }
         $_FilePath = "\\$($this.MachineName)\$($this.LogFolder)"
-        $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_Role.json"
+        $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
 
         if (!(Test-Path $ConfigurationFile)) { return $false }
 
@@ -467,7 +495,7 @@ class WaitForConfigurationFile {
 
     }
 
-    [WaitForConfigurationFile] Get() {
+    [WaitForEvent] Get() {
         return $this
     }
 }
@@ -884,6 +912,7 @@ class WaitForDomainReady {
         while (!$testconnection) {
             Write-Verbose "Waiting for Domain ready , will try again 30 seconds later..."
             ipconfig /renew
+            ipconfig /registerdns
             Start-Sleep -Seconds $_WaitSeconds
             $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         }
@@ -901,6 +930,8 @@ class WaitForDomainReady {
             ipconfig /renew
             return $false
         }
+
+        ipconfig /registerdns
         return $true
     }
 
@@ -1830,7 +1861,7 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'Remote Control(RPC Endpoint Mapper) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM Console"
             New-NetFirewallRule -DisplayName 'Remote Assistance(RDP AND RTC) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For SCCM Console"
         }
-        if ($_Role -contains "DomainMember") {
+        if ($_Role -contains "DomainMember" -or $_Role -contains "WorkgroupMember") {
             #Client Push Installation
             Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
@@ -1850,13 +1881,25 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'CM Remote Control' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2701 -Group "For SCCM Client"
 
             #Wake-Up Proxy
-            New-NetFirewallRule -DisplayName 'Wake-Up Proxy' -Profile Any -Direction Outbound -Action Allow -Protocol UDP -LocalPort (25536, 9) -Group "For SCCM Client"
+            New-NetFirewallRule -DisplayName 'Wake-Up Proxy' -Profile Any -Direction Outbound -Action Allow -Protocol UDP -LocalPort @(25536, 9) -Group "For SCCM Client"
 
             #SUP
-            New-NetFirewallRule -DisplayName 'CM Connect SUP' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort (8530, 8531) -Group "For SCCM Client"
+            New-NetFirewallRule -DisplayName 'CM Connect SUP' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(8530, 8531) -Group "For SCCM Client"
 
             #enable firewall public profile
-            Set-NetFirewallProfile -Profile Public -Enabled True
+            if ($_Role -notcontains "WorkgroupMember") {
+                Set-NetFirewallProfile -Profile Public -Enabled True
+            }
+
+            if ($_Role -contains "WorkgroupMember") {
+                New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For WorkgroupMember"
+                New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
+                New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
+
+                # Force reboot, RDP doesn't seem to work until reboot
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
+            }
         }
         $StatusPath = "$env:windir\temp\OpenFirewallStatus.txt"
         "Finished" >> $StatusPath

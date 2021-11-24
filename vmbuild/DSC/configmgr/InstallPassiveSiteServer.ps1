@@ -223,15 +223,20 @@ do {
     }
 
     $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 2 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+
     if ($state) {
         Write-DscStatus "Adding passive site server on $passiveFQDN`: $($state.SubStageName)" -RetrySeconds 60
     }
 
-    if (0 -eq $i % 10 -and (-not $state)) {
-        Write-DscStatus "No Progress after $i tries, Adding passive site server again on $passiveFQDN`: $($state.SubStageName)"
-        Add-CMPassiveSite -InstallDirectory $SMSInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
+    if (-not $state) {
+        if (0 -eq $i % 10) {
+            Write-DscStatus "No Progress for adding passive site server reported after $($i * 30) seconds, restarting SMS_Executive"
+            Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 60
+        }
+
         if ($i -gt 31) {
-            Write-DscStatus "No Progress for adding passive site server after $i tries, giving up." -Falure
+            Write-DscStatus "No Progress for adding passive site server reported after $($i * 30) seconds, giving up." -Failure
             $installFailure = $true
         }
     }

@@ -10,7 +10,7 @@ $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
-$CSName = $deployConfig.parameters.CSName
+$CSName = $deployConfig.thisParams.CSName
 
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"

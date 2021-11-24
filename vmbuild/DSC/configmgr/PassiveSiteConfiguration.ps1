@@ -13,17 +13,14 @@ configuration PassiveSiteConfiguration
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
     $DCName = $deployConfig.parameters.DCName
 
     # Passive Site Config Props
     $ContentLibVMName = $ThisVM.remoteContentLibVM
-    $ActiveVMName = $deployConfig.parameters.ActiveVMName
-    if (-not $ActiveVMName) {
-        $ActiveVMName = $deployConfig.parameters.ExistingActiveName
-    }
+    $ActiveVMName = $deployConfig.thisParams.ActiveNodeVM.vmName
 
     # Log share
     $LogFolder = "DSC"
@@ -134,8 +131,7 @@ configuration PassiveSiteConfiguration
             DependsOn = "[File]ShareFolder"
         }
 
-        WriteConfigurationFile WriteJoinDomain {
-            Role      = "PassiveSite"
+        WriteEvent WriteJoinDomain {
             LogPath   = $LogPath
             WriteNode = "MachineJoinDomain"
             Status    = "Passed"
@@ -145,7 +141,7 @@ configuration PassiveSiteConfiguration
 
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = "[WriteConfigurationFile]WriteJoinDomain"
+            DependsOn = "[WriteEvent]WriteJoinDomain"
         }
 
         WriteStatus ADKInstall {
@@ -177,8 +173,7 @@ configuration PassiveSiteConfiguration
             Status    = "Wait for DC to assign permissions to Systems Management container"
         }
 
-        WaitForConfigurationFile DelegateControl {
-            Role          = "DC"
+        WaitForEvent DelegateControl {
             MachineName   = $DCName
             LogFolder     = $LogFolder
             ReadNode      = "DelegateControl"
@@ -188,44 +183,49 @@ configuration PassiveSiteConfiguration
         }
 
         WriteStatus WaitFS {
-            DependsOn = "[WaitForConfigurationFile]DelegateControl"
+            DependsOn = "[WaitForEvent]DelegateControl"
             Status    = "Waiting for Content Lib VM $ContentLibVMName to finish configuration."
         }
 
-        AddUserToLocalAdminGroup AddActiveLocalAdmin {
-            Name       = "$ActiveVMName$"
-            DomainName = $DomainName
-            DependsOn  = "[WaitForConfigurationFile]DelegateControl"
+        $addUserDependancy = @()
+        $i = 0
+        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
+            $i++
+            $NodeName = "AddADUserToLocalAdminGroup$($i)"
+            AddUserToLocalAdminGroup "$NodeName" {
+                Name       = $user
+                DomainName = $DomainName
+                DependsOn  = "[WaitForEvent]DelegateControl"
+            }
+            $addUserDependancy += "[AddUserToLocalAdminGroup]$NodeName"
         }
 
-        WaitForConfigurationFile WaitFS {
-            Role          = "DomainMember"
+        WaitForEvent WaitFS {
             MachineName   = $ContentLibVMName
             LogFolder     = $LogFolder
-            ReadNode      = "DomainMemberFinished"
+            ReadNode      = "ConfigurationFinished"
             ReadNodeValue = "Passed"
             Ensure        = "Present"
-            DependsOn     = "[AddUserToLocalAdminGroup]AddActiveLocalAdmin"
+            DependsOn     = $addUserDependancy
         }
 
-        WriteConfigurationFile WritePassiveReady {
-            Role      = "PassiveSite"
+        WriteEvent WritePassiveReady {
             LogPath   = $LogPath
             WriteNode = "PassiveReady"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WaitForConfigurationFile]WaitFS"
+            DependsOn = "[WaitForEvent]WaitFS"
         }
 
         WriteStatus WaitActive {
-            DependsOn = "[WriteConfigurationFile]WritePassiveReady"
+            DependsOn = "[WriteEvent]WritePassiveReady"
             Status    = "Waiting for Site Server $ActiveVMName to finish configuration."
         }
 
-        WaitForConfigurationFile WaitActive {
-            Role          = "ScriptWorkflow"
+        WaitForEvent WaitActive {
             MachineName   = $ActiveVMName
             LogFolder     = $LogFolder
+            FileName      = "ScriptWorkflow"
             ReadNode      = "ScriptWorkflow"
             ReadNodeValue = "Completed"
             Ensure        = "Present"
@@ -233,8 +233,16 @@ configuration PassiveSiteConfiguration
         }
 
         WriteStatus Complete {
-            DependsOn = "[WaitForConfigurationFile]WaitActive"
+            DependsOn = "[WaitForEvent]WaitActive"
             Status    = "Complete!"
+        }
+
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
         }
 
     }

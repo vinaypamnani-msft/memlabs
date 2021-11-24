@@ -133,23 +133,33 @@
             DependsOn = "[File]ShareFolder"
         }
 
+        WriteStatus OpenPorts {
+            DependsOn = "[FileReadAccessShare]SMBShare"
+            Status    = "Open required firewall ports"
+        }
+
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
             DependsOn = "[FileReadAccessShare]SMBShare"
         }
 
-        WriteConfigurationFile WriteWorkgroupMemberFinished {
+        OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
+            Name      = "WorkgroupMember"
             Role      = "WorkgroupMember"
-            LogPath   = $LogPath
-            WriteNode = "WorkgroupMemberFinished"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = "[FileReadAccessShare]SMBShare"
         }
 
         WriteStatus Complete {
-            DependsOn = "[WriteConfigurationFile]WriteWorkgroupMemberFinished"
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
             Status    = "Complete!"
+        }
+
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
         }
     }
 }

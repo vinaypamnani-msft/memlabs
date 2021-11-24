@@ -14,24 +14,11 @@
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
     $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
-
-    if ($ThisVm.siteCode) {
-        $PSName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-        $PSPassiveName = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-        if (-not $PSPassiveName) {
-            $PSPassiveName = ($deployConfig.existingVMs | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }).vmName
-        }
-    }
-
-    if (-not $PSName) {
-        $PSName = $deployConfig.parameters.PSName
-    }
-    $CSName = $deployConfig.parameters.CSName
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Server OS?
@@ -46,10 +33,6 @@
         $IsServerOS = $false
     }
 
-    # Domain Admin Name
-    $DomainAdminName = $deployConfig.vmOptions.adminName
-    $cm_admin = "$DNAME\$DomainAdminName"
-
     # SQL Setup
     $installSQL = $false
     $sqlUpdateEnabled = $false
@@ -63,26 +46,16 @@
         if ($ThisVM.sqlInstanceName) {
             $SQLInstanceName = $ThisVM.sqlInstanceName
         }
-        if ($deployConfig.parameters.ThisSQLCUURL) {
+        if ($deployConfig.thisParams.sqlCUURL) {
             $sqlUpdateEnabled = $true
-            $sqlCUURL = $deployConfig.parameters.ThisSQLCUURL
+            $sqlCUURL = $deployConfig.thisParams.sqlCUURL
             $sqlCuDownloadPath = Join-Path "C:\Temp\SQL_CU" (Split-Path -Path $sqlCUURL -Leaf)
         }
     }
 
-    $SQLSysAdminAccounts = @($cm_admin)
-    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
-    if ($containsPassive) {
-        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-        foreach ($vm in $PassiveVM) {
-            $SQLSysAdminAccounts += "$DName\$($vm.vmName)$"
-        }
-    }
-
-    # Set PS name to existing PS name, if PS not in config
-    if (-not $PSName) {
-        $PSName = $deployConfig.parameters.ExistingPSName
-    }
+    # SQL Sysadmin accounts
+    $waitOnDomainJoin = $deployconfig.thisParams.WaitOnDomainJoin
+    $SQLSysAdminAccounts = $deployConfig.thisParams.SQLSysAdminAccounts
 
     # Log share
     $LogFolder = "DSC"
@@ -208,8 +181,7 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        WriteConfigurationFile WriteJoinDomain {
-            Role      = "DomainMember"
+        WriteEvent WriteJoinDomain {
             LogPath   = $LogPath
             WriteNode = "MachineJoinDomain"
             Status    = "Passed"
@@ -222,7 +194,7 @@
             if ($sqlUpdateEnabled) {
 
                 WriteStatus DownloadSQLCU {
-                    DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
+                    DependsOn = '[WriteEvent]WriteJoinDomain'
                     Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
                 }
 
@@ -234,17 +206,34 @@
 
                 }
 
-                WriteStatus InstallSQL {
-                    DependsOn = '[DownloadFile]DownloadSQLCU'
-                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                WriteStatus WaitDomainJoin {
+                    DependsOn = "[DownloadFile]DownloadSQLCU"
+                    Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
                 }
 
             }
             else {
-                WriteStatus InstallSQL {
-                    DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
-                    Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
+                WriteStatus WaitDomainJoin {
+                    DependsOn = '[WriteEvent]WriteJoinDomain'
+                    Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
                 }
+            }
+
+            $waitOnDependency = @('[WriteStatus]WaitDomainJoin')
+            foreach ($server in $waitOnDomainJoin) {
+
+                VerifyComputerJoinDomain "WaitFor$server" {
+                    ComputerName = $server
+                    Ensure       = "Present"
+                    DependsOn    = "[WriteStatus]WaitDomainJoin"
+                }
+
+                $waitOnDependency += "[VerifyComputerJoinDomain]WaitFor$server"
+            }
+
+            WriteStatus InstallSQL {
+                DependsOn = $waitOnDependency
+                Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
             }
 
             SqlSetup InstallSQL {
@@ -261,8 +250,41 @@
                 DependsOn           = '[WriteStatus]InstallSQL'
             }
 
+            WriteStatus AddSQLPermissions {
+                DependsOn = "[SqlSetup]InstallSQL"
+                Status    = "Adding SQL logins and roles"
+            }
+
+            # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
+            $sqlDependency = @('[WriteStatus]AddSQLPermissions')
+            $i = 0
+            foreach ($account in $SQLSysAdminAccounts | Where-Object {$_ -notlike "BUILTIN*" } ) {
+                $i++
+
+                SqlLogin "AddSqlLogin$i" {
+                    Ensure                  = 'Present'
+                    Name                    = $account
+                    LoginType               = 'WindowsUser'
+                    InstanceName            = $SQLInstanceName
+                    LoginMustChangePassword = $false
+                    PsDscRunAsCredential    = $CMAdmin
+                    DependsOn               = '[WriteStatus]AddSQLPermissions'
+                }
+
+                $sqlDependency += "[SqlLogin]AddSqlLogin$i"
+            }
+
+            SqlRole SqlRole {
+                Ensure               = 'Present'
+                ServerRoleName       = 'sysadmin'
+                MembersToInclude     = $SQLSysAdminAccounts
+                InstanceName         = $SQLInstanceName
+                PsDscRunAsCredential = $CMAdmin
+                DependsOn            = $sqlDependency
+            }
+
             SqlMemory SetSqlMemory {
-                DependsOn    = '[SqlSetup]InstallSQL'
+                DependsOn    = '[SqlRole]SqlRole'
                 Ensure       = 'Present'
                 DynamicAlloc = $false
                 MinMemory    = 2048
@@ -270,55 +292,9 @@
                 InstanceName = $SQLInstanceName
             }
 
-            if ($containsPassive) {
-
-                WriteStatus WaitPassive {
-                    DependsOn = "[SqlMemory]SetSqlMemory"
-                    Status    = "Wait for Passive Site Server $($PassiveVM.vmName) to join domain"
-                }
-
-                WaitForConfigurationFile WaitPassive {
-                    Role          = "PassiveSite"
-                    MachineName   = $PassiveVM.vmName
-                    LogFolder     = $LogFolder
-                    ReadNode      = "MachineJoinDomain"
-                    ReadNodeValue = "Passed"
-                    Ensure        = "Present"
-                    DependsOn     = "[WriteStatus]WaitPassive"
-                }
-
-                SqlLogin addsysadmin {
-                    Ensure                  = 'Present'
-                    Name                    = "$DName\$($PassiveVM.vmName)$"
-                    LoginType               = 'WindowsUser'
-                    InstanceName            = $SQLInstanceName
-                    LoginMustChangePassword = $false
-                    PsDscRunAsCredential    = $CMAdmin
-                    DependsOn               = '[WaitForConfigurationFile]WaitPassive'
-                }
-
-                SqlRole addsysadmin {
-                    Ensure               = 'Present'
-                    ServerRoleName       = 'sysadmin'
-                    MembersToInclude     = $SQLSysAdminAccounts
-                    InstanceName         = $SQLInstanceName
-                    PsDscRunAsCredential = $CMAdmin
-                    DependsOn            = '[SqlLogin]addsysadmin'
-                }
-
-                WriteStatus SSMS {
-                    DependsOn = '[SqlRole]addsysadmin'
-                    Status    = "Downloading and installing SQL Management Studio"
-                }
-            }
-
-            else {
-
-                WriteStatus SSMS {
-                    DependsOn = '[SqlMemory]SetSqlMemory'
-                    Status    = "Downloading and installing SQL Management Studio"
-                }
-
+            WriteStatus SSMS {
+                DependsOn = '[SqlMemory]SetSqlMemory'
+                Status    = "Downloading and installing SQL Management Studio"
             }
 
             InstallSSMS SSMS {
@@ -354,54 +330,44 @@
         else {
 
             WriteStatus AddLocalAdmin {
-                DependsOn = '[WriteConfigurationFile]WriteJoinDomain'
+                DependsOn = '[WriteEvent]WriteJoinDomain'
                 Status    = "Adding cm_svc domain account to Local Administrators group"
             }
 
         }
 
-        AddUserToLocalAdminGroup AddADUserToLocalAdminGroup {
-            Name       = "cm_svc"
-            DomainName = $DomainName
-            DependsOn  = "[WriteStatus]AddLocalAdmin"
-        }
-
-        if ($PSName) {
-            AddUserToLocalAdminGroup AddPSLocalAdmin {
-                Name       = "$PSName$"
+        $addUserDependancy = @('[WriteStatus]AddLocalAdmin')
+        $i = 0
+        foreach ($user in $deployConfig.thisParams.LocalAdminAccounts) {
+            $i++
+            $NodeName = "AddADUserToLocalAdminGroup$($i)"
+            AddUserToLocalAdminGroup "$NodeName" {
+                Name       = $user
                 DomainName = $DomainName
                 DependsOn  = "[WriteStatus]AddLocalAdmin"
             }
-        }
-
-        if ($PSPassiveName) {
-            AddUserToLocalAdminGroup AddPassiveLocalAdmin {
-                Name       = "$PSPassiveName$"
-                DomainName = $DomainName
-                DependsOn  = "[WriteStatus]AddLocalAdmin"
-            }
-        }
-
-        if ($CSName) {
-            AddUserToLocalAdminGroup AddCSLocalAdmin {
-                Name       = "$CSName$"
-                DomainName = $DomainName
-                DependsOn  = "[WriteStatus]AddLocalAdmin"
-            }
-        }
-
-        WriteConfigurationFile WriteDomainMemberFinished {
-            Role      = "DomainMember"
-            LogPath   = $LogPath
-            WriteNode = "DomainMemberFinished"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup"
+            $addUserDependancy += "[AddUserToLocalAdminGroup]$NodeName"
         }
 
         WriteStatus Complete {
-            DependsOn = "[AddUserToLocalAdminGroup]AddADUserToLocalAdminGroup"
+            DependsOn = $addUserDependancy
             Status    = "Complete!"
+        }
+
+        WriteEvent ReadyForPrimary {
+            LogPath   = $LogPath
+            WriteNode = "ReadyForPrimary"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
+        }
+
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
         }
     }
 }

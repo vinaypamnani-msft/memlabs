@@ -12,46 +12,9 @@ $DomainName = $DomainFullName.Split(".")[0]
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
-# DPs
-$DPNames = @()
-$DPNames += ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installDP -eq $true) }).vmName # DP's in current config
-# $DPNames += ($deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installDP -eq $true -or $null -eq $_.installDP) }).vmName # Existing DP's from previous deployments with siteCode
-
-# MPs
-$MPNames = @()
-$MPNames += ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installMP -eq $true) }).vmName # MP's in current config
-# $MPNames += ($deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -eq $($ThisVM.siteCode) -and ($_.installMP -eq $true -or $null -eq $_.installMP) }).vmName # Existing MP's from previous deployments with siteCode
-
-# Existing DPMP roles without siteCode property (older deployments) but in the same subnet as Primary
-# if ($ThisVM.hidden) {
-#     $ThisExistingVM = $deployConfig.existingVMs | Where-Object ($_.vmName -eq $ThisVM.vmName)
-#     $DPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network -and ($_.installDP -eq $true -or $null -eq $_.installDP) }
-#     $MPNames += $deployConfig.existingVMs | Where-Object { $_.role -eq "DPMP" -and $null -eq $_.siteCode -and $_.network -eq $ThisExistingVM.network -and ($_.installMP -eq $true -or $null -eq $_.installMP) }
-# }
-
-# Trim nulls/blanks
-$DPNames = $DPNames | Where-Object { $_ -and $_.Trim() }
-$MPNames = $MPNames | Where-Object { $_ -and $_.Trim() }
-
 $ClientNames = $deployConfig.parameters.DomainMembers
 $cm_svc = "$DomainName\cm_svc"
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
-$networkSubnet = $deployConfig.vmOptions.network
-
-# Add DPMP on Site Server if none specified
-if (-not $MPNames) {
-    Write-DscStatus "Client Push is true and no MP's found. Forcing MP Role on $($deployConfig.parameters.ThisMachineName) to allow client push to work."
-    $MPNames += $deployConfig.parameters.ThisMachineName
-}
-
-if (-not $DPNames) {
-    Write-DscStatus "Client Push is true and no DP's found. Forcing DP Role on $($deployConfig.parameters.ThisMachineName) to allow client push to work."
-    $DPNames += $deployConfig.parameters.ThisMachineName
-}
-
-Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
-Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
-Write-DscStatus "Client push candidates are '$ClientNames'"
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -134,92 +97,78 @@ Write-DscStatus "Restarting services"
 Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
 Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
 
-# TODO: $Configuration.InstallDP status won't be accurate if multiple DP's are in config.
-foreach ($DPName in $DPNames) {
 
-    if ([string]::IsNullOrWhiteSpace($DPName)) {
-        continue
-    }
-
-    $DPFQDN = $DPName + "." + $DomainFullName
-    $Configuration.InstallDP.Status = 'Running'
-    $Configuration.InstallDP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+function Install-DP {
+    param (
+        [Parameter()]
+        [string]
+        $ServerFQDN,
+        [string]
+        $ServerSiteCode
+    )
 
     $i = 0
     $installFailure = $false
+    $DPFQDN = $ServerFQDN
+
     do {
 
         $i++
 
         # Create Site system Server
         #============
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         if (-not $SystemServer) {
-            Write-DscStatus "Creating new CM Site System server on $DPFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN | Out-File $global:StatusLog -Append
+            Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
+            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         }
 
         # Install DP
         #============
-        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN
+        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         if (-not $dpinstalled) {
             Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role."
             $Date = [DateTime]::Now.AddYears(30)
-            Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+            #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+            Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 60
         }
         else {
-            Write-DscStatus "DP Role detected on $DPFQDN"
+            Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
             $dpinstalled = $true
         }
 
         if ($i -gt 10) {
-            Write-DscStatus "No Progress after $i tries, Giving up."
+            Write-DscStatus "No Progress after $i tries, Giving up on $DPFQDN SiteCode: $ServerSiteCode ."
             $installFailure = $true
         }
 
         Start-Sleep -Seconds 10
 
     } until ($dpinstalled -or $installFailure)
-
-    if ($dpinstalled) {
-        $Configuration.InstallDP.Status = 'Completed'
-        $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    }
-    else {
-
-        $Configuration.InstallDP.Status = 'Failed'
-        $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    }
-
 }
 
-# TODO: $Configuration.InstallMP status won't be accurate if multiple DP's are in config.
-foreach ($MPName in $MPNames) {
-
-    if ([string]::IsNullOrWhiteSpace($MPName)) {
-        continue
-    }
-
-    $MPFQDN = $MPName + "." + $DomainFullName
-    $Configuration.InstallMP.Status = 'Running'
-    $Configuration.InstallMP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+function Install-MP {
+    param (
+        [string]
+        $ServerFQDN,
+        [string]
+        $ServerSiteCode
+    )
 
     $i = 0
     $installFailure = $false
+    $MPFQDN = $ServerFQDN
+
     do {
 
         $i++
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $MPFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
         }
@@ -243,17 +192,76 @@ foreach ($MPName in $MPNames) {
         Start-Sleep -Seconds 10
 
     } until ($mpinstalled -or $installFailure)
+}
 
-    if ($mpinstalled) {
-        $Configuration.InstallMP.Status = 'Completed'
-        $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+$DPs = @()
+$MPs = @()
+$ValidSiteCodes = @($SiteCode)
+$ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
+$ValidSiteCodes += $ReportingSiteCodes
+
+foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" } ) {
+    if ($dpmp.siteCode -in $ValidSiteCodes) {
+        if ($dpmp.installDP) {
+            $DPs += [PSCustomObject]@{
+                ServerName     = $dpmp.vmName
+                ServerSiteCode = $dpmp.siteCode
+            }
+        }
+        if ($dpmp.installMP) {
+            if ($dpmp.siteCode -notin $ReportingSiteCodes) {
+                $MPs += [PSCustomObject]@{
+                    ServerName     = $dpmp.vmName
+                    ServerSiteCode = $dpmp.siteCode
+                }
+            }
+            else {
+                Write-DscStatus "Skip MP role for $($dpmp.vmName) since it's a remote site system in Secondary site"
+            }
+        }
     }
-    else {
-        $Configuration.InstallMP.Status = 'Failed'
-        $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+}
+
+# Trim nulls/blanks
+$DPNames = $DPs.ServerName | Where-Object { $_ -and $_.Trim() }
+$MPNames = $MPs.ServerName | Where-Object { $_ -and $_.Trim() }
+
+Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
+Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
+Write-DscStatus "Client push candidates are '$ClientNames'"
+
+foreach ($DP in $DPs) {
+
+    if ([string]::IsNullOrWhiteSpace($DP.ServerName)) {
+        continue
     }
+
+    $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
+    Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode
+}
+
+foreach ($MP in $MPs) {
+
+    if ([string]::IsNullOrWhiteSpace($MP.ServerName)) {
+        continue
+    }
+
+    $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
+    Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode
+}
+
+# Force install DP/MP on PS Site Server if none present
+$dpCount = (Get-CMDistributionPoint -SiteCode $SiteCode | Measure-Object).Count
+$mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
+
+if ($dpCount -eq 0) {
+    Write-DscStatus "No DP's were found in this site. Forcing DP install on Site Server $ThisMachineName"
+    Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
+}
+
+if ($mpCount -eq 0) {
+    Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName"
+    Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
 }
 
 # exit if rerunning DSC to add passive site
@@ -262,12 +270,68 @@ if ($null -ne $deployConfig.parameters.ExistingActiveName) {
     return
 }
 
-# Create Boundry Group
-Write-DscStatus "Creating Boundary and Boundary Group"
-New-CMBoundaryGroup -Name $SiteCode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $DPMPFQDN
-New-CMBoundary -Type IPSubnet -Name $networkSubnet -Value "$networkSubnet/24"
-Add-CMBoundaryToGroup -BoundaryName $networkSubnet -BoundaryGroupName $SiteCode
-Start-Sleep -Seconds 5
+$bgs = $deployConfig.thisParams.sitesAndNetworks
+
+# Create BGs
+foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
+    $siteStatus = Get-CMSite -SiteCode $bgsitecode
+    if ($siteStatus.Status -eq 1) {
+        $dpmplist = @()
+        $dpmplist += (Get-CMDistributionPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
+        $dpmplist += (Get-CMManagementPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
+        $dpmplist = $dpmplist | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+        try {
+            $exists = Get-CMBoundaryGroup -Name $bgsitecode
+            if ($exists) {
+                Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($dpmplist -join ',')"
+                Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $dpmplist
+            }
+            else {
+                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($dpmplist -join ',')"
+                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $dpmplist
+            }
+        }
+        catch {
+            Write-DscStatus "Failed to create BG '$bgsitecode'. Error: $_"
+        }
+    }
+    else {
+        Write-DscStatus "Skip creating Boundary groups for site $bgsitecode because Site Status is not 'Active'."
+    }
+    Start-Sleep -Seconds 5
+}
+
+# Create Boundaries for each subnet and add to BG
+foreach ($bg in $bgs) {
+    $exists = Get-CMBoundary -BoundaryName $bg.Subnet
+    if ($exists) {
+        try {
+            Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
+            Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
+        }
+        catch {
+            Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to BG '$($bg.SiteCode)'. Error: $_"
+        }
+    }
+    else {
+        try {
+            Write-DscStatus "Creating Boundary $($bg.SiteCode) with subnet $($bg.Subnet)"
+            New-CMBoundary -Type IPSubnet -Name $bg.Subnet -Value "$($bg.Subnet)/24"
+            try {
+                Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
+                Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
+            }
+            catch {
+                Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to BG '$($bg.SiteCode)'. Error: $_"
+            }
+        }
+        catch {
+            Write-DscStatus "Failed to create boundary '$($bg.Subnet)'. Error: $_"
+        }
+    }
+
+    Start-Sleep -Seconds 5
+}
 
 # Setup System Discovery
 Write-DscStatus "Enabling AD system discovery"

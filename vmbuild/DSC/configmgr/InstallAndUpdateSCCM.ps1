@@ -11,10 +11,10 @@ $scenario = $deployConfig.parameters.Scenario
 $CurrentRole = $deployConfig.parameters.ThisMachineRole
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-$PSName = $deployConfig.parameters.PSName
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+$PSVM = $deployConfig.thisParams.PrimaryVM
 
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
@@ -577,8 +577,6 @@ else {
     $Configuration.PSReadyToUse.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-    $PSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PSName }
-
     if ($PSVM) {
         $PSSiteCode = $PSVM.siteCode
         $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
@@ -592,8 +590,9 @@ else {
         # Wait for replication ready
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
         Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'"
+        Start-Sleep -Seconds 30
         while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-            Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'" -RetrySeconds 60
+            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 60
             Start-Sleep -Seconds 60
             $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
         }
