@@ -1371,8 +1371,7 @@ function Get-StorageConfig {
 
         # Set file name based on git branch
         $fileListName = "_fileList.json"
-        $currentBranch = (& git branch) -match '\*'
-        if ($currentBranch -and $currentBranch -notmatch "main") {
+        if ($Common.DevBranch) {
             $fileListName = "_fileList_develop.json"
         }
         $fileListPath = Join-Path $Common.AzureFilesPath $fileListName
@@ -1690,6 +1689,13 @@ if (-not $Common.Initialized) {
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
+    # Git Branch
+    $currentBranch = (& git branch) -match '\*'
+    $devBranch = $false
+    if ($currentBranch -and $currentBranch -notmatch "main") {
+        $devBranch = $true
+    }
+
     # Common global props
     $global:Common = [PSCustomObject]@{
         MemLabsVersion        = "211118"
@@ -1709,6 +1715,7 @@ if (-not $Common.Initialized) {
         LogPath               = Join-Path $PSScriptRoot "VMBuild.log"                                     # Log File
         RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
         VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
+        DevBranch             = $devBranch                                                                # Git dev branch
         Supported             = $null                                                                     # Supported Configs
         AzureFileList         = $null
         LocalAdmin            = $null
