@@ -20,6 +20,12 @@
     $DCName = $deployConfig.parameters.DCName
     $PSName = $deployConfig.thisParams.PrimaryVM.vmName
 
+
+    if ($deployConfig.thisParams.PassiveVM){
+        $containsPassive = $true
+        $PassiveVM = $deployConfig.thisParams.PassiveVM
+    }
+
     # Domain Admin User name
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
@@ -67,8 +73,6 @@
     else {
         $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
     }
-
-    $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
 
     $CurrentRole = "CAS"
 
