@@ -1325,6 +1325,10 @@ function Invoke-VmCommand {
     $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName
     $failed = $null -eq $ps
 
+    if ($failed) {
+        $return.ScriptBlockFailed = $true
+    }
+
     # Run script block inside VM
     if (-not $failed) {
         $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
@@ -1772,7 +1776,7 @@ if (-not $Common.Initialized) {
 
     # Common global props
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "211125"
+        MemLabsVersion        = "211125.1"
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files

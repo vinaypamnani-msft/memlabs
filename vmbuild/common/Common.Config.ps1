@@ -2248,7 +2248,7 @@ function Start-VMIfNotRunning {
     }
 }
 
-function Update-VMVersion {
+function Invoke-VMMaintenance {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VMName")]
@@ -2276,7 +2276,7 @@ function Update-VMVersion {
         return
     }
 
-    Write-Log "$VMName`: VM Version ($vmVersion) is NOT up-to-date. Current Version is $latestVersion. Performing update maintenance."
+    Write-Log "$VMName`: VM Version ($vmVersion) is NOT up-to-date. Current Version is $latestVersion. Performing maintenance."
 
     $startInitiated = Start-VMIfNotRunning -VMName $VMName
 
@@ -2287,10 +2287,10 @@ function Update-VMVersion {
     }
 
     if ($worked) {
-        Write-Log "$VMName`: VM update maintenance completed successfully."
+        Write-Log "$VMName`: VM maintenance completed successfully."
     }
     else {
-        Write-Log "$VMName`: VM update maintenance failed." -Verbose
+        Write-Log "$VMName`: VM maintenance failed." -Verbose
     }
 
     if ($startInitiated) {
@@ -2353,7 +2353,7 @@ function Set-PasswordExpiration {
 
     if ($vmNoteObject.role -ne "DC") {
         $account = "vmbuildadmin"
-        $accountReset = Invoke-VmCommand -VmName $VMName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix $account Password Expiration"
+        $accountReset = Invoke-VmCommand -VmName $VMName -VmDomainName $vmDomain -ScriptBlock $Fix_LocalAccount -DisplayName "Fix $account Password Expiration"
         if ($accountReset.ScriptBlockFailed) {
             Write-Log "$VMName`: Failed to set PasswordNeverExpires flag for '$VMName\$account'" -Warning -LogOnly
         }
@@ -2395,6 +2395,7 @@ function Set-AdminProfileFix {
         return $true
     }
 
+    $vmDomain = $vmNoteObject.domain
     $startInitiated = Start-VMIfNotRunning -VMName $VMName -Quiet
 
     $Fix_DefaultProfile = {
@@ -2407,7 +2408,7 @@ function Set-AdminProfileFix {
     }
 
     $success = $false
-    $result = Invoke-VmCommand -VmName $VMName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile"
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $vmDomain -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile"
     if ($result.ScriptBlockFailed) {
         Write-Log "$VMName`: Failed to fix the default user profile." -Verbose
     }
@@ -2464,7 +2465,7 @@ function Get-List {
             foreach ($vm in $virtualMachines) {
 
                 # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
-                Update-VMVersion -VMName $vm.Name
+                Invoke-VMMaintenance -VMName $vm.Name
 
                 $vmNoteObject = Get-VMNote -VMName $vm.Name
 
