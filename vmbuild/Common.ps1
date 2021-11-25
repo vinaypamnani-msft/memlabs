@@ -809,7 +809,7 @@ function Set-VMNote {
         [string]$vmVersion
     )
 
-    if ($vmVersion) {
+    if ($vmVersion -and $vmNote.memLabsVersion -lt $vmVersion) {
         $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
     }
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
@@ -820,6 +820,21 @@ function Set-VMNote {
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
     }
 }
+
+function Update-VMNoteVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$vmName,
+        [Parameter(Mandatory = $false)]
+        [string]$vmVersion
+    )
+
+    $vmNote = Get-VMNote -VMName $VmName
+    $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
+    Set-VMNote -vmName $VmName -vmNote $vmNote
+}
+
 function Remove-DnsRecord {
     [CmdletBinding()]
     param (
