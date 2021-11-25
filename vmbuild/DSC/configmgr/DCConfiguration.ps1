@@ -105,6 +105,7 @@
             Password             = $DomainCreds
             PasswordNeverResets  = $true
             PasswordNeverExpires = $true
+            CannotChangePassword = $true
             DomainName           = $DomainName
             DependsOn            = "[SetupDomain]FirstDS"
         }
@@ -115,6 +116,18 @@
             Password             = $DomainCreds
             PasswordNeverResets  = $true
             PasswordNeverExpires = $true
+            CannotChangePassword = $true
+            DomainName           = $DomainName
+            DependsOn            = "[SetupDomain]FirstDS"
+        }
+
+        ADUser vmbuildadmin {
+            Ensure               = 'Present'
+            UserName             = 'vmbuildadmin'
+            Password             = $DomainCreds
+            PasswordNeverResets  = $true
+            PasswordNeverExpires = $true
+            CannotChangePassword = $true
             DomainName           = $DomainName
             DependsOn            = "[SetupDomain]FirstDS"
         }

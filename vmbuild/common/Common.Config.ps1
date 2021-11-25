@@ -2214,6 +2214,152 @@ function Get-DomainList {
     }
 }
 
+function Start-VMIfNotRunning {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
+        [string] $VMName
+    )
+
+    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+
+    if (-not $vm) {
+        Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
+        return $false
+    }
+
+    if ($vm.State -ne "Running") {
+        try {
+            Start-VM -Name $VMName -ErrorAction Stop
+            Write-Log "$VMName`: Starting VM for maintenance and waiting 30 seocnds."
+            Start-Sleep -Seconds 30
+            return $true
+        }
+        catch {
+            Write-Log "$VMName`: Failed to start VM. Error: $_"
+            return $false
+        }
+    }
+    else {
+        Write-Log "$VMName`: VM is already running." -Verbose
+        return $false
+    }
+}
+
+function Update-VMVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "VMName")]
+        [object] $VMName
+    )
+
+    $vmNoteObject = Get-VMNote -VMName $VMName
+
+    if (-not $vmNoteObject) {
+        Write-Log "$vmName`: VM Notes property could not be read. Skipping." -Warning -LogOnly
+        return
+    }
+
+    $latestVersion = $Common.MemLabsVersion
+    $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
+    $vmVersion = $vmNoteObject.memLabsVersion
+
+    if ($inProgress) {
+        Write-Log "$vmName`: VM Deployment State is in-progress. Skipping." -Verbose
+        return
+    }
+
+    if ($vmVersion -ge $latestVersion) {
+        Write-Log "$VMName`: VM Version ($vmVersion) is up-to-date." -Verbose
+        return
+    }
+
+    Write-Log "$VMName`: VM Version ($vmVersion) is NOT up-to-date. Current Version is $latestVersion. Performing update maintenance."
+
+    $startInitiated = Start-VMIfNotRunning -VMName $VMName
+
+    $worked = Set-PasswordExpiration -VMName $VMName
+
+    if ($worked) {
+        Write-Log "$VMName`: VM update maintenance completed successfully."
+    }
+    else {
+        Write-Log "$VMName`: VM update maintenance failed." -Verbose
+    }
+
+    if ($startInitiated) {
+        Write-Log "$VMName`: Shutting down VM." -Verbose
+        Stop-VM -Name $VMName -Force -ErrorAction SilentlyContinue
+    }
+
+}
+
+function Set-PasswordExpiration {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "VMName")]
+        [object] $VMName
+    )
+
+    $fixVersion = "211125"
+    $vmNoteObject = Get-VMNote -VMName $VMName
+
+    if (-not $vmNoteObject) {
+        return $false
+    }
+
+    if ($vmNoteObject.memLabsVersion -ge $fixVersion) {
+        Write-Log "$VMName`: VM already has the fix applied."
+        return $true
+    }
+
+    $vmDomain = $vmNoteObject.domain
+    $vmAdminUser = $vmNoteObject.adminName
+
+    $startInitiated = Start-VMIfNotRunning -VMName $VMName
+
+    $success = $false
+
+    if ($vmNoteObject.role -eq "DC") {
+        $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $vmAdminUser)
+        $accountsUpdated = 0
+        foreach ($account in $accountsToUpdate) {
+            $accountReset = Invoke-VmCommand -VmName $VMName -VmDomainName $vmDomain -ScriptBlock { Set-ADUser -Identity $using:account -PasswordNeverExpires $true -CannotChangePassword $true}
+            if ($accountReset.ScriptBlockFailed) {
+                Write-Log "$VMName`: Failed to set PasswordNeverExpires flag for '$vmDomain\$account'" -Warning -LogOnly
+            }
+            else {
+                Write-Log "$VMName`: Set PasswordNeverExpires flag for '$vmDomain\$account'" -LogOnly -Verbose
+                $accountsUpdated++
+            }
+        }
+        $success = $successCount -eq $accountsToUpdate.Count
+    }
+
+    if ($vmNoteObject.role -ne "DC") {
+        $account = "vmbuildadmin"
+        $accountReset = Invoke-VmCommand -VmName $VMName -ScriptBlock { Set-LocalUser -Name $using:account -PasswordNeverExpires $true -UserMayChangePassword $false}
+        if ($accountReset.ScriptBlockFailed) {
+            Write-Log "$VMName`: Failed to set PasswordNeverExpires flag for '$VMName\$account'" -Warning -LogOnly
+        }
+        else {
+            Write-Log "$VMName`: Set PasswordNeverExpires flag for '$VMName\$account'" -LogOnly -Verbose
+            $success = $true
+        }
+    }
+
+    if ($startInitiated) {
+        Write-Log "$VMName`: Shutting down VM." -Verbose
+        Stop-VM -Name $VMName -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($success) {
+        Set-VMNote -vmName $VMName -vmNote $vmNoteObject -vmVersion $fixVersion
+    }
+
+    return $success
+}
+
 $global:vm_List = $null
 function Get-List {
 
@@ -2248,20 +2394,11 @@ function Get-List {
             $virtualMachines = Get-VM
 
             foreach ($vm in $virtualMachines) {
-                $vmNoteObject = $null
-                try {
-                    if ($vm.Notes -like "*lastUpdate*") {
-                        $vmNoteObject = $vm.Notes | ConvertFrom-Json
-                    }
-                    else {
-                        Write-Log "VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
-                        #continue
-                    }
-                }
-                catch {
-                    Write-Log "Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
-                    #continue
-                }
+
+                # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
+                Update-VMVersion -VMName $vm.Name
+
+                $vmNoteObject = Get-VMNote -VMName $vm.Name
 
                 # Update LastKnownIP, and timestamp
                 if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
@@ -2308,7 +2445,6 @@ function Get-List {
 
                     $adminUser = $vmNoteObject.adminName
                     $vmDomain = $vmNoteObject.domain
-                    if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin } # we renamed this property, read if it exists
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
 
                     # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
@@ -2328,19 +2464,6 @@ function Get-List {
                             }
                             else {
                                 Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
-                            }
-                        }
-                    }
-
-                    if ($vmNoteObject.role -eq "DC") {
-                        $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $adminUser)
-                        foreach ($account in $accountsToUpdate) {
-                            $accountReset = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Set-ADUser -Identity $using:account -PasswordNeverExpires $true }
-                            if ($accountReset.ScriptBlockFailed) {
-                                Write-Log "$vmName`: Failed to set PasswordNeverExpires flag for '$vmDomain\$account'" -Warning -LogOnly
-                            }
-                            else {
-                                Write-Log "$vmName`: Set PasswordNeverExpires flag for '$vmDomain\$account'" -LogOnly -Verbose
                             }
                         }
                     }

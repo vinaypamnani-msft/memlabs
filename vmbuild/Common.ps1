@@ -720,7 +720,9 @@ function New-VmNote {
         [Parameter(Mandatory = $false)]
         [bool]$Successful,
         [Parameter(Mandatory = $false)]
-        [bool]$InProgress
+        [bool]$InProgress,
+        [Parameter(Mandatory = $false)]
+        [bool]$SkipVersionUpdate = $false
     )
 
     try {
@@ -737,8 +739,11 @@ function New-VmNote {
             adminName            = $DeployConfig.vmOptions.adminName
             network              = $DeployConfig.vmOptions.network
             prefix               = $DeployConfig.vmOptions.prefix
-            memLabsVersion       = $Common.MemLabsVersion
             memLabsDeployVersion = $Common.MemLabsVersion
+        }
+
+        if (-not $SkipVersionUpdate) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $Common.MemLabsVersion -Force
         }
 
         foreach ($prop in $ThisVM.PSObject.Properties) {
@@ -756,15 +761,57 @@ function New-VmNote {
     }
 }
 
+function Get-VMNote {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VMName
+    )
+
+    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+
+    if (-not $vm) {
+        Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
+        return $null
+    }
+
+    $vmNoteObject = $null
+    try {
+        if ($vm.Notes -like "*lastUpdate*") {
+            $vmNoteObject = $vm.Notes | ConvertFrom-Json
+
+            if (-not $vmNoteObject.adminName) {
+                # we renamed this property, read as "adminName" if it exists
+                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $vmNoteObject.domainAdmin  -Force
+            }
+
+            return $vmNoteObject
+        }
+        else {
+            Write-Log "$VMName`: VM Properties do not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
+            return $null
+        }
+    }
+    catch {
+        Write-Log "Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
+        return $null
+    }
+}
+
 function Set-VMNote {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [object]$vmName,
+        [string]$vmName,
         [Parameter(Mandatory = $true)]
-        [object]$vmNote
+        [object]$vmNote,
+        [Parameter(Mandatory = $false)]
+        [string]$vmVersion
     )
 
+    if ($vmVersion) {
+        $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
+    }
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
     $vm = Get-Vm $VmName -ErrorAction Stop
@@ -1705,7 +1752,7 @@ if (-not $Common.Initialized) {
 
     # Common global props
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "211124"
+        MemLabsVersion        = "211125"
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files

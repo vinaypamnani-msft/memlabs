@@ -237,6 +237,18 @@ $VM_Create = {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
     }
 
+    $Fix_LocalAccount = {
+        Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true -UserMayChangePassword $false
+    }
+
+    $skipVersionUpdate = $false
+    Write-Log "PSJOB: $($currentItem.vmName): Updating Password Expiration for vmbuildadmin account."
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix Local Account Password Expiration" -WhatIf:$WhatIf
+    if ($result.ScriptBlockFailed) {
+        Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the password expiration policy for vmbuildadmin." -Warning -OutputStream
+        $skipVersionUpdate = $true
+    }
+
     $Stop_RunningDSC = {
         # Stop any existing DSC runs
         Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
@@ -277,7 +289,7 @@ $VM_Create = {
             }
         }
         # Update VMNote
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -SkipVersionUpdate $skipVersionUpdate
         return
     }
 
@@ -628,7 +640,7 @@ $VM_Create = {
 
     if ($createVM) {
         # Set VM Note
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked -SkipVersionUpdate $skipVersionUpdate
     }
 }
 
@@ -709,12 +721,12 @@ try {
 
             foreach ($thisVM in $deployConfig.virtualMachines) {
                 $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
-                if ($thisVMObject.inProgress -eq $true){
+                if ($thisVMObject.inProgress -eq $true) {
                     $InProgessVMs += $thisVMObject.vmName
                 }
 
             }
-            if ($InProgessVMs.Count -gt 0){
+            if ($InProgessVMs.Count -gt 0) {
                 Write-Host
                 write-host -ForegroundColor Blue "*************************************************************************************************************************************"
                 write-host -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
@@ -839,7 +851,7 @@ try {
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
         Write-Log "Attempting to remove existing DNS Records" -Activity -HostOnly
-        foreach ($item in $deployConfig.virtualMachines | Where-Object {-not ($_.hidden)} ) {
+        foreach ($item in $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) } ) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
         }
     }
