@@ -2307,6 +2307,7 @@ function Get-List {
                 if ($vmNoteObject) {
 
                     $adminUser = $vmNoteObject.adminName
+                    $vmDomain = $vmNoteObject.domain
                     if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin } # we renamed this property, read if it exists
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
 
@@ -2315,7 +2316,7 @@ function Get-List {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                             if ($vmState -eq "Running" -and (-not $inProgress)) {
                                 try {
-                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                                     $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
                                     Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
@@ -2331,15 +2332,28 @@ function Get-List {
                         }
                     }
 
+                    if ($vmNoteObject.role -eq "DC") {
+                        $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $adminUser)
+                        foreach ($account in $accountsToUpdate) {
+                            $accountReset = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Set-ADUser -Identity $using:account -PasswordNeverExpires $true }
+                            if ($accountReset.ScriptBlockFailed) {
+                                Write-Log "$vmName`: Failed to set PasswordNeverExpires flag for '$vmDomain\$account'" -Warning -LogOnly
+                            }
+                            else {
+                                Write-Log "$vmName`: Set PasswordNeverExpires flag for '$vmDomain\$account'" -LogOnly -Verbose
+                            }
+                        }
+                    }
+
                     # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
                     if ($vmNoteObject.role -eq "DPMP") {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                             if ($vmState -eq "Running" -and (-not $inProgress)) {
                                 try {
-                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
+                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
                                     $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     if (-not $siteCode) {
-                                        $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                                        $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                                         $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     }
                                     if ($siteCode) {

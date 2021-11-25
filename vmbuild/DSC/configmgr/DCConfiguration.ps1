@@ -100,21 +100,23 @@
         }
 
         ADUser Admin {
-            Ensure              = 'Present'
-            UserName            = $DomainAdminName
-            Password            = $DomainCreds
-            PasswordNeverResets = $true
-            DomainName          = $DomainName
-            DependsOn           = "[SetupDomain]FirstDS"
+            Ensure               = 'Present'
+            UserName             = $DomainAdminName
+            Password             = $DomainCreds
+            PasswordNeverResets  = $true
+            PasswordNeverExpires = $true
+            DomainName           = $DomainName
+            DependsOn            = "[SetupDomain]FirstDS"
         }
 
         ADUser cm-svc {
-            Ensure              = 'Present'
-            UserName            = 'cm_svc'
-            Password            = $DomainCreds
-            PasswordNeverResets = $true
-            DomainName          = $DomainName
-            DependsOn           = "[SetupDomain]FirstDS"
+            Ensure               = 'Present'
+            UserName             = 'cm_svc'
+            Password             = $DomainCreds
+            PasswordNeverResets  = $true
+            PasswordNeverExpires = $true
+            DomainName           = $DomainName
+            DependsOn            = "[SetupDomain]FirstDS"
         }
 
         ADGroup AddToAdmin {
