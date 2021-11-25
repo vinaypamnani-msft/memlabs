@@ -2398,7 +2398,7 @@ function Get-List {
             foreach ($vm in $virtualMachines) {
 
                 # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
-                # Update-VMVersion -VMName $vm.Name
+                Update-VMVersion -VMName $vm.Name
 
                 $vmNoteObject = Get-VMNote -VMName $vm.Name
 
