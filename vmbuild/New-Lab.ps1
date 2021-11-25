@@ -238,7 +238,7 @@ $VM_Create = {
     }
 
     $Fix_LocalAccount = {
-        Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true -UserMayChangePassword $false
+        Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
     }
 
     $skipVersionUpdate = $false

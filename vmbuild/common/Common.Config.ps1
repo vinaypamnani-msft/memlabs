@@ -2329,16 +2329,17 @@ function Set-PasswordExpiration {
                 Write-Log "$VMName`: Failed to set PasswordNeverExpires flag for '$vmDomain\$account'" -Warning -LogOnly
             }
             else {
-                Write-Log "$VMName`: Set PasswordNeverExpires flag for '$vmDomain\$account'" -LogOnly -Verbose
+                Write-Log "$VMName`: Set PasswordNeverExpires flag for '$vmDomain\$account'" -Verbose
                 $accountsUpdated++
             }
         }
-        $success = $successCount -eq $accountsToUpdate.Count
+        $success = $accountsUpdated -eq $accountsToUpdate.Count
+        Write-Log "Updated $accountsUpdated accounts out of $($accountsToUpdate.Count). Result: $success" -Verbose
     }
 
     if ($vmNoteObject.role -ne "DC") {
         $account = "vmbuildadmin"
-        $accountReset = Invoke-VmCommand -VmName $VMName -ScriptBlock { Set-LocalUser -Name $using:account -PasswordNeverExpires $true -UserMayChangePassword $false}
+        $accountReset = Invoke-VmCommand -VmName $VMName -ScriptBlock { Set-LocalUser -Name $using:account -PasswordNeverExpires $true }
         if ($accountReset.ScriptBlockFailed) {
             Write-Log "$VMName`: Failed to set PasswordNeverExpires flag for '$VMName\$account'" -Warning -LogOnly
         }
@@ -2346,6 +2347,7 @@ function Set-PasswordExpiration {
             Write-Log "$VMName`: Set PasswordNeverExpires flag for '$VMName\$account'" -LogOnly -Verbose
             $success = $true
         }
+        Write-Log "Updated vmbuildaccount. Result: $success" -Verbose
     }
 
     if ($startInitiated) {
@@ -2396,7 +2398,7 @@ function Get-List {
             foreach ($vm in $virtualMachines) {
 
                 # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
-                Update-VMVersion -VMName $vm.Name
+                # Update-VMVersion -VMName $vm.Name
 
                 $vmNoteObject = Get-VMNote -VMName $vm.Name
 
