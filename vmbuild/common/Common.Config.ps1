@@ -2218,13 +2218,15 @@ function Start-VMIfNotRunning {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
-        [string] $VMName
+        [string] $VMName,
+        [Parameter(Mandatory = $false, HelpMessage = "Quiet - No logging")]
+        [switch] $Quiet
     )
 
     $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
 
     if (-not $vm) {
-        Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
+        if (-not $Quiet.IsPresent) { Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_" }
         return $false
     }
 
@@ -2241,7 +2243,7 @@ function Start-VMIfNotRunning {
         }
     }
     else {
-        Write-Log "$VMName`: VM is already running." -Verbose
+        if (-not $Quiet.IsPresent) { Write-Log "$VMName`: VM is already running." -Verbose }
         return $false
     }
 }
@@ -2281,6 +2283,10 @@ function Update-VMVersion {
     $worked = Set-PasswordExpiration -VMName $VMName
 
     if ($worked) {
+        $worked = Set-AdminProfileFix -VMName $VMName
+    }
+
+    if ($worked) {
         Write-Log "$VMName`: VM update maintenance completed successfully."
     }
     else {
@@ -2316,15 +2322,23 @@ function Set-PasswordExpiration {
     $vmDomain = $vmNoteObject.domain
     $vmAdminUser = $vmNoteObject.adminName
 
-    $startInitiated = Start-VMIfNotRunning -VMName $VMName
+    $startInitiated = Start-VMIfNotRunning -VMName $VMName -Quiet
 
     $success = $false
+
+    $Fix_DomainAccount = {
+        Set-ADUser -Identity $using:account -PasswordNeverExpires $true -CannotChangePassword $true
+    }
+
+    $Fix_LocalAccount = {
+        Set-LocalUser -Name $using:account -PasswordNeverExpires $true
+    }
 
     if ($vmNoteObject.role -eq "DC") {
         $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $vmAdminUser)
         $accountsUpdated = 0
         foreach ($account in $accountsToUpdate) {
-            $accountReset = Invoke-VmCommand -VmName $VMName -VmDomainName $vmDomain -ScriptBlock { Set-ADUser -Identity $using:account -PasswordNeverExpires $true -CannotChangePassword $true}
+            $accountReset = Invoke-VmCommand -VmName $VMName -VmDomainName $vmDomain -ScriptBlock $Fix_DomainAccount -DisplayName "Fix $account Password Expiration"
             if ($accountReset.ScriptBlockFailed) {
                 Write-Log "$VMName`: Failed to set PasswordNeverExpires flag for '$vmDomain\$account'" -Warning -LogOnly
             }
@@ -2339,7 +2353,7 @@ function Set-PasswordExpiration {
 
     if ($vmNoteObject.role -ne "DC") {
         $account = "vmbuildadmin"
-        $accountReset = Invoke-VmCommand -VmName $VMName -ScriptBlock { Set-LocalUser -Name $using:account -PasswordNeverExpires $true }
+        $accountReset = Invoke-VmCommand -VmName $VMName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix $account Password Expiration"
         if ($accountReset.ScriptBlockFailed) {
             Write-Log "$VMName`: Failed to set PasswordNeverExpires flag for '$VMName\$account'" -Warning -LogOnly
         }
@@ -2348,6 +2362,58 @@ function Set-PasswordExpiration {
             $success = $true
         }
         Write-Log "Updated vmbuildaccount. Result: $success" -Verbose
+    }
+
+    if ($startInitiated) {
+        Write-Log "$VMName`: Shutting down VM." -Verbose
+        Stop-VM -Name $VMName -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($success) {
+        Set-VMNote -vmName $VMName -vmNote $vmNoteObject -vmVersion $fixVersion
+    }
+
+    return $success
+}
+
+function Set-AdminProfileFix {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "VMName")]
+        [object] $VMName
+    )
+
+    $fixVersion = "211125.1"
+    $vmNoteObject = Get-VMNote -VMName $VMName
+
+    if (-not $vmNoteObject) {
+        return $false
+    }
+
+    if ($vmNoteObject.memLabsVersion -ge $fixVersion) {
+        Write-Log "$VMName`: VM already has the fix applied."
+        return $true
+    }
+
+    $startInitiated = Start-VMIfNotRunning -VMName $VMName -Quiet
+
+    $Fix_DefaultProfile = {
+        $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
+        $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
+        $path3 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat"
+        if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse | Out-Null }
+        if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse | Out-Null }
+        if (Test-Path $path3) { Remove-Item -Path $path3 -Force | Out-Null }
+    }
+
+    $success = $false
+    $result = Invoke-VmCommand -VmName $VMName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile"
+    if ($result.ScriptBlockFailed) {
+        Write-Log "$VMName`: Failed to fix the default user profile." -Verbose
+    }
+    else {
+        Write-Log "$VMName`: Fixed the default user profile." -Verbose
+        $success = $true
     }
 
     if ($startInitiated) {

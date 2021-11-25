@@ -816,7 +816,12 @@ function Set-VMNote {
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
     $vm = Get-Vm $VmName -ErrorAction Stop
     if ($vm) {
-        Write-Log "Setting VM Note for $vmName" -LogOnly
+        if ($vmVersion) {
+            Write-Log "Setting VM Note for $vmName, setting version to $vmVersion" -Verbose
+        }
+        else {
+            Write-Log "Setting VM Note for $vmName" -Verbose
+        }
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
     }
 }
@@ -1375,7 +1380,7 @@ function Get-VmSession {
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
         if ($ps.Availability -eq "Available") {
-            # Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
+            Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
             return $ps
         }
     }
