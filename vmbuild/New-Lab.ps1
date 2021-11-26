@@ -645,9 +645,9 @@ $VM_Create = {
     }
 }
 
-if (-not $enableVerbose) {
-    Clear-Host
-}
+Clear-Host
+Write-Host ("`r`n" * 6)
+Invoke-Maintenance
 
 try {
     if ($Configuration) {
@@ -655,7 +655,7 @@ try {
         $configResult = Get-UserConfiguration -Configuration $Configuration
         if ($configResult.Loaded) {
             $userConfig = $configResult.Config
-            Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
+            # Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
             Write-Log "### START." -Success
             Write-Log "Validating specified configuration: $Configuration" -Activity
         }
@@ -694,8 +694,8 @@ try {
         }
         if ($configResult.Loaded) {
             $userConfig = $configResult.Config
-            Clear-Host
-            Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
+            # Clear-Host
+            # Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
             Write-Log "### START." -Success
             Write-Log "Using $($result.ConfigFileName) provided by genconfig" -Activity
             Write-Log "genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"

@@ -5,23 +5,39 @@ function Invoke-Maintenance {
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.role -ne "OSDClient" }
     $vmCount = ($vmsNeedingMaintenance | Measure-Object).Count
 
+    $text = "Performing VM maintenance"
+    Write-Progress -Activity $text -Status "Please wait..." -PercentComplete 0
+    # Write-Log $text -Activity
+
     if ($vmCount -gt 0) {
-        Write-Log "$vmCount VM's need maintenance. VM's will be started if needed and shut down post-maintenance."
+        Write-Log "$vmCount VM's need maintenance. VM's will be started if needed and shut down post-maintenance." -Activity
     }
     else {
-        Write-Log "There are no VM's that need maintenance."
+        Write-Log "There are no VM's that need maintenance." -Activity
         return
     }
 
-    # Perform maintenance... run it on DC's first, rest after.
+    $i = 0
+    $countWorked = $countFailed = 0
+
+    # Perform maintenance... run it on DC's first, rest after. Start DC if not running, but don't bother stoppping them. Other VM's would need domain creds to work.
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
-        Invoke-VMMaintenance -VMName $vm.vmName
+        $i++
+        Start-VMIfNotRunning -VMName $vm.vmName | Out-Null
+        $worked = Invoke-VMMaintenance -VMName $vm.vmName
+        if ($worked) { $countWorked++} else {$countFailed++}
+        Write-Progress -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i/$vmCount)*100)
     }
 
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
-        Invoke-VMMaintenance -VMName $vm.vmName
+        $i++
+        $worked = Invoke-VMMaintenance -VMName $vm.vmName
+        if ($worked) { $countWorked++} else {$countFailed++}
+        Write-Progress -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i/$vmCount)*100)
     }
 
+    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed" -Activity
+    Write-Progress -Activity $text -Completed
 }
 
 function Invoke-VMMaintenance {
@@ -35,7 +51,7 @@ function Invoke-VMMaintenance {
 
     if (-not $vmNoteObject) {
         Write-Log "$vmName`: VM Notes property could not be read. Skipping." -Warning -LogOnly
-        return
+        return $false
     }
 
     $latestFixVersion = $Common.LatestHotfixVersion
@@ -44,15 +60,15 @@ function Invoke-VMMaintenance {
 
     if ($inProgress) {
         Write-Log "$vmName`: VM Deployment State is in-progress. Skipping." -Verbose
-        return
+        return $false
     }
 
     if ($vmVersion -ge $latestFixVersion) {
         Write-Log "$VMName`: VM Version ($vmVersion) is up-to-date." -Verbose
-        return
+        return $true
     }
 
-    Write-Log "$VMName`: VM Version ($vmVersion) is NOT up-to-date. Required Version is $latestFixVersion. Performing maintenance."
+    Write-Log "$VMName`: VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion." -SubActivity
 
     $startInitiated = Start-VMIfNotRunning -VMName $VMName
 
@@ -63,16 +79,18 @@ function Invoke-VMMaintenance {
     }
 
     if ($worked) {
-        Write-Log "$VMName`: VM maintenance completed successfully."
+        Write-Log "$VMName`: VM maintenance completed successfully." -Success
     }
     else {
-        Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log and refer to internal documentation." -ShowNotification
+        Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log and refer to internal documentation." -ShowNotification -Failure
     }
 
     if ($startInitiated) {
         Write-Log "$VMName`: Shutting down VM." -Verbose
         Stop-VM -Name $VMName -Force -ErrorAction SilentlyContinue
     }
+
+    return $worked
 
 }
 

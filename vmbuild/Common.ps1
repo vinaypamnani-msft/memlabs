@@ -1885,10 +1885,4 @@ if (-not $Common.Initialized) {
     # Write progress
     Write-Progress "Loading required modules." -Completed
 
-    if (-not $InJob.IsPresent) {
-        Write-Progress "Performing VM maintenance." -Status "Please wait..." -PercentComplete -1
-        Invoke-Maintenance
-        Write-Progress "Performing VM maintenance." -Completed
-    }
-
 }
