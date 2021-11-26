@@ -222,6 +222,7 @@ $VM_Create = {
         return
     }
 
+    $skipVersionUpdate = $false
     $Fix_DefaultProfile = {
         $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
         $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
@@ -235,13 +236,13 @@ $VM_Create = {
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
+        $skipVersionUpdate = $true
     }
 
     $Fix_LocalAccount = {
         Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
     }
 
-    $skipVersionUpdate = $false
     Write-Log "PSJOB: $($currentItem.vmName): Updating Password Expiration for vmbuildadmin account."
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix Local Account Password Expiration" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
@@ -644,7 +645,9 @@ $VM_Create = {
     }
 }
 
-Clear-Host
+if (-not $enableVerbose) {
+    Clear-Host
+}
 
 try {
     if ($Configuration) {

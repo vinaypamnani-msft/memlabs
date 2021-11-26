@@ -29,7 +29,9 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         [switch]$OutputStream,
         [Parameter(Mandatory = $false)]
-        [switch]$HostOnly
+        [switch]$HostOnly,
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowNotification
     )
 
     $HashArguments = @{}
@@ -46,6 +48,10 @@ function Write-Log {
     }
 
     $Text = "[$caller] $Text"
+
+    if ($ShowNotification.IsPresent) {
+        Show-Notification -ToastTitle "MEMLabs VMBuild" -ToastText $Text
+    }
 
     # Is Verbose?
     $IsVerbose = $false
@@ -106,10 +112,18 @@ function Write-Log {
     }
 
     # Write to console, if not logOnly and not OutputStream
-    If (-not $LogOnly.IsPresent -and -not $OutputStream.IsPresent) {
-        if (-not $IsVerbose -or ($IsVerbose -and $Common.VerboseEnabled)) {
-            Write-Host $Text @HashArguments
-        }
+    $writeHost = $false
+    If (-not $LogOnly.IsPresent -and -not $OutputStream.IsPresent -and -not $IsVerbose) {
+        $writeHost = $true
+    }
+
+    # Always log verbose to host, if VerboseEnabled
+    if ($IsVerbose -and $Common.VerboseEnabled) {
+        $writeHost = $true
+    }
+
+    if ($writeHost) {
+        Write-Host $Text @HashArguments
     }
 
     $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss:fff'
@@ -140,6 +154,35 @@ function Write-Log {
             }
         }
     }
+}
+
+function Show-Notification {
+    [cmdletbinding()]
+    Param (
+        [string]
+        $ToastTitle,
+        [string]
+        [parameter(ValueFromPipeline)]
+        $ToastText
+    )
+
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+    $Template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+
+    $RawXml = [xml] $Template.GetXml()
+    ($RawXml.toast.visual.binding.text | Where-Object {$_.id -eq "1"}).AppendChild($RawXml.CreateTextNode($ToastTitle)) > $null
+    ($RawXml.toast.visual.binding.text | Where-Object {$_.id -eq "2"}).AppendChild($RawXml.CreateTextNode($ToastText)) > $null
+
+    $SerializedXml = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $SerializedXml.LoadXml($RawXml.OuterXml)
+
+    $Toast = [Windows.UI.Notifications.ToastNotification]::new($SerializedXml)
+    $Toast.Tag = "VMBuild"
+    $Toast.Group = "VMBuild"
+    $Toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(1)
+
+    $Notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("PowerShell")
+    $Notifier.Show($Toast);
 }
 
 function Write-Exception {
@@ -801,28 +844,43 @@ function Get-VMNote {
 function Set-VMNote {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = "VMNote")]
+        [Parameter(Mandatory = $true, ParameterSetName = "VMVersion")]
         [string]$vmName,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = "VMNote")]
+        [Parameter(Mandatory = $false, ParameterSetName = "VMVersion")]
         [object]$vmNote,
+        [Parameter(Mandatory = $false, ParameterSetName = "VMNote")]
+        [Parameter(Mandatory = $true, ParameterSetName = "VMVersion")]
+        [string]$vmVersion,
         [Parameter(Mandatory = $false)]
-        [string]$vmVersion
+        [switch]$forceVersionUpdate
     )
 
-    if ($vmVersion -and $vmNote.memLabsVersion -lt $vmVersion) {
-        $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
+    if (-not $vmNote) {
+        $vmNote = Get-VMNote -VMName $vmName
     }
+
+    $vmVersionUpdated = $false
+    if ($vmVersion -and ($vmNote.memLabsVersion -lt $vmVersion -or $forceVersionUpdate.IsPresent)) {
+        $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
+        $vmVersionUpdated = $true
+    }
+
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-    $vm = Get-Vm $VmName -ErrorAction Stop
+    $vm = Get-Vm $VmName -ErrorAction SilentlyContinue
     if ($vm) {
-        if ($vmVersion) {
-            Write-Log "Setting VM Note for $vmName, setting version to $vmVersion" -Verbose
+        if ($vmVersionUpdated) {
+            Write-Log "Setting VM Note for $vmName (version $vmVersion)" -Verbose
         }
         else {
             Write-Log "Setting VM Note for $vmName" -Verbose
         }
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
+    }
+    else {
+        Write-Log "Failed to get VM from Hyper-V. Cannot set VM Note for $vmName" -Verbose
     }
 }
 
@@ -1759,6 +1817,7 @@ if ($currentBranch -and $currentBranch -notmatch "main") {
 . $PSScriptRoot\common\Common.Config.ps1
 . $PSScriptRoot\common\Common.RdcMan.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
+. $PSScriptRoot\common\Common.Maintenance.ps1
 
 ############################
 ### Common Object        ###
@@ -1776,7 +1835,8 @@ if (-not $Common.Initialized) {
 
     # Common global props
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "211125.1"
+        MemLabsVersion        = "211124"
+        LatestHotfixVersion   = "211125.2"
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
@@ -1824,5 +1884,11 @@ if (-not $Common.Initialized) {
 
     # Write progress
     Write-Progress "Loading required modules." -Completed
+
+    if (-not $InJob.IsPresent) {
+        Write-Progress "Performing VM maintenance." -Status "Please wait..." -PercentComplete -1
+        Invoke-Maintenance
+        Write-Progress "Performing VM maintenance." -Completed
+    }
 
 }
