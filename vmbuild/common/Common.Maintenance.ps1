@@ -50,7 +50,7 @@ function Invoke-VMMaintenance {
     $vmNoteObject = Get-VMNote -VMName $VMName
 
     if (-not $vmNoteObject) {
-        Write-Log "$vmName`: VM Notes property could not be read. Skipping." -Warning -LogOnly
+        Write-Log "$vmName`: VM Notes property could not be read. Skipping." -Warning
         return $false
     }
 
@@ -59,7 +59,7 @@ function Invoke-VMMaintenance {
     $vmVersion = $vmNoteObject.memLabsVersion
 
     if ($inProgress) {
-        Write-Log "$vmName`: VM Deployment State is in-progress. Skipping." -Verbose
+        Write-Log "$vmName`: VM Deployment State is in-progress. Skipping." -Warning
         return $false
     }
 
