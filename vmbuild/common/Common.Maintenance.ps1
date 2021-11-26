@@ -4,6 +4,8 @@ function Invoke-Maintenance {
     $vmsNeedingMaintenance = Get-List -Type VM | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion }
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.role -ne "OSDClient" }
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
+    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.vmBuild -eq $true }
+
     $vmCount = ($vmsNeedingMaintenance | Measure-Object).Count
 
     $text = "Performing VM maintenance"

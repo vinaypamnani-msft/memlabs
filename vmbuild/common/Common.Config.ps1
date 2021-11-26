@@ -2351,11 +2351,15 @@ function Get-List {
 
                     $vmObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $adminUser -Force
                     $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $true -Force
 
                     foreach ($prop in $vmNoteObject.PSObject.Properties) {
                         $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
                         $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                     }
+                }
+                else {
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $false -Force
                 }
 
                 $return += $vmObject
