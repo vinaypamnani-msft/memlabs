@@ -52,7 +52,7 @@ function Write-Log {
     $Text = "[$caller] $Text"
 
     if ($ShowNotification.IsPresent) {
-        Show-Notification -ToastTitle "MEMLabs VMBuild" -ToastText $Text
+        Show-Notification -ToastText $Text
     }
 
     # Is Verbose?
@@ -168,10 +168,13 @@ function Show-Notification {
     [cmdletbinding()]
     Param (
         [string]
-        $ToastTitle,
+        $ToastTitle = "MEMLabs VMBuild",
         [string]
         [parameter(ValueFromPipeline)]
-        $ToastText
+        $ToastText,
+        [string]
+        [parameter(ValueFromPipeline)]
+        $ToastTag = "VMBuild"
     )
 
     [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
@@ -185,7 +188,7 @@ function Show-Notification {
     $SerializedXml.LoadXml($RawXml.OuterXml)
 
     $Toast = [Windows.UI.Notifications.ToastNotification]::new($SerializedXml)
-    $Toast.Tag = "VMBuild"
+    $Toast.Tag = $ToastTag
     $Toast.Group = "VMBuild"
     $Toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(1)
 

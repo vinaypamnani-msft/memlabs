@@ -83,7 +83,8 @@ function Start-VMMaintenance {
         Write-Log "$VMName`: VM maintenance completed successfully." -Success
     }
     else {
-        Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log and refer to internal documentation." -ShowNotification -Failure
+        Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log and refer to internal documentation." -Failure
+        Show-Notification -ToastText "$VMName`: VM maintenance failed. Review VMBuild.log and refer to internal documentation." -ToastTag $VMName
     }
 
     return $worked
@@ -158,7 +159,7 @@ function Start-VMFix {
         return $return
     }
 
-    Write-Log "$VMName`: '$fixName' is applicable. Applying fix now."
+    Write-Log "$VMName`: Fix '$fixName' is applicable. Applying fix now."
 
     # Start VM to apply fix
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
@@ -183,11 +184,11 @@ function Start-VMFix {
 
     $result = Invoke-VmCommand @HashArguments
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
-        Write-Log "$VMName`: Failed to apply fix '$fixName'."
+        Write-Log "$VMName`: Fix '$fixName' failed to be applied."
         $return.Success = $false
     }
     else {
-        Write-Log "$VMName`: Fix '$fixName' applied. Updating version to $fixVersion"
+        Write-Log "$VMName`: Fix '$fixName' applied. Updating version to $fixVersion."
         Set-VMNote -vmName $VMName -vmVersion $fixVersion
         $return.Success = $true
     }
