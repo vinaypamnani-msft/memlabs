@@ -121,9 +121,16 @@ function Start-VMFixes {
         $vmNote = Get-VMNote -VMName $VMName
         if ($vmNote.role -ne "DC") {
             Write-Log "$VMName`: Shutting down VM." -Verbose
-            Stop-VM -Name $VMName -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
+            $i = 0
+            do {
+                $i++
+                Stop-VM -Name $VMName -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
+            }
+            while ($i -ge 5 -or $StopError.Count -ne 0)
+
             if ($StopError.Count -ne 0) {
-                Write-Log "$VMName`: Failed to stop the VM" -Warning
+                Write-Log "$VMName`: Failed to stop the VM. $StopError" -Warning
             }
         }
     }
@@ -152,14 +159,21 @@ function Start-VMFix {
     # Check applicability
     $fixName = $vmFix.FixName
     $fixVersion = $vmFix.FixVersion
+
+    if ($vmNote.memLabsVersion -ge $fixVersion) {
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) has been applied already."
+        $return.Success = $true
+        return $return
+    }
+
     if (-not $vmFix.AppliesToThisVM) {
-        Write-Log "$VMName`: Fix '$fixName' is not applicable. Updating version to '$fixVersion'"
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) is not applicable. Updating version to '$fixVersion'"
         Set-VMNote -VMName $vmName -vmVersion $fixVersion
         $return.Success = $true
         return $return
     }
 
-    Write-Log "$VMName`: Fix '$fixName' is applicable. Applying fix now."
+    Write-Log "$VMName`: Fix '$fixName' ($fixVersion) is applicable. Applying fix now."
 
     # Start VM to apply fix
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
@@ -184,11 +198,11 @@ function Start-VMFix {
 
     $result = Invoke-VmCommand @HashArguments
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
-        Write-Log "$VMName`: Fix '$fixName' failed to be applied."
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied."
         $return.Success = $false
     }
     else {
-        Write-Log "$VMName`: Fix '$fixName' applied. Updating version to $fixVersion."
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
         Set-VMNote -vmName $VMName -vmVersion $fixVersion
         $return.Success = $true
     }
