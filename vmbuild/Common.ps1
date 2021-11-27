@@ -23,6 +23,8 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         [switch]$Activity,
         [Parameter(Mandatory = $false)]
+        [switch]$Highlight,
+        [Parameter(Mandatory = $false)]
         [switch]$SubActivity,
         [Parameter(Mandatory = $false)]
         [switch]$LogOnly,
@@ -94,6 +96,12 @@ function Write-Log {
     If ($IsVerbose) {
         $info = $false
         $Text = "VERBOSE: $Text"
+    }
+
+    If ($Highlight.IsPresent) {
+        $info = $false
+        $Text = "+++ $Text"
+        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
     }
 
     if ($info) {
@@ -1383,10 +1391,6 @@ function Invoke-VmCommand {
     $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName
     $failed = $null -eq $ps
 
-    if ($failed) {
-        $return.ScriptBlockFailed = $true
-    }
-
     # Run script block inside VM
     if (-not $failed) {
         $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
@@ -1399,6 +1403,7 @@ function Invoke-VmCommand {
         }
     }
     else {
+        $return.ScriptBlockFailed = $true
         # Uncomment when debugging, this is called many times while waiting for VM to be ready
         # Write-Log "Invoke-VmCommand: $VmName`: Failed to get VM Session." -Failure -LogOnly
         # return $return
@@ -1787,6 +1792,7 @@ function Set-SupportedOptions {
     $supported = [PSCustomObject]@{
         Roles            = $roles
         RolesForExisting = $rolesForExisting
+        AllRoles         = ($roles + $rolesForExisting | Select-Object -Unique)
         OperatingSystems = $operatingSystems
         SqlVersions      = $sqlVersions
         CMVersions       = $cmVersions
@@ -1833,10 +1839,13 @@ if (-not $Common.Initialized) {
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
+    # Get latest hotfix version
+    $latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion-Descending | Select-Object -First 1 -ExpandProperty FixVersion
+
     # Common global props
     $global:Common = [PSCustomObject]@{
         MemLabsVersion        = "211124"
-        LatestHotfixVersion   = "211125.2"
+        LatestHotfixVersion   = $latestHotfixVersion
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files

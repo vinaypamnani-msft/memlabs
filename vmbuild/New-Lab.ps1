@@ -647,7 +647,7 @@ $VM_Create = {
 
 Clear-Host
 Write-Host ("`r`n" * 6)
-Invoke-Maintenance
+Start-Maintenance
 
 try {
     if ($Configuration) {
