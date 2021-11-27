@@ -178,7 +178,7 @@ function Start-VMFix {
         return $return
     }
 
-    Write-Log "$VMName`: Fix '$fixName' ($fixVersion) is applicable. Applying fix now."
+    Write-Log "$VMName`: Fix '$fixName' ($fixVersion) is applicable. Applying fix now." -Verbose
 
     # Start VM to apply fix
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
@@ -203,7 +203,7 @@ function Start-VMFix {
 
     $result = Invoke-VmCommand @HashArguments
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
-        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied."
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
         $return.Success = $false
     }
     else {
