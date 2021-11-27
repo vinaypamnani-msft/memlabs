@@ -1,7 +1,7 @@
 
 function Start-Maintenance {
 
-    $vmsNeedingMaintenance = Get-List -Type VM | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion }
+    $vmsNeedingMaintenance = Get-List -Type VM | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.role -ne "OSDClient" }
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.vmBuild -eq $true }
@@ -226,10 +226,10 @@ function Start-VMIfNotRunning {
     if ($vm.State -ne "Running") {
         try {
             Write-Log "$VMName`: Starting VM for maintenance and waiting for it to be ready to connect."
-            Start-VM -Name $VMName -ErrorAction Stop
+            Start-VM -Name $VMName -ErrorAction Stop | Out-Null
             $return.StartedVM = $true
             if ($WaitForConnect.IsPresent) {
-                $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2
+                $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2 -Quiet
                 if (-not $connected) {
                     Write-Log "$VMName`: Could not connect to the VM after waiting for 2 minutes."
                     $return.ConnectFailed = $true

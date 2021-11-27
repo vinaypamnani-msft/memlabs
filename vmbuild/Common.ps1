@@ -1184,6 +1184,8 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false)]
+        [switch]$Quiet,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -1306,7 +1308,7 @@ function Wait-ForVm {
             $msg = "Waiting for $PathToVerify to exist"
         }
 
-        Write-Log "$VmName`: $msg..."
+        if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
         do {
             Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $msg -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             Start-Sleep -Seconds 5
@@ -1321,7 +1323,7 @@ function Wait-ForVm {
     Write-Progress -Activity "$VmName`: Waiting for virtual machine" -Status "Wait complete." -Completed
 
     if ($ready) {
-        Write-Log "$VmName`: VM is now available." -Success
+        if (-not $Quiet.IsPresent) { Write-Log "$VmName`: VM is now available." -Success }
     }
 
     if (-not $ready) {
