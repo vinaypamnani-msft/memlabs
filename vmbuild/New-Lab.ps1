@@ -559,8 +559,9 @@ $VM_Create = {
 
     $complete = $false
     $previousStatus = ""
+    $suppressNoisyLogging = $enableVerbose -eq $false
     do {
-        $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt } -SuppressLog -WhatIf:$WhatIf
+        $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt } -SuppressLog:$suppressNoisyLogging -WhatIf:$WhatIf
         Start-Sleep -Seconds 3
 
         if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {

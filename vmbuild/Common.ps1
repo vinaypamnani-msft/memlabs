@@ -1397,6 +1397,7 @@ function Invoke-VmCommand {
     }
 
     # Get VM Session
+    $ps = $null
     if ($VmDomainAccount) {
         $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount
     }
