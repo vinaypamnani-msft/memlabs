@@ -9,7 +9,6 @@ function Start-Maintenance {
     $vmCount = ($vmsNeedingMaintenance | Measure-Object).Count
 
     $text = "Performing maintenance"
-    Write-Progress -Activity $text -Status "Please wait..." -PercentComplete 0
     Write-Log $text -Activity
 
     if ($vmCount -gt 0) {
@@ -20,28 +19,29 @@ function Start-Maintenance {
         return
     }
 
+    $progressId = Get-Random
+    Write-Progress -Id $progressId -Activity $text -Status "Please wait..." -PercentComplete 0
+
     $i = 0
     $countWorked = $countFailed = 0
 
     # Perform maintenance... run it on DC's first, rest after.
-    # Start DC if not running, but don't bother stoppping them. Other VM's would need domain creds to work.
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
         $i++
-        Start-VMIfNotRunning -VMName $vm.vmName | Out-Null
+        Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         $worked = Start-VMMaintenance -VMName $vm.vmName
         if ($worked) { $countWorked++ } else { $countFailed++ }
-        Write-Progress -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
     }
 
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
         $i++
+        Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         $worked = Start-VMMaintenance -VMName $vm.vmName
         if ($worked) { $countWorked++ } else { $countFailed++ }
-        Write-Progress -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
     }
 
     Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed" -Activity
-    Write-Progress -Activity $text -Completed
+    Write-Progress -Id $progressId -Activity $text -Completed
 }
 
 function Start-VMMaintenance {
@@ -95,7 +95,9 @@ function Start-VMFixes {
         [Parameter(Mandatory = $true, HelpMessage = "VMName")]
         [object] $VMName,
         [Parameter(Mandatory = $true, HelpMessage = "VMFixes")]
-        [object] $VMFixes
+        [object] $VMFixes,
+        [Parameter(Mandatory = $false, HelpMessage = "SkipVMShutdown")]
+        [switch] $SkipVMShutdown
     )
 
     Write-Log "$VMName`: Applying fixes to the virtual machine." -Verbose
@@ -114,7 +116,7 @@ function Start-VMFixes {
         if (-not $success) { break }
     }
 
-    if ($vmStarted) {
+    if ($vmStarted -and -not $SkipVMShutdown.IsPresent) {
         $vmNote = Get-VMNote -VMName $VMName
         if ($vmNote.role -ne "DC") {
             Write-Log "$VMName`: Shutting down VM." -Verbose
@@ -144,6 +146,7 @@ function Start-VMFix {
 
     # Get current VM note to ensure we don't have outdated version
     $vmNote = Get-VMNote -VMName $vmName
+    $vmDomain = $vmNote.domain
 
     # Check applicability
     $fixName = $vmFix.FixName
@@ -158,17 +161,15 @@ function Start-VMFix {
     Write-Log "$VMName`: '$fixName' is applicable. Applying fix now."
 
     # Start VM to apply fix
-    $status = Start-VMIfNotRunning -VMName $VMName -Quiet
+    $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
     $return.StartedVM = $status.StartedVM
 
-    if ($status.StartFailed) {
-        Write-Log "$VMName`: VM could not be started to apply fix '$fixName'."
+    if ($status.StartFailed -or $status.ConnectFailed) {
+        # Write-Log "$VMName`: VM could not be started to apply fix '$fixName'."
         return $return
     }
 
     # Apply Fix
-    $vmDomain = $vmNote.domain
-
     $HashArguments = @{
         VmName       = $VMName
         VMDomainName = $vmDomain
@@ -181,7 +182,7 @@ function Start-VMFix {
     }
 
     $result = Invoke-VmCommand @HashArguments
-    if ($result.ScriptBlockFailed) {
+    if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Failed to apply fix '$fixName'."
         $return.Success = $false
     }
@@ -199,39 +200,50 @@ function Start-VMIfNotRunning {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
         [string] $VMName,
-        [Parameter(Mandatory = $false, HelpMessage = "Quiet - No logging")]
+        [Parameter(Mandatory = $true, HelpMessage = "VM Domain")]
+        [string] $VMDomain,
+        [Parameter(Mandatory = $false, HelpMessage = "Wait for VM to be connectable")]
+        [switch] $WaitForConnect,
+        [Parameter(Mandatory = $false, HelpMessage = "Quiet - No logging when VM is already running")]
         [switch] $Quiet
     )
 
     $return = [PSCustomObject]@{
-        StartedVM   = $false
-        StartFailed = $false
+        StartedVM     = $false
+        StartFailed   = $false
+        ConnectFailed = $false
     }
 
     $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_" -Warning
+        $return.StartFailed = $true
+        $return.ConnectFailed = $true
         return $return
     }
 
     if ($vm.State -ne "Running") {
         try {
+            Write-Log "$VMName`: Starting VM for maintenance and waiting for it to be ready to connect."
             Start-VM -Name $VMName -ErrorAction Stop
-            Write-Log "$VMName`: Starting VM for maintenance and waiting 30 seocnds."
-            Start-Sleep -Seconds 30
             $return.StartedVM = $true
-            $return.StartFailed = $false
+            if ($WaitForConnect.IsPresent) {
+                $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2
+                if (-not $connected) {
+                    Write-Log "$VMName`: Could not connect to the VM after waiting for 2 minutes."
+                    $return.ConnectFailed = $true
+                }
+            }
         }
         catch {
             Write-Log "$VMName`: Failed to start VM. Error: $_"
-            $return.StartedVM = $false
             $return.StartFailed = $true
+            $return.ConnectFailed = $true
         }
     }
     else {
         if (-not $Quiet.IsPresent) { Write-Log "$VMName`: VM is already running." -Verbose }
-        $return.StartedVM = $false
     }
 
     return $return
@@ -240,9 +252,9 @@ function Start-VMIfNotRunning {
 function Get-VMFixes {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "VMName", ParameterSetName="Real")]
+        [Parameter(Mandatory = $true, HelpMessage = "VMName", ParameterSetName = "Real")]
         [object] $VMName,
-        [Parameter(Mandatory = $true, HelpMessage = "VMName", ParameterSetName="Dummy")]
+        [Parameter(Mandatory = $true, HelpMessage = "VMName", ParameterSetName = "Dummy")]
         [switch] $ReturnDummyList
     )
 
@@ -269,7 +281,10 @@ function Get-VMFixes {
             }
         }
         if ($accountsUpdated -ne $accountsToUpdate.Count) {
-            throw "Updated $accountsUpdated accounts out of $($accountsToUpdate.Count)."
+            return $false
+        }
+        else {
+            return $true
         }
     }
 
@@ -288,7 +303,13 @@ function Get-VMFixes {
     ### Local account password expiration
 
     $Fix_LocalAccount = {
-        Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
+        Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true -ErrorAction SilentlyContinue -ErrorVariable AccountError
+        if ($AccountError.Count -eq 0) {
+            return $true
+        }
+        else {
+            return $false
+        }
     }
 
     $fixesToPerform += [PSCustomObject]@{
@@ -311,6 +332,7 @@ function Get-VMFixes {
         if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse | Out-Null }
         if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse | Out-Null }
         if (Test-Path $path3) { Remove-Item -Path $path3 -Force | Out-Null }
+        return $true
     }
 
     $fixesToPerform += [PSCustomObject]@{
