@@ -132,7 +132,7 @@ function Start-VMFixes {
                 Stop-VM -Name $VMName -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 3
             }
-            until ($i -ge 5 -or $StopError.Count -ne 0)
+            until ($i -ge 5 -or $StopError.Count -eq 0)
 
             if ($StopError.Count -ne 0) {
                 Write-Log "$VMName`: Failed to stop the VM. $StopError" -Warning

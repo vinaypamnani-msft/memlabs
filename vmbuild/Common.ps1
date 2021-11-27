@@ -100,6 +100,7 @@ function Write-Log {
 
     If ($Highlight.IsPresent) {
         $info = $false
+        Write-Host
         $Text = "+++ $Text"
         $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
     }
@@ -149,6 +150,7 @@ function Write-Log {
     }
 
     if ($write) {
+        $Text = $Text.ToString().Trim()
         try {
             $Text | Out-File $Common.LogPath -Append
         }
