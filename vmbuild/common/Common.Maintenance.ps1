@@ -108,13 +108,18 @@ function Start-VMFixes {
 
     foreach ($vmFix in $VMFixes | Sort-Object FixVersion ) {
         $status = Start-VMFix -vmName $VMName -vmFix $vmFix
-
-        if ($status.StartedVM) {
-            $vmStarted = $true
-        }
-
+        if ($status.StartedVM) { $vmStarted = $true }
         $success = $status.Success
-        if (-not $success) { break }
+
+        if (-not $success) {
+            Write-Log "Retrying fix '$($vmFix.FixName)' after waiting for 30 seconds."
+            Start-Sleep -Seconds 30
+            $status = Start-VMFix -vmName $VMName -vmFix
+            if ($status.StartedVM) { $vmStarted = $true }
+            $success = $status.Success
+
+            if (-not $success) { break }
+        }
     }
 
     if ($vmStarted -and -not $SkipVMShutdown.IsPresent) {
