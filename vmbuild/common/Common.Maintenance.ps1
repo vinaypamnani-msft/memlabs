@@ -201,6 +201,10 @@ function Start-VMFix {
         $HashArguments.Add("ArgumentList", $vmFix.ArgumentList)
     }
 
+    if ($vmFix.RunAsAccount) {
+        $HashArguments.Add("VmDomainAccount", $vmFix.RunAsAccount)
+    }
+
     $result = Invoke-VmCommand @HashArguments
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
@@ -291,15 +295,26 @@ function Get-VMFixes {
 
     $Fix_DomainAccount = {
         param ($accountName)
+        Start-Transcript -Path "C:\staging\Fix-DomainAccounts.txt"
         $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $accountName)
         $accountsToUpdate = $accountsToUpdate | Select-Object -Unique
         $accountsUpdated = 0
         foreach ($account in $accountsToUpdate) {
-            Set-ADUser -Identity $account -PasswordNeverExpires $true -CannotChangePassword $true -ErrorVariable AccountError -ErrorAction SilentlyContinue
+            $i = 0
+            do {
+                $i++
+                Set-ADUser -Identity $account -PasswordNeverExpires $true -CannotChangePassword $true -ErrorVariable AccountError -ErrorAction SilentlyContinue
+            }
+            until ($i -ge 5 -or $AccountError.Count -eq 0)
+
             if ($AccountError.Count -eq 0) {
                 $accountsUpdated++
             }
+            else {
+                $AccountError | Out-Host
+            }
         }
+        Stop-Transcript
         if ($accountsUpdated -ne $accountsToUpdate.Count) {
             return $false
         }
@@ -318,6 +333,7 @@ function Get-VMFixes {
         NotAppliesToRoles = @()
         ScriptBlock       = $Fix_DomainAccount
         ArgumentList      = @($vmNote.adminName)
+        RunAsAccount      = $vmNote.adminName
     }
 
     ### Local account password expiration

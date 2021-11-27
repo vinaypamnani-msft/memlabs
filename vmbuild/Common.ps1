@@ -1346,6 +1346,8 @@ function Invoke-VmCommand {
         [ScriptBlock]$ScriptBlock,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
+        [string]$VmDomainAccount,
         [Parameter(Mandatory = $false, HelpMessage = "Argument List to supply to ScriptBlock")]
         [string[]]$ArgumentList,
         [Parameter(Mandatory = $false, HelpMessage = "Display Name of the script for log/console")]
@@ -1395,7 +1397,14 @@ function Invoke-VmCommand {
     }
 
     # Get VM Session
-    $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName
+    if ($VmDomainAccount) {
+        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount
+    }
+
+    if (-not $ps) {
+        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName
+    }
+
     $failed = $null -eq $ps
 
     # Run script block inside VM
@@ -1434,7 +1443,9 @@ function Get-VmSession {
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
         [string]$VmName,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
-        [string]$VmDomainName = "WORKGROUP"
+        [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
+        [string]$VmDomainAccount
     )
 
     $ps = $null
@@ -1448,7 +1459,14 @@ function Get-VmSession {
     }
 
     # Get PS Session
-    $username = "$VmDomainName\$($Common.LocalAdmin.UserName)"
+    if ($VmDomainAccount) {
+        $username = "$VmDomainName\$VmDomainAccount"
+        $cacheKey = $cacheKey + "-" + $VmDomainAccount
+    }
+    else {
+        $username = "$VmDomainName\$($Common.LocalAdmin.UserName)"
+        $cacheKey = $cacheKey + "-" + $Common.LocalAdmin.UserName
+    }
 
     # Retrieve session from cache
     if ($global:ps_cache.ContainsKey($cacheKey)) {
