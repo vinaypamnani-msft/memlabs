@@ -647,10 +647,13 @@ $VM_Create = {
 }
 
 Clear-Host
-Write-Host ("`r`n" * 6)
-Start-Maintenance
+
 
 try {
+
+    Write-Host ("`r`n" * 6)
+    Start-Maintenance
+
     if ($Configuration) {
         # Get user configuration
         $configResult = Get-UserConfiguration -Configuration $Configuration
