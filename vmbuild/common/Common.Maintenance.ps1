@@ -207,7 +207,7 @@ function Start-VMFix {
 
     # Start dependent VM's
     if ($vmFix.DependentVMs) {
-        $dependentVMs = $vmFix.DependentVMs | Where-Object { $_ -and $_.Trim() }
+        $dependentVMs = $vmFix.DependentVMs
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) requires '$($dependentVMs -join ',')' to be running."
         foreach ($vm in $dependentVMs) {
             if ([string]::IsNullOrWhiteSpace($vm)) { continue }
@@ -380,6 +380,7 @@ function Get-VMFixes {
         AppliesToExisting = $true
         AppliesToRoles    = @("DC")
         NotAppliesToRoles = @()
+        DependentVMs      = @()
         ScriptBlock       = $Fix_DomainAccount
         ArgumentList      = @($vmNote.adminName)
     }
@@ -404,6 +405,7 @@ function Get-VMFixes {
         AppliesToExisting = $true
         AppliesToRoles    = @()
         NotAppliesToRoles = @("DC")
+        DependentVMs      = @()
         ScriptBlock       = $Fix_LocalAccount
     }
 
@@ -427,6 +429,7 @@ function Get-VMFixes {
         AppliesToExisting = $true
         AppliesToRoles    = @()
         NotAppliesToRoles = @()
+        DependentVMs      = @()
         ScriptBlock       = $Fix_DefaultProfile
     }
 
@@ -492,7 +495,7 @@ function Get-VMFixes {
         AppliesToThisVM   = $false
         AppliesToNew      = $false
         AppliesToExisting = $true
-        AppliesToRoles    = @("Primary")
+        AppliesToRoles    = @("CASorStandalonePrimary")
         NotAppliesToRoles = @()
         DependentVMs      = @($dc.vmName, $vmNote.remoteSQLVM)
         ScriptBlock       = $Fix_CMFullAdmin
@@ -514,7 +517,16 @@ function Get-VMFixes {
         elseif ($vmNote.role -in $applicableRoles) {
             $applicable = $true
         }
+        else {
+            $topLevelSite = $vmNote.role -eq "CAS" -or ($vmNote.role -eq "Primary" -and (-not $vmNote.parentSiteCode))
+            if ($applicableRoles -contains "CASorStandalonePrimary" -and $topLevelSite) {
+                $applicable = $true
+            }
+        }
         $vmFix.AppliesToThisVM = $applicable
+
+        # Filter out null's'
+        $vmFix.DependentVMs = $vmFix.DependentVMs | Where-Object { $_ -and $_.Trim() }
     }
 
     return $fixesToPerform
