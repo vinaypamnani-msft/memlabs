@@ -1,10 +1,10 @@
 
 function Start-Maintenance {
 
-    $vmsNeedingMaintenance = Get-List -Type VM | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
+    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true }
+    $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.role -ne "OSDClient" }
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
-    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.vmBuild -eq $true }
 
     $vmCount = ($vmsNeedingMaintenance | Measure-Object).Count
 
@@ -24,6 +24,7 @@ function Start-Maintenance {
 
     $i = 0
     $countWorked = $countFailed = $countSkipped = 0
+    $countMaintNotNeeded = $allVMs.Count - $vmCount
 
     # Perform maintenance... run it on DC's first, rest after.
     $failedDomains = @()
@@ -60,7 +61,7 @@ function Start-Maintenance {
     }
 
     Write-Host
-    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed. Skipped: $countSkipped" -Activity
+    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countMaintNotNeeded" -Activity
     Write-Progress -Id $progressId -Activity $text -Completed
 }
 
@@ -239,7 +240,7 @@ function Start-VMFix {
         $HashArguments.Add("VmDomainAccount", $vmFix.RunAsAccount)
     }
 
-    $result = Invoke-VmCommand @HashArguments
+    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
         $return.Success = $false

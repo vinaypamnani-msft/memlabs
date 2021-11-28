@@ -183,8 +183,8 @@ function Show-Notification {
     $Template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
 
     $RawXml = [xml] $Template.GetXml()
-    ($RawXml.toast.visual.binding.text | Where-Object {$_.id -eq "1"}).AppendChild($RawXml.CreateTextNode($ToastTitle)) > $null
-    ($RawXml.toast.visual.binding.text | Where-Object {$_.id -eq "2"}).AppendChild($RawXml.CreateTextNode($ToastText)) > $null
+    ($RawXml.toast.visual.binding.text | Where-Object { $_.id -eq "1" }).AppendChild($RawXml.CreateTextNode($ToastTitle)) > $null
+    ($RawXml.toast.visual.binding.text | Where-Object { $_.id -eq "2" }).AppendChild($RawXml.CreateTextNode($ToastText)) > $null
 
     $SerializedXml = New-Object Windows.Data.Xml.Dom.XmlDocument
     $SerializedXml.LoadXml($RawXml.OuterXml)
@@ -1354,6 +1354,8 @@ function Invoke-VmCommand {
         [string]$DisplayName,
         [Parameter(Mandatory = $false, HelpMessage = "Suppress log entries. Useful when waiting for VM to be ready to run commands.")]
         [switch]$SuppressLog,
+        [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
+        [switch]$ShowVMSessionError,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
@@ -1399,11 +1401,11 @@ function Invoke-VmCommand {
     # Get VM Session
     $ps = $null
     if ($VmDomainAccount) {
-        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount
+        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError
     }
 
     if (-not $ps) {
-        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName
+        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
     }
 
     $failed = $null -eq $ps
@@ -1446,7 +1448,9 @@ function Get-VmSession {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
-        [string]$VmDomainAccount
+        [string]$VmDomainAccount,
+        [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
+        [switch]$ShowVMSessionError
     )
 
     $ps = $null
@@ -1482,12 +1486,17 @@ function Get-VmSession {
 
     $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
-        Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+        if ($ShowVMSessionError.IsPresent) {
+            Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
+        }
+        else {
+            Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+        }
         if ($VmDomainName -ne $VmName) {
             $username = "$VmName\$($Common.LocalAdmin.UserName)"
             $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
             $cacheKey = $VmName + "-WORKGROUP"
-            Write-Log "$VmName`: Attempting to get a session using $username." -Verbose
+            Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username." -Verbose
             $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
             if ($Err1.Count -ne 0) {
                 Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err1" -Failure -Verbose
