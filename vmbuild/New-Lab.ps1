@@ -972,9 +972,19 @@ finally {
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs" -LogOnly
     }
-    $Common.Initialized = $false
     get-job | stop-job
+
+    # uninit common
+    $Common.Initialized = $false
+
+    # Set quick edit back
     Set-QuickEdit
+
+    # Close PS Sessions
+    foreach($session in $global:ps_cache.Keys) {
+        Write-Log "Closing PS Session $session" -Verbose
+        Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host

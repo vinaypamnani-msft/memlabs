@@ -1419,7 +1419,14 @@ function Invoke-VmCommand {
             $failed = $true
             $return.ScriptBlockFailed = $true
             if (-not $SuppressLog) {
-                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2.ToString().Trim())." -Failure
+                if ($Err2.Count -eq 1) {
+                    Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
+                }
+                else {
+                    $msg = @()
+                    foreach ($failMsg in $Err2) { $msg += $failMsg }
+                    Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
+                }
             }
         }
     }

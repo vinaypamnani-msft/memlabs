@@ -1,12 +1,12 @@
 
 function Start-Maintenance {
 
-    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true }
+    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true}
     $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
-    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.role -ne "OSDClient" }
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
 
     $vmCount = ($vmsNeedingMaintenance | Measure-Object).Count
+    $countNotNeeded = $allVMs.Count - $vmCount
 
     $text = "Performing maintenance"
     Write-Log $text -Activity
@@ -24,7 +24,6 @@ function Start-Maintenance {
 
     $i = 0
     $countWorked = $countFailed = $countSkipped = 0
-    $countNotNeeded = $allVMs.Count - $vmCount
 
     # Perform maintenance... run it on DC's first, rest after.
     $failedDomains = @()
@@ -71,7 +70,7 @@ function Show-FailedDomains {
     Write-Host "DC Maintenance failed for below domains . This may be because the passwords for the required accounts (listed below) expired."
     Write-Host
     $failedDCs = Get-List -Type VM -ResetCache | Where-Object { $_.role -eq "DC" -and $_.domain -in $failedDomains }
-    ($failedDCS | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName) } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-String).Trim() | Out-Host
+    ($failedDCS | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName, "cm_svc") } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-String).Trim() | Out-Host
     Write-Host
     Write-Host "Manual remediation steps here."
 }
@@ -106,7 +105,7 @@ function Start-VMMaintenance {
         return $true
     }
 
-    Write-Log "$VMName`: VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion." -Highlight
+    Write-Log "$VMName`: VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion. Performing maintenance..." -Highlight
 
     $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
     $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes
@@ -239,7 +238,7 @@ function Start-VMFix {
     $HashArguments = @{
         VmName       = $VMName
         VMDomainName = $vmDomain
-        DisplayName  = $vmFix.FixName
+        DisplayName  = $fixName
         ScriptBlock  = $vmFix.ScriptBlock
     }
 
@@ -255,6 +254,22 @@ function Start-VMFix {
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
         $return.Success = $false
+        if ($Common.VerboseEnabled) {
+            $pull_Transcript = {
+                $filePath = "C:\staging\Fix\$($using:fixName).txt"
+                if (Test-Path $filePath) {
+                    Get-Content -Path $filePath -ErrorAction SilentlyContinue -Force
+                }
+            }
+            $HashArguments2 = @{
+                VmName       = $VMName
+                VMDomainName = $vmDomain
+                DisplayName  = "Pull-Fix-Transcript"
+                ScriptBlock  = $pull_Transcript
+            }
+            $result2 = Invoke-VmCommand @HashArguments2 -SuppressLog
+            if (-not $result2.ScriptBlockFailed) { $result2.ScriptBlockOutput | Out-Host }
+        }
     }
     else {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
@@ -343,7 +358,8 @@ function Get-VMFixes {
     $Fix_DomainAccount = {
         param ($accountName)
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
-        Start-Transcript -Path "C:\staging\Fix\Fix-DomainAccounts.txt" -Append
+        $transcriptPath = "C:\staging\Fix\Fix-DomainAccounts.txt"
+        Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue
         $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $accountName)
         $accountsToUpdate = $accountsToUpdate | Select-Object -Unique
         $accountsUpdated = 0
@@ -358,9 +374,6 @@ function Get-VMFixes {
 
             if ($AccountError.Count -eq 0) {
                 $accountsUpdated++
-            }
-            else {
-                $AccountError | Out-Host
             }
         }
         Stop-Transcript
@@ -379,7 +392,7 @@ function Get-VMFixes {
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("DC")
-        NotAppliesToRoles = @()
+        NotAppliesToRoles = @("OSDClient")
         DependentVMs      = @()
         ScriptBlock       = $Fix_DomainAccount
         ArgumentList      = @($vmNote.adminName)
@@ -404,7 +417,7 @@ function Get-VMFixes {
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
-        NotAppliesToRoles = @("DC")
+        NotAppliesToRoles = @("DC", "OSDClient")
         DependentVMs      = @()
         ScriptBlock       = $Fix_LocalAccount
     }
@@ -428,7 +441,7 @@ function Get-VMFixes {
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
-        NotAppliesToRoles = @()
+        NotAppliesToRoles = @("OSDClient")
         DependentVMs      = @()
         ScriptBlock       = $Fix_DefaultProfile
     }
@@ -437,7 +450,8 @@ function Get-VMFixes {
 
     $Fix_CMFullAdmin = {
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
-        Start-Transcript -Path "C:\staging\Fix\Fix-CMFullAdmin.txt" -Append
+        $transcriptPath = "C:\staging\Fix\Fix-CMFullAdmin.txt"
+        Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue
         $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
         $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
 
@@ -496,7 +510,7 @@ function Get-VMFixes {
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("CASorStandalonePrimary")
-        NotAppliesToRoles = @()
+        NotAppliesToRoles = @("OSDClient")
         DependentVMs      = @($dc.vmName, $vmNote.remoteSQLVM)
         ScriptBlock       = $Fix_CMFullAdmin
         RunAsAccount      = $vmNote.adminName
