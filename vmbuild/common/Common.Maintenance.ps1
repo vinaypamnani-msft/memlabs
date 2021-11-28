@@ -52,7 +52,6 @@ function Start-VMMaintenance {
     )
 
     $vmNoteObject = Get-VMNote -VMName $VMName
-    $vmDomain = $vmNoteObject.domain
 
     if (-not $vmNoteObject) {
         Write-Log "$vmName`: VM Notes property could not be read. Skipping." -Warning
@@ -78,7 +77,7 @@ function Start-VMMaintenance {
     Write-Log "$VMName`: VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion." -Highlight
 
     $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
-    $worked = Start-VMFixes -VMName $VMName -VMDomain $vmDomain -VMFixes $vmFixes
+    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes
 
     if ($worked) {
         Write-Log "$VMName`: VM maintenance completed successfully." -Success
@@ -96,8 +95,6 @@ function Start-VMFixes {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VMName")]
         [string] $VMName,
-        [Parameter(Mandatory = $true, HelpMessage = "VMDomain")]
-        [string] $VMDomain,
         [Parameter(Mandatory = $true, HelpMessage = "VMFixes")]
         [object] $VMFixes,
         [Parameter(Mandatory = $false, HelpMessage = "SkipVMShutdown")]
@@ -105,15 +102,6 @@ function Start-VMFixes {
     )
 
     Write-Log "$VMName`: Applying fixes to the virtual machine." -Verbose
-
-    $testBlock = {
-        if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
-    }
-
-    $test = Invoke-VmCommand -VmName $VMName -VmDomainName $VMDomain -ScriptBlock $testBlock -DisplayName "Test VM Connection"
-    if ($test.ScriptBlockFailed) {
-        return $false
-    }
 
     $success = $false
     $toStop = @()
@@ -320,6 +308,7 @@ function Get-VMFixes {
 
     $Fix_DomainAccount = {
         param ($accountName)
+        if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
         Start-Transcript -Path "C:\staging\Fix\Fix-DomainAccounts.txt"
         $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $accountName)
         $accountsToUpdate = $accountsToUpdate | Select-Object -Unique
@@ -411,7 +400,7 @@ function Get-VMFixes {
     # Full Admin in CM
 
     $Fix_CMFullAdmin = {
-
+        if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
         Start-Transcript -Path "C:\staging\Fix\Fix-CMFullAdmin.txt"
         $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
         $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
