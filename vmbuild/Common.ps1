@@ -1415,7 +1415,7 @@ function Invoke-VmCommand {
             $failed = $true
             $return.ScriptBlockFailed = $true
             if (-not $SuppressLog) {
-                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $Err2" -Failure
+                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2.ToString().Trim())." -Failure
             }
         }
     }

@@ -37,7 +37,7 @@ function Start-Maintenance {
         Write-Log "DC Maintenance Failed for at least one domain. Displaying message and skipping maintenance of remaining virtual machines." -LogOnly
         Write-Host
         Write-Host "DC Maintenance Failed. This may be because the passwords for the required accounts (listed below) expired. "
-        Get-List -Type VM -ResetCache | Where-Object { $_.role -eq "DC" } | Select-Object vmName, domain, @{Name="accountsToUpdate"; Expression={@("vmbuildadmin",$_.adminName)}}
+        Get-List -Type VM -ResetCache | Where-Object { $_.role -eq "DC" } | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName) } }
         Write-Host "Manual remediation steps here."
     }
     else {
@@ -185,8 +185,9 @@ function Start-VMFix {
 
     # Start dependent VM's
     if ($vmFix.DependentVMs) {
-        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) requires '$($vmFix.DependentVMs -join ',')' to be running."
-        foreach ($vm in $vmFix.DependentVMs) {
+        $dependentVMs = $vmFix.DependentVMs | Where-Object { $_ -and $_.Trim() }
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) requires '$($dependentVMs -join ',')' to be running."
+        foreach ($vm in $dependentVMs) {
             if ([string]::IsNullOrWhiteSpace($vm)) { continue }
             $note = Get-VMNote -VMName $vm
             $status = Start-VMIfNotRunning -VMName $vm -VMDomain $note.domain -WaitForConnect -Quiet
@@ -310,7 +311,7 @@ function Get-VMFixes {
     }
     else {
         $vmNote = Get-VMNote -VMName $VMName
-        $dc = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -eq $vmNote.domain}
+        $dc = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -eq $vmNote.domain }
     }
 
     $fixesToPerform = @()
@@ -430,40 +431,33 @@ function Get-VMFixes {
         $i = 0
         do {
             $i++
-            try {
-                # Import the ConfigurationManager.psd1 module
-                if ($null -eq (Get-Module ConfigurationManager)) {
-                    Import-Module $modulePath
-                }
 
-                # Connect to the site's drive if it is not already present
-                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
-
-                while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-                    Start-Sleep -Seconds 10
-                    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
-                }
-
-                # Set the current location to be the site code.
-                Set-Location "$($SiteCode):\" @initParams
-
-                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" }
-
-                if (-not $exists) {
-                    New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-                        -SecurityScopeName "All", "All Systems", "All Users and User Groups"
-                    Start-Sleep -Seconds 30
-                    $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName }
-                }
-
+            # Import the ConfigurationManager.psd1 module
+            if ($null -eq (Get-Module ConfigurationManager)) {
+                Import-Module $modulePath -ErrorAction SilentlyContinue
             }
-            catch {
-                $exists = $false
+
+            # Connect to the site's drive if it is not already present
+            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
+
+            while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                Start-Sleep -Seconds 10
+                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
+            }
+
+            # Set the current location to be the site code.
+            Set-Location "$($SiteCode):\" @initParams
+
+            $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
+
+            if (-not $exists) {
+                New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+                    -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 30
+                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName } -ErrorAction SilentlyContinue
             }
         }
         until ($exists -or $i -gt 5)
-
 
         Stop-Transcript
 
