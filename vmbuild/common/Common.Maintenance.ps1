@@ -309,7 +309,7 @@ function Get-VMFixes {
     $Fix_DomainAccount = {
         param ($accountName)
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
-        Start-Transcript -Path "C:\staging\Fix\Fix-DomainAccounts.txt"
+        Start-Transcript -Path "C:\staging\Fix\Fix-DomainAccounts.txt" -Append
         $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $accountName)
         $accountsToUpdate = $accountsToUpdate | Select-Object -Unique
         $accountsUpdated = 0
@@ -401,7 +401,7 @@ function Get-VMFixes {
 
     $Fix_CMFullAdmin = {
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
-        Start-Transcript -Path "C:\staging\Fix\Fix-CMFullAdmin.txt"
+        Start-Transcript -Path "C:\staging\Fix\Fix-CMFullAdmin.txt" -Append
         $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
         $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
 
