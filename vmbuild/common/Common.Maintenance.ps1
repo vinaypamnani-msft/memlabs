@@ -473,7 +473,7 @@ function Get-VMFixes {
         AppliesToExisting = $true
         AppliesToRoles    = @("Primary")
         NotAppliesToRoles = @()
-        DependentVMs      = @($vmNote.remoteSQLVM, $dc.vmName)
+        DependentVMs      = @($dc.vmName, $vmNote.remoteSQLVM)
         ScriptBlock       = $Fix_CMFullAdmin
         RunAsAccount      = $vmNote.adminName
     }
