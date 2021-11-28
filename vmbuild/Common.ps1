@@ -1866,7 +1866,7 @@ if (-not $Common.Initialized) {
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
     # Get latest hotfix version
-    $latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion-Descending | Select-Object -First 1 -ExpandProperty FixVersion
+    $latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
 
     # Common global props
     $global:Common = [PSCustomObject]@{

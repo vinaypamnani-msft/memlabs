@@ -52,6 +52,7 @@ function Start-VMMaintenance {
     )
 
     $vmNoteObject = Get-VMNote -VMName $VMName
+    $vmDomain = $vmNoteObject.domain
 
     if (-not $vmNoteObject) {
         Write-Log "$vmName`: VM Notes property could not be read. Skipping." -Warning
@@ -77,7 +78,7 @@ function Start-VMMaintenance {
     Write-Log "$VMName`: VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion." -Highlight
 
     $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
-    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes
+    $worked = Start-VMFixes -VMName $VMName -VMDomain $vmDomain -VMFixes $vmFixes
 
     if ($worked) {
         Write-Log "$VMName`: VM maintenance completed successfully." -Success
@@ -94,7 +95,9 @@ function Start-VMFixes {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VMName")]
-        [object] $VMName,
+        [string] $VMName,
+        [Parameter(Mandatory = $true, HelpMessage = "VMDomain")]
+        [string] $VMDomain,
         [Parameter(Mandatory = $true, HelpMessage = "VMFixes")]
         [object] $VMFixes,
         [Parameter(Mandatory = $false, HelpMessage = "SkipVMShutdown")]
@@ -103,39 +106,41 @@ function Start-VMFixes {
 
     Write-Log "$VMName`: Applying fixes to the virtual machine." -Verbose
 
+    $testBlock = {
+        if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
+    }
+
+    $test = Invoke-VmCommand -VmName $VMName -VmDomainName $VMDomain -ScriptBlock $testBlock -DisplayName "Test VM Connection"
+    if ($test.ScriptBlockFailed) {
+        return $false
+    }
+
     $success = $false
-    $vmStarted = $false
+    $toStop = @()
 
     foreach ($vmFix in $VMFixes | Sort-Object FixVersion ) {
         $status = Start-VMFix -vmName $VMName -vmFix $vmFix
-        if ($status.StartedVM) { $vmStarted = $true }
+        $toStop += $status.VMsToStop
         $success = $status.Success
-
-        if (-not $success) {
-            Write-Log "Retrying fix '$($vmFix.FixName)' after waiting for 30 seconds."
-            Start-Sleep -Seconds 30
-            $status = Start-VMFix -vmName $VMName -vmFix $vmFix
-            if ($status.StartedVM) { $vmStarted = $true }
-            $success = $status.Success
-
-            if (-not $success) { break }
-        }
+        if (-not $success) { break }
     }
 
-    if ($vmStarted -and -not $SkipVMShutdown.IsPresent) {
-        $vmNote = Get-VMNote -VMName $VMName
-        if ($vmNote.role -ne "DC") {
-            Write-Log "$VMName`: Shutting down VM." -Verbose
-            $i = 0
-            do {
-                $i++
-                Stop-VM -Name $VMName -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 3
-            }
-            until ($i -ge 5 -or $StopError.Count -eq 0)
+    if ($toStop.Count -ne 0 -and -not $SkipVMShutdown.IsPresent) {
+        foreach ($vm in $toStop) {
+            $vmNote = Get-VMNote -VMName $vm
+            if ($vmNote.role -ne "DC") {
+                Write-Log "$vm`: Shutting down VM." -Verbose
+                $i = 0
+                do {
+                    $i++
+                    Stop-VM -Name $vm -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 3
+                }
+                until ($i -ge 5 -or $StopError.Count -eq 0)
 
-            if ($StopError.Count -ne 0) {
-                Write-Log "$VMName`: Failed to stop the VM. $StopError" -Warning
+                if ($StopError.Count -ne 0) {
+                    Write-Log "$vm`: Failed to stop the VM. $StopError" -Warning
+                }
             }
         }
     }
@@ -154,7 +159,7 @@ function Start-VMFix {
 
     $return = [PSCustomObject]@{
         Success   = $false
-        StartedVM = $false
+        VMsToStop = @()
     }
 
     # Get current VM note to ensure we don't have outdated version
@@ -180,9 +185,29 @@ function Start-VMFix {
 
     Write-Log "$VMName`: Fix '$fixName' ($fixVersion) is applicable. Applying fix now." -Verbose
 
+    # Start dependent VM's
+    if ($vmFix.DependentVMs) {
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) requires '$($vmFix.DependentVMs -join ',')' to be running."
+        foreach ($vm in $vmFix.DependentVMs) {
+            if ([string]::IsNullOrWhiteSpace($vm)) { continue }
+            $note = Get-VMNote -VMName $vm
+            $status = Start-VMIfNotRunning -VMName $vm -VMDomain $note.domain -WaitForConnect -Quiet
+            if ($status.StartedVM) {
+                $return.VMsToStop += $vm
+            }
+
+            if ($status.StartFailed -or $status.ConnectFailed) {
+                # Write-Log "$VMName`: VM could not be started to apply fix '$fixName'."
+                return $return
+            }
+        }
+    }
+
     # Start VM to apply fix
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
-    $return.StartedVM = $status.StartedVM
+    if ($status.StartedVM) {
+        $return.VMsToStop += $VMName
+    }
 
     if ($status.StartFailed -or $status.ConnectFailed) {
         # Write-Log "$VMName`: VM could not be started to apply fix '$fixName'."
@@ -295,7 +320,7 @@ function Get-VMFixes {
 
     $Fix_DomainAccount = {
         param ($accountName)
-        Start-Transcript -Path "C:\staging\Fix-DomainAccounts.txt"
+        Start-Transcript -Path "C:\staging\Fix\Fix-DomainAccounts.txt"
         $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $accountName)
         $accountsToUpdate = $accountsToUpdate | Select-Object -Unique
         $accountsUpdated = 0
@@ -304,6 +329,7 @@ function Get-VMFixes {
             do {
                 $i++
                 Set-ADUser -Identity $account -PasswordNeverExpires $true -CannotChangePassword $true -ErrorVariable AccountError -ErrorAction SilentlyContinue
+                if ($AccountError.Count -ne 0) { Start-Sleep -Seconds 20 }
             }
             until ($i -ge 5 -or $AccountError.Count -eq 0)
 
@@ -373,7 +399,7 @@ function Get-VMFixes {
 
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-DefaultUserProfile"
-        FixVersion        = "211125.3"
+        FixVersion        = "211126"
         AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
@@ -382,7 +408,76 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_DefaultProfile
     }
 
+    # Full Admin in CM
+
+    $Fix_CMFullAdmin = {
+
+        Start-Transcript -Path "C:\staging\Fix\Fix-CMFullAdmin.txt"
+        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+        $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
+
+        # Get CM module path
+        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+        $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+        $uiInstallPath = $subKey.GetValue("UI Installation Directory")
+        $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
+        $initParams = @{}
+
+        # Import the ConfigurationManager.psd1 module
+        if ($null -eq (Get-Module ConfigurationManager)) {
+            Import-Module $modulePath
+        }
+
+        # Connect to the site's drive if it is not already present
+        New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
+
+        while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Seconds 10
+            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+        }
+
+        # Set the current location to be the site code.
+        Set-Location "$($SiteCode):\" @initParams
+
+        $userName = "vmbuildadmin"
+        $userDomain = $env:USERDOMAIN
+        $domainUserName = "$userDomain\$userName"
+        $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" }
+
+        if (-not $exists) {
+            $i = 0
+            do {
+                $i++
+                New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+                    -SecurityScopeName "All", "All Systems", "All Users and User Groups"
+                Start-Sleep -Seconds 30
+                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName }
+            }
+            until ($exists -or $i -gt 5)
+        }
+
+        Stop-Transcript
+
+        if ($exists) { return $true }
+        else { return $false }
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-CMFullAdmin"
+        FixVersion        = "211127"
+        AppliesToThisVM   = $false
+        AppliesToNew      = $false
+        AppliesToExisting = $true
+        AppliesToRoles    = @("Primary")
+        NotAppliesToRoles = @()
+        DependentVMs      = @($vmNote.remoteSQLVM)
+        ScriptBlock       = $Fix_CMFullAdmin
+        RunAsAccount      = $vmNote.adminName
+    }
+
+    # ========================
     # Determine applicability
+    # ========================
     foreach ($vmFix in $fixesToPerform) {
         $applicable = $false
         $applicableRoles = $vmFix.AppliesToRoles
