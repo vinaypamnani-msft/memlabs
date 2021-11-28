@@ -310,6 +310,7 @@ function Get-VMFixes {
     }
     else {
         $vmNote = Get-VMNote -VMName $VMName
+        $dc = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -eq $vmNote.domain}
     }
 
     $fixesToPerform = @()
@@ -478,7 +479,7 @@ function Get-VMFixes {
         AppliesToExisting = $true
         AppliesToRoles    = @("Primary")
         NotAppliesToRoles = @()
-        DependentVMs      = @($vmNote.remoteSQLVM)
+        DependentVMs      = @($vmNote.remoteSQLVM, $dc.vmName)
         ScriptBlock       = $Fix_CMFullAdmin
         RunAsAccount      = $vmNote.adminName
     }
