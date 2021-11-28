@@ -1,10 +1,10 @@
 
 function Start-Maintenance {
 
-    $vmsNeedingMaintenance = Get-List -Type VM | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
+    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true }
+    $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.role -ne "OSDClient" }
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
-    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.vmBuild -eq $true }
 
     $vmCount = ($vmsNeedingMaintenance | Measure-Object).Count
 
@@ -12,7 +12,7 @@ function Start-Maintenance {
     Write-Log $text -Activity
 
     if ($vmCount -gt 0) {
-        Write-Log "$vmCount VM's need maintenance. VM's will be started if needed and shut down post-maintenance."
+        Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
     }
     else {
         Write-Log "No maintenance required." -Success
@@ -23,35 +23,57 @@ function Start-Maintenance {
     Write-Progress -Id $progressId -Activity $text -Status "Please wait..." -PercentComplete 0
 
     $i = 0
-    $countWorked = $countFailed = 0
+    $countWorked = $countFailed = $countSkipped = 0
+    $countNotNeeded = $allVMs.Count - $vmCount
 
     # Perform maintenance... run it on DC's first, rest after.
+    $failedDomains = @()
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
         $i++
         Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         $worked = Start-VMMaintenance -VMName $vm.vmName
-        if ($worked) { $countWorked++ } else { $countFailed++ }
+        if ($worked) { $countWorked++ } else {
+            $failedDomains += $vm.domain
+            $countFailed++
+        }
     }
 
-    if ($countFailed -gt 0) {
-        Write-Log "DC Maintenance Failed for at least one domain. Displaying message and skipping maintenance of remaining virtual machines." -LogOnly
-        Write-Host
-        Write-Host "DC Maintenance Failed. This may be because the passwords for the required accounts (listed below) expired. "
-        Get-List -Type VM -ResetCache | Where-Object { $_.role -eq "DC" } | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName) } }
-        Write-Host "Manual remediation steps here."
-    }
-    else {
-        foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
-            $i++
-            Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
+    foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
+        $i++
+        Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
+        if ($vm.domain -in $failedDomains) {
+            Write-Log "$($vm.vmName)`: Maintenance skipped, DC maintenance failed." -Highlight
+            $countSkipped++
+        }
+        else {
             $worked = Start-VMMaintenance -VMName $vm.vmName
             if ($worked) { $countWorked++ } else { $countFailed++ }
         }
     }
 
-    Write-Host
-    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed" -Activity
+    if ($failedDomains.Count -gt 0) {
+        Show-FailedDomains -failedDomains $failedDomains
+    }
+
+    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -Activity
     Write-Progress -Id $progressId -Activity $text -Completed
+}
+
+function Show-FailedDomains {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Failed Domains")]
+        [object] $failedDomains
+    )
+
+    Write-Log "DC Maintenance failed for the domains ($($failedDomains -join ',')). Skipping maintenance of VM's in these domain(s)." -LogOnly
+    Write-Host
+    Write-Host "DC Maintenance failed for below domains . This may be because the passwords for the required accounts (listed below) expired."
+    Write-Host
+    $failedDCs = Get-List -Type VM -ResetCache | Where-Object { $_.role -eq "DC" -and $_.domain -in $failedDomains }
+    ($failedDCS | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName) } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-String).Trim() | Out-Host
+    Write-Host
+    Write-Host "Manual remediation steps here."
 }
 
 function Start-VMMaintenance {
@@ -229,7 +251,7 @@ function Start-VMFix {
         $HashArguments.Add("VmDomainAccount", $vmFix.RunAsAccount)
     }
 
-    $result = Invoke-VmCommand @HashArguments
+    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
         $return.Success = $false
@@ -360,7 +382,6 @@ function Get-VMFixes {
         NotAppliesToRoles = @()
         ScriptBlock       = $Fix_DomainAccount
         ArgumentList      = @($vmNote.adminName)
-        RunAsAccount      = $vmNote.adminName
     }
 
     ### Local account password expiration
