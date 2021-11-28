@@ -3812,7 +3812,7 @@ do {
         $global:StartOver = $false
         $return.DeployNow = Select-MainMenu
         if ($global:StartOver -eq $true) {
-            Write-Host -ForegroundColor Yellow "Saving Configuration..."
+            Write-Host -ForegroundColor Yellow "Saving Configuration... use ""!"" to return."
             $Global:SavedConfig = $global:config
             Write-Host
             break
