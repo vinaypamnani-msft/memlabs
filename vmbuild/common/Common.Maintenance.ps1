@@ -217,7 +217,7 @@ function Start-VMFix {
                 $return.VMsToStop += $vm
             }
 
-            if ($status.StartFailed -or $status.ConnectFailed) {
+            if ($status.StartFailed) {
                 # Write-Log "$VMName`: VM could not be started to apply fix '$fixName'."
                 return $return
             }
@@ -230,7 +230,7 @@ function Start-VMFix {
         $return.VMsToStop += $VMName
     }
 
-    if ($status.StartFailed -or $status.ConnectFailed) {
+    if ($status.StartFailed) {
         # Write-Log "$VMName`: VM could not be started to apply fix '$fixName'."
         return $return
     }
