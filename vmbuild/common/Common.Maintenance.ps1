@@ -12,7 +12,7 @@ function Start-Maintenance {
     Write-Log $text -Activity
 
     if ($vmCount -gt 0) {
-        Write-Log "$vmCount VM's need maintenance. VM's will be started if stopped and shut down post-maintenance."
+        Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
     }
     else {
         Write-Log "No maintenance required." -Success
