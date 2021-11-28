@@ -1240,10 +1240,12 @@ function Wait-ForVm {
                 $status = $originalStatus
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Start-Sleep -Seconds 5
             }
 
-            if (-not $readyOobe) {
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $originalStatus -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 5
             }
 
@@ -1486,24 +1488,30 @@ function Get-VmSession {
 
     $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
-        if ($ShowVMSessionError.IsPresent) {
-            Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
-        }
-        else {
-            Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
-        }
         if ($VmDomainName -ne $VmName) {
-            $username = "$VmName\$($Common.LocalAdmin.UserName)"
-            $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
+            Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+            $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
+            $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
             $cacheKey = $VmName + "-WORKGROUP"
-            Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username." -Verbose
+            Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
             $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
             if ($Err1.Count -ne 0) {
-                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err1" -Failure -Verbose
+                if ($ShowVMSessionError.IsPresent) {
+                    Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
+                }
+                else {
+                    Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
+                }
                 return $null
             }
         }
         else {
+            if ($ShowVMSessionError.IsPresent) {
+                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
+            }
+            else {
+                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+            }
             return $null
         }
     }

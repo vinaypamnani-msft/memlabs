@@ -110,7 +110,6 @@
             UserName                 = "vmbuildadmin"
             Password                 = $Admincreds
             PasswordNeverExpires     = $true
-            PasswordChangeNotAllowed = $true
             DependsOn                = "[WriteStatus]AddLocalUser"
         }
 
@@ -119,7 +118,6 @@
             UserName                 = $AdminName
             Password                 = $Admincreds
             PasswordNeverExpires     = $true
-            PasswordChangeNotAllowed = $true
             DependsOn        = "[User]vmbuildadmin"
         }
 
