@@ -417,33 +417,42 @@ function Get-VMFixes {
             Import-Module $modulePath
         }
 
-        # Connect to the site's drive if it is not already present
-        New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
-
-        while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-            Start-Sleep -Seconds 10
-            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-        }
-
-        # Set the current location to be the site code.
-        Set-Location "$($SiteCode):\" @initParams
-
         $userName = "vmbuildadmin"
         $userDomain = $env:USERDOMAIN
         $domainUserName = "$userDomain\$userName"
-        $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" }
 
-        if (-not $exists) {
-            $i = 0
-            do {
-                $i++
-                New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-                    -SecurityScopeName "All", "All Systems", "All Users and User Groups"
-                Start-Sleep -Seconds 30
-                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName }
+        $i = 0
+        do {
+            $i++
+            try {
+                # Connect to the site's drive if it is not already present
+                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
+
+                while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                    Start-Sleep -Seconds 10
+                    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+                }
+
+                # Set the current location to be the site code.
+                Set-Location "$($SiteCode):\" @initParams
+
+                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" }
+
+                if (-not $exists) {
+                    New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+                        -SecurityScopeName "All", "All Systems", "All Users and User Groups"
+                    Start-Sleep -Seconds 30
+                    $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName }
+                }
+
             }
-            until ($exists -or $i -gt 5)
+            catch {
+                $exists = $false
+                Start-Sleep -Seconds 30
+            }
         }
+        until ($exists -or $i -gt 5)
+
 
         Stop-Transcript
 
