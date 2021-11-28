@@ -24,7 +24,7 @@ function Start-Maintenance {
 
     $i = 0
     $countWorked = $countFailed = $countSkipped = 0
-    $countMaintNotNeeded = $allVMs.Count - $vmCount
+    $countNotNeeded = $allVMs.Count - $vmCount
 
     # Perform maintenance... run it on DC's first, rest after.
     $failedDomains = @()
@@ -52,17 +52,28 @@ function Start-Maintenance {
     }
 
     if ($failedDomains.Count -gt 0) {
-        Write-Log "DC Maintenance Failed for at least one domain. Displaying message and skipping maintenance of remaining virtual machines." -LogOnly
-        Write-Host
-        Write-Host "DC Maintenance Failed. This may be because the passwords for the required accounts (listed below) expired. "
-        $failedDCs = Get-List -Type VM -ResetCache | Where-Object { $_.role -eq "DC" -and $_.memLabsVersion -lt $Common.LatestHotfixVersion }
-        $failedDCS | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName) } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-Host
-        Write-Host "Manual remediation steps here."
+        Show-FailedDomains -failedDomains $failedDomains
     }
 
-    Write-Host
-    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countMaintNotNeeded" -Activity
+    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -Activity
     Write-Progress -Id $progressId -Activity $text -Completed
+}
+
+function Show-FailedDomains {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Failed Domains")]
+        [object] $failedDomains
+    )
+
+    Write-Log "DC Maintenance failed for the domains ($($failedDomains -join ',')). Skipping maintenance of VM's in these domain(s)." -LogOnly
+    Write-Host
+    Write-Host "DC Maintenance failed for below domains . This may be because the passwords for the required accounts (listed below) expired."
+    Write-Host
+    $failedDCs = Get-List -Type VM -ResetCache | Where-Object { $_.role -eq "DC" -and $_.domain -in $failedDomains }
+    ($failedDCS | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName) } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-String).Trim() | Out-Host
+    Write-Host
+    Write-Host "Manual remediation steps here."
 }
 
 function Start-VMMaintenance {
