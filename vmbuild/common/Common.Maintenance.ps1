@@ -33,13 +33,23 @@ function Start-Maintenance {
         if ($worked) { $countWorked++ } else { $countFailed++ }
     }
 
-    foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
-        $i++
-        Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
-        $worked = Start-VMMaintenance -VMName $vm.vmName
-        if ($worked) { $countWorked++ } else { $countFailed++ }
+    if ($countFailed -gt 0) {
+        Write-Log "DC Maintenance Failed for at least one domain. Displaying message and skipping maintenance of remaining virtual machines." -LogOnly
+        Write-Host
+        Write-Host "DC Maintenance Failed. This may be because the passwords for the required accounts (listed below) expired. "
+        Get-List -Type VM -ResetCache | Where-Object { $_.role -eq "DC" } | Select-Object vmName, domain, @{Name="accountsToUpdate"; Expression={@("vmbuildadmin",$_.adminName)}}
+        Write-Host "Manual remediation steps here."
+    }
+    else {
+        foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
+            $i++
+            Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
+            $worked = Start-VMMaintenance -VMName $vm.vmName
+            if ($worked) { $countWorked++ } else { $countFailed++ }
+        }
     }
 
+    Write-Host
     Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed" -Activity
     Write-Progress -Id $progressId -Activity $text -Completed
 }
@@ -412,11 +422,6 @@ function Get-VMFixes {
         $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
         $initParams = @{}
 
-        # Import the ConfigurationManager.psd1 module
-        if ($null -eq (Get-Module ConfigurationManager)) {
-            Import-Module $modulePath
-        }
-
         $userName = "vmbuildadmin"
         $userDomain = $env:USERDOMAIN
         $domainUserName = "$userDomain\$userName"
@@ -425,12 +430,17 @@ function Get-VMFixes {
         do {
             $i++
             try {
+                # Import the ConfigurationManager.psd1 module
+                if ($null -eq (Get-Module ConfigurationManager)) {
+                    Import-Module $modulePath
+                }
+
                 # Connect to the site's drive if it is not already present
                 New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
 
                 while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
                     Start-Sleep -Seconds 10
-                    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+                    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
                 }
 
                 # Set the current location to be the site code.
