@@ -44,6 +44,10 @@ function Start-Maintenance {
         $vmNote = Get-VMNote $dc.vmName
         if ($vmNote.memlabsVersion -le "211125.1") {
             $criticalDomains += $dc.domain
+            write-log "Adding $($dc.domain) to Critical List" -LogOnly
+        }
+        else{
+            #write-host "Not Adding $($dc.domain) to Critical List"
         }
     }
 
@@ -277,7 +281,7 @@ function Start-VMFix {
         $HashArguments.Add("VmDomainAccount", $vmFix.RunAsAccount)
     }
 
-    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
+    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
         $return.Success = $false
@@ -386,7 +390,7 @@ function Get-VMFixes {
         param ($accountName)
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
         $transcriptPath = "C:\staging\Fix\Fix-DomainAccounts.txt"
-        Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue
+        Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
         $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $accountName)
         $accountsToUpdate = $accountsToUpdate | Select-Object -Unique
         $accountsUpdated = 0
@@ -394,7 +398,7 @@ function Get-VMFixes {
             $i = 0
             do {
                 $i++
-                Set-ADUser -Identity $account -PasswordNeverExpires $true -CannotChangePassword $true -ErrorVariable AccountError -ErrorAction SilentlyContinue
+                Set-ADUser -Identity $account -PasswordNeverExpires $true -CannotChangePassword $true -ErrorVariable AccountError -ErrorAction SilentlyContinue | out-null
                 if ($AccountError.Count -ne 0) { Start-Sleep -Seconds (20 * $i) }
             }
             until ($i -ge 5 -or $AccountError.Count -eq 0)
@@ -403,7 +407,7 @@ function Get-VMFixes {
                 $accountsUpdated++
             }
         }
-        Stop-Transcript
+        Stop-Transcript | out-null
         if ($accountsUpdated -ne $accountsToUpdate.Count) {
             return $false
         }
@@ -478,7 +482,7 @@ function Get-VMFixes {
     $Fix_CMFullAdmin = {
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
         $transcriptPath = "C:\staging\Fix\Fix-CMFullAdmin.txt"
-        Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue
+        Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
         $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
         $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
 
@@ -499,32 +503,32 @@ function Get-VMFixes {
 
             # Import the ConfigurationManager.psd1 module
             if ($null -eq (Get-Module ConfigurationManager)) {
-                Import-Module $modulePath -ErrorAction SilentlyContinue
+                Import-Module $modulePath -ErrorAction SilentlyContinue | out-null
             }
 
             # Connect to the site's drive if it is not already present
-            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
+            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
 
             while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
                 Start-Sleep -Seconds 10
-                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
+                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
             }
 
             # Set the current location to be the site code.
-            Set-Location "$($SiteCode):\" @initParams
+            Set-Location "$($SiteCode):\" @initParams | out-null
 
             $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
 
             if (-not $exists) {
                 New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-                    -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue
+                    -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
                 Start-Sleep -Seconds 30
                 $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName } -ErrorAction SilentlyContinue
             }
         }
         until ($exists -or $i -gt 5)
 
-        Stop-Transcript
+        Stop-Transcript | out-null
 
         if ($exists) { return $true }
         else { return $false }

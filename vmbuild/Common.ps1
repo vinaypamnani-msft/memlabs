@@ -1356,6 +1356,8 @@ function Invoke-VmCommand {
         [string]$DisplayName,
         [Parameter(Mandatory = $false, HelpMessage = "Suppress log entries. Useful when waiting for VM to be ready to run commands.")]
         [switch]$SuppressLog,
+        [Parameter(Mandatory = $false, HelpMessage = "Check return value = true to indicate success")]
+        [switch]$CommandReturnsBool,
         [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
         [switch]$ShowVMSessionError,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
@@ -1415,17 +1417,40 @@ function Invoke-VmCommand {
     # Run script block inside VM
     if (-not $failed) {
         $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
-        if ($Err2.Count -ne 0) {
-            $failed = $true
-            $return.ScriptBlockFailed = $true
-            if (-not $SuppressLog) {
-                if ($Err2.Count -eq 1) {
-                    Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
+        if ($CommandReturnsBool) {
+            if ($($return.ScriptBlockOutput) -ne $true) {
+                write-host "Output was $($return.ScriptBlockOutput)"
+                $failed = $true
+                $return.ScriptBlockFailed = $true
+                if ($Err2.Count -ne 0) {
+                    $failed = $true
+                    $return.ScriptBlockFailed = $true
+                    if (-not $SuppressLog) {
+                        if ($Err2.Count -eq 1) {
+                            Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
+                        }
+                        else {
+                            $msg = @()
+                            foreach ($failMsg in $Err2) { $msg += $failMsg }
+                            Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
+                        }
+                    }
                 }
-                else {
-                    $msg = @()
-                    foreach ($failMsg in $Err2) { $msg += $failMsg }
-                    Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
+            }
+        }
+        else {
+            if ($Err2.Count -ne 0) {
+                $failed = $true
+                $return.ScriptBlockFailed = $true
+                if (-not $SuppressLog) {
+                    if ($Err2.Count -eq 1) {
+                        Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
+                    }
+                    else {
+                        $msg = @()
+                        foreach ($failMsg in $Err2) { $msg += $failMsg }
+                        Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
+                    }
                 }
             }
         }
