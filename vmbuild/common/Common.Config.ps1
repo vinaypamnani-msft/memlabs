@@ -2248,20 +2248,11 @@ function Get-List {
             $virtualMachines = Get-VM
 
             foreach ($vm in $virtualMachines) {
-                $vmNoteObject = $null
-                try {
-                    if ($vm.Notes -like "*lastUpdate*") {
-                        $vmNoteObject = $vm.Notes | ConvertFrom-Json
-                    }
-                    else {
-                        Write-Log "VM Properties for '$($vm.Name)'' does not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
-                        #continue
-                    }
-                }
-                catch {
-                    Write-Log "Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
-                    #continue
-                }
+
+                # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
+                # Invoke-VMMaintenance -VMName $vm.Name
+
+                $vmNoteObject = Get-VMNote -VMName $vm.Name
 
                 # Update LastKnownIP, and timestamp
                 if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
@@ -2307,7 +2298,7 @@ function Get-List {
                 if ($vmNoteObject) {
 
                     $adminUser = $vmNoteObject.adminName
-                    if (-not $adminUser) { $adminUser = $vmNoteObject.domainAdmin } # we renamed this property, read if it exists
+                    $vmDomain = $vmNoteObject.domain
                     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
 
                     # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
@@ -2315,7 +2306,7 @@ function Get-List {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                             if ($vmState -eq "Running" -and (-not $inProgress)) {
                                 try {
-                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                                     $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
                                     Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
@@ -2336,10 +2327,10 @@ function Get-List {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                             if ($vmState -eq "Running" -and (-not $inProgress)) {
                                 try {
-                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
+                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
                                     $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     if (-not $siteCode) {
-                                        $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                                        $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                                         $siteCode = $siteCodeFromVM.ScriptBlockOutput
                                     }
                                     if ($siteCode) {
@@ -2360,11 +2351,15 @@ function Get-List {
 
                     $vmObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $adminUser -Force
                     $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $true -Force
 
                     foreach ($prop in $vmNoteObject.PSObject.Properties) {
                         $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
                         $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                     }
+                }
+                else {
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $false -Force
                 }
 
                 $return += $vmObject

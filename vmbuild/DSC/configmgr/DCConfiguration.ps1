@@ -100,21 +100,47 @@
         }
 
         ADUser Admin {
-            Ensure              = 'Present'
-            UserName            = $DomainAdminName
-            Password            = $DomainCreds
-            PasswordNeverResets = $true
-            DomainName          = $DomainName
-            DependsOn           = "[SetupDomain]FirstDS"
+            Ensure               = 'Present'
+            UserName             = $DomainAdminName
+            Password             = $DomainCreds
+            PasswordNeverResets  = $true
+            PasswordNeverExpires = $true
+            CannotChangePassword = $true
+            DomainName           = $DomainName
+            DependsOn            = "[SetupDomain]FirstDS"
+        }
+
+        ADUser administrator {
+            Ensure               = 'Present'
+            UserName             = 'administrator'
+            Password             = $DomainCreds
+            PasswordNeverResets  = $true
+            PasswordNeverExpires = $true
+            CannotChangePassword = $true
+            DomainName           = $DomainName
+            DependsOn            = "[ADUser]Admin"
         }
 
         ADUser cm-svc {
-            Ensure              = 'Present'
-            UserName            = 'cm_svc'
-            Password            = $DomainCreds
-            PasswordNeverResets = $true
-            DomainName          = $DomainName
-            DependsOn           = "[SetupDomain]FirstDS"
+            Ensure               = 'Present'
+            UserName             = 'cm_svc'
+            Password             = $DomainCreds
+            PasswordNeverResets  = $true
+            PasswordNeverExpires = $true
+            CannotChangePassword = $true
+            DomainName           = $DomainName
+            DependsOn            = "[SetupDomain]FirstDS"
+        }
+
+        ADUser vmbuildadmin {
+            Ensure               = 'Present'
+            UserName             = 'vmbuildadmin'
+            Password             = $DomainCreds
+            PasswordNeverResets  = $true
+            PasswordNeverExpires = $true
+            CannotChangePassword = $true
+            DomainName           = $DomainName
+            DependsOn            = "[SetupDomain]FirstDS"
         }
 
         ADGroup AddToAdmin {

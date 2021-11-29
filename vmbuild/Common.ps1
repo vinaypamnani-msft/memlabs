@@ -23,13 +23,17 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         [switch]$Activity,
         [Parameter(Mandatory = $false)]
+        [switch]$Highlight,
+        [Parameter(Mandatory = $false)]
         [switch]$SubActivity,
         [Parameter(Mandatory = $false)]
         [switch]$LogOnly,
         [Parameter(Mandatory = $false)]
         [switch]$OutputStream,
         [Parameter(Mandatory = $false)]
-        [switch]$HostOnly
+        [switch]$HostOnly,
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowNotification
     )
 
     $HashArguments = @{}
@@ -45,7 +49,12 @@ function Write-Log {
         $caller = "<Script>"
     }
 
+    if ($Text -is [string]) { $Text = $Text.ToString().Trim() }
     $Text = "[$caller] $Text"
+
+    if ($ShowNotification.IsPresent) {
+        Show-Notification -ToastText $Text
+    }
 
     # Is Verbose?
     $IsVerbose = $false
@@ -90,6 +99,13 @@ function Write-Log {
         $Text = "VERBOSE: $Text"
     }
 
+    If ($Highlight.IsPresent) {
+        $info = $false
+        Write-Host
+        $Text = "+++ $Text"
+        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
+    }
+
     if ($info) {
         $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::White)
         $Text = "INFO: $Text"
@@ -106,10 +122,18 @@ function Write-Log {
     }
 
     # Write to console, if not logOnly and not OutputStream
-    If (-not $LogOnly.IsPresent -and -not $OutputStream.IsPresent) {
-        if (-not $IsVerbose -or ($IsVerbose -and $Common.VerboseEnabled)) {
-            Write-Host $Text @HashArguments
-        }
+    $writeHost = $false
+    If (-not $LogOnly.IsPresent -and -not $OutputStream.IsPresent -and -not $IsVerbose) {
+        $writeHost = $true
+    }
+
+    # Always log verbose to host, if VerboseEnabled
+    if ($IsVerbose -and $Common.VerboseEnabled) {
+        $writeHost = $true
+    }
+
+    if ($writeHost) {
+        Write-Host $Text @HashArguments
     }
 
     $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss:fff'
@@ -127,6 +151,7 @@ function Write-Log {
     }
 
     if ($write) {
+        $Text = $Text.ToString().Trim()
         try {
             $Text | Out-File $Common.LogPath -Append
         }
@@ -140,6 +165,38 @@ function Write-Log {
             }
         }
     }
+}
+
+function Show-Notification {
+    [cmdletbinding()]
+    Param (
+        [string]
+        $ToastTitle = "MEMLabs VMBuild",
+        [string]
+        [parameter(ValueFromPipeline)]
+        $ToastText,
+        [string]
+        [parameter(ValueFromPipeline)]
+        $ToastTag = "VMBuild"
+    )
+
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+    $Template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+
+    $RawXml = [xml] $Template.GetXml()
+    ($RawXml.toast.visual.binding.text | Where-Object { $_.id -eq "1" }).AppendChild($RawXml.CreateTextNode($ToastTitle)) > $null
+    ($RawXml.toast.visual.binding.text | Where-Object { $_.id -eq "2" }).AppendChild($RawXml.CreateTextNode($ToastText)) > $null
+
+    $SerializedXml = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $SerializedXml.LoadXml($RawXml.OuterXml)
+
+    $Toast = [Windows.UI.Notifications.ToastNotification]::new($SerializedXml)
+    $Toast.Tag = $ToastTag
+    $Toast.Group = "VMBuild"
+    $Toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(1)
+
+    $Notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("PowerShell")
+    $Notifier.Show($Toast);
 }
 
 function Write-Exception {
@@ -720,7 +777,9 @@ function New-VmNote {
         [Parameter(Mandatory = $false)]
         [bool]$Successful,
         [Parameter(Mandatory = $false)]
-        [bool]$InProgress
+        [bool]$InProgress,
+        [Parameter(Mandatory = $false)]
+        [bool]$SkipVersionUpdate = $false
     )
 
     try {
@@ -737,8 +796,11 @@ function New-VmNote {
             adminName            = $DeployConfig.vmOptions.adminName
             network              = $DeployConfig.vmOptions.network
             prefix               = $DeployConfig.vmOptions.prefix
-            memLabsVersion       = $Common.MemLabsVersion
             memLabsDeployVersion = $Common.MemLabsVersion
+        }
+
+        if (-not $SkipVersionUpdate) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $Common.MemLabsVersion -Force
         }
 
         foreach ($prop in $ThisVM.PSObject.Properties) {
@@ -756,23 +818,100 @@ function New-VmNote {
     }
 }
 
-function Set-VMNote {
+function Get-VMNote {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [object]$vmName,
-        [Parameter(Mandatory = $true)]
-        [object]$vmNote
+        [string]$VMName
     )
+
+    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+
+    if (-not $vm) {
+        Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
+        return $null
+    }
+
+    $vmNoteObject = $null
+    try {
+        if ($vm.Notes -like "*lastUpdate*") {
+            $vmNoteObject = $vm.Notes | ConvertFrom-Json
+
+            if (-not $vmNoteObject.adminName) {
+                # we renamed this property, read as "adminName" if it exists
+                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $vmNoteObject.domainAdmin  -Force
+            }
+
+            return $vmNoteObject
+        }
+        else {
+            Write-Log "$VMName`: VM Properties do not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
+            return $null
+        }
+    }
+    catch {
+        Write-Log "Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
+        return $null
+    }
+}
+
+function Set-VMNote {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, ParameterSetName = "VMNote")]
+        [Parameter(Mandatory = $true, ParameterSetName = "VMVersion")]
+        [string]$vmName,
+        [Parameter(Mandatory = $true, ParameterSetName = "VMNote")]
+        [Parameter(Mandatory = $false, ParameterSetName = "VMVersion")]
+        [object]$vmNote,
+        [Parameter(Mandatory = $false, ParameterSetName = "VMNote")]
+        [Parameter(Mandatory = $true, ParameterSetName = "VMVersion")]
+        [string]$vmVersion,
+        [Parameter(Mandatory = $false)]
+        [switch]$forceVersionUpdate
+    )
+
+    if (-not $vmNote) {
+        $vmNote = Get-VMNote -VMName $vmName
+    }
+
+    $vmVersionUpdated = $false
+    if ($vmVersion -and ($vmNote.memLabsVersion -lt $vmVersion -or $forceVersionUpdate.IsPresent)) {
+        $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
+        $vmVersionUpdated = $true
+    }
 
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-    $vm = Get-Vm $VmName -ErrorAction Stop
+    $vm = Get-Vm $VmName -ErrorAction SilentlyContinue
     if ($vm) {
-        Write-Log "Setting VM Note for $vmName" -LogOnly
+        if ($vmVersionUpdated) {
+            Write-Log "Setting VM Note for $vmName (version $vmVersion)" -Verbose
+        }
+        else {
+            Write-Log "Setting VM Note for $vmName" -Verbose
+        }
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
     }
+    else {
+        Write-Log "Failed to get VM from Hyper-V. Cannot set VM Note for $vmName" -Verbose
+    }
 }
+
+function Update-VMNoteVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$vmName,
+        [Parameter(Mandatory = $false)]
+        [string]$vmVersion
+    )
+
+    $vmNote = Get-VMNote -VMName $VmName
+    $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
+    Set-VMNote -vmName $VmName -vmNote $vmNote
+}
+
 function Remove-DnsRecord {
     [CmdletBinding()]
     param (
@@ -1051,6 +1190,8 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false)]
+        [switch]$Quiet,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -1100,10 +1241,12 @@ function Wait-ForVm {
                 $status = $originalStatus
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Start-Sleep -Seconds 5
             }
 
-            if (-not $readyOobe) {
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $originalStatus -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 5
             }
 
@@ -1173,7 +1316,7 @@ function Wait-ForVm {
             $msg = "Waiting for $PathToVerify to exist"
         }
 
-        Write-Log "$VmName`: $msg..."
+        if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
         do {
             Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $msg -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             Start-Sleep -Seconds 5
@@ -1188,7 +1331,7 @@ function Wait-ForVm {
     Write-Progress -Activity "$VmName`: Waiting for virtual machine" -Status "Wait complete." -Completed
 
     if ($ready) {
-        Write-Log "$VmName`: VM is now available." -Success
+        if (-not $Quiet.IsPresent) { Write-Log "$VmName`: VM is now available." -Success }
     }
 
     if (-not $ready) {
@@ -1206,12 +1349,18 @@ function Invoke-VmCommand {
         [ScriptBlock]$ScriptBlock,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
+        [string]$VmDomainAccount,
         [Parameter(Mandatory = $false, HelpMessage = "Argument List to supply to ScriptBlock")]
         [string[]]$ArgumentList,
         [Parameter(Mandatory = $false, HelpMessage = "Display Name of the script for log/console")]
         [string]$DisplayName,
         [Parameter(Mandatory = $false, HelpMessage = "Suppress log entries. Useful when waiting for VM to be ready to run commands.")]
         [switch]$SuppressLog,
+        [Parameter(Mandatory = $false, HelpMessage = "Check return value = true to indicate success")]
+        [switch]$CommandReturnsBool,
+        [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
+        [switch]$ShowVMSessionError,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
@@ -1255,21 +1404,60 @@ function Invoke-VmCommand {
     }
 
     # Get VM Session
-    $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName
+    $ps = $null
+    if ($VmDomainAccount) {
+        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError
+    }
+
+    if (-not $ps) {
+        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
+    }
+
     $failed = $null -eq $ps
 
     # Run script block inside VM
     if (-not $failed) {
         $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
-        if ($Err2.Count -ne 0) {
-            $failed = $true
-            $return.ScriptBlockFailed = $true
-            if (-not $SuppressLog) {
-                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $Err2" -Failure
+        if ($CommandReturnsBool) {
+            if ($($return.ScriptBlockOutput) -ne $true) {
+                Write-Log "Output was: $($return.ScriptBlockOutput)" -Warning
+                $failed = $true
+                $return.ScriptBlockFailed = $true
+                if ($Err2.Count -ne 0) {
+                    $failed = $true
+                    $return.ScriptBlockFailed = $true
+                    if (-not $SuppressLog) {
+                        if ($Err2.Count -eq 1) {
+                            Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
+                        }
+                        else {
+                            $msg = @()
+                            foreach ($failMsg in $Err2) { $msg += $failMsg }
+                            Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
+                        }
+                    }
+                }
+            }
+        }
+        else {
+            if ($Err2.Count -ne 0) {
+                $failed = $true
+                $return.ScriptBlockFailed = $true
+                if (-not $SuppressLog) {
+                    if ($Err2.Count -eq 1) {
+                        Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
+                    }
+                    else {
+                        $msg = @()
+                        foreach ($failMsg in $Err2) { $msg += $failMsg }
+                        Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
+                    }
+                }
             }
         }
     }
     else {
+        $return.ScriptBlockFailed = $true
         # Uncomment when debugging, this is called many times while waiting for VM to be ready
         # Write-Log "Invoke-VmCommand: $VmName`: Failed to get VM Session." -Failure -LogOnly
         # return $return
@@ -1293,7 +1481,11 @@ function Get-VmSession {
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
         [string]$VmName,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
-        [string]$VmDomainName = "WORKGROUP"
+        [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
+        [string]$VmDomainAccount,
+        [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
+        [switch]$ShowVMSessionError
     )
 
     $ps = $null
@@ -1307,13 +1499,20 @@ function Get-VmSession {
     }
 
     # Get PS Session
-    $username = "$VmDomainName\$($Common.LocalAdmin.UserName)"
+    if ($VmDomainAccount) {
+        $username = "$VmDomainName\$VmDomainAccount"
+        $cacheKey = $cacheKey + "-" + $VmDomainAccount
+    }
+    else {
+        $username = "$VmDomainName\$($Common.LocalAdmin.UserName)"
+        $cacheKey = $cacheKey + "-" + $Common.LocalAdmin.UserName
+    }
 
     # Retrieve session from cache
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
         if ($ps.Availability -eq "Available") {
-            # Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
+            Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
             return $ps
         }
     }
@@ -1322,19 +1521,30 @@ function Get-VmSession {
 
     $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
-        Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
         if ($VmDomainName -ne $VmName) {
-            $username = "$VmName\$($Common.LocalAdmin.UserName)"
-            $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
+            Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+            $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
+            $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
             $cacheKey = $VmName + "-WORKGROUP"
-            Write-Log "$VmName`: Attempting to get a session using $username." -Verbose
+            Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
             $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
             if ($Err1.Count -ne 0) {
-                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err1" -Failure -Verbose
+                if ($ShowVMSessionError.IsPresent) {
+                    Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
+                }
+                else {
+                    Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
+                }
                 return $null
             }
         }
         else {
+            if ($ShowVMSessionError.IsPresent) {
+                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
+            }
+            else {
+                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+            }
             return $null
         }
     }
@@ -1658,6 +1868,7 @@ function Set-SupportedOptions {
     $supported = [PSCustomObject]@{
         Roles            = $roles
         RolesForExisting = $rolesForExisting
+        AllRoles         = ($roles + $rolesForExisting | Select-Object -Unique)
         OperatingSystems = $operatingSystems
         SqlVersions      = $sqlVersions
         CMVersions       = $cmVersions
@@ -1688,6 +1899,7 @@ if ($currentBranch -and $currentBranch -notmatch "main") {
 . $PSScriptRoot\common\Common.Config.ps1
 . $PSScriptRoot\common\Common.RdcMan.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
+. $PSScriptRoot\common\Common.Maintenance.ps1
 
 ############################
 ### Common Object        ###
@@ -1703,9 +1915,13 @@ if (-not $Common.Initialized) {
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
+    # Get latest hotfix version
+    $latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+
     # Common global props
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "211124"
+        MemLabsVersion        = "211129"
+        LatestHotfixVersion   = $latestHotfixVersion
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files

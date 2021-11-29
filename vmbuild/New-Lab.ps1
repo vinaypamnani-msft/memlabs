@@ -222,6 +222,7 @@ $VM_Create = {
         return
     }
 
+    $skipVersionUpdate = $false
     $Fix_DefaultProfile = {
         $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
         $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
@@ -235,6 +236,18 @@ $VM_Create = {
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile" -WhatIf:$WhatIf
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
+        $skipVersionUpdate = $true
+    }
+
+    $Fix_LocalAccount = {
+        Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
+    }
+
+    Write-Log "PSJOB: $($currentItem.vmName): Updating Password Expiration for vmbuildadmin account."
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix Local Account Password Expiration" -WhatIf:$WhatIf
+    if ($result.ScriptBlockFailed) {
+        Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the password expiration policy for vmbuildadmin." -Warning -OutputStream
+        $skipVersionUpdate = $true
     }
 
     $Stop_RunningDSC = {
@@ -277,7 +290,7 @@ $VM_Create = {
             }
         }
         # Update VMNote
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -SkipVersionUpdate $skipVersionUpdate
         return
     }
 
@@ -546,8 +559,9 @@ $VM_Create = {
 
     $complete = $false
     $previousStatus = ""
+    $suppressNoisyLogging = $enableVerbose -eq $false
     do {
-        $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt } -SuppressLog -WhatIf:$WhatIf
+        $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt } -SuppressLog:$suppressNoisyLogging -WhatIf:$WhatIf
         Start-Sleep -Seconds 3
 
         if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {
@@ -628,19 +642,24 @@ $VM_Create = {
 
     if ($createVM) {
         # Set VM Note
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked -SkipVersionUpdate $skipVersionUpdate
     }
 }
 
 Clear-Host
 
+
 try {
+
+    Write-Host ("`r`n" * 6)
+    Start-Maintenance
+
     if ($Configuration) {
         # Get user configuration
         $configResult = Get-UserConfiguration -Configuration $Configuration
         if ($configResult.Loaded) {
             $userConfig = $configResult.Config
-            Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
+            # Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
             Write-Log "### START." -Success
             Write-Log "Validating specified configuration: $Configuration" -Activity
         }
@@ -679,8 +698,8 @@ try {
         }
         if ($configResult.Loaded) {
             $userConfig = $configResult.Config
-            Clear-Host
-            Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
+            # Clear-Host
+            # Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
             Write-Log "### START." -Success
             Write-Log "Using $($result.ConfigFileName) provided by genconfig" -Activity
             Write-Log "genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
@@ -709,12 +728,12 @@ try {
 
             foreach ($thisVM in $deployConfig.virtualMachines) {
                 $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
-                if ($thisVMObject.inProgress -eq $true){
+                if ($thisVMObject.inProgress -eq $true) {
                     $InProgessVMs += $thisVMObject.vmName
                 }
 
             }
-            if ($InProgessVMs.Count -gt 0){
+            if ($InProgessVMs.Count -gt 0) {
                 Write-Host
                 write-host -ForegroundColor Blue "*************************************************************************************************************************************"
                 write-host -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
@@ -839,7 +858,7 @@ try {
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
         Write-Log "Attempting to remove existing DNS Records" -Activity -HostOnly
-        foreach ($item in $deployConfig.virtualMachines | Where-Object {-not ($_.hidden)} ) {
+        foreach ($item in $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) } ) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
         }
     }
@@ -956,8 +975,18 @@ finally {
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs" -LogOnly
     }
-    $Common.Initialized = $false
     get-job | stop-job
+
+    # Close PS Sessions
+    foreach($session in $global:ps_cache.Keys) {
+        Write-Log "Closing PS Session $session" -Verbose
+        Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue
+    }
+
+    # uninit common
+    $Common.Initialized = $false
+
+    # Set quick edit back
     Set-QuickEdit
 }
 

@@ -105,19 +105,27 @@
             }
         }
 
-        User AddLocalUser {
-            Ensure               = "Present"
-            UserName             = $AdminName
-            Password             = $Admincreds
-            PasswordNeverExpires = $true
-            DependsOn            = "[WriteStatus]AddLocalUser"
+        User vmbuildadmin {
+            Ensure                   = "Present"
+            UserName                 = "vmbuildadmin"
+            Password                 = $Admincreds
+            PasswordNeverExpires     = $true
+            DependsOn                = "[WriteStatus]AddLocalUser"
+        }
+
+        User adminUser {
+            Ensure                   = "Present"
+            UserName                 = $AdminName
+            Password                 = $Admincreds
+            PasswordNeverExpires     = $true
+            DependsOn        = "[User]vmbuildadmin"
         }
 
         Group AddUserToLocalAdminGroup {
             GroupName        = 'Administrators'
             Ensure           = 'Present'
-            MembersToInclude = $AdminName
-            DependsOn        = "[User]AddLocalUser"
+            MembersToInclude = @($AdminName, "vmbuildadmin")
+            DependsOn        = "[User]adminUser"
         }
 
         File ShareFolder {

@@ -37,16 +37,60 @@ if ($null -eq (Get-Module ConfigurationManager)) {
 }
 
 # Connect to the site's drive if it is not already present
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
 
 while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
     Write-DscStatus "Retry in 10s to Set PS Drive" -NoLog
     Start-Sleep -Seconds 10
-    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
 }
 
 # Set the current location to be the site code.
 Set-Location "$($SiteCode):\" @initParams
+
+function Install-MP {
+    param (
+        [string]
+        $ServerFQDN,
+        [string]
+        $ServerSiteCode
+    )
+
+    $i = 0
+    $installFailure = $false
+    $MPFQDN = $ServerFQDN
+
+    do {
+
+        $i++
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
+        if (-not $SystemServer) {
+            Write-DscStatus "Creating new CM Site System server on $MPFQDN"
+            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 15
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
+        }
+
+        $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
+        if (-not $mpinstalled) {
+            Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
+            Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-DscStatus "MP Role detected on $MPFQDN"
+            $mpinstalled = $true
+        }
+
+        if ($i -gt 10) {
+            Write-DscStatus "No Progress after $i tries, Giving up."
+            $installFailure = $true
+        }
+
+        Start-Sleep -Seconds 10
+
+    } until ($mpinstalled -or $installFailure)
+}
 
 # Get info for Passive Site Server
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
@@ -56,13 +100,20 @@ $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secon
 # Add Passive site
 $secondaryFQDN = $SecondaryVM.vmName + "." + $DomainFullName
 $secondarySiteCode = $SecondaryVM.siteCode
+$parentSiteCode = $SecondaryVM.parentSiteCode
 
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
 if ($SecondaryVM.cmInstallDir) {
     $SMSInstallDir = $SecondaryVM.cmInstallDir
 }
 
-Write-DscStatus "Adding secondary site server on $secondaryFQDN"
+$mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
+if ($mpCount -eq 0) {
+    Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName"
+    Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
+}
+
+Write-DscStatus "Adding secondary site server on $secondaryFQDN with Site Code $secondarySiteCode, attached to $parentSiteCode"
 try {
 
     $Date = [DateTime]::Now.AddYears(30)
@@ -78,12 +129,23 @@ try {
     }
 
     New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
-        -PrimarySiteCode $SecondaryVM.parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
+        -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
         -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
 }
 catch {
-    Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_" -Failure
-    return
+    try {
+        $_ | Out-File $global:StatusLog -Append
+        Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_. Retrying once."
+        Start-Sleep -Seconds 30
+        New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
+        -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
+        -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
+    }
+    catch {
+        $_ | Out-File $global:StatusLog -Append
+        Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_" -Failure
+        return
+    }
 }
 
 $i = 0
