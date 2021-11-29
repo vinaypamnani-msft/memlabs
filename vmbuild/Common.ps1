@@ -49,6 +49,7 @@ function Write-Log {
         $caller = "<Script>"
     }
 
+    if ($Text -is [string]) { $Text = $Text.ToString().Trim() }
     $Text = "[$caller] $Text"
 
     if ($ShowNotification.IsPresent) {
@@ -1419,7 +1420,7 @@ function Invoke-VmCommand {
         $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
         if ($CommandReturnsBool) {
             if ($($return.ScriptBlockOutput) -ne $true) {
-                write-host "Output was $($return.ScriptBlockOutput)"
+                Write-Log "Output was: $($return.ScriptBlockOutput)" -Warning
                 $failed = $true
                 $return.ScriptBlockFailed = $true
                 if ($Err2.Count -ne 0) {
@@ -1919,7 +1920,7 @@ if (-not $Common.Initialized) {
 
     # Common global props
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "211128"
+        MemLabsVersion        = "211129"
         LatestHotfixVersion   = $latestHotfixVersion
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
