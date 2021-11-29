@@ -37,10 +37,21 @@ function Start-Maintenance {
         }
     }
 
+    # Check if failed domain is -le 211125.1
+    $failedDCs = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -in $failedDomains }
+    $criticalDomains = @()
+    foreach($dc in $failedDCs) {
+        $vmNote = Get-VMNote $dc.vmName
+        if ($vmNote.memlabsVersion -le "211125.1") {
+            $criticalDomains += $dc.domain
+        }
+    }
+
+    # Perform maintenance on other VM's
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
         $i++
         Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
-        if ($vm.domain -in $failedDomains) {
+        if ($vm.domain -in $criticalDomains) {
             Write-Log "$($vm.vmName)`: Maintenance skipped, DC maintenance failed." -Highlight
             $countSkipped++
         }
@@ -50,8 +61,9 @@ function Start-Maintenance {
         }
     }
 
-    if ($failedDomains.Count -gt 0) {
-        Show-FailedDomains -failedDomains $failedDomains
+    if ($criticalDomains.Count -gt 0) {
+        Write-Log "DC Maintenance failed for the domains ($($criticalDomains -join ',')). Skipping maintenance of VM's in these domain(s)." -LogOnly
+        Show-FailedDomains -failedDomains $criticalDomains
     }
 
     Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -Activity
@@ -65,14 +77,26 @@ function Show-FailedDomains {
         [object] $failedDomains
     )
 
-    Write-Log "DC Maintenance failed for the domains ($($failedDomains -join ',')). Skipping maintenance of VM's in these domain(s)." -LogOnly
+    $failedDCs = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -in $failedDomains }
+    $dcList = ($failedDCs | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName, "cm_svc") } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-String).Trim()
+    $dcList = $dcList -split "`r`n"
+
+    $longest = 128
+    $longestMinus2 = 126
     Write-Host
-    Write-Host "DC Maintenance failed for below domains . This may be because the passwords for the required accounts (listed below) expired."
-    Write-Host
-    $failedDCs = Get-List -Type VM -ResetCache | Where-Object { $_.role -eq "DC" -and $_.domain -in $failedDomains }
-    ($failedDCS | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName, "cm_svc") } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-String).Trim() | Out-Host
-    Write-Host
-    Write-Host "Manual remediation steps here."
+    Write-Host "#".PadRight($longest, "#") -ForegroundColor Yellow
+    Write-Host "# DC Maintenance failed for below domains. This may be because the passwords for the required accounts (listed below) expired. #" -ForegroundColor Yellow
+    Write-Host "#".PadRight($longestMinus2, " ") "#"
+    foreach($line in $dcList) {Write-Host "# $line".PadRight($longestMinus2," ") "#" -ForegroundColor Yellow}
+    Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "# Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "#".PadRight($longestMinus2, " ") "#"
+    Write-Host "# 1. Logon to the affected DC's.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "# 2. Launch 'AD Users and Computers', and reset the account for the above listed accounts to the desiredPassword.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "# 3. Run 'VMBuild.cmd' again.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "#".PadRight($longest, "#") -ForegroundColor Yellow
+
 }
 
 function Start-VMMaintenance {
@@ -114,8 +138,8 @@ function Start-VMMaintenance {
         Write-Log "$VMName`: VM maintenance completed successfully." -Success
     }
     else {
-        Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log and refer to internal documentation." -Failure
-        Show-Notification -ToastText "$VMName`: VM maintenance failed. Review VMBuild.log and refer to internal documentation." -ToastTag $VMName
+        Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log." -Failure
+        Show-Notification -ToastText "$VMName`: VM maintenance failed. Review VMBuild.log." -ToastTag $VMName
     }
 
     return $worked
