@@ -95,6 +95,9 @@ function Show-FailedDomains {
     Write-Host "# 2. Launch 'AD Users and Computers', and reset the account for the above listed accounts to the desiredPassword.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# 3. Run 'VMBuild.cmd' again.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "# If the password hasn't expired/changed, re-run VMBuild.cmd in case there was a transient issue.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "# If the issue persists, please report it.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "#".PadRight($longest, "#") -ForegroundColor Yellow
 
 }
@@ -392,7 +395,7 @@ function Get-VMFixes {
             do {
                 $i++
                 Set-ADUser -Identity $account -PasswordNeverExpires $true -CannotChangePassword $true -ErrorVariable AccountError -ErrorAction SilentlyContinue
-                if ($AccountError.Count -ne 0) { Start-Sleep -Seconds 20 }
+                if ($AccountError.Count -ne 0) { Start-Sleep -Seconds (20 * $i) }
             }
             until ($i -ge 5 -or $AccountError.Count -eq 0)
 
