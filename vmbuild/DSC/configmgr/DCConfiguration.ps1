@@ -110,6 +110,17 @@
             DependsOn            = "[SetupDomain]FirstDS"
         }
 
+        ADUser administrator {
+            Ensure               = 'Present'
+            UserName             = 'administrator'
+            Password             = $DomainCreds
+            PasswordNeverResets  = $true
+            PasswordNeverExpires = $true
+            CannotChangePassword = $true
+            DomainName           = $DomainName
+            DependsOn            = "[ADUser]Admin"
+        }
+
         ADUser cm-svc {
             Ensure               = 'Present'
             UserName             = 'cm_svc'

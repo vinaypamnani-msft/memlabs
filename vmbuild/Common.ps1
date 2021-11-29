@@ -1894,7 +1894,7 @@ if (-not $Common.Initialized) {
 
     # Common global props
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "211124"
+        MemLabsVersion        = "211128"
         LatestHotfixVersion   = $latestHotfixVersion
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
