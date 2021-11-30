@@ -2246,7 +2246,7 @@ function Get-VMSizeCached {
             }
         }
     }
-    write-host "Making new Entry for $($vm.vmName)"
+    #write-host "Making new Entry for $($vm.vmName)"
     # if we didnt return the cache entry, get new data, and add it to cache
     $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
     $MemoryStartup = $vm.MemoryStartup
