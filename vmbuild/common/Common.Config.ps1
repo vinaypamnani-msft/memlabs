@@ -2214,119 +2214,6 @@ function Get-DomainList {
     }
 }
 
-function Get-VMSizeCached {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, ParameterSetName = "VM Object")]
-        [object] $vm,
-        [Parameter(Mandatory = $false, ParameterSetName = "FlushCache")]
-        [switch] $FlushCache
-    )
-    $cacheFile = Join-Path $global:common.CachePath "diskcache.json"
-    if (-not ($global:common.SizeCache)) {
-        $global:common.SizeCache = @()
-        if (Test-Path $cacheFile -PathType Leaf) {
-            $global:common.SizeCache = Get-Content $cacheFile | ConvertFrom-Json
-        }
-    }
-
-    $vmCacheEntry = $null
-    #return Cached entry
-    #if (-not $FlushCache -and $diskCache) {
-    if ($global:common.SizeCache) {
-
-        $vmCacheEntry = $global:common.SizeCache | Where-Object { $_.vmId -eq $vm.vmId } | Select-Object -Last 1
-        if ($vmCacheEntry) {
-            if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
-                return $vmCacheEntry
-            }
-            else {
-                $global:common.SizeCache = $global:common.SizeCache | Where-Object { $_.vmId -ne $vm.vmId }
-            }
-        }
-    }
-    write-host "Making new Entry for $($vm.vmName)"
-    # if we didnt return the cache entry, get new data, and add it to cache
-    $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
-    $MemoryStartup = $vm.MemoryStartup
-    $vmCacheEntry = [PSCustomObject]@{
-        vmId          = $vm.vmID
-        diskSize      = $diskSize
-        MemoryStartup = $MemoryStartup
-        EntryAdded    = (Get-Date -format "MM/dd/yyyy HH:mm")
-    }
-    $global:common.SizeCache += $vmCacheEntry
-    ConvertTo-Json  $global:common.SizeCache | Out-File $cacheFile -Force
-    return $vmCacheEntry
-}
-$global:vmNetCache = $null
-function Get-VMNetworkCached {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, ParameterSetName = "VM Object")]
-        [object] $vm,
-        [Parameter(Mandatory = $false, ParameterSetName = "FlushCache")]
-        [switch] $FlushCache
-    )
-    $cacheFile = Join-Path $global:common.CachePath "netCache.json"
-    if (-not ($global:common.NetCache)) {
-        $global:common.NetCache = @()
-        if (Test-Path $cacheFile -PathType Leaf) {
-            $global:common.NetCache = Get-Content $cacheFile | ConvertFrom-Json
-        }
-    }
-
-
-
-    #$LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
-    #$datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
-    #if (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP) {
-
-    $vmCacheEntry = $null
-    #return Cached entry
-    #if (-not $FlushCache -and $diskCache) {
-    if ($global:common.NetCache) {
-        $vmCacheEntry = $global:common.NetCache | Where-Object { $_.vmId -eq $vm.vmId } | Select-Object -Last 1
-        if ($vmCacheEntry) {
-
-            if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
-                return $vmCacheEntry
-            }
-            else {
-                $global:common.NetCache = $global:common.NetCache | Where-Object { $_.vmId -ne $vm.vmId }
-            }
-        }
-    }
-
-    # if we didnt return the cache entry, get new data, and add it to cache
-    $vmNet = ($vm | Get-VMNetworkAdapter)
-    $vmCacheEntry = [PSCustomObject]@{
-        vmId        = $vm.vmID
-        SwitchName  = $vmNet.SwitchName
-        #IPAddresses = $vmNet.IPAddresses
-        EntryAdded  = (Get-Date -format "MM/dd/yyyy HH:mm")
-    }
-    $global:common.NetCache += $vmCacheEntry
-    ConvertTo-Json $global:common.NetCache | Out-File $cacheFile -Force
-    return $vmCacheEntry
-}
-
-function Test-CacheValid {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string] $EntryTime,
-        [Parameter(Mandatory = $true)]
-        [int] $MaxHours
-    )
-    $LastUpdateTime = [Datetime]::ParseExact($EntryTime, 'MM/dd/yyyy HH:mm', $null)
-    $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
-    if ($datediff.Hours -lt $MaxHours) {
-        return $true
-    }
-    return $false
-}
-
 $global:vm_List = $null
 function Get-List {
 
@@ -2361,19 +2248,18 @@ function Get-List {
             $virtualMachines = Get-VM
 
             foreach ($vm in $virtualMachines) {
-                $stopwatch = [System.Diagnostics.Stopwatch]::new()
-                $stopWatch.Start()
+
                 # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
                 # Invoke-VMMaintenance -VMName $vm.Name
 
-                $vmNoteObject = $vm.Notes | convertFrom-Json
+                $vmNoteObject = Get-VMNote -VMName $vm.Name
 
                 # Update LastKnownIP, and timestamp
                 if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
                     $LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
                     $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
                     if (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP) {
-                        $IPAddress = ($vm | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
+                        $IPAddress = (Get-VM -Name $vm.Name | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
                         if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
                             if ($null -eq $vmNoteObject.LastKnownIP) {
                                 $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $IPAddress
@@ -2391,37 +2277,24 @@ function Get-List {
                         }
                     }
                 }
-                write-Host "LastKnownIP :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
+
                 #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
-                $sizeCache = Get-VMSizeCached -vm $vm
-                $memoryStartupGB = $sizeCache.MemoryStart / 1GB
-                $diskSizeGB = $sizeCache.diskSize / 1GB
-                write-Host "diskSize :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
-                $vmNet = Get-VMNetworkCached -vm $vm
-                write-Host "vmNet :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
+                $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
+                $diskSizeGB = $diskSize / 1GB
+                $vmNet = $vm | Get-VMNetworkAdapter
                 $vmName = $vm.Name
                 $vmState = $vm.State.ToString()
-                write-Host "vmNet :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
+
                 $vmObject = [PSCustomObject]@{
                     vmName          = $vm.Name
                     vmId            = $vm.Id
                     subnet          = $vmNet.SwitchName
                     memoryGB        = $vm.MemoryAssigned / 1GB
-                    memoryStartupGB = $memoryStartupGB
+                    memoryStartupGB = $vm.MemoryStartup / 1GB
                     diskUsedGB      = [math]::Round($diskSizeGB, 2)
                     state           = $vmState
                 }
-                write-Host "vmObject :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
+
                 if ($vmNoteObject) {
 
                     $adminUser = $vmNoteObject.adminName
@@ -2448,9 +2321,7 @@ function Get-List {
                             }
                         }
                     }
-                    write-Host "SiteCodeFix :" -NoNewline
-                    $Stopwatch.Elapsed.Milliseconds | Out-Host
-                    $Stopwatch.Restart()
+
                     # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
                     if ($vmNoteObject.role -eq "DPMP") {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
@@ -2477,9 +2348,7 @@ function Get-List {
                             }
                         }
                     }
-                    write-Host "DPMPFix :" -NoNewline
-                    $Stopwatch.Elapsed.Milliseconds | Out-Host
-                    $Stopwatch.Restart()
+
                     $vmObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $adminUser -Force
                     $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
                     $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $true -Force
@@ -2488,9 +2357,6 @@ function Get-List {
                         $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
                         $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                     }
-                    write-Host "AddProps :" -NoNewline
-                    $Stopwatch.Elapsed.Milliseconds | Out-Host
-                    $Stopwatch.Restart()
                 }
                 else {
                     $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $false -Force
