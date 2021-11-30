@@ -1926,6 +1926,9 @@ if (-not $Common.Initialized) {
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
         ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\samples")   # Path for Config files
+        CachePath             = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
+        SizeCache             = $null                                                                     # Cache for Memory Assigned, and Disk Usage
+        NetCache              = $null                                                                     # Cache for Get-NetworkAdapter
         AzureFilesPath        = $storagePath                                                              # Path for downloaded files
         AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
         AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
@@ -1943,6 +1946,7 @@ if (-not $Common.Initialized) {
         AzureFileList         = $null
         LocalAdmin            = $null
         FatalError            = $null
+
     }
 
     # Storage config
