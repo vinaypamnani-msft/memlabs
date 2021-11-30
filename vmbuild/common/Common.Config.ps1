@@ -2295,10 +2295,10 @@ function Get-VMNetworkCached {
     # if we didnt return the cache entry, get new data, and add it to cache
     $vmNet = ($vm | Get-VMNetworkAdapter)
     $vmCacheEntry = [PSCustomObject]@{
-        vmId        = $vm.vmID
-        SwitchName  = $vmNet.SwitchName
+        vmId       = $vm.vmID
+        SwitchName = $vmNet.SwitchName
         #IPAddresses = $vmNet.IPAddresses
-        EntryAdded  = (Get-Date -format "MM/dd/yyyy HH:mm")
+        EntryAdded = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
     $global:common.NetCache += $vmCacheEntry
     ConvertTo-Json $global:common.NetCache | Out-File $cacheFile -Force
@@ -2321,6 +2321,163 @@ function Test-CacheValid {
     return $false
 }
 
+
+function Get-VMFromHyperV {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $vm
+    )
+    $vmNoteObject = $vm.Notes | convertFrom-Json
+    # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
+    # Invoke-VMMaintenance -VMName $vm.Name
+
+
+
+    # Update LastKnownIP, and timestamp
+    if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
+        $LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
+        $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
+        if (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP) {
+            $IPAddress = ($vm | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
+            if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
+                if ($null -eq $vmNoteObject.LastKnownIP) {
+                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $IPAddress
+                }
+                else {
+                    $vmNoteObject.LastKnownIP = $IPAddress
+                }
+                Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+            }
+            else {
+                #Update the Notes LastUpdateTime everytime we scan for it
+                if (-not [string]::IsNullOrWhiteSpace($IPAddress)) {
+                    Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+                }
+            }
+        }
+    }
+
+    #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
+    $sizeCache = Get-VMSizeCached -vm $vm
+    $memoryStartupGB = $sizeCache.MemoryStartup / 1GB
+    $diskSizeGB = $sizeCache.diskSize / 1GB
+
+    $vmNet = Get-VMNetworkCached -vm $vm
+
+    $vmName = $vm.Name
+    #VmState is now updated  in Update-VMFromHyperV
+    #$vmState = $vm.State.ToString()
+
+    $vmObject = [PSCustomObject]@{
+        vmName          = $vm.Name
+        vmId            = $vm.Id
+        subnet          = $vmNet.SwitchName
+        memoryGB        = $vm.MemoryAssigned / 1GB
+        memoryStartupGB = $memoryStartupGB
+        diskUsedGB      = [math]::Round($diskSizeGB, 2)
+    }
+
+
+    if ($vmNoteObject) {
+        $vmDomain = $vmNoteObject.domain
+
+        # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
+        if ($vmNoteObject.role -in "CAS", "Primary", "PassiveSite") {
+            if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
+                if ($vmState -eq "Running" -and (-not $inProgress)) {
+                    try {
+                        $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                        $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                        $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
+                        Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
+                        Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                    }
+                    catch {
+                        Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                    }
+                }
+                else {
+                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                }
+            }
+        }
+
+        # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
+        if ($vmNoteObject.role -eq "DPMP") {
+            if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
+                if ($vmState -eq "Running" -and (-not $inProgress)) {
+                    try {
+                        $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
+                        $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                        if (-not $siteCode) {
+                            $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
+                            $siteCode = $siteCodeFromVM.ScriptBlockOutput
+                        }
+                        if ($siteCode) {
+                            $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
+                            Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
+                            Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+                        }
+                    }
+                    catch {
+                        Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                    }
+                }
+                else {
+                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                }
+            }
+        }
+    }
+    Update-VMFromHyperV -vm $vm -vmObject $vmObject -vmNoteObject $vmNoteObject
+    return $vmObject
+}
+
+function Update-VMFromHyperV {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $vm,
+        [Parameter(Mandatory = $false)]
+        [object] $vmObject,
+        [Parameter(Mandatory = $false)]
+        [object] $vmNoteObject
+    )
+    if (-not $vmNoteObject) {
+        $vmNoteObject = $vm.Notes | convertFrom-Json
+    }
+
+    if ($vmNoteObject){
+        if ([String]::isnullorwhitespace($vmNoteObject.vmName)){
+            # If we dont have a vmName property, this is not one of our VM's
+            $vmNoteObject = $null
+        }
+    }
+    if (-not $vmObject) {
+        $vmObject = $global:vm_List | Where-Object { $_.vmId -eq $vm.vmID }
+    }
+    if ($vmNoteObject) {
+        $vmState = $vm.State.ToString()
+        $adminUser = $vmNoteObject.adminName
+        $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
+
+        $vmObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $adminUser -Force
+        $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
+        $vmObject | Add-Member -MemberType NoteProperty -Name "state" -Value $vmState -Force
+        $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $true -Force
+
+        foreach ($prop in $vmNoteObject.PSObject.Properties) {
+            $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
+            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+        }
+    }
+    else {
+        $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $false -Force
+    }
+
+}
+
 $global:vm_List = $null
 function Get-List {
 
@@ -2333,6 +2490,8 @@ function Get-List {
         [string] $DomainName,
         [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [switch] $ResetCache,
+        [Parameter(Mandatory = $false, ParameterSetName = "Type")]
+        [switch] $SmartUpdate,
         [Parameter(Mandatory = $true, ParameterSetName = "FlushCache")]
         [switch] $FlushCache
     )
@@ -2347,132 +2506,51 @@ function Get-List {
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null
         }
+        $virtualMachines = Get-VM
+        if ($SmartUpdate.IsPresent) {
+            if ($global:vm_List) {
+                foreach ( $oldListVM in $global:vm_List) {
+                    if ($DomainName){
+                        if ($oldListVM.domain -ne $DomainName){
+                            continue
+                        }
+                    }
+                    #Remove Missing VM's
+                    if (-not ($virtualMachines.vmId -contains $oldListVM.vmID)) {
+                        #write-host "removing $($oldListVM.vmID)"
+                        $global:vm_List = $global:vm_List | Where-Object { $_.vmID -ne $oldListVM.vmID -or ($_.vmBuild -eq $false) }
+                    }
+                }
+                foreach ($vm in $virtualMachines) {
+                    #if its missing, do a full add
+                   $vmFromGlobal = $global:vm_List | Where-Object {$_.vmId -eq $vm.vmID}
+                   if ($null -eq $vmFromGlobal) {
+                   #    if (-not $global:vm_List.vmID -contains $vmID){
+                        #write-host "adding missing vm $($vm.vmName)"
+                        $vmObject = Get-VMFromHyperV -vm $vm
+                        $global:vm_List += $vmObject
+                    }
+                    else {
+                        if ($DomainName){
+                            if ($vmFromGlobal.domain -ne $DomainName){
+                                continue
+                            }
+                        }
+                       #else, update the existing entry.
+                        Update-VMFromHyperV -vm $vm -vmObject $vmFromGlobal
+                    }
+                }
+            }
+        }
 
         if ($null -eq $global:vm_List) {
 
             Write-Log "Obtaining '$Type' list and caching it." -Verbose
             $return = @()
-            $virtualMachines = Get-VM
 
             foreach ($vm in $virtualMachines) {
 
-                $vmNoteObject = $vm.Notes | convertFrom-Json
-                # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
-                # Invoke-VMMaintenance -VMName $vm.Name
-
-
-
-                # Update LastKnownIP, and timestamp
-                if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
-                    $LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
-                    $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
-                    if (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP) {
-                        $IPAddress = ($vm | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
-                        if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
-                            if ($null -eq $vmNoteObject.LastKnownIP) {
-                                $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $IPAddress
-                            }
-                            else {
-                                $vmNoteObject.LastKnownIP = $IPAddress
-                            }
-                            Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
-                        }
-                        else {
-                            #Update the Notes LastUpdateTime everytime we scan for it
-                            if (-not [string]::IsNullOrWhiteSpace($IPAddress)) {
-                                Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
-                            }
-                        }
-                    }
-                }
-
-                #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
-                $sizeCache = Get-VMSizeCached -vm $vm
-                $memoryStartupGB = $sizeCache.MemoryStart / 1GB
-                $diskSizeGB = $sizeCache.diskSize / 1GB
-
-                $vmNet = Get-VMNetworkCached -vm $vm
-
-                $vmName = $vm.Name
-                $vmState = $vm.State.ToString()
-
-                $vmObject = [PSCustomObject]@{
-                    vmName          = $vm.Name
-                    vmId            = $vm.Id
-                    subnet          = $vmNet.SwitchName
-                    memoryGB        = $vm.MemoryAssigned / 1GB
-                    memoryStartupGB = $memoryStartupGB
-                    diskUsedGB      = [math]::Round($diskSizeGB, 2)
-                    state           = $vmState
-                }
-
-                if ($vmNoteObject) {
-
-                    $adminUser = $vmNoteObject.adminName
-                    $vmDomain = $vmNoteObject.domain
-                    $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
-
-                    # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
-                    if ($vmNoteObject.role -in "CAS", "Primary", "PassiveSite") {
-                        if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
-                            if ($vmState -eq "Running" -and (-not $inProgress)) {
-                                try {
-                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
-                                    $siteCode = $siteCodeFromVM.ScriptBlockOutput
-                                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                    Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode." -LogOnly
-                                    Set-VMNote -vmName $vmName -vmNote $vmNoteObject
-                                }
-                                catch {
-                                    Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
-                                }
-                            }
-                            else {
-                                Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
-                            }
-                        }
-                    }
-
-                    # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
-                    if ($vmNoteObject.role -eq "DPMP") {
-                        if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
-                            if ($vmState -eq "Running" -and (-not $inProgress)) {
-                                try {
-                                    $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
-                                    $siteCode = $siteCodeFromVM.ScriptBlockOutput
-                                    if (-not $siteCode) {
-                                        $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
-                                        $siteCode = $siteCodeFromVM.ScriptBlockOutput
-                                    }
-                                    if ($siteCode) {
-                                        $vmNoteObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $siteCode.ToString() -Force
-                                        Write-Log "Site code for $vmName is missing in VM Note. Adding siteCode $siteCode after reading from registry." -LogOnly
-                                        Set-VMNote -vmName $vmName -vmNote $vmNoteObject
-                                    }
-                                }
-                                catch {
-                                    Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
-                                }
-                            }
-                            else {
-                                Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
-                            }
-                        }
-                    }
-
-                    $vmObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $adminUser -Force
-                    $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
-                    $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $true -Force
-
-                    foreach ($prop in $vmNoteObject.PSObject.Properties) {
-                        $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
-                        $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
-                    }
-
-                }
-                else {
-                    $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $false -Force
-                }
+                $vmObject = Get-VMFromHyperV -vm $vm
 
                 $return += $vmObject
             }
