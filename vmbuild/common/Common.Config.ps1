@@ -2329,10 +2329,6 @@ function Get-VMFromHyperV {
         [object] $vm
     )
     $vmNoteObject = $vm.Notes | convertFrom-Json
-    # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
-    # Invoke-VMMaintenance -VMName $vm.Name
-
-
 
     # Update LastKnownIP, and timestamp
     if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
@@ -2449,7 +2445,7 @@ function Update-VMFromHyperV {
     }
 
     if ($vmNoteObject) {
-        if ([String]::isnullorwhitespace($vmNoteObject.vmName)) {
+        if ([String]::isnullorwhitespace($vmNoteObject.role)) {
             # If we dont have a vmName property, this is not one of our VM's
             $vmNoteObject = $null
         }
