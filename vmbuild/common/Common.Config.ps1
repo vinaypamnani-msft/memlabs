@@ -2276,12 +2276,6 @@ function Get-VMNetworkCached {
         }
     }
 
-
-
-    #$LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
-    #$datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
-    #if (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP) {
-
     $vmCacheEntry = $null
     #return Cached entry
     #if (-not $FlushCache -and $diskCache) {
@@ -2361,12 +2355,12 @@ function Get-List {
             $virtualMachines = Get-VM
 
             foreach ($vm in $virtualMachines) {
-                $stopwatch = [System.Diagnostics.Stopwatch]::new()
-                $stopWatch.Start()
+
+                $vmNoteObject = $vm.Notes | convertFrom-Json
                 # Fixes known issues, starts VM if necessary, sets VM Note with updated version if fix applied
                 # Invoke-VMMaintenance -VMName $vm.Name
 
-                $vmNoteObject = $vm.Notes | convertFrom-Json
+
 
                 # Update LastKnownIP, and timestamp
                 if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
@@ -2391,25 +2385,17 @@ function Get-List {
                         }
                     }
                 }
-                write-Host "LastKnownIP :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
+
                 #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
                 $sizeCache = Get-VMSizeCached -vm $vm
                 $memoryStartupGB = $sizeCache.MemoryStart / 1GB
                 $diskSizeGB = $sizeCache.diskSize / 1GB
-                write-Host "diskSize :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
+
                 $vmNet = Get-VMNetworkCached -vm $vm
-                write-Host "vmNet :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
+
                 $vmName = $vm.Name
                 $vmState = $vm.State.ToString()
-                write-Host "vmNet :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
+
                 $vmObject = [PSCustomObject]@{
                     vmName          = $vm.Name
                     vmId            = $vm.Id
@@ -2419,9 +2405,7 @@ function Get-List {
                     diskUsedGB      = [math]::Round($diskSizeGB, 2)
                     state           = $vmState
                 }
-                write-Host "vmObject :" -NoNewline
-                $Stopwatch.Elapsed.Milliseconds | Out-Host
-                $Stopwatch.Restart()
+
                 if ($vmNoteObject) {
 
                     $adminUser = $vmNoteObject.adminName
@@ -2448,9 +2432,7 @@ function Get-List {
                             }
                         }
                     }
-                    write-Host "SiteCodeFix :" -NoNewline
-                    $Stopwatch.Elapsed.Milliseconds | Out-Host
-                    $Stopwatch.Restart()
+
                     # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
                     if ($vmNoteObject.role -eq "DPMP") {
                         if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
@@ -2477,9 +2459,7 @@ function Get-List {
                             }
                         }
                     }
-                    write-Host "DPMPFix :" -NoNewline
-                    $Stopwatch.Elapsed.Milliseconds | Out-Host
-                    $Stopwatch.Restart()
+
                     $vmObject | Add-Member -MemberType NoteProperty -Name "adminName" -Value $adminUser -Force
                     $vmObject | Add-Member -MemberType NoteProperty -Name "inProgress" -Value $inProgress -Force
                     $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $true -Force
@@ -2488,9 +2468,7 @@ function Get-List {
                         $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
                         $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                     }
-                    write-Host "AddProps :" -NoNewline
-                    $Stopwatch.Elapsed.Milliseconds | Out-Host
-                    $Stopwatch.Restart()
+
                 }
                 else {
                     $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $false -Force
