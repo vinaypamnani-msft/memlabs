@@ -111,7 +111,7 @@ function Select-ConfigMenu {
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%white%green" }
         }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load Sample Configuration%gray%green"; "4" = "Load saved config from File%gray%green"; "*B3" = ""; }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load saved config from File%gray%green"; "*B3" = ""; }
         $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
         $vmsTotal = (Get-List -Type VM | Measure-Object).Count
         $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
@@ -137,8 +137,8 @@ function Select-ConfigMenu {
         switch ($response.ToLowerInvariant()) {
             "1" { $SelectedConfig = Select-NewDomainConfig }
             "2" { $SelectedConfig = Show-ExistingNetwork }
-            "3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
-            "4" { $SelectedConfig = Select-Config $configDir -NoMore }
+            #"3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
+            "3" { $SelectedConfig = Select-Config $configDir -NoMore }
             "!" {
                 $SelectedConfig = $Global:SavedConfig
                 $Global:SavedConfig = $null
@@ -341,7 +341,7 @@ function select-RestoreSnapshotDomain {
             }
         }
     }
-    Get-List -FlushCache | out-null
+    Get-List -type VM -SmartUpdate | out-null
 
     if ($missingVMS.Count -gt 0) {
         #Write-Host
@@ -428,7 +428,7 @@ function select-OptimizeDomain {
         }
     }
 
-    get-list -type VM -ResetCache | out-null
+    get-list -type VM -SmartUpdate | out-null
     $sizeAfter = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
     write-Host "Total size of VMs in $domain after optimize: $([math]::Round($sizeAfter,2))GB"
     write-host
@@ -538,9 +538,9 @@ function Select-StartDomain {
             }
             get-job | wait-job | out-null
             get-job | remove-job | out-null
-            #get-list -type VM -ResetCache | out-null
+            #get-list -type VM -SmartUpdate | out-null
             if ($CriticalOnly -eq $false) {
-                get-list -type VM -ResetCache | out-null
+                get-list -type VM -SmartUpdate | out-null
                 return
             }
             else {
@@ -551,11 +551,11 @@ function Select-StartDomain {
             start-vm $response
             get-job | wait-job | out-null
             get-job | remove-job | out-null
-            #get-list -type VM -ResetCache | out-null
+            #get-list -type VM -SmartUpdate | out-null
             $response = $null
         }
     }
-    get-list -type VM -ResetCache | out-null
+    get-list -type VM -SmartUpdate | out-null
 }
 
 
@@ -617,14 +617,14 @@ function Select-StopDomain {
             }
             get-job | wait-job | Out-Null
             get-job | remove-job | Out-Null
-            get-list -type VM -ResetCache | out-null
+            get-list -type VM -SmartUpdate | out-null
             return
         }
         else {
             stop-vm $response -force
             get-job | wait-job | Out-Null
             get-job | remove-job | Out-Null
-            get-list -type VM -ResetCache | out-null
+            get-list -type VM -SmartUpdate | out-null
         }
 
     }
@@ -654,7 +654,7 @@ function Select-DeleteDomain {
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
                     Remove-Domain -DomainName $domain
-                    Get-List -type VM -ResetCache | Out-Null
+                    Get-List -type VM -SmartUpdate | Out-Null
                     return
                 }
             }
@@ -667,7 +667,7 @@ function Select-DeleteDomain {
             }
             else {
                 Remove-VirtualMachine -VmName $response
-                Get-List -type VM -ResetCache | Out-Null
+                Get-List -type VM -SmartUpdate | Out-Null
                 continue
             }
         }
@@ -683,7 +683,7 @@ function Select-DeletePending {
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
             Remove-InProgress
-            Get-List -type VM -ResetCache | Out-Null
+            Get-List -type VM -SmartUpdate | Out-Null
         }
     }
 }
@@ -1251,6 +1251,9 @@ function Select-NewDomainConfig {
                 $newConfig.vmOptions.domainName = $domain
                 $newConfig.vmOptions.prefix = $prefix
                 $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+                if (-not $valid){
+                    $domain = $null
+                }
             }
         }
 
@@ -1374,17 +1377,18 @@ Function Get-DomainStatsLine {
         [string]$DomainName
     )
     $stats = ""
-    $ExistingCasCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-    $ExistingPriCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
-    $ExistingSecCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
-    $ExistingDPMPCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
-    $ExistingSQLCount = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
-    $ExistingSubnetCount = (Get-List -Type VM -Domain $DomainName | Select-Object -Property Subnet -unique | measure-object).Count
-    $TotalVMs = (Get-List -Type VM -Domain $DomainName | Measure-Object).Count
-    $TotalRunningVMs = (Get-List -Type VM -Domain $DomainName | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
-    $TotalMem = (Get-List -Type VM -Domain $DomainName | Measure-Object -Sum MemoryGB).Sum
-    $TotalMaxMem = (Get-List -Type VM -Domain $DomainName | Measure-Object -Sum MemoryStartupGB).Sum
-    $TotalDiskUsed = (Get-List -Type VM -Domain $DomainName | Measure-Object -Sum DiskUsedGB).Sum
+    $ListCache = Get-List -Type VM -Domain $DomainName
+    $ExistingCasCount = ($ListCache | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
+    $ExistingPriCount = ($ListCache | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
+    $ExistingSecCount = ($ListCache | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
+    $ExistingDPMPCount = ($ListCache | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
+    $ExistingSQLCount = ($ListCache | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
+    $ExistingSubnetCount = ($ListCache | Select-Object -Property Subnet -unique | measure-object).Count
+    $TotalVMs = ($ListCache| Measure-Object).Count
+    $TotalRunningVMs = ($ListCache | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
+    $TotalMem = ($ListCache | Measure-Object -Sum MemoryGB).Sum
+    $TotalMaxMem = ($ListCache | Measure-Object -Sum MemoryStartupGB).Sum
+    $TotalDiskUsed = ($ListCache | Measure-Object -Sum DiskUsedGB).Sum
     $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
     if ($ExistingCasCount -gt 0) {
         $stats += "[CAS VMs: $ExistingCasCount] "

@@ -310,7 +310,7 @@ function New-RDCManFileFromHyperV {
     }
 
     Install-RDCman
-    $domainList = (Get-List -Type UniqueDomain -ResetCache)
+    $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
     foreach ($domain in $domainList) {
         Write-Verbose "Adding all machines from Domain $domain"
         $findGroup = $null
@@ -512,7 +512,7 @@ function Remove-MissingDomainsFromFile {
     param(
         [object]$file
     )
-    $domainList = (Get-List -Type UniqueDomain -ResetCache)
+    $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
     Write-Verbose "[Remove-MissingDomainsFromFile] DomainList: $($domainList -join ",")"
     foreach ($group in $file.SelectNodes("group")) {
         if ($group.properties.name -in $domainList) {

@@ -598,7 +598,7 @@ function Test-ValidRoleDC {
                 $vmProps = Get-List -Type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $_.role -eq "DC" }
                 if ($vmProps.AdminName -ne $ConfigObject.vmOptions.adminName) {
                     Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] is using a different admin name [$($ConfigObject.vmOptions.adminName)] for deployment. You must use the existing admin user [$($vmProps.AdminName)]." -ReturnObject $ReturnObject -Warning
-                    Get-List -FlushCache | Out-Null
+                    Get-List -type VM -SmartUpdate | Out-Null
                 }
             }
         }
@@ -1054,7 +1054,7 @@ function Test-Configuration {
                 $notRunningNames = $notRunning.vmName -join ","
                 if ($notRunning.Count -gt 0) {
                     Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] requires other site servers [$notRunningNames] to be running." -ReturnObject $return -Warning
-                    Get-List -FlushCache | Out-Null
+                    Get-List -type VM -SmartUpdate | Out-Null
                 }
             }
 
@@ -1170,7 +1170,7 @@ function Test-Configuration {
     if (-not $compare -and $compare2) {
         $duplicates = $compare2.InputObject -join ","
         Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
-        Get-List -FlushCache | Out-Null
+        Get-List -type VM -SmartUpdate | Out-Null
     }
 
     # Return if validation failed
@@ -2448,8 +2448,8 @@ function Update-VMFromHyperV {
         $vmNoteObject = $vm.Notes | convertFrom-Json
     }
 
-    if ($vmNoteObject){
-        if ([String]::isnullorwhitespace($vmNoteObject.vmName)){
+    if ($vmNoteObject) {
+        if ([String]::isnullorwhitespace($vmNoteObject.vmName)) {
             # If we dont have a vmName property, this is not one of our VM's
             $vmNoteObject = $null
         }
@@ -2506,12 +2506,13 @@ function Get-List {
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null
         }
-        $virtualMachines = Get-VM
+
         if ($SmartUpdate.IsPresent) {
             if ($global:vm_List) {
+                $virtualMachines = Get-VM
                 foreach ( $oldListVM in $global:vm_List) {
-                    if ($DomainName){
-                        if ($oldListVM.domain -ne $DomainName){
+                    if ($DomainName) {
+                        if ($oldListVM.domain -ne $DomainName) {
                             continue
                         }
                     }
@@ -2523,20 +2524,20 @@ function Get-List {
                 }
                 foreach ($vm in $virtualMachines) {
                     #if its missing, do a full add
-                   $vmFromGlobal = $global:vm_List | Where-Object {$_.vmId -eq $vm.vmID}
-                   if ($null -eq $vmFromGlobal) {
-                   #    if (-not $global:vm_List.vmID -contains $vmID){
+                    $vmFromGlobal = $global:vm_List | Where-Object { $_.vmId -eq $vm.vmID }
+                    if ($null -eq $vmFromGlobal) {
+                        #    if (-not $global:vm_List.vmID -contains $vmID){
                         #write-host "adding missing vm $($vm.vmName)"
                         $vmObject = Get-VMFromHyperV -vm $vm
                         $global:vm_List += $vmObject
                     }
                     else {
-                        if ($DomainName){
-                            if ($vmFromGlobal.domain -ne $DomainName){
+                        if ($DomainName) {
+                            if ($vmFromGlobal.domain -ne $DomainName) {
                                 continue
                             }
                         }
-                       #else, update the existing entry.
+                        #else, update the existing entry.
                         Update-VMFromHyperV -vm $vm -vmObject $vmFromGlobal
                     }
                 }
@@ -2547,7 +2548,7 @@ function Get-List {
 
             Write-Log "Obtaining '$Type' list and caching it." -Verbose
             $return = @()
-
+            $virtualMachines = Get-VM
             foreach ($vm in $virtualMachines) {
 
                 $vmObject = Get-VMFromHyperV -vm $vm
