@@ -1355,6 +1355,7 @@ function Add-ExistingVMsToDeployConfig {
     $existingDC = $config.parameters.ExistingDCName
     $containsPassive = $config.virtualMachines.role -contains "PassiveSite"
     $containsSecondary = $config.virtualMachines.role -contains "Secondary"
+    $containsDPMP = $config.virtualMachines.role -contains "DPMP"
 
     $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
     foreach ($PriVM in $PriVMS) {
@@ -1409,7 +1410,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add exising DC to list
-    if ($existingDC -and ($containsPS -or $containsPassive -or $containsSecondary)) {
+    if ($existingDC -and ($containsPS -or $containsPassive -or $containsSecondary -or $containsDPMP)) {
         # create a dummy VM object for the existingDC
         Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $config
     }
