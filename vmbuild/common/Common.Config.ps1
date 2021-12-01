@@ -31,7 +31,7 @@ function Get-UserConfiguration {
     }
 
     try {
-        Write-Log "Get-UserConfiguration: Get-UserConfiguration: Get-UserConfiguration: Get-UserConfiguration: Get-UserConfiguration: Get-UserConfiguration: Get-UserConfiguration: Get-UserConfiguration: Loading $configPath." -LogOnly
+        Write-Log "Loading $configPath." -LogOnly
         $config = Get-Content $configPath -Force | ConvertFrom-Json
         $return.Loaded = $true
         $return.Config = $config
@@ -1870,7 +1870,7 @@ function Get-ExistingForDomain {
 
     }
     catch {
-        Write-Log "Get-ExistingGorDometn: Gai-ExistingGorDometn: Fai-ExistingGorDometn: Fai-ExistingGorDometn: Fai-ExistingGorDometn: Fai-ExistingGorDometn: Fai-ExistingForDometn: Fai-ExistingForDomain: Failed to get existing $Role from $DomainName. $_" -Failure
+        Write-Log "Failed to get existing $Role from $DomainName. $_" -Failure
         return $null
     }
 }
@@ -1935,7 +1935,7 @@ function Get-ExistingSiteServer {
 
     }
     catch {
-        Write-Log "Get-ExistingSiteServer: Get-ExistingSiteServer: Get-ExistingSiteServer: Get-ExistingSiteServer: Get-ExistingSiteServer: Get-ExistingSiteServer: Get-ExistingSiteServer: Get-ExistingSiteServer: Failed to get existing site servers. $_" -Failure
+        Write-Log "Failed to get existing site servers. $_" -Failure
         return $null
     }
 }
@@ -1963,7 +1963,7 @@ function Get-ExistingForSubnet {
 
     }
     catch {
-        Write-Log "Get-ExistingGorSubnet: Get-ExistingGorSubnet: Get-ExistingForSubnet: Get-ExistingForSubnet: Get-ExistingGorSubnet: Fet-ExistingForSubnet: Fet-ExistingForSubnet: Fet-ExistingForSubnet: Failed to get existing $Role from $Subnet. $_" -Failure
+        Write-Log "Failed to get existing $Role from $Subnet. $_" -Failure
         return $null
     }
 }
@@ -2199,7 +2199,7 @@ function Get-SubnetList {
 
     }
     catch {
-        Write-Log "Get-SubnetList: Get-SubnetList: Get-SubnetList: Get-SubnetList: Get-SubnetList: Get-SubnetList: Get-SubnetList: Get-SubnetList: Failed to get subnet list. $_" -Failure -LogOnly
+        Write-Log "Failed to get subnet list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -2210,7 +2210,7 @@ function Get-DomainList {
         return (Get-List -Type UniqueDomain)
     }
     catch {
-        Write-Log "Get-DomainList: Get-DomainList: Get-DomainList: Get-DomainList: Get-DomainList: Get-DomainList: Get-DomainList: Get-DomainList: Failed to get domain list. $_" -Failure -LogOnly
+        Write-Log "Failed to get domain list. $_" -Failure -LogOnly
         return $null
     }
 }
@@ -2813,7 +2813,7 @@ function Copy-SampleConfigs {
     $realConfigPath = $Common.ConfigPath
     $sampleConfigPath = Join-Path $Common.ConfigPath "samples"
 
-    Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
+    Write-Log "Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
     foreach ($item in Get-ChildItem $sampleConfigPath -File -Filter *.json) {
         $copyFile = $true
         $sampleFile = $item.FullName
@@ -2823,13 +2823,13 @@ function Copy-SampleConfigs {
             $sampleFileHash = Get-FileHash $sampleFile
             $configFileHash = Get-FileHash $configFile
             if ($configFileHash -ne $sampleFileHash) {
-                Write-Log "Copy-SampleConfigs: Copy-CampleConfigs: Copy-CampleConfigs: Copy-CampleConfigs: Sopy-CampleConfigs: Sopy-SampleConfigs: Sopy-SampleConfigs: Sopy-SampleConfigs: Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
+                Write-Log "Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
                 $copyFile = $false
             }
         }
 
         if ($copyFile) {
-            Write-Log "Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copy-SampleConfigs: Copying $fileName to config directory." -LogOnly -Verbose
+            Write-Log "Copying $fileName to config directory." -LogOnly -Verbose
             Copy-Item -Path $sampleFile -Destination $configFile -Force
         }
     }
