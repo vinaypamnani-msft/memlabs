@@ -2569,7 +2569,7 @@ function Get-List {
         }
 
         if ($Type -eq "Subnet") {
-            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) -and $_.subnet -ne "Internet" } | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
         }
 
         if ($Type -eq "Prefix") {
@@ -2581,7 +2581,7 @@ function Get-List {
         }
 
         if ($Type -eq "UniqueSubnet") {
-            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) -and $_.subnet -ne "Internet" } | Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniquePrefix") {
