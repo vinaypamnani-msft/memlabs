@@ -323,6 +323,11 @@ function New-RDCManFileFromHyperV {
         # Set user/pass on the group
         $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -first 1).AdminName
 
+        if ($null -eq $username){
+            Write-Log "Could not determine username from DC config for domain $domain. Assuming username is 'admin'"
+            $username = "admin"
+        }
+
         if (Test-Path "$Global:newrdcmanpath\$rdcmanexe") {
             $encryptedPass = Get-RDCManPassword $Global:newrdcmanpath
             if ($null -eq $encryptedPass) {

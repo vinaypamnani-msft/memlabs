@@ -760,7 +760,9 @@ function Select-MainMenu {
         $i = 0
         #$valid = Get-TestResult -SuccessOnError
         foreach ($virtualMachine in $global:config.virtualMachines) {
-
+            if ($null -eq $virtualMachine){
+                $global:config.virtualMachines | convertTo-Json -Depth 3 |out-host
+            }
             $i = $i + 1
             $name = Get-VMString $virtualMachine
             $customOptions += [ordered]@{"$i" = "$name%white%green" }
