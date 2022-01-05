@@ -3532,19 +3532,21 @@ function Select-VirtualMachines {
                 }
 
 
-                Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os -parentSiteCode $parentSiteCode -SiteCode $siteCode
+                $machineName = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os -parentSiteCode $parentSiteCode -SiteCode $siteCode -ReturnMachineName $true
                 if ($role -eq "DC") {
                     $Global:Config.vmOptions.domainName = select-NewDomainName
                     $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
                 }
                 Get-TestResult -SuccessOnError | out-null
-                return
+                if (-not $machineName) {
+                    return
+                }
             }
             :VMLoop while ($true) {
                 $i = 0
                 foreach ($virtualMachine in $global:config.virtualMachines) {
                     $i = $i + 1
-                    if ($i -eq $response) {
+                    if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                         $newValue = "Start"
                         while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                             Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
