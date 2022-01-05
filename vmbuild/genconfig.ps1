@@ -2555,7 +2555,7 @@ function Get-AdditionalValidations {
     Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
     switch ($name) {
         "E" {
-            if (-not $value.EndsWith("GB" -and -not $value.EndsWith("MB"))) {
+            if (-not ($value.EndsWith("GB")) -and (-not ($value.EndsWith("MB")))) {
                 if ($CurrentValue.EndsWith("GB")) {
                     $property.$name = $value.Trim() + "GB"
                 }
@@ -2565,7 +2565,7 @@ function Get-AdditionalValidations {
             }
         }
         "F" {
-            if (-not $value.EndsWith("GB" -and -not $value.EndsWith("MB"))) {
+            if (-not ($value.EndsWith("GB")) -and (-not ($value.EndsWith("MB")))) {
                 if ($CurrentValue.EndsWith("GB")) {
                     $property.$name = $value.Trim() + "GB"
                 }
@@ -2575,7 +2575,7 @@ function Get-AdditionalValidations {
             }
         }
         "G" {
-            if (-not $value.EndsWith("GB" -and -not $value.EndsWith("MB"))) {
+            if (-not ($value.EndsWith("GB")) -and (-not ($value.EndsWith("MB")))) {
                 if ($CurrentValue.EndsWith("GB")) {
                     $property.$name = $value.Trim() + "GB"
                 }
@@ -2585,7 +2585,7 @@ function Get-AdditionalValidations {
             }
         }
         "memory" {
-            if (-not $value.EndsWith("GB" -and -not $value.EndsWith("MB"))) {
+            if (-not ($value.EndsWith("GB")) -and (-not ($value.EndsWith("MB")))) {
                 if ($CurrentValue.EndsWith("GB")) {
                     $property.$name = $value.Trim() + "GB"
                 }
@@ -3695,18 +3695,23 @@ function Select-VirtualMachines {
                 foreach ($virtualMachine in $global:config.virtualMachines) {
                     $i = $i + 1
                     if ($i -eq $response) {
-                        if ($virtualMachine.role -eq "FileServer") {
-                            $passiveVM = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-                            if ($passiveVM) {
-                                if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
-                                    Write-Host
-                                    write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
-                                    $removeVM = $false
+                        $response = Read-Host2 -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (y/N)" -HideHelp
+                        if (-not [String]::IsNullOrWhiteSpace($response)) {
+                            if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
+                                if ($virtualMachine.role -eq "FileServer") {
+                                    $passiveVM = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+                                    if ($passiveVM) {
+                                        if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
+                                            Write-Host
+                                            write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
+                                            $removeVM = $false
+                                        }
+                                    }
+                                }
+                                if ($removeVM -eq $true) {
+                                    Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
                                 }
                             }
-                        }
-                        if ($removeVM -eq $true) {
-                            Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
                         }
                     }
                 }
