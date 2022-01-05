@@ -2623,12 +2623,35 @@ function Get-AdditionalValidations {
                 $property.installMP = $false
             }
             $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
-            $property.vmName = $newName
+            if ($($property.vmName) -ne $newName) {
+                $rename = $true
+                $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                if (-not [String]::IsNullOrWhiteSpace($response)) {
+                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                        $rename = $false
+                    }
+                }
+                if ($rename -eq $true) {
+                    $property.vmName = $newName
+                }
+            }
         }
         "installDP" {
             $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
-            $property.vmName = $newName
+            if ($($property.vmName) -ne $newName) {
+                $rename = $true
+                $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                if (-not [String]::IsNullOrWhiteSpace($response)) {
+                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                        $rename = $false
+                    }
+                }
+                if ($rename -eq $true) {
+                    $property.vmName = $newName
+                }
+            }
         }
+
         "siteCode" {
             if ($property.RemoteSQLVM) {
                 $newSQLName = $value + "SQL"
@@ -2660,7 +2683,18 @@ function Get-AdditionalValidations {
                 $RemoteSQLVM.vmName = $newSQLName
                 $property.RemoteSQLVM = $newSQLName
             }
-            $property.vmName = $newName
+            if ($($property.vmName) -ne $newName) {
+                $rename = $true
+                $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                if (-not [String]::IsNullOrWhiteSpace($response)) {
+                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                        $rename = $false
+                    }
+                }
+                if ($rename -eq $true) {
+                    $property.vmName = $newName
+                }
+            }
             Write-Verbose "New Name: $newName"
             if ($property.role -eq "CAS") {
                 $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
@@ -2914,7 +2948,19 @@ function Select-Options {
                     Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
                     if ($property.role -eq "DomainMember") {
                         if (-not $property.SqlVersion) {
-                            $property.vmName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config
+                            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config
+                            if ($($property.vmName) -ne $newName) {
+                                $rename = $true
+                                $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                                if (-not [String]::IsNullOrWhiteSpace($response)) {
+                                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                                        $rename = $false
+                                    }
+                                }
+                                if ($rename -eq $true){
+                                    $property.vmName = $newName
+                                }
+                            }
                         }
                     }
                     continue MainLoop
@@ -2957,7 +3003,18 @@ function Select-Options {
                     if ($property.role -eq "DPMP") {
                         Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
                         $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
-                        $property.vmName = $newName
+                        if ($($property.vmName) -ne $newName) {
+                            $rename = $true
+                            $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                            if (-not [String]::IsNullOrWhiteSpace($response)) {
+                                if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                                    $rename = $false
+                                }
+                            }
+                            if ($rename -eq $true){
+                                $property.vmName = $newName
+                            }
+                        }
                         continue MainLoop
                     }
                 }
