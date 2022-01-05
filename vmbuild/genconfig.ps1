@@ -538,14 +538,10 @@ function Select-StartDomain {
             }
             get-job | wait-job | out-null
             get-job | remove-job | out-null
-            #get-list -type VM -SmartUpdate | out-null
-            if ($CriticalOnly -eq $false) {
-                get-list -type VM -SmartUpdate | out-null
-                return
-            }
-            else {
-                continue
-            }
+
+            get-list -type VM -SmartUpdate | out-null
+            return
+
         }
         else {
             start-vm $response
@@ -760,8 +756,8 @@ function Select-MainMenu {
         $i = 0
         #$valid = Get-TestResult -SuccessOnError
         foreach ($virtualMachine in $global:config.virtualMachines) {
-            if ($null -eq $virtualMachine){
-                $global:config.virtualMachines | convertTo-Json -Depth 3 |out-host
+            if ($null -eq $virtualMachine) {
+                $global:config.virtualMachines | convertTo-Json -Depth 3 | out-host
             }
             $i = $i + 1
             $name = Get-VMString $virtualMachine
@@ -1253,7 +1249,7 @@ function Select-NewDomainConfig {
                 $newConfig.vmOptions.domainName = $domain
                 $newConfig.vmOptions.prefix = $prefix
                 $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
-                if (-not $valid){
+                if (-not $valid) {
                     $domain = $null
                 }
             }
@@ -1386,7 +1382,7 @@ Function Get-DomainStatsLine {
     $ExistingDPMPCount = ($ListCache | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $ExistingSQLCount = ($ListCache | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
     $ExistingSubnetCount = ($ListCache | Select-Object -Property Subnet -unique | measure-object).Count
-    $TotalVMs = ($ListCache| Measure-Object).Count
+    $TotalVMs = ($ListCache | Measure-Object).Count
     $TotalRunningVMs = ($ListCache | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
     $TotalMem = ($ListCache | Measure-Object -Sum MemoryGB).Sum
     $TotalMaxMem = ($ListCache | Measure-Object -Sum MemoryStartupGB).Sum
@@ -1466,7 +1462,7 @@ function Show-ExistingNetwork {
         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
         }
         else {
-            Select-StartDomain -domain $domain
+            Select-StartDomain -domain $domain -response "C"
         }
 
     }
@@ -1515,8 +1511,8 @@ function Show-ExistingNetwork {
     #    }
     #}
     #
-    if ($role -eq "Secondary"){
-        if (-not $parentSiteCode){
+    if ($role -eq "Secondary") {
+        if (-not $parentSiteCode) {
             return
         }
     }
@@ -1598,7 +1594,7 @@ function Format-Roles {
             "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]" }
             "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]" }
             "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]" }
-            default {$newRoles += $role}
+            default { $newRoles += $role }
         }
     }
 
@@ -1612,37 +1608,37 @@ function Select-RolesForExisting {
         [Parameter(Mandatory = $false, HelpMessage = "Enhance Roles")]
         [bool]$enhance = $true
     )
-    $existing = get-list -type vm -domain $global:config.vmOptions.domainName | Where-Object {$_.Role -eq "DC"}
-    if ($existing){
+    $existing = get-list -type vm -domain $global:config.vmOptions.domainName | Where-Object { $_.Role -eq "DC" }
+    if ($existing) {
 
-    $existingRoles = Select-RolesForExistingList
-    $ha_Text = "Enable High Availability (HA) on an Existing Site Server"
+        $existingRoles = Select-RolesForExistingList
+        $ha_Text = "Enable High Availability (HA) on an Existing Site Server"
     }
-    else{
+    else {
         $existingRoles = Select-RolesForNewList
-        $ha_Text= "Enable High Availability (HA) on a Site Server"
+        $ha_Text = "Enable High Availability (HA) on a Site Server"
     }
 
     $existingRoles2 = @()
     $CurrentValue = $null
-if ($enhance){
-    $CurrentValue = "DomainMember"
-    foreach ($item in $existingRoles) {
+    if ($enhance) {
+        $CurrentValue = "DomainMember"
+        foreach ($item in $existingRoles) {
 
-        switch ($item) {
-            "CAS" { $existingRoles2 += "CAS and Primary" }
-            "DomainMember" {
-                $existingRoles2 += "DomainMember (Server)"
-                $existingRoles2 += "DomainMember (Client)"
+            switch ($item) {
+                "CAS" { $existingRoles2 += "CAS and Primary" }
+                "DomainMember" {
+                    $existingRoles2 += "DomainMember (Server)"
+                    $existingRoles2 += "DomainMember (Client)"
+                }
+                "PassiveSite" {}
+                Default { $existingRoles2 += $item }
             }
-            "PassiveSite" {}
-            Default { $existingRoles2 += $item }
         }
     }
-}
-else{
-    $existingRoles2  = $existingRoles
-}
+    else {
+        $existingRoles2 = $existingRoles
+    }
     $existingRoles2 = Format-Roles $existingRoles2
 
     $OptionArray = @{ "H" = $ha_Text }
@@ -1701,6 +1697,13 @@ function Select-OSForNew {
     if ($Role -eq "AADClient") {
         $OSList = $Common.Supported.OperatingSystems | Where-Object { -not ( $_ -like "*Server*" ) }
         $defaultValue = "Windows 10 Latest (64-bit)"
+    }
+    if ($role -eq "OSDClient") {
+        return $null
+    }
+
+    if ($role -eq "Secondary") {
+        return $defaultValue
     }
     $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue $defaultValue
     return $role
@@ -3478,22 +3481,22 @@ function Select-VirtualMachines {
             if ($response.ToLowerInvariant() -eq "n") {
                 #$role = Select-RolesForNew
                 $role = Select-RolesForExisting -enhance:$false
-                if (-not $role){
+                if (-not $role) {
                     return
                 }
                 if ($role -eq "H") {
                     $role = "PassiveSite"
                 }
+
                 $os = Select-OSForNew -Role $role
                 $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
 
-
-                if ($role -eq "Secondary"){
-                    if (-not $parentSiteCode)
-                    {
+                if ($role -eq "Secondary") {
+                    if (-not $parentSiteCode) {
                         return
                     }
                 }
+
                 if ($role -eq "PassiveSite") {
                     $domain = $global:config.vmOptions.DomainName
                     $existingPassive = @()
@@ -3505,8 +3508,8 @@ function Select-VirtualMachines {
                     $exisitingPassive += $global:config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
                     $existingSS += $global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
 
-                    $existingSS = $existingSS | Where-Object {$_}
-                    $exisitingPassive = $exisitingPassive | Where-Object {$_}
+                    $existingSS = $existingSS | Where-Object { $_ }
+                    $exisitingPassive = $exisitingPassive | Where-Object { $_ }
 
                     $PossibleSS = @()
                     foreach ($item in $existingSS) {
