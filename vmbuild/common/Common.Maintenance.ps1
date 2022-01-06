@@ -97,7 +97,7 @@ function Show-FailedDomains {
     Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#"
-    Write-Host "# 1. Logon to the affected DC's.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "# 1. Logon to the affected DC's using Hyper-V console.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# 2. Launch 'AD Users and Computers', and reset the account for the above listed accounts to the desiredPassword.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# 3. Run 'VMBuild.cmd' again.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
