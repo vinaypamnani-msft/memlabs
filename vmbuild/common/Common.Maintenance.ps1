@@ -85,6 +85,8 @@ function Show-FailedDomains {
     $dcList = ($failedDCs | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName, "cm_svc") } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-String).Trim()
     $dcList = $dcList -split "`r`n"
 
+    Write-Log "Displaying the failed domains message for ($($failedDomains -join ','))." -LogOnly
+
     $longest = 128
     $longestMinus2 = 126
     Write-Host
@@ -483,7 +485,17 @@ function Get-VMFixes {
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
         $transcriptPath = "C:\staging\Fix\Fix-CMFullAdmin.txt"
         Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
-        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar
+
+        if ($ErrVar.Count -ne 0) {
+            return $false
+        }
+
+        if ([string]::IsNullOrWhiteSpace($SiteCode)) {
+            # Deployment was done with cmOptions.Install=False, or site was uninstalled
+            return $true
+        }
+
         $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
 
         # Get CM module path
