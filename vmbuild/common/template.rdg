@@ -44,13 +44,18 @@
       <smartGroup>
         <properties>
           <expanded>True</expanded>
-          <name>DC</name>
+          <name>DomainServers</name>
         </properties>
         <ruleGroup operator="All">
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
             <value>"DC"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"FileServer"</value>
           </rule>
         </ruleGroup>
       </smartGroup>
@@ -120,11 +125,6 @@
             <property>Comment</property>
             <operator>Matches</operator>
             <value>"PassiveSite"</value>
-          </rule>
-          <rule>
-            <property>Comment</property>
-            <operator>Matches</operator>
-            <value>"FileServer"</value>
           </rule>
           <rule>
             <property>Comment</property>
