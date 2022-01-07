@@ -323,7 +323,7 @@ function New-RDCManFileFromHyperV {
         # Set user/pass on the group
         $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -first 1).AdminName
 
-        if ($null -eq $username){
+        if ($null -eq $username) {
             Write-Log "Could not determine username from DC config for domain $domain. Assuming username is 'admin'"
             $username = "admin"
         }
@@ -353,20 +353,17 @@ function New-RDCManFileFromHyperV {
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
-            if ($vm.Role -eq "DomainMember" -and $null -eq $vm.SqlVersion -and $vm.deployedOS.Contains("Server")) {
-                $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
-            }else {
-                if ($vm.Role -eq "DomainMember"){
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient"
-                }
-            }
 
-            if ($vm.Role -eq "WorkgroupMember" -and $vm.deployedOS.Contains("Server")) {
-                $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
-            }else {
-                if ($vm.Role -eq "WorkgroupMember"){
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient"
+            if ($vm.Role -eq "DomainMember" -or $vm.Role -eq "WorkgroupMember") {
+                if ( $null -eq $vm.SqlVersion -and $vm.deployedOS.Contains("Server")) {
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
                 }
+                else {
+                    if (-not ($vm.deployedOS.Contains("Server"))) {
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient"
+                    }
+                }
+
             }
 
             $comment = $c | ConvertTo-Json
@@ -405,7 +402,7 @@ function New-RDCManFileFromHyperV {
             }
             $ForceOverwrite = $true
             $vmID = $null
-            if ($vm.Role -eq "OSDClient" -or $vm.Role -eq "AADClient"){
+            if ($vm.Role -eq "OSDClient" -or $vm.Role -eq "AADClient") {
                 $vmID = $vm.vmId
             }
             if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID) -eq $True) {
@@ -413,12 +410,12 @@ function New-RDCManFileFromHyperV {
             }
         }
         $CurrentSmartGroups = $findgroup.SelectNodes('smartGroup')
-        foreach ($item in $CurrentSmartGroups){
+        foreach ($item in $CurrentSmartGroups) {
             #Write-Log $item.properties.name
             [void]$findGroup.RemoveChild($item)
         }
 
-        foreach ($item in $groupFromTemplate.SelectNodes('smartGroup')){
+        foreach ($item in $groupFromTemplate.SelectNodes('smartGroup')) {
             #write-host "template: $($item.properties.name)"
             $clonedItem = $item.clone()
             $clonedItem = $existing.ImportNode($clonedItem, $true)
@@ -558,8 +555,8 @@ function Add-RDCManServerToGroup {
     #<connectionType>VirtualMachineConsoleConnect</connectionType>
     #<vmId>TEMPLATE</vmId>
 
-    if (-not [string]::IsNullOrWhiteSpace($vmID)){
-        $displayName = "[console] "+ $displayName
+    if (-not [string]::IsNullOrWhiteSpace($vmID)) {
+        $displayName = "[console] " + $displayName
     }
 
     if ($ForceOverwrite) {
@@ -585,7 +582,7 @@ function Add-RDCManServerToGroup {
 
 
         $clonedNode = $existing.ImportNode($newserver, $true)
-        if (-not [string]::IsNullOrWhiteSpace($vmID)){
+        if (-not [string]::IsNullOrWhiteSpace($vmID)) {
 
             [xml]$logonCredsXml = @"
             <logonCredentials inherit="None">
@@ -596,7 +593,7 @@ function Add-RDCManServerToGroup {
             </logonCredentials>
 "@
             $clonedNode.AppendChild($existing.ImportNode($logonCredsXml.logonCredentials, $true))
-            $clonedNode.logonCredentials.userName =  $env:username
+            $clonedNode.logonCredentials.userName = $env:username
             $clonedNode.properties.name = $env:computername
             $e = $existing.CreateElement("connectionType")
             $e.set_InnerText("VirtualMachineConsoleConnect")
