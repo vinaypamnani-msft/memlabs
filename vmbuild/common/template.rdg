@@ -68,11 +68,6 @@
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
-            <value>"WorkgroupMember"</value>
-          </rule>
-          <rule>
-            <property>Comment</property>
-            <operator>Matches</operator>
             <value>"AADClient"</value>
           </rule>
           <rule>
