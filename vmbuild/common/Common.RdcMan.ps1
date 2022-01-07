@@ -353,9 +353,22 @@ function New-RDCManFileFromHyperV {
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
-            if ($vm.Role -eq "DomainMember" -and $null -eq $vm.SqlVersion) {
+            if ($vm.Role -eq "DomainMember" -and $null -eq $vm.SqlVersion -and $vm.deployedOS.Contains("Server")) {
                 $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+            }else {
+                if ($vm.Role -eq "DomainMember"){
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient"
+                }
             }
+
+            if ($vm.Role -eq "WorkgroupMember" -and $vm.deployedOS.Contains("Server")) {
+                $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+            }else {
+                if ($vm.Role -eq "WorkgroupMember"){
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient"
+                }
+            }
+
             $comment = $c | ConvertTo-Json
 
             $name = $($vm.VmName)

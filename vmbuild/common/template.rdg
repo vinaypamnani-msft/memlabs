@@ -57,13 +57,13 @@
       <smartGroup>
         <properties>
           <expanded>True</expanded>
-          <name>Members</name>
+          <name>Clients</name>
         </properties>
         <ruleGroup operator="Any">
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
-            <value>"PlainMemberServer"</value>
+            <value>"PlainMemberClient"</value>
           </rule>
           <rule>
             <property>Comment</property>
@@ -79,6 +79,19 @@
             <property>Comment</property>
             <operator>Matches</operator>
             <value>"InternetClient"</value>
+          </rule>
+        </ruleGroup>
+      </smartGroup>
+      <smartGroup>
+        <properties>
+          <expanded>True</expanded>
+          <name>Servers</name>
+        </properties>
+        <ruleGroup operator="Any">
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"PlainMemberServer"</value>
           </rule>
         </ruleGroup>
       </smartGroup>
