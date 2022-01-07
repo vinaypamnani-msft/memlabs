@@ -85,6 +85,8 @@ function Show-FailedDomains {
     $dcList = ($failedDCs | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName, "cm_svc") } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-String).Trim()
     $dcList = $dcList -split "`r`n"
 
+    Write-Log "Displaying the failed domains message for ($($failedDomains -join ','))." -LogOnly
+
     $longest = 128
     $longestMinus2 = 126
     Write-Host
@@ -95,7 +97,7 @@ function Show-FailedDomains {
     Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#"
-    Write-Host "# 1. Logon to the affected DC's.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "# 1. Logon to the affected DC's using Hyper-V console.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# 2. Launch 'AD Users and Computers', and reset the account for the above listed accounts to the desiredPassword.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# 3. Run 'VMBuild.cmd' again.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
@@ -483,7 +485,17 @@ function Get-VMFixes {
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
         $transcriptPath = "C:\staging\Fix\Fix-CMFullAdmin.txt"
         Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
-        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar
+
+        if ($ErrVar.Count -ne 0) {
+            return $false
+        }
+
+        if ([string]::IsNullOrWhiteSpace($SiteCode)) {
+            # Deployment was done with cmOptions.Install=False, or site was uninstalled
+            return $true
+        }
+
         $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
 
         # Get CM module path
