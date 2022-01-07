@@ -405,7 +405,7 @@ function select-DeleteSnapshotDomain {
 function select-OptimizeDomain {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Optimize")]
         [string] $domain
     )
     select-StopDomain $domain
@@ -452,7 +452,7 @@ function Select-StartDomain {
     while ($true) {
         Write-Host
 
-        $vms = get-list -type vm -DomainName $domain
+        $vms = get-list -type vm -DomainName $domain -SmartUpdate
 
         $notRunning = $vms | Where-Object { $_.State -ne "Running" }
         if ($notRunning -and ($notRunning | Measure-Object).count -gt 0) {
@@ -565,7 +565,7 @@ function Select-StopDomain {
 
     While ($true) {
         Write-Host
-        $vms = get-list -type vm -DomainName $domain
+        $vms = get-list -type vm -DomainName $domain -SmartUpdate
         $running = $vms | Where-Object { $_.State -ne "Off" }
         if ($running -and ($running | Measure-Object).count -gt 0) {
             Write-host "$(($running| Measure-Object).count) VM's in '$domain' are currently running."
@@ -634,7 +634,7 @@ function Select-DeleteDomain {
     )
 
     while ($true) {
-        $vms = get-list -type vm -DomainName $domain | Select-Object -ExpandProperty vmName
+        $vms = get-list -type vm -DomainName $domain -SmartUpdate | Select-Object -ExpandProperty vmName
         if (-not $vms) {
             return
         }
@@ -672,7 +672,7 @@ function Select-DeleteDomain {
 
 function Select-DeletePending {
 
-    get-list -Type VM | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Subnet, SQLVersion | Out-Host
+    get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Subnet, SQLVersion | Out-Host
     Write-Host "Please confirm these VM's are not currently in process of being deployed."
     Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
     $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
