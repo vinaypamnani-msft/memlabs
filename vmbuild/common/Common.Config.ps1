@@ -577,7 +577,7 @@ function Test-ValidRoleDC {
 
             # Check VM exists in Hyper-V
             #$vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
-            $vm = Get-List -type VM | Where-Object { $_.vmName -eq $existingDC }
+            $vm = Get-List -type VM -SmartUpdate | Where-Object { $_.vmName -eq $existingDC }
             if (-not $vm) {
                 Add-ValidationMessage -Message "$vmRole Validation: Existing DC found [$existingDC] but VM with the same name was not found in Hyper-V." -ReturnObject $ReturnObject -Warning
             }
@@ -590,8 +590,12 @@ function Test-ValidRoleDC {
                     # }
                 }
                 else {
-                    # VM Not running, cannot validate network
-                    Add-ValidationMessage -Message "$vmRole Validation: Existing DC [$existingDC] found but VM is not Running." -ReturnObject $ReturnObject -Warning
+                    start-vm -name $vm.vmName | out-null
+                    $vm = Get-List -type VM -SmartUpdate
+                    if ($vm.State -ne "Running") {
+                        # VM Not running, cannot validate network
+                        Add-ValidationMessage -Message "$vmRole Validation: Existing DC [$existingDC] found but VM is not Running." -ReturnObject $ReturnObject -Warning
+                    }
                 }
 
                 # Account validation
@@ -1410,7 +1414,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add exising DC to list
-    if ($existingDC -and ($containsPS -or $containsPassive -or $containsSecondary -or $containsDPMP)) {
+    if ($existingDC){# -and ($containsPS -or $containsPassive -or $containsSecondary -or $containsDPMP)) {
         # create a dummy VM object for the existingDC
         Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $config
     }
@@ -1436,6 +1440,11 @@ function Add-ExistingVMToDeployConfig {
     if (-not $existingVM) {
         Write-Log "Not adding $vmName as it does not exist as an existing VM" -LogOnly
         return
+    }
+
+    Write-Log -Verbose "Adding $vmName as an existing VM"
+    if ($existingVM.state -ne "Running") {
+        start-vm -name $existingVM.vmName
     }
 
     $newVMObject = [PSCustomObject]@{

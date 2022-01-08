@@ -247,6 +247,18 @@ function select-SnapshotDomain {
     Write-Host
     Write-Host -ForegroundColor Yellow "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
     Select-StopDomain -domain $domain
+    get-SnapshotDomain -domain $domain
+    Select-StartDomain -domain $domain
+
+}
+
+
+function get-SnapshotDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
+        [string] $domain
+    )
     $vms = get-list -type vm -DomainName $domain
     Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
     Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
@@ -277,8 +289,6 @@ function select-SnapshotDomain {
 
     write-host
     Write-Host "$domain has been CheckPointed"
-    Select-StartDomain -domain $domain
-
 }
 
 function select-RestoreSnapshotDomain {
@@ -559,11 +569,17 @@ function Select-StopDomain {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
-        [string] $domain
+        [string] $domain,
+        [Parameter(Mandatory = $false, HelpMessage = "Prepopulate response")]
+        [string] $response = $null
     )
 
+    if ($response) {
+        $preResponse = $response
+    }
 
     While ($true) {
+        $response = $null
         Write-Host
         $vms = get-list -type vm -DomainName $domain -SmartUpdate
         $running = $vms | Where-Object { $_.State -ne "Off" }
@@ -577,7 +593,13 @@ function Select-StopDomain {
 
         $vmsname = $running | Select-Object -ExpandProperty vmName
         $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
-        $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
+        if (-not $preResponse) {
+            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
+        }
+        else {
+            $response = $preResponse
+            $preResponse = $null
+        }
 
         if ([string]::IsNullOrWhiteSpace($response)) {
             return
@@ -2287,7 +2309,7 @@ Function Get-SiteCodeForDPMP {
                 return $null
             }
             else {
-               return ($result -Split " ")[0]
+                return ($result -Split " ")[0]
             }
         }
     }
@@ -3953,7 +3975,15 @@ if (-not $InternalUseOnly.IsPresent) {
 
 #================================= NEW LAB SCENERIO ============================================
 if ($InternalUseOnly.IsPresent) {
-
+    if (($Global:DeployConfig.existingVMs | measure-object).Count -gt 0) {
+        write-host -ForegroundColor Green "This configuration will make modifications to $($Global:DeployConfig.vmOptions.DomainName)"
+        $response = Read-Host2 -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (Y/n)" -HideHelp
+        if ([String]::IsNullOrWhiteSpace($response) -or $response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes" ) {
+            Select-StopDomain -domain $Global:DeployConfig.vmOptions.DomainName -response "C"
+            get-SnapshotDomain -domain $Global:DeployConfig.vmOptions.DomainName
+            Select-StartDomain -domain $Global:DeployConfig.vmOptions.DomainName -response "C"
+        }
+    }
     return $return
 }
 
