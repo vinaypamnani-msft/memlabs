@@ -2253,36 +2253,42 @@ Function Get-SiteCodeForDPMP {
     #Get-PSCallStack | out-host
     while ($valid -eq $false) {
         $siteCodes = @()
-        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -first 1).SiteCode
+        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -first 1)
         if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-            $siteCodes += $tempSiteCode
+            $siteCodes += "$($tempSiteCode.SiteCode) (New Primary Server - $($tempSiteCode.vmName))"
         }
-        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" } | Select-Object -first 1).SiteCode
+        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" } | Select-Object -first 1)
         if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-            $siteCodes += $tempSiteCode
+            $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName)"
         }
         if ($Domain) {
-            $siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
-            $siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object -ExpandProperty SiteCode -Unique
-        }
-        if ($siteCodes.Length -eq 0) {
-            Write-Host
-            write-host "No valid site codes are eligible to accept this DPMP"
-            return $null
-        }
-        else {
-            #write-host $siteCodes
-        }
-        $result = $null
-        while (-not $result) {
-            $result = Get-Menu -Prompt "Select sitecode to connect DPMP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false
-        }
-        if ($result.ToLowerInvariant() -eq "x") {
-            return $null
-        }
-        else {
-            return $result
+            #$siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
+            #$siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object -ExpandProperty SiteCode -Unique
+            foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object SiteCode, Subnet, VmName -Unique)) {
+                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Subnet))"
+            }
+            foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object SiteCode, Subnet, VmName -Unique)) {
+                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Subnet))"
+            }
 
+            if ($siteCodes.Length -eq 0) {
+                Write-Host
+                write-host "No valid site codes are eligible to accept this DPMP"
+                return $null
+            }
+            else {
+                #write-host $siteCodes
+            }
+            $result = $null
+            while (-not $result) {
+                $result = Get-Menu -Prompt "Select sitecode to connect DPMP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false
+            }
+            if ($result.ToLowerInvariant() -eq "x") {
+                return $null
+            }
+            else {
+               return ($result -Split " ")[0]
+            }
         }
     }
 }
@@ -2957,7 +2963,7 @@ function Select-Options {
                                         $rename = $false
                                     }
                                 }
-                                if ($rename -eq $true){
+                                if ($rename -eq $true) {
                                     $property.vmName = $newName
                                 }
                             }
@@ -3011,7 +3017,7 @@ function Select-Options {
                                     $rename = $false
                                 }
                             }
-                            if ($rename -eq $true){
+                            if ($rename -eq $true) {
                                 $property.vmName = $newName
                             }
                         }
