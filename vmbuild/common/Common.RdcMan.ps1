@@ -213,12 +213,16 @@ function New-RDCManFile {
         return
     }
 
-    # Set user/pass on the group
-    $username = $DeployConfig.vmOptions.adminName
-    $findGroup.logonCredentials.password = $encryptedPass
-    if ($findGroup.logonCredentials.username -ne $username) {
-        $findGroup.logonCredentials.userName = $username
-        $shouldSave = $true
+    # Set user/pass on the group\
+    $pname = $findGroup.logonCredentials.profileName.'#text'
+    if ($pname -eq "Custom") {
+        #write-host "ProfileName is $($pname)"
+        $username = $DeployConfig.vmOptions.adminName
+        $findGroup.logonCredentials.password = $encryptedPass
+        if ($findGroup.logonCredentials.username -ne $username) {
+            $findGroup.logonCredentials.userName = $username
+            $shouldSave = $true
+        }
     }
 
     foreach ($vm in $DeployConfig.virtualMachines) {
