@@ -85,6 +85,118 @@ function Write-JobProgress {
     }
 }
 
+function New-VMJobs {
+
+    param(
+        [int]$Phase,
+        [object]$deployConfig
+    )
+
+    if ($Phase -eq 1) {
+        $PhaseDescription = "Creation"
+        Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
+        Write-Host
+    }
+    else {
+        $PhaseDescription = "Configuration"
+        Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
+        Write-Host
+    }
+
+    [System.Collections.ArrayList]$jobs = @()
+    $job_created_yes = 0
+    $job_created_no = 0
+
+    foreach ($currentItem in $deployConfig.virtualMachines) {
+        $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+        Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
+
+        if ($WhatIf) {
+            Write-Log "Will start a job for VM $PhaseDescription $($currentItem.vmName)"
+            continue
+        }
+
+        if ($Phase -eq 1) {
+            $job = Start-Job -ScriptBlock $global:VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+        }
+        else {
+            $job = Start-Job -ScriptBlock $global:VM_Config -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+        }
+
+        if ($Err.Count -ne 0) {
+            Write-Log "Failed to start job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
+            $job_created_no++
+        }
+        else {
+            Write-Log "Created job $($job.Id) for VM $PhaseDescription $($currentItem.vmName)" -LogOnly
+            $jobs += $job
+            $job_created_yes++
+        }
+    }
+
+    if ($job_created_no -eq 0) {
+        Write-Log "Created $job_created_yes jobs for VM $PhaseDescription. Waiting for jobs."
+    }
+    else {
+        Write-Log "Created $job_created_yes jobs for VM $PhaseDescription. Failed to create $job_created_no jobs."
+    }
+
+    $failedCount = 0
+    $successCount = 0
+    $warningCount = 0
+    do {
+        $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
+        foreach ($job in $runningJobs) {
+            Write-JobProgress($job)
+        }
+
+        $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
+        foreach ($job in $completedJobs) {
+
+            Write-JobProgress($job)
+
+            # if ($Phase -eq 2) {
+            #     Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Yellow
+            # }
+
+            $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
+            $incrementCount = $true
+            foreach ($line in $jobOutput) {
+                $line = $line.ToString().Trim()
+                if ($line.StartsWith("ERROR")) {
+                    Write-Host $line -ForegroundColor Red
+                    if ($incrementCount) { $failedCount++ }
+                }
+                elseif ($line.StartsWith("WARNING")) {
+                    Write-Host $line -ForegroundColor Yellow
+                    if ($incrementCount) { $warningCount++ }
+                }
+                else {
+                    Write-Host $line -ForegroundColor Green
+                    if ($incrementCount) { $successCount++ }
+                }
+
+                $incrementCount = $false
+            }
+
+            Write-Progress -Id $job.Id -Activity $job.Name -Completed
+            $jobs.Remove($job)
+        }
+
+        # Sleep
+        Start-Sleep -Seconds 1
+
+    } until ($runningJobs.Count -eq 0)
+
+    Write-Log "`n$successCount jobs completed successfully; $warningCount warnings, $failedCount failures."
+
+    if ($failedCount -gt 0) {
+        return $false
+    }
+
+    return $true
+}
+
 Clear-Host
 
 # Main script starts here
@@ -284,10 +396,8 @@ try {
     # Generate RDCMan file
     New-RDCManFile $deployConfig $global:Common.RdcManFilePath
 
-    # Array to store PS jobs
-    [System.Collections.ArrayList]$jobs = @()
-    $existingDC = $deployConfig.parameters.ExistingDCName
     # Existing DC scenario
+    $existingDC = $deployConfig.parameters.ExistingDCName
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($existingDC) {
@@ -306,175 +416,13 @@ try {
         return $deployConfig
     }
 
-    Write-Log "Phase 1 - Creating Virtual Machine Deployment Jobs" -Activity
+    $created = New-VMJobs -Phase 1 -deployConfig $deployConfig
 
-    $job_created_yes = 0
-    $job_created_no = 0
-    foreach ($currentItem in $deployConfig.virtualMachines) {
-        $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
-        Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
-        if ($enableDebug) {
-            continue
-        }
-        if ($WhatIf) {
-            Write-Log "Will start a job for VM $($currentItem.vmName)"
-            continue
-        }
-
-        $job = Start-Job -ScriptBlock $global:VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
-
-        if ($Err.Count -ne 0) {
-            Write-Log "Failed to start job for VM $($currentItem.vmName). $Err" -Failure
-            $job_created_no++
-        }
-        else {
-            Write-Log "Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
-            $jobs += $job
-            $job_created_yes++
-        }
-        #Remove-PerVMSettings -deployConfig $deployConfigCopy
-    }
-
-    if ($job_created_no -eq 0) {
-        Write-Log "Created $job_created_yes jobs for VM deployment."
-    }
-    else {
-        Write-Log "Created $job_created_yes jobs for VM deployment. Failed to create $job_created_no jobs."
-    }
-
-
-
-    Write-Log "Phase 1 - Waiting for VM Jobs to create virtual machines." -Activity
-    $failedCount = 0
-    $successCount = 0
-    $warningCount = 0
-    do {
-        $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
-        foreach ($job in $runningJobs) {
-            Write-JobProgress($job)
-        }
-
-        $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
-        foreach ($job in $completedJobs) {
-            Write-JobProgress($job)
-            $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
-
-            $incrementCount = $true
-            foreach ($line in $jobOutput) {
-                $line = $line.ToString().Trim()
-                if ($line.StartsWith("ERROR")) {
-                    Write-Host $line -ForegroundColor Red
-                    if ($incrementCount) { $failedCount++ }
-                }
-                elseif ($line.StartsWith("WARNING")) {
-                    Write-Host $line -ForegroundColor Yellow
-                    if ($incrementCount) { $warningCount++ }
-                }
-                else {
-                    Write-Host $line -ForegroundColor Green
-                    if ($incrementCount) { $successCount++ }
-                }
-
-                $incrementCount = $false
-            }
-
-            Write-Progress -Id $job.Id -Activity $job.Name -Completed
-            $jobs.Remove($job)
-        }
-
-        # Sleep
-        Start-Sleep -Seconds 1
-
-    } until ($runningJobs.Count -eq 0)
-
-    Write-Log "Phase 1 Job Completion Status." -Activity
-    Write-Log "$successCount jobs completed successfully; $warningCount warnings, $failedCount failures."
-
-    if ($failedCount -gt 0) {
+    if (-not $created) {
         Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
     }
     else {
-        Write-Log "Phase 2 - Creating Virtual Machine Configuration Jobs" -Activity
-
-        [System.Collections.ArrayList]$jobs = @()
-        $job_created_yes = 0
-        $job_created_no = 0
-        foreach ($currentItem in $deployConfig.virtualMachines) {
-            $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
-            Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
-            if ($enableDebug) {
-                continue
-            }
-            if ($WhatIf) {
-                Write-Log "Will start a job for VM Configuration $($currentItem.vmName)"
-                continue
-            }
-
-            $job = Start-Job -ScriptBlock $global:VM_Config -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
-
-            if ($Err.Count -ne 0) {
-                Write-Log "Failed to start job for VM Configuration $($currentItem.vmName). $Err" -Failure
-                $job_created_no++
-            }
-            else {
-                Write-Log "Created job $($job.Id) for VM Configuration $($currentItem.vmName)" -LogOnly
-                $jobs += $job
-                $job_created_yes++
-            }
-            #Remove-PerVMSettings -deployConfig $deployConfigCopy
-        }
-
-        if ($job_created_no -eq 0) {
-            Write-Log "Created $job_created_yes jobs for VM configuration."
-        }
-        else {
-            Write-Log "Created $job_created_yes jobs for VM configuration. Failed to create $job_created_no jobs."
-        }
-
-        Write-Log "Phase 2 - Waiting for VM Jobs to configure virtual machines." -Activity
-        $failedCount = 0
-        $successCount = 0
-        $warningCount = 0
-        do {
-            $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
-            foreach ($job in $runningJobs) {
-                Write-JobProgress($job)
-            }
-
-            $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
-            foreach ($job in $completedJobs) {
-                Write-JobProgress($job)
-                Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
-                $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
-
-                $incrementCount = $true
-                foreach ($line in $jobOutput) {
-                    $line = $line.ToString().Trim()
-                    if ($line.StartsWith("ERROR")) {
-                        Write-Host $line -ForegroundColor Red
-                        if ($incrementCount) { $failedCount++ }
-                    }
-                    elseif ($line.StartsWith("WARNING")) {
-                        Write-Host $line -ForegroundColor Yellow
-                        if ($incrementCount) { $warningCount++ }
-                    }
-                    else {
-                        Write-Host $line -ForegroundColor Green
-                        if ($incrementCount) { $successCount++ }
-                    }
-
-                    $incrementCount = $false
-                }
-
-                Write-Progress -Id $job.Id -Activity $job.Name -Completed
-                $jobs.Remove($job)
-            }
-
-            # Sleep
-            Start-Sleep -Seconds 1
-
-        } until ($runningJobs.Count -eq 0)
-
+        $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
     }
 
     $timer.Stop()
@@ -483,8 +431,15 @@ try {
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
     }
 
-    Write-Host
-    Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
+    if (-not $created -or -not $configured) {
+        Write-Host
+        Write-Log "### SCRIPT FINISHED WITH FAILURES. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Failure
+    }
+    else {
+        Write-Host
+        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
+    }
+
     $NewLabsuccess = $true
 }
 catch {

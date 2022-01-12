@@ -350,8 +350,8 @@ $global:VM_Config = {
                 }
             }
         }
-        # Update VMNote
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted
+        # Update VMNote and set new version, this code doesn't run when VM_Create failed
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -UpdateVersion
         return
     }
 
@@ -588,16 +588,16 @@ $global:VM_Config = {
 
     if (-not $complete) {
         $worked = $false
-        Write-Log "PSJOB: $($currentItem.vmName): Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -OutputStream -Failure
+        Write-Log "PSJOB: $($currentItem.vmName): VM Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -OutputStream -Failure
     }
     else {
         $worked = $true
-        Write-Progress "$($currentItem.role) configuration completed successfully. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -Completed
-        Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
+        Write-Progress "$($currentItem.role) Configuration completed successfully. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -Completed
+        Write-Log "PSJOB: $($currentItem.vmName): VM Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
 
     if ($createVM) {
-        # Set VM Note
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked
+        # Update VMNote and set new version, this code doesn't run when VM_Create failed
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked -UpdateVersion
     }
 }
