@@ -1900,6 +1900,7 @@ if ($currentBranch -and $currentBranch -notmatch "main") {
 . $PSScriptRoot\common\Common.RdcMan.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
+. $PSScriptRoot\common\Common.ScriptBlocks.ps1
 
 ############################
 ### Common Object        ###
@@ -1946,7 +1947,6 @@ if (-not $Common.Initialized) {
         AzureFileList         = $null
         LocalAdmin            = $null
         FatalError            = $null
-
     }
 
     # Storage config
