@@ -65,7 +65,7 @@ $global:VM_Create = {
         }
 
         if ($currentItem.role -eq "OSDClient") {
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion
             Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
             return
         }
@@ -97,7 +97,7 @@ $global:VM_Create = {
     }
 
     # Assign DHCP reservation for PS/CS
-    if ($currentItem.role -in "Primary", "CAS", "Secondary" -and (-not $currentItem.hidden)) {
+    if ($currentItem.role -in "Primary", "CAS", "Secondary" -and $createVM) {
         try {
             $vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop
             if ($vmnet) {
@@ -136,7 +136,9 @@ $global:VM_Create = {
         return
     }
 
+    # This gets set to true later, if a required fix failed to get applied. When version isn't updated, VM Maintenance could attempt fix again.
     $skipVersionUpdate = $false
+
     $Fix_DefaultProfile = {
         $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
         $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
@@ -146,66 +148,32 @@ $global:VM_Create = {
         if (Test-Path $path3) { Remove-Item -Path $path3 -Force | Out-Null }
     }
 
-    Write-Log "PSJOB: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile"
-    if ($result.ScriptBlockFailed) {
-        Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
-        $skipVersionUpdate = $true
-    }
-
     $Fix_LocalAccount = {
         Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
     }
 
-    Write-Log "PSJOB: $($currentItem.vmName): Updating Password Expiration for vmbuildadmin account."
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix Local Account Password Expiration"
-    if ($result.ScriptBlockFailed) {
-        Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the password expiration policy for vmbuildadmin." -Warning -OutputStream
-        $skipVersionUpdate = $true
-    }
-
-    $Stop_RunningDSC = {
-        # Stop any existing DSC runs
-        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
-        Stop-DscConfiguration -Verbose -Force -ErrorAction SilentlyContinue
-        # Get-Process wmiprvse* -ErrorAction SilentlyContinue | Where-Object {$_.modules.ModuleName -like "*DSC*"} | Stop-Process -Force -ErrorAction SilentlyContinue
-    }
-
-    Write-Log "PSJOB: $($currentItem.vmName): Stopping any previously running DSC Configurations."
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
-    if ($result.ScriptBlockFailed) {
-        Write-Log "PSJOB: $($currentItem.vmName): Failed to stop any running DSC's." -Warning -OutputStream
-    }
-
-    # Boot To OOBE?
-    $bootToOOBE = $currentItem.role -eq "AADClient"
-    if ($bootToOOBE) {
-        # Run Sysprep
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown }
+    if ($createVM) {
+        Write-Log "PSJOB: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile"
         if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
+            $skipVersionUpdate = $true
+        }
+
+        Write-Log "PSJOB: $($currentItem.vmName): Updating Password Expiration for vmbuildadmin account."
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix Local Account Password Expiration"
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): Failed to fix the password expiration policy for vmbuildadmin." -Warning -OutputStream
+            $skipVersionUpdate = $true
+        }
+
+        # Set vm note
+        if ($skipVersionUpdate) {
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
         }
         else {
-            $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 15
-            if (-not $ready) {
-                Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
-            }
-            else {
-                Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
-                $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
-                if ($oobeStarted) {
-                    Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
-                    Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
-                }
-                else {
-                    Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
-                }
-            }
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true -UpdateVersion
         }
-        # Update VMNote
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -SkipVersionUpdate $skipVersionUpdate
-        return
     }
 
     # Copy DSC files
@@ -269,14 +237,11 @@ $global:VM_Create = {
             return
         }
 
-        # Copy SQL CU file to VM
-        # Copy-Item -ToSession $ps -Path $sqlCUPath -Destination "C:\temp\SQL_CU\$sqlCUFileName" -Force
-
         # Eject ISO from guest
         Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
     }
 
-    # Define DSC ScriptBlock
+    # Install DSC Modules
     $DSC_InstallModules = {
 
         param($cmDscFolder)
@@ -302,6 +267,92 @@ $global:VM_Create = {
                 Import-Module $folder.Name -Force;
             }
         }
+    }
+
+    Write-Log "PSJOB: $($currentItem.vmName): Installing DSC Modules."
+
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -ArgumentList $cmDscFolder -DisplayName "DSC: Install Modules"
+    if ($result.ScriptBlockFailed) {
+        Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
+        return
+    }
+
+    if ($createVM) {
+        Write-Log "PSJOB: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
+    }
+    else {
+        Write-Log "PSJOB: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role)." -OutputStream -Success
+    }
+
+}
+
+$global:VM_Config = {
+
+    # Dot source common
+    . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+
+    # Get variables from parent scope
+    $deployConfig = $using:deployConfigCopy
+    $currentItem = $using:currentItem
+
+    # Params for child script blocks
+    $cmDscFolder = "configmgr"
+    $createVM = $true
+    if ($currentItem.hidden -eq $true) { $createVM = $false }
+
+    # Change log location
+    $domainNameForLogging = $deployConfig.vmOptions.domainName
+    $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainNameForLogging.log"
+
+    # Set domain name, depending on whether we need to create new VM or use existing one
+    if (-not $createVM -or ($currentItem.role -eq "DC") ) {
+        $domainName = $deployConfig.parameters.DomainName
+    }
+    else {
+        $domainName = "WORKGROUP"
+    }
+
+    $Stop_RunningDSC = {
+        # Stop any existing DSC runs
+        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
+        Stop-DscConfiguration -Verbose -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Log "PSJOB: $($currentItem.vmName): Stopping any previously running DSC Configurations."
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+    if ($result.ScriptBlockFailed) {
+        Write-Log "PSJOB: $($currentItem.vmName): Failed to stop any running DSC's." -Warning -OutputStream
+    }
+
+    # Boot To OOBE?
+    $bootToOOBE = $currentItem.role -eq "AADClient"
+    if ($bootToOOBE) {
+        # Run Sysprep
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown }
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
+        }
+        else {
+            $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 15
+            if (-not $ready) {
+                Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
+            }
+            else {
+                Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
+                $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
+                if ($oobeStarted) {
+                    Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
+                    Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
+                }
+                else {
+                    Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
+                }
+            }
+        }
+        # Update VMNote
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted
+        return
     }
 
     $DSC_CreateConfig = {
@@ -433,12 +484,6 @@ $global:VM_Create = {
 
     Write-Log "PSJOB: $($currentItem.vmName): Starting $($currentItem.role) role configuration via DSC."
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -ArgumentList $cmDscFolder -DisplayName "DSC: Install Modules"
-    if ($result.ScriptBlockFailed) {
-        Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
-        return
-    }
-
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $cmDscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -449,7 +494,6 @@ $global:VM_Create = {
     if ($currentItem.operatingSystem -notlike "*SERVER*") {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures."
     }
-
 
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $cmDscFolder, $createVM -DisplayName "DSC: Start $($currentItem.role) Configuration"
     if ($result.ScriptBlockFailed) {
@@ -554,6 +598,6 @@ $global:VM_Create = {
 
     if ($createVM) {
         # Set VM Note
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked -SkipVersionUpdate $skipVersionUpdate
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked
     }
 }

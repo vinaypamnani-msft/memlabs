@@ -286,8 +286,6 @@ try {
 
     # Array to store PS jobs
     [System.Collections.ArrayList]$jobs = @()
-    $job_created_yes = 0
-    $job_created_no = 0
     $existingDC = $deployConfig.parameters.ExistingDCName
     # Existing DC scenario
 
@@ -299,8 +297,19 @@ try {
         }
     }
 
-    Write-Log "Creating Virtual Machine Deployment Jobs" -Activity
+    Write-Log "Deployment Summary" -Activity -HostOnly
+    Write-Host
+    Show-Summary -deployConfig $deployConfig
 
+    # Return if debug enabled
+    if ($enableDebug) {
+        return $deployConfig
+    }
+
+    Write-Log "Phase 1 - Creating Virtual Machine Deployment Jobs" -Activity
+
+    $job_created_yes = 0
+    $job_created_no = 0
     foreach ($currentItem in $deployConfig.virtualMachines) {
         $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
         Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
@@ -333,13 +342,9 @@ try {
         Write-Log "Created $job_created_yes jobs for VM deployment. Failed to create $job_created_no jobs."
     }
 
-    Write-Log "Deployment Summary" -Activity -HostOnly
-    Write-Host
-    Show-Summary -deployConfig $deployConfig
-    if ($enableDebug) {
-        return $deployConfig
-    }
-    Write-Log "Waiting for VM Jobs to deploy and configure the virtual machines." -Activity
+
+
+    Write-Log "Phase 1 - Waiting for VM Jobs to create virtual machines." -Activity
     $failedCount = 0
     $successCount = 0
     $warningCount = 0
@@ -352,7 +357,6 @@ try {
         $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
         foreach ($job in $completedJobs) {
             Write-JobProgress($job)
-            Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
 
             $incrementCount = $true
@@ -383,8 +387,95 @@ try {
 
     } until ($runningJobs.Count -eq 0)
 
-    Write-Log "Job Completion Status." -Activity
+    Write-Log "Phase 1 Job Completion Status." -Activity
     Write-Log "$successCount jobs completed successfully; $warningCount warnings, $failedCount failures."
+
+    if ($failedCount -gt 0) {
+        Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
+    }
+    else {
+        Write-Log "Phase 2 - Creating Virtual Machine Configuration Jobs" -Activity
+
+        [System.Collections.ArrayList]$jobs = @()
+        $job_created_yes = 0
+        $job_created_no = 0
+        foreach ($currentItem in $deployConfig.virtualMachines) {
+            $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+            Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
+            if ($enableDebug) {
+                continue
+            }
+            if ($WhatIf) {
+                Write-Log "Will start a job for VM Configuration $($currentItem.vmName)"
+                continue
+            }
+
+            $job = Start-Job -ScriptBlock $global:VM_Config -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+
+            if ($Err.Count -ne 0) {
+                Write-Log "Failed to start job for VM Configuration $($currentItem.vmName). $Err" -Failure
+                $job_created_no++
+            }
+            else {
+                Write-Log "Created job $($job.Id) for VM Configuration $($currentItem.vmName)" -LogOnly
+                $jobs += $job
+                $job_created_yes++
+            }
+            #Remove-PerVMSettings -deployConfig $deployConfigCopy
+        }
+
+        if ($job_created_no -eq 0) {
+            Write-Log "Created $job_created_yes jobs for VM configuration."
+        }
+        else {
+            Write-Log "Created $job_created_yes jobs for VM configuration. Failed to create $job_created_no jobs."
+        }
+
+        Write-Log "Phase 2 - Waiting for VM Jobs to configure virtual machines." -Activity
+        $failedCount = 0
+        $successCount = 0
+        $warningCount = 0
+        do {
+            $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
+            foreach ($job in $runningJobs) {
+                Write-JobProgress($job)
+            }
+
+            $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
+            foreach ($job in $completedJobs) {
+                Write-JobProgress($job)
+                Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Cyan
+                $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
+
+                $incrementCount = $true
+                foreach ($line in $jobOutput) {
+                    $line = $line.ToString().Trim()
+                    if ($line.StartsWith("ERROR")) {
+                        Write-Host $line -ForegroundColor Red
+                        if ($incrementCount) { $failedCount++ }
+                    }
+                    elseif ($line.StartsWith("WARNING")) {
+                        Write-Host $line -ForegroundColor Yellow
+                        if ($incrementCount) { $warningCount++ }
+                    }
+                    else {
+                        Write-Host $line -ForegroundColor Green
+                        if ($incrementCount) { $successCount++ }
+                    }
+
+                    $incrementCount = $false
+                }
+
+                Write-Progress -Id $job.Id -Activity $job.Name -Completed
+                $jobs.Remove($job)
+            }
+
+            # Sleep
+            Start-Sleep -Seconds 1
+
+        } until ($runningJobs.Count -eq 0)
+
+    }
 
     $timer.Stop()
 
@@ -407,7 +498,7 @@ finally {
     get-job | stop-job
 
     # Close PS Sessions
-    foreach($session in $global:ps_cache.Keys) {
+    foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose
         Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue
     }
