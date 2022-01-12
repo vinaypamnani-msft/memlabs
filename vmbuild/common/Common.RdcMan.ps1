@@ -434,7 +434,7 @@ function New-RDCManFileFromHyperV {
         $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | Select-Object -First 1
         #$ruleToClone = $SmartGroupToClone.ruleGroup.rule
         $clonedSG = $SmartGroupToClone.clone()
-        if ($roles -contains "OSDClient") {
+        if ($roles -contains "OSDClient" -or $roles -contains "AADClient") {
             $clonedSG = $SmartGroupToClone.clone()
             $clonedSG.properties.name = "OSD Clients"
             $clonedSG.ruleGroup.rule.value = "OSDClient"
