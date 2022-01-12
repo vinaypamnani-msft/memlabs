@@ -59,7 +59,7 @@
           <expanded>True</expanded>
           <name>DomainServers</name>
         </properties>
-        <ruleGroup operator="All">
+        <ruleGroup operator="Any">
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
