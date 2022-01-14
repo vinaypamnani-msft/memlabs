@@ -423,7 +423,8 @@ $global:VM_Config = {
 
     $DSC_StartConfig = {
 
-        param($cmDscFolder, $createVM)
+        param($cmDscFolder)
+
         # Get required variables from parent scope
         $currentItem = $using:currentItem
 
@@ -470,14 +471,15 @@ $global:VM_Config = {
         Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
         Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
 
-        "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
-        if ($createVM) {
-            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
-        }
-        else {
+        if ($currentItem.hidden) {
             # Don't wait, if we're not creating a new VM and running DSC on an existing VM
+            "Start-DscConfiguration for $dscConfigPath for existing VM" | Out-File $log -Append
             Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
             Start-Sleep -Seconds 60 # Wait for DSC Status to do tests, and wait on the latest action
+        }
+        else {
+            "Start-DscConfiguration for $dscConfigPath for new VM" | Out-File $log -Append
+            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
         }
 
     }
@@ -495,11 +497,11 @@ $global:VM_Config = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures."
     }
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $cmDscFolder, $createVM -DisplayName "DSC: Start $($currentItem.role) Configuration"
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $cmDscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
         # Retry once before exiting
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock $DSC_StartConfig -DisplayName "DSC: Start $($currentItem.role) Configuration"
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $cmDscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
         if ($result.ScriptBlockFailed) {
             Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
@@ -517,7 +519,7 @@ $global:VM_Config = {
     $previousStatus = ""
     $suppressNoisyLogging = $enableVerbose -eq $false
     do {
-        $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt } -SuppressLog:$suppressNoisyLogging
+        $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
         Start-Sleep -Seconds 3
 
         if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {

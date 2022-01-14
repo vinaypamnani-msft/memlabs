@@ -22,11 +22,11 @@
     $CSName = $deployConfig.thisParams.ParentSiteServer.vmName
 
     $Scenario = "Standalone"
-    if ($CSName){
+    if ($CSName) {
         $Scenario = "Hierarchy"
     }
 
-    if ($deployConfig.thisParams.PassiveVM){
+    if ($deployConfig.thisParams.PassiveVM) {
         $containsPassive = $true
         $PassiveVM = $deployConfig.thisParams.PassiveVM
     }
@@ -219,12 +219,24 @@
             DependsOn    = "[WriteEvent]WriteJoinDomain"
         }
 
+        $waitOnDependency = @('[InstallADK]ADKInstall')
+        foreach ($server in $waitOnDomainJoin) {
+
+            VerifyComputerJoinDomain "WaitFor$server" {
+                ComputerName = $server
+                Ensure       = "Present"
+                DependsOn    = "[InstallADK]ADKInstall"
+            }
+
+            $waitOnDependency += "[VerifyComputerJoinDomain]WaitFor$server"
+        }
+
         if ($installSQL) {
 
             if ($sqlUpdateEnabled) {
 
                 WriteStatus DownloadSQLCU {
-                    DependsOn = '[InstallADK]ADKInstall'
+                    DependsOn = $waitOnDependency
                     Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
                 }
 
@@ -244,25 +256,13 @@
             }
             else {
                 WriteStatus WaitDomainJoin {
-                    DependsOn = '[InstallADK]ADKInstall'
+                    DependsOn = $waitOnDependency
                     Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
                 }
             }
 
-            $waitOnDependency = @('[WriteStatus]WaitDomainJoin')
-            foreach ($server in $waitOnDomainJoin) {
-
-                VerifyComputerJoinDomain "WaitFor$server" {
-                    ComputerName = $server
-                    Ensure       = "Present"
-                    DependsOn    = "[WriteStatus]WaitDomainJoin"
-                }
-
-                $waitOnDependency += "[VerifyComputerJoinDomain]WaitFor$server"
-            }
-
             WriteStatus InstallSQL {
-                DependsOn = $waitOnDependency
+                DependsOn = "[WriteStatus]WaitDomainJoin"
                 Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
             }
 
@@ -288,7 +288,7 @@
             # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
             $sqlDependency = @('[WriteStatus]AddSQLPermissions')
             $i = 0
-            foreach ($account in $SQLSysAdminAccounts | Where-Object {$_ -notlike "BUILTIN*" } ) {
+            foreach ($account in $SQLSysAdminAccounts | Where-Object { $_ -notlike "BUILTIN*" } ) {
                 $i++
 
                 SqlLogin "AddSqlLogin$i" {
@@ -349,7 +349,7 @@
         else {
 
             WriteStatus SSMS {
-                DependsOn = '[InstallADK]ADKInstall'
+                DependsOn = $waitOnDependency
                 Status    = "Downloading and installing SQL Management Studio"
             }
 
@@ -409,7 +409,7 @@
             AddUserToLocalAdminGroup "$NodeName" {
                 Name       = $user
                 DomainName = $DomainName
-                DependsOn = "[WriteStatus]AddLocalAdmins"
+                DependsOn  = "[WriteStatus]AddLocalAdmins"
             }
             $addUserDependancy += "[AddUserToLocalAdminGroup]$NodeName"
         }
