@@ -1939,6 +1939,9 @@ class InstallFeatureForSCCM {
 
         Write-Verbose "Current Role is : $_Role"
 
+        # Install on all devices
+        Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
+
         if ($_Role -notcontains "DomainMember") {
             Install-WindowsFeature -Name "Rdc"
         }
