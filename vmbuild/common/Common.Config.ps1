@@ -2500,7 +2500,7 @@ function Get-List {
         [switch] $SmartUpdate,
         [Parameter(Mandatory = $true, ParameterSetName = "FlushCache")]
         [switch] $FlushCache,
-        [Parameter(Mandatory = $false, ParameterSetName = "Config")]
+        [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [object] $DeployConfig
     )
 
