@@ -2499,7 +2499,9 @@ function Get-List {
         [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [switch] $SmartUpdate,
         [Parameter(Mandatory = $true, ParameterSetName = "FlushCache")]
-        [switch] $FlushCache
+        [switch] $FlushCache,
+        [Parameter(Mandatory = $false, ParameterSetName = "Config")]
+        [object] $DeployConfig
     )
 
     try {
@@ -2567,6 +2569,25 @@ function Get-List {
 
         $return = $global:vm_List
 
+        if ($null -ne $DeployConfig){
+            foreach ($vm in $return){
+                $vm |  Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
+            }
+            $domain = $DeployConfig.vmoptions.domainName
+            $subnet = $DeployConfig.vmoptions.network
+            $prefix = $DeployConfig.vmoptions.prefix
+            foreach ($vm in $DeployConfig.virtualMachines){
+                if ($vm.hidden) {
+                    continue
+                }
+                $newVM = $vm
+                $newVM |  Add-Member -MemberType NoteProperty -Name "subnet" -Value $subnet -Force
+                $newVM |  Add-Member -MemberType NoteProperty -Name "Domain" -Value $domain -Force
+                $newVM |  Add-Member -MemberType NoteProperty -Name "prefix" -Value $prefix -Force
+                $newVM |  Add-Member -MemberType NoteProperty -Name "source" -Value "config" -Force
+                $return += $newVM
+            }
+        }
         if ($DomainName) {
             $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
         }
