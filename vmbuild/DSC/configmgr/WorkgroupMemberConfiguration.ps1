@@ -14,7 +14,7 @@
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
     # Server OS?
