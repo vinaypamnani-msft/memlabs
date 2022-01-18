@@ -1060,18 +1060,19 @@ function Get-NewMachineName {
 
     [int]$i = 1
     while ($true) {
-        $NewName = $RoleName + ($TotalCount + $i)
+        $NewName = $RoleName + ($i)
         if ($null -eq $ConfigToCheck) {
             write-log "Config is NULL..  Machine names will not be checked. Please notify someone of this bug."
             #break
         }
-        if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName } | Measure-Object).Count -eq 0) {
+        if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName -and $NewName -ne $CurrentName} | Measure-Object).Count -eq 0) {
 
             $newNameWithPrefix = ($ConfigToCheck.vmOptions.prefix) + $NewName
             if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {
                 break
             }
         }
+        write-log -verbose "$newName already exists [$CurrentName].. Trying next"
         $i++
     }
     return $NewName
@@ -2731,7 +2732,7 @@ function Get-AdditionalValidations {
                 }
             }
 
-            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -SiteCode $value
+            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -SiteCode $value -CurrentName $property.vmName
             $NewSSName = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newName }
             if ($NewSSName) {
                 write-host
@@ -3012,7 +3013,7 @@ function Select-Options {
                     Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
                     if ($property.role -eq "DomainMember") {
                         if (-not $property.SqlVersion) {
-                            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config
+                            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -CurrentName $property.vmName
                             if ($($property.vmName) -ne $newName) {
                                 $rename = $true
                                 $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
@@ -3452,10 +3453,10 @@ function Add-NewVMForRole {
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
         if ($virtualMachine.InstallMP -or $virtualMachine.InstallDP) {
-            $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig -InstallMP $virtualMachine.installMP -InstallDP $virtualMachine.installDP
+            $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig -InstallMP $virtualMachine.installMP -InstallDP $virtualMachine.installDP -CurrentName $virtualMachine.vmName
         }
         else {
-            $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig
+            $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig -CurrentName $virtualMachine.vmName
         }
         Write-Verbose "Machine Name Generated $machineName"
     }
