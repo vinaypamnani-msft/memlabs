@@ -1567,8 +1567,9 @@ function Get-List2 {
     if ($DomainName) {
         $return = Get-List -Type VM -DomainName $DomainName -DeployConfig $DeployConfig -ResetCache:$ResetCache -SmartUpdate:$SmartUpdate
     }
-
-    $return = Get-List -Type VM -DeployConfig $DeployConfig -ResetCache:$ResetCache -SmartUpdate:$SmartUpdate
+    else {
+        $return = Get-List -Type VM -DeployConfig $DeployConfig -ResetCache:$ResetCache -SmartUpdate:$SmartUpdate
+    }
 
     return ($return | Sort-Object -Property source)
 }
