@@ -20,8 +20,9 @@
     $PSName = $deployConfig.thisParams.PSName
     $CSName = $deployConfig.thisParams.CSName
 
-    $DHCP_DNSAddress = $deployConfig.parameters.DHCPDNSAddress
-    $DHCP_DefaultGateway = $deployConfig.parameters.DHCPDefaultGateway
+    $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
+    $DHCP_DNSAddress = $network + ".1"
+    $DHCP_DefaultGateway = $network + ".200"
 
     $setNetwork = $true
     if ($ThisVM.hidden) {

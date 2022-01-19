@@ -347,7 +347,14 @@ try {
 
     # Test if DHCP scope exists, if not create it
     Write-Log "Creating/verifying DHCP scope options for specified network." -Activity
-    $worked = Test-DHCPScope -ConfigParams $deployConfig.parameters
+    $DCVM = Get-List2 -DeployConfig $deployConfig -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq 'DC' }
+    if ($DCVM) {
+        $worked = Test-DHCPScope -ScopeID $deployConfig.vmOptions.network -ScopeName $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -DCVMName $DCVM.vmName
+    }
+    else {
+        $worked = Test-DHCPScope -ScopeID $deployConfig.vmOptions.network -ScopeName $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
+    }
+
     if (-not $worked) {
         Write-Log "Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
         return
@@ -367,15 +374,7 @@ try {
 
         # Test if DHCP scope exists, if not create it
         Write-Log "Creating/verifying DHCP scope options for the 'Internet' network." -Activity
-        $dummyParams = [PSCustomObject]@{
-            DHCPScopeId        = $internetSubnet
-            DHCPScopeName      = $internetSwitchName
-            DHCPScopeStart     = "172.31.250.20"
-            DHCPScopeEnd       = "172.31.250.199"
-            DHCPDefaultGateway = "172.31.250.200"
-            DHCPDNSAddress     = @("4.4.4.4", "8.8.8.8")
-        }
-        $worked = Test-DHCPScope -ConfigParams $dummyParams
+        $worked = Test-DHCPScope -ScopeID $internetSubnet -ScopeName $internetSwitchName -DomainName $deployConfig.vmOptions.domainName
         if (-not $worked) {
             Write-Log "Failed to verify/create DHCP Scope for the 'Internet' network. Exiting." -Failure
             return
@@ -422,14 +421,17 @@ try {
         Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
     }
     else {
+
+        # Create/Updated RDCMan file
+        if (Test-Path "C:\tools\rdcman.exe") {
+            Start-Sleep -Seconds 5
+            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+        }
+
         $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
     }
 
     $timer.Stop()
-
-    if (Test-Path "C:\tools\rdcman.exe") {
-        New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
-    }
 
     if (-not $created -or -not $configured) {
         Write-Host

@@ -232,12 +232,6 @@ function New-DeployConfig {
             ActiveVMName       = $activeVMName
             DomainMembers      = $clientsCsv
             Scenario           = $scenario
-            DHCPScopeId        = $configObject.vmOptions.Network
-            DHCPScopeName      = $configObject.vmOptions.Network
-            DHCPDNSAddress     = $network + ".1"
-            DHCPDefaultGateway = $network + ".200"
-            DHCPScopeStart     = $network + ".20"
-            DHCPScopeEnd       = $network + ".199"
             ExistingDCName     = $existingDCName
             ExistingCASName    = $existingCSName
             ExistingPSName     = $existingPSName

@@ -663,19 +663,25 @@ function Test-NetworkSwitch {
 
 function Test-DHCPScope {
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Parameters object of deploy Configuration.")]
-        [object]$ConfigParams
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]
+        [string]$ScopeID,
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope Name.")]
+        [string]$ScopeName,
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Domain Name option.")]
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "DC VM Name for extracting the DNS IP.")]
+        [string]$DCVMName
     )
 
-    $scopeID = $ConfigParams.DHCPScopeId
-    $scopeName = $ConfigParams.DHCPScopeName
-    $createScope = $false
-
+    # Define Lease Time
     $leaseTimespan = New-TimeSpan -Days 16
-    if ($scopeName -eq "Internet") {
+    $internetScope = $false
+    if ($ScopeName.ToLowerInvariant() -eq "internet") {
         $leaseTimespan = New-TimeSpan -Days 365
+        $internetScope = $true
     }
 
+    # Install DHCP, if not found
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
         Write-Log "DHCP is not installed. Installing..."
@@ -687,85 +693,78 @@ function Test-DHCPScope {
         }
     }
 
+    # Check if scope exists
+    $createScope = $false
     $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
     if ($scope) {
-        Write-Log "'$scopeID' scope is already present in DHCP."
-        $createScope = $false
+        Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
     }
     else {
         $createScope = $true
     }
 
+    # Define scope options
+    $network = $ScopeID.Substring(0, $ScopeID.LastIndexOf("."))
+    $DHCPDNSAddress = $network + ".1"
+    $DHCPDefaultGateway = $network + ".200"
+    $DHCPScopeStart = $network + ".20"
+    $DHCPScopeEnd = $network + ".199"
+
+    # Create scope, if needed
     if ($createScope) {
-        Add-DhcpServerv4Scope -Name $scopeName -StartRange $ConfigParams.DHCPScopeStart -EndRange $ConfigParams.DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction SilentlyContinue
-        $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorVariable ScopeErr -ErrorAction SilentlyContinue
+        Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction SilentlyContinue
+        $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction SilentlyContinue
         if ($scope) {
-            Write-Log "'$scopeID' scope added to DHCP."
+            Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
         }
         else {
-            Write-Log "Failed to add '$scopeID' to DHCP. $ScopeErr" -Failure
+            Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
             return $false
         }
     }
 
     try {
-        $HashArguments = @{
-            ScopeId   = $scopeID
-            Router    = $ConfigParams.DHCPDefaultGateway
-            DnsDomain = $ConfigParams.DomainName
-        }
 
-        if ($ConfigParams.DCName) {
-            $dcnet = Get-Vm -Name $ConfigParams.DCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
-        }
-
-        if (-not $dcnet -and $ConfigParams.ExistingDCName) {
-            $dcnet = Get-Vm -Name $ConfigParams.ExistingDCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
-        }
-
-        if ($dcnet) {
-            $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
-            $HashArguments.Add("DnsServer", $dcIpv4)
-            $HashArguments.Add("WinsServer", $dcIpv4)
+        if ($internetScope) {
+            $HashArguments = @{
+                ScopeId   = $ScopeID
+                Router    = $DHCPDefaultGateway
+            }
         }
         else {
-            $HashArguments.Add("DnsServer", $ConfigParams.DHCPDNSAddress)
+            $HashArguments = @{
+                ScopeId   = $ScopeID
+                Router    = $DHCPDefaultGateway
+                DnsDomain = $DomainName
+            }
+        }
+
+        if ($DCVMName -and -not $internetScope) {
+            $dcnet = Get-Vm -Name $DCVMName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+            if ($dcnet) {
+                $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
+                $HashArguments.Add("DnsServer", $dcIpv4)
+                $HashArguments.Add("WinsServer", $dcIpv4)
+            }
+            else {
+                $HashArguments.Add("DnsServer", $DHCPDNSAddress)
+            }
+        }
+
+        if ($internetScope) {
+            $DHCPDNSAddress = @("4.4.4.4", "8.8.8.8")
+            $HashArguments.Add("DnsServer", $DHCPDNSAddress)
         }
 
         Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
-        Write-Log "Added/updated scope options for '$scopeID' scope in DHCP." -Success
+        Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
         return $true
     }
     catch {
-        Write-Log "Failed to add/update scope options for '$scopeID' scope in DHCP. $_" -Failure
+        Write-Log "Failed to add/update scope options for '$ScopeID ($ScopeName)' scope in DHCP. $_" -Failure
         return $false
     }
 
-}
-
-function New-DhcpScopeDescription {
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Parameters object of deploy Configuration.")]
-        [object]$ConfigParams
-    )
-
-    try {
-        $scopeID = $ConfigParams.DHCPScopeId
-
-        $dhcpDesc = [PSCustomObject]@{
-            Domain  = $ConfigParams.domainName
-            DC      = $ConfigParams.DCName
-            Primary = $ConfigParams.PSName
-            CAS     = $ConfigParams.CSName
-        }
-
-        $dhcpDescJson = ($dhcpDesc | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-        Set-DhcpServerv4Scope -ScopeId $scopeID -Description $dhcpDescJson
-
-    }
-    catch {
-        Write-Log "Failed to add/update description for '$scopeID' scope in DHCP. $_" -Failure
-    }
 }
 
 function New-VmNote {

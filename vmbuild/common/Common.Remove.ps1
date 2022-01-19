@@ -162,6 +162,8 @@ function Remove-All {
         }
     }
 
+    Remove-DhcpScope -ScopeId "172.31.250.0" -WhatIf:$WhatIf
+
     Write-Host
 
 }
