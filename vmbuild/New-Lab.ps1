@@ -394,7 +394,7 @@ try {
     }
 
     # Generate RDCMan file
-    New-RDCManFile $deployConfig $global:Common.RdcManFilePath
+    #New-RDCManFile $deployConfig $global:Common.RdcManFilePath
 
     # Existing DC scenario
     $existingDC = $deployConfig.parameters.ExistingDCName
