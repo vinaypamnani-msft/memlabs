@@ -1542,6 +1542,37 @@ function Get-List {
     }
 }
 
+function Get-List2 {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, ParameterSetName = "List")]
+        [object] $DeployConfig,
+        [Parameter(Mandatory = $false, ParameterSetName = "List")]
+        [string] $DomainName,
+        [Parameter(Mandatory = $false, ParameterSetName = "List")]
+        [switch] $ResetCache,
+        [Parameter(Mandatory = $false, ParameterSetName = "List")]
+        [switch] $SmartUpdate,
+        [Parameter(Mandatory = $true, ParameterSetName = "FlushCache")]
+        [switch] $FlushCache
+    )
+
+    if ($FlushCache.IsPresent) {
+        Get-List -FlushCache
+        return
+    }
+
+    $return = @()
+
+    if ($DomainName) {
+        $return = Get-List -Type VM -DomainName $DomainName -DeployConfig $DeployConfig -ResetCache:$ResetCache -SmartUpdate:$SmartUpdate
+    }
+
+    $return = Get-List -Type VM -DeployConfig $DeployConfig -ResetCache:$ResetCache -SmartUpdate:$SmartUpdate
+
+    return ($return | Sort-Object -Property source)
+}
+
 Function Show-Summary {
     [CmdletBinding()]
     param (
