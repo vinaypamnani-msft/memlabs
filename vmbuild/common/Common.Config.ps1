@@ -230,9 +230,6 @@ function New-DeployConfig {
             ExistingCASName    = $existingCSName
             ExistingPSName     = $existingPSName
             ExistingActiveName = $existingActiveVMName
-            ThisMachineName    = $null
-            ThisMachineRole    = $null
-            #ThisSQLCUURL       = $null
         }
 
         $deploy = [PSCustomObject]@{
@@ -508,7 +505,7 @@ function Add-PerVMSettings {
 
     #Get the CU URL, and SQL permissions
     if ($thisVM.sqlVersion) {
-        $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
+        $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $thisVM.sqlVersion }
         $sqlCUUrl = $sqlFile.cuURL
         $thisParams | Add-Member -MemberType NoteProperty -Name "sqlCUURL" -Value $sqlCUUrl -Force
 
