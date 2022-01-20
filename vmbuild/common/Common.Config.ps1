@@ -113,6 +113,8 @@ function New-DeployConfig {
         [object] $configObject
     )
     try {
+
+        # domainAdminName was renamed, this is here for backward compat
         if ($null -ne ($configObject.vmOptions.domainAdminName)) {
             if ($null -eq ($configObject.vmOptions.adminName)) {
                 $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
@@ -120,116 +122,57 @@ function New-DeployConfig {
             $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
 
-        $containsCS = $configObject.virtualMachines.role -contains "CAS"
-
-        # Scenario
-        if ($containsCS) {
-            $scenario = "Hierarchy"
-        }
-        else {
-            $scenario = "Standalone"
-        }
+        $scenario = "Standalone"
 
         # add prefix to vm names
         $virtualMachines = $configObject.virtualMachines
         foreach ($item in $virtualMachines) {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
         }
-        #$virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
 
-        # create params object
-
-        # DCName (prefer name in config over existing)
-        $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
-        $existingDCName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -Role "DC"
-        if (-not $DCName) {
-            $DCName = $existingDCName
-        }
-
-        $containsPS = $configObject.virtualMachines.role -contains "Primary"
         $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         if ($PSVM) {
-            # CSName (prefer name in config over existing)
-            $existingCS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode ($PSVM.parentSiteCode | Select-Object -First 1) # Bypass failures, validation would fail if we had multiple
-            $existingCSName = ($existingCS | Where-Object { $_.role -ne "PassiveSite" }).vmName
-            $CSName = ($virtualMachines | Where-Object { $_.role -eq "CAS" }).vmName
-            if (-not $CSName) {
-                $CSName = $existingCSName
-            }
-
             # Add prefix to remote SQL
             if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
                 $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
             }
 
-            $PSName = $PSVM.vmName
+            if ($PSVM.parentSiteCode) {
+                $scenario = "Hierarchy"
+            }
         }
 
-        # TODO: Re-do this logic... PSName
-        if (-not $PSName) {
-            # Set existing PS from same subnet as current config - we don't allow multiple primary sites in same subnet
-            $existingPS = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -Role "Primary" | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-            $existingPSName = $existingPS.vmName
-        }
-
-        # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
         $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         if ($PassiveVM) {
-            $ActiveVMinConfig = $virtualMachines | Where-Object { $_.role -in "CAS", "Primary" -and $_.siteCode -eq $PassiveVM.siteCode -and $_.vmName -ne $PassiveVM.vmName }
-            $activeVMName = $ActiveVMinConfig.vmName
-            if (-not $ActiveVMinConfig) {
-                $ActiveVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $PassiveVM.siteCode | Where-Object { $_.role -in "CAS", "Primary" }
-                $existingActiveVMName = $ActiveVM.vmName
-            }
-
             # Add prefix to FS
             if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
                 $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
             }
         }
 
-        # Existing Site Server for passive site (only allow one Passive per deployment when adding to existing)
-        $SecondaryVM = $virtualMachines | Where-Object { $_.role -eq "Secondary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-        if ($SecondaryVM) {
-            $PSinConfig = $virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $SecondaryVM.parentSiteCode }
-            $existingPSName = $PSinConfig.vmName
-            if (-not $PSinConfig) {
-                $ParentVM = Get-ExistingSiteServer -DomainName $configObject.vmOptions.domainName -SiteCode $SecondaryVM.parentSiteCode -Role "Primary"
-                $existingPSName = $ParentVM.vmName
-            }
-        }
-
-        if ($containsCS) {
-            $CSVM = $virtualMachines | Where-Object { $_.role -eq "CAS" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-
+        $CSVM = $virtualMachines | Where-Object { $_.role -eq "CAS" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
+        if ($CSVM) {
             # Add prefix to remote SQL
             if ($CSVM.remoteSQLVM -and -not $CSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
                 $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
             }
+
+            $scenario = "Hierarchy"
         }
 
-        if ($existingCSName -and $containsPS) {
+        # create params object
 
-            if ($PSVM.parentSiteCode) {
-                $scenario = "Hierarchy"
-            }
-            else {
-                $scenario = "Standalone"
-            }
-
+        $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
+        $existingDCName = Get-ExistingForDomain -DomainName $configObject.vmOptions.domainName -Role "DC"
+        if (-not $DCName) {
+            $DCName = $existingDCName
         }
 
         $params = [PSCustomObject]@{
             DomainName         = $configObject.vmOptions.domainName
             DCName             = $DCName
-            CSName             = $CSName
-            PSName             = $PSName
-            ActiveVMName       = $activeVMName
             Scenario           = $scenario
             ExistingDCName     = $existingDCName
-            ExistingCASName    = $existingCSName
-            ExistingPSName     = $existingPSName
-            ExistingActiveName = $existingActiveVMName
         }
 
         $deploy = [PSCustomObject]@{
@@ -245,7 +188,6 @@ function New-DeployConfig {
         Write-Exception -ExceptionInfo $_ -AdditionalInfo ($configObject | ConvertTo-Json)
     }
 }
-
 
 function Add-ExistingVMsToDeployConfig {
     [CmdletBinding()]
@@ -304,7 +246,6 @@ function Add-ExistingVMsToDeployConfig {
     $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
     foreach ($Secondary in $Secondaries) {
         $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM
-        #$existingPS = $deployConfig.parameters.ExistingPSName
         if ($primary) {
             Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
             if ($primary.RemoteSQLVM) {
@@ -407,6 +348,7 @@ function Add-VMToAccountLists {
         }
     }
 }
+
 function Add-PerVMSettings {
     [CmdletBinding()]
     param (
@@ -745,7 +687,6 @@ function Get-ValidPRISiteCodes {
     return ($existingSiteCodes | Select-Object -Unique)
 }
 
-
 function Get-ExistingForDomain {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
@@ -908,6 +849,7 @@ function Get-SiteServerForSiteCode {
     }
     return $null
 }
+
 function get-RoleForSitecode {
     [CmdletBinding()]
     param (
@@ -930,40 +872,7 @@ function get-RoleForSitecode {
     }
     return $null
 }
-function Get-SiteServerForSiteCode {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
-        [object] $deployConfig,
-        [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
-        [object] $SiteCode,
-        [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
-        [ValidateSet("Name", "VM")]
-        [string] $type = "Name"
-    )
-    $SiteServerRoles = @("Primary", "Secondary", "CAS")
-    $configVMs = @()
-    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
-    if ($configVMs) {
-        if ($type -eq "Name") {
-            return ($configVMs | Select-Object -First 1).vmName
-        }
-        else {
-            return ($configVMs | Select-Object -First 1)
-        }
-    }
-    $existingVMs = @()
-    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
-    if ($existingVMs) {
-        if ($type -eq "Name") {
-            return ($existingVMs | Select-Object -First 1).vmName
-        }
-        else {
-            return ($existingVMs | Select-Object -First 1)
-        }
-    }
-    return $null
-}
+
 function Get-VMObjectFromConfigOrExisting {
     [CmdletBinding()]
     param (
@@ -983,6 +892,7 @@ function Get-VMObjectFromConfigOrExisting {
         return $vm
     }
 }
+
 function Get-PrimarySiteServerForSiteCode {
     [CmdletBinding()]
     param (
@@ -1015,6 +925,7 @@ function Get-PrimarySiteServerForSiteCode {
         }
     }
 }
+
 function Get-PassiveSiteServerForSiteCode {
     [CmdletBinding()]
     param (
@@ -1084,7 +995,6 @@ function Get-ActiveSiteServerForSiteCode {
     }
     return $null
 }
-
 
 function Get-SubnetList {
 
@@ -1163,6 +1073,7 @@ function Get-VMSizeCached {
     ConvertTo-Json  $global:common.SizeCache | Out-File $cacheFile -Force
     return $vmCacheEntry
 }
+
 $global:vmNetCache = $null
 function Get-VMNetworkCached {
     [CmdletBinding()]
@@ -1224,7 +1135,6 @@ function Test-CacheValid {
     }
     return $false
 }
-
 
 function Get-VMFromHyperV {
     [CmdletBinding()]

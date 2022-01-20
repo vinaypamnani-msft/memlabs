@@ -913,7 +913,7 @@ function Test-Configuration {
             }
 
             # Other Site servers must be running
-            if ($psParentSiteCode -and $deployConfig.parameters.ExistingCASName -and $deployConfig.cmOptions.updateToLatest) {
+            if ($psParentSiteCode -and $deployConfig.cmOptions.updateToLatest) {
                 $notRunning = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.State -ne "Running" }
                 $notRunningNames = $notRunning.vmName -join ","
                 if ($notRunning.Count -gt 0) {
@@ -977,8 +977,11 @@ function Test-Configuration {
             Test-ValidRoleDPMP -VM $VM -ReturnObject $return
         }
 
-        if (-not $containsPS -and -not $deployConfig.parameters.ExistingPSName) {
-            Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode/subnet was not found." -ReturnObject $return -Warning
+        if (-not $containsPS) {
+            $existingPS = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "Primary" -SiteCode $DPMPVM.siteCode
+            if (-not $existingPS) {
+                Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode [$($DPMPVM.siteCode)] was not found." -ReturnObject $return -Warning
+            }
         }
 
     }
@@ -992,8 +995,12 @@ function Test-Configuration {
     }
 
     # Primary site without CAS
-    if ($deployConfig.parameters.scenario -eq "Hierarchy" -and -not $deployConfig.parameters.CSName) {
-        Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
+    if ($deployConfig.parameters.scenario -eq "Hierarchy") {
+        $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
+        $existingCS = Get-List2 -DeployConfig $deployConfig -DomainName $deployConfig.parameters.domainName | Where-Object {$_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
+        if (-not $existingCS) {
+            Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
+        }
     }
 
     # tech preview and hierarchy

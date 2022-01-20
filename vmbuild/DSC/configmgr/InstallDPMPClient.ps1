@@ -265,7 +265,7 @@ if ($mpCount -eq 0) {
 }
 
 # exit if rerunning DSC to add passive site
-if ($null -ne $deployConfig.parameters.ExistingActiveName) {
+if ($null -ne $deployConfig.thisParams.PassiveVM) {
     Write-DscStatus "Skip Client Push since we're adding Passive site server"
     return
 }
