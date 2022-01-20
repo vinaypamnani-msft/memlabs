@@ -39,20 +39,19 @@ function Write-DscStatus {
     }
 }
 
-# Read required items from config json
-$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
-$scenario = $deployConfig.parameters.Scenario
-$CurrentRole = $deployConfig.parameters.ThisMachineRole
-
 # Provision Tool path, RegisterTaskScheduler copies files here
 $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
 if (!(Test-Path $ProvisionToolPath)) {
     New-Item $ProvisionToolPath -ItemType directory | Out-Null
 }
 
+# Read required items from config json
+$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
+$scenario = $deployConfig.parameters.Scenario
+$ThisVM = $deployConfig.thisParams.thisVM
+$CurrentRole = $ThisVM.role
+
 # contains passive?
-$ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
 $containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
 

@@ -402,12 +402,6 @@ $global:VM_Config = {
 
         # Write config to file
         $configFilePath = "C:\staging\DSC\deployConfig.json"
-        $deployConfig.parameters.ThisMachineName = $currentItem.vmName
-        $deployConfig.parameters.ThisMachineRole = $currentItem.role   # Don't override this to DomainMember, otherwise DSC won't run MPDP config
-
-        #if ($sqlCUUrl) {
-        #    $deployConfig.parameters.ThisSQLCUURL = $sqlCUUrl
-        #}
 
         "Writing DSC config to $configFilePath" | Out-File $log -Append
         if (Test-Path $configFilePath) {

@@ -59,22 +59,13 @@ if ($Common.Initialized) {
 }
 . "..\Common.ps1"
 $ConfirmPreference = $false
+
 # Create dummy file so config doesn't fail
 $userConfig = Get-UserConfiguration -Configuration $configName
 $result = Test-Configuration -InputObject $userConfig.Config
 Add-ExistingVMsToDeployConfig -config $result.DeployConfig
 $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
 Add-PerVMSettings -deployConfig $result.DeployConfig -thisVM $ThisVM
-
-$result.DeployConfig.parameters.ThisMachineName = $ThisVM.vmName
-$result.DeployConfig.parameters.ThisMachineRole = $ThisVM.role
-$role  = $ThisVM.role
-
-#if ($ThisVM.sqlVersion) {
-#    $sqlFile = $Common.AzureFileList.ISO | Where-Object {$_.id -eq $ThisVM.sqlVersion}
-#    $result.DeployConfig.parameters.ThisSQLCUURL = $sqlFile.cuURL
-#}
-
 
 # Dump config to file, for debugging
 #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
@@ -95,6 +86,7 @@ Write-Host "Installing $dscFolder TemplateHelpDSC on this machine.."
 Copy-Item .\$dscFolder\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
 
 # Create test config, for testing if the config definition is good.
+$role  = $ThisVM.role
 switch (($role)) {
     "DPMP" { $role = "DomainMember" }
     "FileServer" { $role = "DomainMember" }

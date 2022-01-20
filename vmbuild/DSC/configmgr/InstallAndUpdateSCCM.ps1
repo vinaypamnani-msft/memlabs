@@ -6,14 +6,14 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $scenario = $deployConfig.parameters.Scenario
-$CurrentRole = $deployConfig.parameters.ThisMachineRole
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
-$ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+$ThisMachineName = $deployConfig.thisParams.MachineName
+$ThisVM = $deployConfig.thisParams.thisVM
+$CurrentRole = $ThisVM.role
 $PSVM = $deployConfig.thisParams.PrimaryVM
 
 # Set Install Dir
