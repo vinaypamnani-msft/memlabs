@@ -107,7 +107,9 @@ function Select-ConfigMenu {
     while ($true) {
         $customOptions = [ordered]@{ "1" = "Create New Domain%white%green" }
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
-        $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%white%green"; }
+        if ($domainCount -gt 0) {
+            $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%white%green"; }
+        }
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%white%green" }
         }
@@ -673,6 +675,7 @@ function Select-DeleteDomain {
                 if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
                     Remove-Domain -DomainName $domain
                     Get-List -type VM -SmartUpdate | Out-Null
+                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
                     return
                 }
             }
@@ -686,6 +689,7 @@ function Select-DeleteDomain {
             else {
                 Remove-VirtualMachine -VmName $response
                 Get-List -type VM -SmartUpdate | Out-Null
+                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
                 continue
             }
         }
@@ -1065,7 +1069,7 @@ function Get-NewMachineName {
             write-log "Config is NULL..  Machine names will not be checked. Please notify someone of this bug."
             #break
         }
-        if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName -and $NewName -ne $CurrentName} | Measure-Object).Count -eq 0) {
+        if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName -and $NewName -ne $CurrentName } | Measure-Object).Count -eq 0) {
 
             $newNameWithPrefix = ($ConfigToCheck.vmOptions.prefix) + $NewName
             if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {
@@ -2215,7 +2219,7 @@ Function Get-OperatingSystemMenu {
     $valid = $false
     while ($valid -eq $false) {
         $OSList = Get-SupportedOperatingSystemsForRole -role $property.role
-        if ($null -eq $OSList ){
+        if ($null -eq $OSList ) {
             return
         }
         $property."$name" = Get-Menu "Select OS Version" $OSList $CurrentValue -Test:$false

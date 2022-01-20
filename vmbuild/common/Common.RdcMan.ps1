@@ -323,7 +323,9 @@ function New-RDCManFileFromHyperV {
             Write-Log "Failed to find group to modify" -Failure
             return
         }
-        Remove-MissingServersFromGroup -findgroup $findGroup
+        if (Remove-MissingServersFromGroup -findgroup $findGroup) {
+            $shouldSave = $true
+        }
         # Set user/pass on the group
         $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -first 1).AdminName
 
@@ -467,7 +469,9 @@ function New-RDCManFileFromHyperV {
 
     }
 
-    Remove-MissingDomainsFromFile -file $file
+    if (Remove-MissingDomainsFromFile -file $file) {
+        $shouldSave = $true
+    }
     $unknownVMs = @()
     $unknownVMs += get-list -type vm  | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
@@ -521,6 +525,8 @@ function Remove-MissingServersFromGroup {
         [object]$findgroup
     )
 
+    $return = $false
+
     $completeServerList = Get-List -Type VM | Select-Object -ExpandProperty vmName
     foreach ($item in $findgroup.group.server) {
         if ($item.properties.displayName -in $completeServerList -or $item.properties.name -in $completeServerList) {
@@ -528,24 +534,30 @@ function Remove-MissingServersFromGroup {
         }
         Write-Log ("Removing $($item.properties.displayName)") -LogOnly -Verbose
         $findGroup.group.RemoveChild($item) | out-null
+        $return = $true
     }
 
+    return $return
 }
 function Remove-MissingDomainsFromFile {
     [CmdletBinding()]
     param(
         [object]$file
     )
+    $return = $false
     $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
     Write-Verbose "[Remove-MissingDomainsFromFile] DomainList: $($domainList -join ",")"
     foreach ($group in $file.SelectNodes("group")) {
         if ($group.properties.name -in $domainList) {
-            Write-Verbose "[Remove-MissingDomainsFromFile] Not Deleting : $group.properties.name"
+            #Write-Verbose "[Remove-MissingDomainsFromFile] Not Deleting : $group.properties.name"
             continue;
         }
+        Write-Verbose "[Remove-MissingDomainsFromFile] Deleting : $($group.properties.name)"
         $file.RemoveChild($group) | out-null
+        $return = $true
     }
 
+    return $return
 }
 
 function Add-RDCManServerToGroup {
