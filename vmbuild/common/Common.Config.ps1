@@ -254,12 +254,14 @@ function Add-ExistingVMsToDeployConfig {
         [object] $config
     )
 
-    $containsPS = $config.virtualMachines.role -contains "Primary"
+    # Add exising DC to list
     $existingDC = $config.parameters.ExistingDCName
-    $containsPassive = $config.virtualMachines.role -contains "PassiveSite"
-    $containsSecondary = $config.virtualMachines.role -contains "Secondary"
-    $containsDPMP = $config.virtualMachines.role -contains "DPMP"
+    if ($existingDC) {
+        # create a dummy VM object for the existingDC
+        Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $config
+    }
 
+    # Add CAS to list, when adding primary
     $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
     foreach ($PriVM in $PriVMS) {
         if ($PriVM.parentSiteCode) {
@@ -273,7 +275,7 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
-
+    # Add Primary to list, when adding DPMP
     $DPMPs = $config.virtualMachines | Where-Object { $_.role -eq "DPMP" }
     foreach ($dpmp in $DPMPS) {
         $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode
@@ -283,9 +285,8 @@ function Add-ExistingVMsToDeployConfig {
     }
 
 
-    # Adding Passive to existing
+    # Add Primary to list, when adding Passive
     $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-
     foreach ($PassiveVM in $PassiveVMs) {
         $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode
         if ($ActiveNode) {
@@ -299,7 +300,7 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
-
+    # Add Primary to list, when adding Secondary
     $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
     foreach ($Secondary in $Secondaries) {
         $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM
@@ -310,12 +311,6 @@ function Add-ExistingVMsToDeployConfig {
                 Add-ExistingVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
             }
         }
-    }
-
-    # Add exising DC to list
-    if ($existingDC){# -and ($containsPS -or $containsPassive -or $containsSecondary -or $containsDPMP)) {
-        # create a dummy VM object for the existingDC
-        Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $config
     }
 }
 
@@ -739,12 +734,12 @@ function Get-ValidPRISiteCodes {
     $existingSiteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode
 
     if ($Config) {
-        $containsPS = $Config.virtualMachines.role -contains "Primary"
-        if ($containsPS) {
-            $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
-            #We dont support multiple subnets per config yet
-            # $existingSiteCodes += $PSVM.siteCode
-        }
+        # $containsPS = $Config.virtualMachines.role -contains "Primary"
+        # if ($containsPS) {
+        #     $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
+        #     # We dont support multiple subnets per config yet
+        #     # $existingSiteCodes += $PSVM.siteCode
+        # }
     }
 
     return ($existingSiteCodes | Select-Object -Unique)
@@ -1468,22 +1463,22 @@ function Get-List {
 
         $return = $global:vm_List
 
-        if ($null -ne $DeployConfig){
-            foreach ($vm in $return){
-                $vm |  Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
+        if ($null -ne $DeployConfig) {
+            foreach ($vm in $return) {
+                $vm | Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
             }
             $domain = $DeployConfig.vmoptions.domainName
             $subnet = $DeployConfig.vmoptions.network
             $prefix = $DeployConfig.vmoptions.prefix
-            foreach ($vm in $DeployConfig.virtualMachines){
+            foreach ($vm in $DeployConfig.virtualMachines) {
                 if ($vm.hidden) {
                     continue
                 }
                 $newVM = $vm
-                $newVM |  Add-Member -MemberType NoteProperty -Name "subnet" -Value $subnet -Force
-                $newVM |  Add-Member -MemberType NoteProperty -Name "Domain" -Value $domain -Force
-                $newVM |  Add-Member -MemberType NoteProperty -Name "prefix" -Value $prefix -Force
-                $newVM |  Add-Member -MemberType NoteProperty -Name "source" -Value "config" -Force
+                $newVM | Add-Member -MemberType NoteProperty -Name "subnet" -Value $subnet -Force
+                $newVM | Add-Member -MemberType NoteProperty -Name "Domain" -Value $domain -Force
+                $newVM | Add-Member -MemberType NoteProperty -Name "prefix" -Value $prefix -Force
+                $newVM | Add-Member -MemberType NoteProperty -Name "source" -Value "config" -Force
                 $return += $newVM
             }
         }
