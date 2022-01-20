@@ -138,11 +138,6 @@ function New-DeployConfig {
         #$virtualMachines | foreach-object { $_.vmName = $configObject.vmOptions.prefix + $_.vmName }
 
         # create params object
-        try {
-            $network = $configObject.vmOptions.network.Substring(0, $configObject.vmOptions.network.LastIndexOf("."))
-        }
-        catch {}
-        $clientsCsv = ($virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
 
         # DCName (prefer name in config over existing)
         $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
@@ -230,7 +225,6 @@ function New-DeployConfig {
             CSName             = $CSName
             PSName             = $PSName
             ActiveVMName       = $activeVMName
-            DomainMembers      = $clientsCsv
             Scenario           = $scenario
             ExistingDCName     = $existingDCName
             ExistingCASName    = $existingCSName

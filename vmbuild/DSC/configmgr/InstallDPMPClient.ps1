@@ -12,7 +12,7 @@ $DomainName = $DomainFullName.Split(".")[0]
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
-$ClientNames = $deployConfig.parameters.DomainMembers
+$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
 $cm_svc = "$DomainName\cm_svc"
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 
