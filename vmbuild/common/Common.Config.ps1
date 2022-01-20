@@ -235,14 +235,11 @@ function New-DeployConfig {
             #ThisSQLCUURL       = $null
         }
 
-        $existingVMs = Get-List -Type VM -DomainName $configObject.vmOptions.domainName
-
         $deploy = [PSCustomObject]@{
             cmOptions       = $configObject.cmOptions
             vmOptions       = $configObject.vmOptions
             virtualMachines = $virtualMachines
             parameters      = $params
-            existingVMs     = $existingVMs
         }
 
         return $deploy

@@ -4012,7 +4012,8 @@ if (-not $InternalUseOnly.IsPresent) {
 
 #================================= NEW LAB SCENERIO ============================================
 if ($InternalUseOnly.IsPresent) {
-    if (($Global:DeployConfig.existingVMs | measure-object).Count -gt 0) {
+    $domainExists = Get-List -Type VM -DomainName $Global:DeployConfig.vmOptions.domainName
+    if (($domainExists) {
         write-host -ForegroundColor Green "This configuration will make modifications to $($Global:DeployConfig.vmOptions.DomainName)"
         $response = Read-Host2 -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (Y/n)" -HideHelp
         if ([String]::IsNullOrWhiteSpace($response) -or $response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes" ) {
