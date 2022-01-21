@@ -1208,7 +1208,7 @@ function select-timezone {
     $commonTimeZones += "Central Standard Time"
     $commonTimeZones += "Eastern Standard Time"
     $commonTimeZones += "Mountain Standard Time"
-    $commonTimeZones += "Greenwich Standard Time"
+    $commonTimeZones += "UTC"
     $commonTimeZones += "Central Europe Standard Time"
     $commonTimeZones += "China Standard Time"
     $commonTimeZones += "Tokyo Standard Time"
