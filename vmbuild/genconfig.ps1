@@ -712,8 +712,12 @@ function Select-DeletePending {
 function get-VMOptionsSummary {
 
     $options = $Global:Config.vmOptions
+    if ($null -eq $options.timeZone) {
+        $currentTimeZone = (Get-TimeZone).Id
+        $options | Add-Member -MemberType NoteProperty -Name "timeZone" -Value $currentTimeZone -Force
+    }
     $domainName = "[$($options.domainName)]".PadRight(21)
-    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.adminName)] [Location $($options.basePath)]"
+    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.adminName)] [Location $($options.basePath)] [TZ $($options.timeZone)]"
     return $Output
 }
 
@@ -1188,6 +1192,36 @@ function get-PrefixForDomain {
     }
     return $prefix
 
+}
+
+
+function select-timezone {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
+        [Object] $ConfigToCheck = $global:config
+    )
+
+    $commonTimeZones = @()
+    $commonTimeZones += $((Get-TimeZone).Id)
+    $commonTimeZones += "Pacific Standard Time"
+    $commonTimeZones += "Central Standard Time"
+    $commonTimeZones += "Eastern Standard Time"
+    $commonTimeZones += "Mountain Standard Time"
+    $commonTimeZones += "Greenwich Standard Time"
+    $commonTimeZones += "Central Europe Standard Time"
+    $commonTimeZones += "China Standard Time"
+    $commonTimeZones += "Tokyo Standard Time"
+    $commonTimeZones += "India Standard Time"
+    $commonTimeZones += "Russian Standard Time"
+
+    $commonTimeZones = $commonTimeZones | Select-Object -Unique
+
+    $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $commonTimeZones -CurrentValue $($ConfigToCheck.vmOptions.timezone) -additionalOptions @{"F" = "Display Full List" }
+    if ($timezone -eq "F") {
+        $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $((Get-TimeZone -ListAvailable).Id) -CurrentValue $($ConfigToCheck.vmOptions.timezone)
+    }
+    return $timezone
 }
 function select-NewDomainName {
     [CmdletBinding()]
@@ -3058,6 +3092,12 @@ function Select-Options {
                     $domain = select-NewDomainName
                     $property.domainName = $domain
                     $property.prefix = get-PrefixForDomain -Domain $domain
+                    Get-TestResult -SuccessOnError | out-null
+                    continue MainLoop
+                }
+                "timeZone" {
+                    $timezone = Select-TimeZone
+                    $property.timeZone = $timezone
                     Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
                 }
