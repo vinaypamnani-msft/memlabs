@@ -9,21 +9,24 @@ function Write-HostLog {
 Write-HostLog "START"
 
 # Change CD-ROM Drive Letter
-Write-HostLog "Changing CD-ROM DriveLetter to Z:"
-$x = Get-WmiObject -Class Win32_volume -Filter 'DriveType=5 AND DriveLetter="Z:"'
-if (-not $x) {
-    Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter = 'Z:' }
+$cd = Get-WmiObject -Class Win32_volume -Filter 'DriveType=5'
+if ($cd) {
+    Write-HostLog "Changing CD-ROM DriveLetter to Z:"
     $x = Get-WmiObject -Class Win32_volume -Filter 'DriveType=5 AND DriveLetter="Z:"'
-    if ($x) {
-        Write-HostLog "Changed Driveletter of CD-ROM drive"
+    if (-not $x) {
+        Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter = 'Z:' }
+        $x = Get-WmiObject -Class Win32_volume -Filter 'DriveType=5 AND DriveLetter="Z:"'
+        if ($x) {
+            Write-HostLog "Changed Driveletter of CD-ROM drive"
+        }
+        else {
+            Write-HostLog "Failed to change Driveletter of CD-ROM drive. Exiting."
+            return
+        }
     }
     else {
-        Write-HostLog "Failed to change Driveletter of CD-ROM drive. Exiting."
-        return
+        Write-HostLog "CD-ROM already changed to Z:"
     }
-}
-else {
-    Write-HostLog "CD-ROM already changed to Z:"
 }
 
 # Create Storage Pool
