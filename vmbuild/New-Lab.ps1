@@ -108,6 +108,11 @@ function New-VMJobs {
     $job_created_no = 0
 
     foreach ($currentItem in $deployConfig.virtualMachines) {
+
+        if ($Phase -eq 2 -and $currentItem.role -eq "OSDClient") {
+            continue
+        }
+
         $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
         Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
 
