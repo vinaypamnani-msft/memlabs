@@ -64,7 +64,8 @@
     "windowsAdminCenterPort": "6516",
     "dscScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/DSC/Host.zip",
     "dscFunction": "Host.ps1\\Host",
-    "hostScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/scripts/configureHost.ps1"
+    "hostScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/scripts/configureHostTask.ps1",
+    "hostScriptUrl": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/scripts/configureHost.ps1"
   },
   "resources": [
     {
@@ -402,7 +403,7 @@
           "autoUpgradeMinorVersion":true,
           "settings": {
             "fileUris": ["[variables('hostScript')]"],
-            "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -File configureHost.ps1"
+            "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File configureHostTask.ps1 -ScriptUrl ', variables('hostScriptUrl'))]"
           }
       }
     }

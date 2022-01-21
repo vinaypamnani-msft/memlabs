@@ -159,6 +159,7 @@ Install-RemoteAccess -VpnType RoutingOnly
 cmd.exe /c netsh routing ip nat install
 
 # External Hyper-V Switch NIC
+$shouldReboot = $false
 $externalInterface = "vEthernet ($Network)"
 Write-HostLog "Adding $externalInterface interface to NAT"
 $text = & netsh routing ip nat show interface
@@ -168,9 +169,15 @@ if ($text -like "*$externalInterface*") {
 else {
     cmd.exe /c netsh routing ip nat add interface "$externalInterface"
     cmd.exe /c netsh routing ip nat set interface "$externalInterface" mode=full
+    $shouldReboot = $true
 }
 
 # Disable Modern Stack to allow use of RRAS GUI again
 cmd.exe /c reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\RemoteAccess\Parameters /v ModernStackEnabled /t REG_DWORD /d 0 /f
 
 Write-HostLog "FINISH"
+
+if ($shouldReboot) {
+    Write-HostLog "Restarting the machine."
+    & shutdown /r /t 30 /c "MEMLABS needs to restart the Azure Host VM. The machine will restart in less than a minute."
+}
