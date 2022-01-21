@@ -997,7 +997,7 @@ function Test-Configuration {
     # Primary site without CAS
     if ($deployConfig.parameters.scenario -eq "Hierarchy") {
         $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
-        $existingCS = Get-List2 -DeployConfig $deployConfig -DomainName $deployConfig.parameters.domainName | Where-Object {$_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
+        $existingCS = Get-List2 -DeployConfig $deployConfig | Where-Object {$_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
         if (-not $existingCS) {
             Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
         }

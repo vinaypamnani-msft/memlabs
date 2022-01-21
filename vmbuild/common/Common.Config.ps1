@@ -169,10 +169,10 @@ function New-DeployConfig {
         }
 
         $params = [PSCustomObject]@{
-            DomainName         = $configObject.vmOptions.domainName
-            DCName             = $DCName
-            Scenario           = $scenario
-            ExistingDCName     = $existingDCName
+            DomainName     = $configObject.vmOptions.domainName
+            DCName         = $DCName
+            Scenario       = $scenario
+            ExistingDCName = $existingDCName
         }
 
         $deploy = [PSCustomObject]@{
@@ -416,23 +416,23 @@ function Add-PerVMSettings {
     if ($thisVM.Role -eq "DC" -or $thisVM.Role -eq "Primary") {
         $sitesAndNetworks = @()
         $siteCodes = @()
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary" -and -not $_.hidden }) {
-            $sitesAndNetworks += [PSCustomObject]@{
-                SiteCode = $vm.siteCode
-                Subnet   = $deployConfig.vmOptions.network
-            }
-            if ($vm.siteCode -in $siteCodes) {
-                Write-Log "Error: $($vm.vmName) has a sitecode already in use by another Primary or Secondary"
-            }
-            $siteCodes += $vm.siteCode
-        }
-        foreach ($vm in get-list -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.role -in "Primary", "Secondary" }) {
+        # foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary" -and -not $_.hidden }) {
+        #     $sitesAndNetworks += [PSCustomObject]@{
+        #         SiteCode = $vm.siteCode
+        #         Subnet   = $deployConfig.vmOptions.network
+        #     }
+        #     if ($vm.siteCode -in $siteCodes) {
+        #         Write-Log "Error: $($vm.vmName) has a sitecode already in use in config by another Primary or Secondary"
+        #     }
+        #     $siteCodes += $vm.siteCode
+        # }
+        foreach ($vm in get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -in "Primary", "Secondary" }) {
             $sitesAndNetworks += [PSCustomObject]@{
                 SiteCode = $vm.siteCode
                 Subnet   = $vm.network
             }
             if ($vm.siteCode -in $siteCodes) {
-                Write-Log "Error: $($vm.vmName) has a sitecode already in use by another Primary or Secondary"
+                Write-Log "Error: $($vm.vmName) has a sitecode already in use in hyper-v by another Primary or Secondary"
             }
             $siteCodes += $vm.siteCode
         }
@@ -1381,7 +1381,17 @@ function Get-List {
             $subnet = $DeployConfig.vmoptions.network
             $prefix = $DeployConfig.vmoptions.prefix
             foreach ($vm in $DeployConfig.virtualMachines) {
+                $found = $false
                 if ($vm.hidden) {
+                    continue
+                }
+                foreach ($vm2 in $return) {
+                    if ($vm2.vmName -eq $vm.vmName) {
+                        $vm2.source = "config"
+                        $found = $true
+                    }
+                }
+                if ($found) {
                     continue
                 }
                 $newVM = $vm
@@ -1435,7 +1445,7 @@ function Get-List2 {
         [Parameter(Mandatory = $true, ParameterSetName = "List")]
         [object] $DeployConfig,
         [Parameter(Mandatory = $false, ParameterSetName = "List")]
-        [string] $DomainName,
+        [switch] $AllDomains,
         [Parameter(Mandatory = $false, ParameterSetName = "List")]
         [switch] $ResetCache,
         [Parameter(Mandatory = $false, ParameterSetName = "List")]
@@ -1451,11 +1461,11 @@ function Get-List2 {
 
     $return = @()
 
-    if ($DomainName) {
-        $return = Get-List -Type VM -DomainName $DomainName -DeployConfig $DeployConfig -ResetCache:$ResetCache -SmartUpdate:$SmartUpdate
+    if ($AllDomains.IsPresent) {
+        $return = Get-List -Type VM -DeployConfig $DeployConfig -ResetCache:$ResetCache -SmartUpdate:$SmartUpdate
     }
     else {
-        $return = Get-List -Type VM -DeployConfig $DeployConfig -ResetCache:$ResetCache -SmartUpdate:$SmartUpdate
+        $return = Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName -DeployConfig $DeployConfig -ResetCache:$ResetCache -SmartUpdate:$SmartUpdate
     }
 
     return ($return | Sort-Object -Property source)

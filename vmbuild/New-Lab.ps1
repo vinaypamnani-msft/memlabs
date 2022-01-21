@@ -352,7 +352,7 @@ try {
 
     # Test if DHCP scope exists, if not create it
     Write-Log "Creating/verifying DHCP scope options for specified network." -Activity
-    $DCVM = Get-List2 -DeployConfig $deployConfig -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq 'DC' }
+    $DCVM = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.role -eq 'DC' }
     if ($DCVM) {
         $worked = Test-DHCPScope -ScopeID $deployConfig.vmOptions.network -ScopeName $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -DCVMName $DCVM.vmName
     }
