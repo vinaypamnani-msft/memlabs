@@ -46,5 +46,3 @@ Start-BitsTransfer -Source $ScriptUrl -Destination $filePath -Priority Foregroun
 
 # Register scheduled task
 Register-ConfigureHostTask
-
-Start-Sleep -Seconds 45
