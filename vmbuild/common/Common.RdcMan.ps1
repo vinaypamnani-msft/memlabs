@@ -273,61 +273,67 @@ function New-RDCManFileFromHyperV {
             Remove-Item $rdcmanfile | out-null
         }
     }
-    $templatefile = Join-Path $PSScriptRoot "template.rdg"
+    try {
+        $templatefile = Join-Path $PSScriptRoot "template.rdg"
 
-    # Gets the blank template
-    [xml]$template = Get-Content -Path $templatefile
-    if ($null -eq $template) {
-        Write-Log "Could not locate $templatefile" -Failure
-        if ($OverWrite -eq $false) {
-            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+        # Gets the blank template
+        [xml]$template = Get-Content -Path $templatefile
+        if ($null -eq $template) {
+            Write-Log "Could not locate $templatefile" -Failure
+            if ($OverWrite -eq $false) {
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+            }
+            else {
+                return
+            }
         }
-        else {
+
+        # Gets the blank template, or returns the existing rdg xml if available.
+        if (-not (Test-Path $rdcmanfile)) {
+            Copy-Item $templatefile $rdcmanfile
+            Write-Verbose "Loading config from $rdcmanfile"
+        }
+        [xml]$existing = Get-Content -Path $rdcmanfile
+        # This is the bulk of the data.
+        $file = $existing.RDCMan.file
+        if ($null -eq $file) {
+            Write-Log "Could not load File section from $rdcmanfile" -Failure
+            if ($OverWrite -eq $false) {
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+            }
+            else {
+                return
+            }
+        }
+
+        $group = $file.group
+        if ($null -eq $group) {
+            Write-Log "Could not load group section from $rdcmanfile" -Failure
+            if ($OverWrite -eq $false) {
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+            }
+            else {
+                return
+            }
+        }
+
+        # If the original file was a template, remove the templated group.
+        if ($group.properties.Name -eq "VMASTEMPLATE") {
+            [void]$file.RemoveChild($group)
+            $group = $null
+        }
+
+        $groupFromTemplate = $template.RDCMan.file.group
+        if ($null -eq $groupFromTemplate) {
+            Write-Log "Could not load group section from $templatefile" -Failure
             return
         }
     }
-
-    # Gets the blank template, or returns the existing rdg xml if available.
-    if (-not (Test-Path $rdcmanfile)) {
-        Copy-Item $templatefile $rdcmanfile
-        Write-Verbose "Loading config from $rdcmanfile"
-    }
-    [xml]$existing = Get-Content -Path $rdcmanfile
-    # This is the bulk of the data.
-    $file = $existing.RDCMan.file
-    if ($null -eq $file) {
-        Write-Log "Could not load File section from $rdcmanfile" -Failure
+    catch {
         if ($OverWrite -eq $false) {
             return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
         }
-        else {
-            return
-        }
     }
-
-    $group = $file.group
-    if ($null -eq $group) {
-        Write-Log "Could not load group section from $rdcmanfile" -Failure
-        if ($OverWrite -eq $false) {
-            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
-        }
-        else {
-            return
-        }
-    }
-
-    # If the original file was a template, remove the templated group.
-    if ($group.properties.Name -eq "VMASTEMPLATE") {
-        [void]$file.RemoveChild($group)
-        $group = $null
-    }
-
-    $groupFromTemplate = $template.RDCMan.file.group
-    if ($null -eq $groupFromTemplate) {
-        Write-Log "Could not load group section from $templatefile" -Failure
-        return
-    }
-
     Install-RDCman
     $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
     foreach ($domain in $domainList) {
@@ -502,7 +508,7 @@ function New-RDCManFileFromHyperV {
         $smartGroups = $null
         $smartGroups = $findGroup.SelectNodes('/smartGroup')
         foreach ($smartGroup in $smartGroups) {
-            $findgroup.RemoveChild($smartGroup)
+            [void]$findgroup.RemoveChild($smartGroup)
         }
 
         foreach ($vm in $unknownVMs) {
