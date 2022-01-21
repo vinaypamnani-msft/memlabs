@@ -797,6 +797,7 @@ function Select-MainMenu {
         }
         if ($enableDebug) {
             $customOptions += [ordered]@{ "R" = "Return deployConfig" }
+            $customOptions += [ordered]@{ "P" = "Return PerVM thisParams" }
             $customOptions += [ordered]@{ "Z" = "Generate DSC.Zip" }
         }
 
@@ -811,6 +812,21 @@ function Select-MainMenu {
             "d" { return $true }
             "s" { return $false }
             "r" { return Test-Configuration -InputObject $Global:Config }
+            "p" {
+                $returnArray = [pscustomObject]@{
+                    VMs = @()
+                }
+                $config = Test-Configuration -InputObject $Global:Config
+                foreach ($currentItem in $config.deployConfig.virtualMachines) {
+                    $deployConfigCopy = $config.deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+                    Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
+                    $vm = $currentItem
+                    $vm | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $deployConfigCopy.thisParams -Force
+                    $returnArray.VMs += $vm
+                }
+                return $returnArray
+
+            }
             "!" {
                 $global:StartOver = $true
                 return $false
