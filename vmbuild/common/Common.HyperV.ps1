@@ -5,13 +5,19 @@ function Get-VM2 {
         [string]$Name
     )
 
-    $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name }
+    $vmFromList = Get-List -Type VM | Where-Object { $_.vmName -eq $Name }
 
     if ($vmFromList) {
         return (Get-VM -Id $vmFromList.vmId)
     }
     else {
+        # Update List, and try again
+        $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name }
+        if ($vmFromList) {
+            return (Get-VM -Id $vmFromList.vmId)
+        }
         return $null
+
     }
 }
 
@@ -22,7 +28,6 @@ function Start-VM2 {
         [string]$Name,
         [Parameter(Mandatory = $false)]
         [switch]$Passthru
-
     )
 
     $vm = Get-VM2 -Name $Name

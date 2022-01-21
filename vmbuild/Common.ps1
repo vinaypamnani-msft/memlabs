@@ -824,7 +824,7 @@ function Get-VMNote {
         [string]$VMName
     )
 
-    $vm = Get-VM2 -Name $VMName -ErrorAction SilentlyContinue
+    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
@@ -882,7 +882,7 @@ function Set-VMNote {
 
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-    $vm = Get-VM2 $VmName -ErrorAction SilentlyContinue
+    $vm = Get-VM $VmName -ErrorAction SilentlyContinue
     if ($vm) {
         if ($vmVersionUpdated) {
             Write-Log "Setting VM Note for $vmName (version $vmVersion)" -Verbose
