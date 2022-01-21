@@ -168,6 +168,10 @@ $global:VM_Create = {
         }
 
         $timeZone = $deployConfig.vmOptions.timeZone
+        if (-not $timeZone) {
+            $timeZone = (Get-Timezone).id
+        }
+
         Write-Log "PSJOB: $($currentItem.vmName): Setting timezone to '$timeZone'."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { param ($timezone) Set-TimeZone -Id $timezone } -ArgumentList $timeZone -DisplayName "Setting timezone to '$timeZone'"
         if ($result.ScriptBlockFailed) {
