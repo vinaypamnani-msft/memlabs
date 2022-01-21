@@ -167,6 +167,13 @@ $global:VM_Create = {
             $skipVersionUpdate = $true
         }
 
+        $timeZone = $deployConfig.vmOptions.timeZone
+        Write-Log "PSJOB: $($currentItem.vmName): Setting timezone to '$timeZone'."
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { param ($timezone) Set-TimeZone -Id $timezone } -ArgumentList $timeZone -DisplayName "Setting timezone to '$timeZone'"
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): Failed to set the timezone." -Warning -OutputStream
+        }
+
         # Set vm note
         if ($skipVersionUpdate) {
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
