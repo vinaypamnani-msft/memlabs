@@ -740,7 +740,7 @@ function Test-DHCPScope {
         }
 
         if ($DCVMName -and -not $internetScope) {
-            $dcnet = Get-Vm -Name $DCVMName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+            $dcnet = Get-VM2 -Name $DCVMName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
             if ($dcnet) {
                 $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
                 $HashArguments.Add("DnsServer", $dcIpv4)
@@ -824,7 +824,7 @@ function Get-VMNote {
         [string]$VMName
     )
 
-    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    $vm = Get-VM2 -Name $VMName -ErrorAction SilentlyContinue
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
@@ -882,7 +882,7 @@ function Set-VMNote {
 
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-    $vm = Get-Vm $VmName -ErrorAction SilentlyContinue
+    $vm = Get-VM2 $VmName -ErrorAction SilentlyContinue
     if ($vm) {
         if ($vmVersionUpdated) {
             Write-Log "Setting VM Note for $vmName (version $vmVersion)" -Verbose
@@ -1012,7 +1012,7 @@ function New-VirtualMachine {
     }
 
     # VM Exists
-    $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    $vmTest = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
     if ($vmTest -and $ForceNew.IsPresent) {
         Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is present."
         if ($vmTest.State -ne "Off") {
@@ -1102,7 +1102,7 @@ function New-VirtualMachine {
     Add-VMDvdDrive -VMName $VmName
 
     Write-Log "$VmName`: Changing boot order"
-    $f = Get-VM $VmName | Get-VMFirmware
+    $f = Get-VM2 -Name $VmName | Get-VMFirmware
     $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
     $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
     $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
@@ -1209,7 +1209,7 @@ function Wait-ForVm {
         Write-Log "$VmName`: Waiting for VM to go in $VmState state..."
         do {
             try {
-                $vmTest = Get-VM -Name $VmName
+                $vmTest = Get-VM2 -Name $VmName
                 Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 $ready = $vmTest.State -eq $VmState
                 Start-Sleep -Seconds 5
@@ -1901,6 +1901,7 @@ if ($currentBranch -and $currentBranch -notmatch "main") {
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
+. $PSScriptRoot\common\Common.HyperV.ps1
 
 ############################
 ### Common Object        ###

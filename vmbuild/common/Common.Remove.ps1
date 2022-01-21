@@ -10,7 +10,7 @@ function Remove-VirtualMachine {
         [switch] $WhatIf
     )
 
-    $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    $vmTest = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
     if ($vmTest) {
         Write-Log "VM '$VmName' exists. Removing." -SubActivity -HostOnly
         if ($vmTest.State -ne "Off") {

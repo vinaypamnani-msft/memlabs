@@ -190,7 +190,7 @@ $vmName = "z$vmName"
 
 # Check if VM exists
 $createVm = $true
-$vmTest = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+$vmTest = Get-VM2 -Name $vmName -ErrorAction SilentlyContinue
 if ($vmTest) {
     Write-Log "Found $vmName in Hyper-V."
     if ($ForceNewVm.IsPresent) {
@@ -281,7 +281,7 @@ Write-Log "Capturing the golden image from $vmName..." -Activity
 
 Write-Log "Obtaining OS disk path of $vmName..."
 if (-not $WhatIf) {
-    $f = Get-VM -Name $vmName | Get-VMFirmware
+    $f = Get-VM2 -Name $vmName | Get-VMFirmware
     $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
     $osDiskPath = $f_hd.Device.Path
 
@@ -310,7 +310,7 @@ else {
     Write-Log "The 'golden' image $vhdxFile was copied to $($Common.AzureImagePath)..." -Success
 
     # Delete VM
-    $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    $vmTest = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
     if ($vmTest -and $DeleteVM.IsPresent) {
         if ($vmTest.State -ne "Off") {
             Write-Log "$VmName`: Turning the VM off forcefully..."

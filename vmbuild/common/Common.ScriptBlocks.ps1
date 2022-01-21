@@ -46,7 +46,7 @@ $global:VM_Create = {
     if ($createVM) {
 
         # Check if VM already exists
-        $exists = Get-VM $currentItem.vmName -ErrorAction SilentlyContinue
+        $exists = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
         if ($exists) {
             Write-Log "PSJOB: $($currentItem.vmName): VM already exists. Exiting." -Failure -OutputStream -HostOnly
             return
@@ -79,7 +79,7 @@ $global:VM_Create = {
     }
     else {
         # Check if VM is connectable
-        $exists = Get-Vm -Name $currentItem.vmName -ErrorAction SilentlyContinue
+        $exists = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
         if ($exists -and $exists.State -ne "Running") {
             # Validation should prevent from ever getting in this block
             Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue -ErrorVariable StartErr

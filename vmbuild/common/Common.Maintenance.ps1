@@ -332,7 +332,7 @@ function Start-VMIfNotRunning {
         ConnectFailed = $false
     }
 
-    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    $vm = Get-VM2 -Name $VMName -ErrorAction SilentlyContinue
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_" -Warning

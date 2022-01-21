@@ -274,8 +274,8 @@ function get-SnapshotDomain {
                 }
                 Write-Host "Checkpointing $($vm.VmName)"
 
-                $notesFile = Join-Path (get-vm $($vm.VmName)).Path 'MemLabs.Notes.json'
-                (get-vm $($vm.VmName)).notes | Out-File $notesFile
+                $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
+                (Get-VM2 -Name $($vm.VmName)).notes | Out-File $notesFile
 
 
                 Checkpoint-VM -Name $vm.VmName -SnapshotName 'MemLabs Snapshot' -ErrorAction Stop
@@ -337,7 +337,7 @@ function select-RestoreSnapshotDomain {
                 if ($checkPoint) {
                     Write-Host "Restoring $($vm.VmName)"
                     $checkPoint | Restore-VMCheckpoint -Confirm:$false
-                    $notesFile = Join-Path (get-vm $($vm.VmName)).Path 'MemLabs.Notes.json'
+                    $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
                     if (Test-Path $notesFile) {
                         $notes = Get-Content $notesFile
                         set-vm -VMName $vm.vmName -notes $notes
@@ -395,7 +395,7 @@ function select-DeleteSnapshotDomain {
                     Write-Host "Merging $($vm.VmName)"
                     Remove-VMCheckpoint -VMName $vm.vmName -Name "MemLabs Snapshot"
                 }
-                $notesFile = Join-Path (get-vm $($vm.VmName)).Path 'MemLabs.Notes.json'
+                $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
                 if (Test-Path $notesFile) {
                     Remove-Item $notesFile -Force
                 }
@@ -629,7 +629,7 @@ function Select-StopDomain {
                         continue
                     }
                 }
-                $vm2 = Get-VM $vm.vmName -ErrorAction SilentlyContinue
+                $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
                 if ($vm2.State -eq "Running") {
                     Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
                     start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName | Out-Null

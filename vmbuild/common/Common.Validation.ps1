@@ -436,7 +436,6 @@ function Test-ValidRoleDC {
         if ($existingDC) {
 
             # Check VM exists in Hyper-V
-            #$vm = Get-VM -Name $existingDC -ErrorAction SilentlyContinue
             $vm = Get-List -type VM -SmartUpdate | Where-Object { $_.vmName -eq $existingDC }
             if (-not $vm) {
                 Add-ValidationMessage -Message "$vmRole Validation: Existing DC found [$existingDC] but VM with the same name was not found in Hyper-V." -ReturnObject $ReturnObject -Warning
