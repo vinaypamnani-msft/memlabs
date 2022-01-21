@@ -140,121 +140,121 @@ function Save-RdcManSettignsFile {
     $file.Save($existingfile)
 
 }
-
-function New-RDCManFile {
-    param(
-        [object]$DeployConfig,
-        [string]$rdcmanfile
-    )
-
-    Write-Log "Creating/Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity
-
-    $templatefile = Join-Path $PSScriptRoot "template.rdg"
-
-    # Gets the blank template
-    [xml]$template = Get-Content -Path $templatefile
-    if ($null -eq $template) {
-        Write-Log "Could not locate $templatefile" -Failure
-        return
-    }
-
-    # Gets the blank template, or returns the existing rdg xml if available.
-    $existing = $template
-    if (Test-Path $rdcmanfile) {
-        [xml]$existing = Get-Content -Path $rdcmanfile
-    }
-
-    # This is the bulk of the data.
-    $file = $existing.RDCMan.file
-    if ($null -eq $file) {
-        Write-Log "Could not load File section from $rdcmanfile" -Failure
-        return
-    }
-
-    $group = $file.group
-    if ($null -eq $group) {
-        Write-Log "Could not load group section from $rdcmanfile" -Failure
-        return
-    }
-
-    $groupFromTemplate = $template.RDCMan.file.group
-    if ($null -eq $groupFromTemplate) {
-        Write-Log "Could not load group section from $templatefile" -Failure
-        return
-    }
-
-    Install-RDCman
-
-    if (Test-Path "$newrdcmanpath\$rdcmanexe") {
-        $encryptedPass = Get-RDCManPassword $newrdcmanpath
-        if ($null -eq $encryptedPass) {
-            Write-Log "Password was not generated correctly." -Failure
-            return
-        }
-    }
-    else {
-        Write-Log "Could not locate $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
-        return
-    }
-
-    # <RDCMan>
-    #   <file>
-    #     <group>
-    #        <logonCredentials>
-    #        <server>
-    #        <server>
-    #     <group>
-    #     ...
-
-    $domain = $DeployConfig.vmOptions.domainName
-    $findGroup = Get-RDCManGroupToModify $domain $group $findGroup $groupFromTemplate $existing
-    if ($findGroup -eq $false -or $null -eq $findGroup) {
-        Write-Log "Failed to find group to modify" -Failure
-        return
-    }
-
-    # Set user/pass on the group\
-    $pname = $findGroup.logonCredentials.profileName.'#text'
-    if ($pname -eq "Custom") {
-        #write-host "ProfileName is $($pname)"
-        $username = $DeployConfig.vmOptions.adminName
-        $findGroup.logonCredentials.password = $encryptedPass
-        if ($findGroup.logonCredentials.username -ne $username) {
-            $findGroup.logonCredentials.userName = $username
-            $shouldSave = $true
-        }
-    }
-
-    foreach ($vm in $DeployConfig.virtualMachines) {
-        $comment = $vm | ConvertTo-Json
-        $name = $vm.vmName
-        $displayName = $vm.vmName
-        if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString()) -eq $True) {
-            $shouldSave = $true
-        }
-    }
-
-
-    # Add new group
-    [void]$file.AppendChild($findgroup)
-
-
-    # If the original file was a template, remove the templated group.
-    if ($group.properties.Name -eq "VMASTEMPLATE") {
-        [void]$file.RemoveChild($group)
-    }
-    Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
-    # Save to desired filename
-    if ($shouldSave) {
-        Write-Log "Killing RDCMan, if necessary and saving $rdcmanfile." -Success
-        Get-Process -Name rdcman -ea Ignore | Stop-Process
-        Start-Sleep 1
-        $existing.save($rdcmanfile) | Out-Null
-    }
-    else {
-        Write-Log "No Changes. Not updating $rdcmanfile" -Success
-    }
-}
+#
+#function New-RDCManFile {
+#    param(
+#        [object]$DeployConfig,
+#        [string]$rdcmanfile
+#    )
+#
+#    Write-Log "Creating/Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity
+#
+#    $templatefile = Join-Path $PSScriptRoot "template.rdg"
+#
+#    # Gets the blank template
+#    [xml]$template = Get-Content -Path $templatefile
+#    if ($null -eq $template) {
+#        Write-Log "Could not locate $templatefile" -Failure
+#        return
+#    }
+#
+#    # Gets the blank template, or returns the existing rdg xml if available.
+#    $existing = $template
+#    if (Test-Path $rdcmanfile) {
+#        [xml]$existing = Get-Content -Path $rdcmanfile
+#    }
+#
+#    # This is the bulk of the data.
+#    $file = $existing.RDCMan.file
+#    if ($null -eq $file) {
+#        Write-Log "Could not load File section from $rdcmanfile" -Failure
+#        return
+#    }
+#
+#    $group = $file.group
+#    if ($null -eq $group) {
+#        Write-Log "Could not load group section from $rdcmanfile" -Failure
+#        return
+#    }
+#
+#    $groupFromTemplate = $template.RDCMan.file.group
+#    if ($null -eq $groupFromTemplate) {
+#        Write-Log "Could not load group section from $templatefile" -Failure
+#        return
+#    }
+#
+#    Install-RDCman
+#
+#    if (Test-Path "$newrdcmanpath\$rdcmanexe") {
+#        $encryptedPass = Get-RDCManPassword $newrdcmanpath
+#        if ($null -eq $encryptedPass) {
+#            Write-Log "Password was not generated correctly." -Failure
+#            return
+#        }
+#    }
+#    else {
+#        Write-Log "Could not locate $rdcmanexe. Please copy $rdcmanexe to C:\tools directory, and try again." -Failure
+#        return
+#    }
+#
+#    # <RDCMan>
+#    #   <file>
+#    #     <group>
+#    #        <logonCredentials>
+#    #        <server>
+#    #        <server>
+#    #     <group>
+#    #     ...
+#
+#    $domain = $DeployConfig.vmOptions.domainName
+#    $findGroup = Get-RDCManGroupToModify $domain $group $findGroup $groupFromTemplate $existing
+#    if ($findGroup -eq $false -or $null -eq $findGroup) {
+#        Write-Log "Failed to find group to modify" -Failure
+#        return
+#    }
+#
+#    # Set user/pass on the group\
+#    $pname = $findGroup.logonCredentials.profileName.'#text'
+#    if ($pname -eq "Custom") {
+#        #write-host "ProfileName is $($pname)"
+#        $username = $DeployConfig.vmOptions.adminName
+#        $findGroup.logonCredentials.password = $encryptedPass
+#        if ($findGroup.logonCredentials.username -ne $username) {
+#            $findGroup.logonCredentials.userName = $username
+#            $shouldSave = $true
+#        }
+#    }
+#
+#    foreach ($vm in $DeployConfig.virtualMachines) {
+#        $comment = $vm | ConvertTo-Json
+#        $name = $vm.vmName
+#        $displayName = $vm.vmName
+#        if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString()) -eq $True) {
+#            $shouldSave = $true
+#        }
+#    }
+#
+#
+#    # Add new group
+#    [void]$file.AppendChild($findgroup)
+#
+#
+#    # If the original file was a template, remove the templated group.
+#    if ($group.properties.Name -eq "VMASTEMPLATE") {
+#        [void]$file.RemoveChild($group)
+#    }
+#    Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
+#    # Save to desired filename
+#    if ($shouldSave) {
+#        Write-Log "Killing RDCMan, if necessary and saving $rdcmanfile." -Success
+#        Get-Process -Name rdcman -ea Ignore | Stop-Process
+#        Start-Sleep 1
+#        $existing.save($rdcmanfile) | Out-Null
+#    }
+#    else {
+#        Write-Log "No Changes. Not updating $rdcmanfile" -Success
+#    }
+#}
 
 function New-RDCManFileFromHyperV {
     [CmdletBinding()]
@@ -279,7 +279,12 @@ function New-RDCManFileFromHyperV {
     [xml]$template = Get-Content -Path $templatefile
     if ($null -eq $template) {
         Write-Log "Could not locate $templatefile" -Failure
-        return
+        if ($OverWrite -eq $false) {
+            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+        }
+        else {
+            return
+        }
     }
 
     # Gets the blank template, or returns the existing rdg xml if available.
@@ -292,13 +297,23 @@ function New-RDCManFileFromHyperV {
     $file = $existing.RDCMan.file
     if ($null -eq $file) {
         Write-Log "Could not load File section from $rdcmanfile" -Failure
-        return
+        if ($OverWrite -eq $false) {
+            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+        }
+        else {
+            return
+        }
     }
 
     $group = $file.group
     if ($null -eq $group) {
         Write-Log "Could not load group section from $rdcmanfile" -Failure
-        return
+        if ($OverWrite -eq $false) {
+            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+        }
+        else {
+            return
+        }
     }
 
     # If the original file was a template, remove the templated group.

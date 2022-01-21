@@ -480,7 +480,7 @@ function Select-StartDomain {
         $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" }
 
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
+            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None"
         }
         else {
             $response = $preResponse
@@ -488,7 +488,7 @@ function Select-StartDomain {
         }
 
 
-        if ([string]::IsNullOrWhiteSpace($response)) {
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
             return
         }
         if ($response -eq "A" -or $response -eq "C") {
@@ -596,14 +596,14 @@ function Select-StopDomain {
         $vmsname = $running | Select-Object -ExpandProperty vmName
         $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false
+            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None"
         }
         else {
             $response = $preResponse
             $preResponse = $null
         }
 
-        if ([string]::IsNullOrWhiteSpace($response)) {
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
             return
         }
         if ($response -eq "A" -or $response -eq "C" -or $response -eq "N") {
