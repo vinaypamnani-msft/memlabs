@@ -211,7 +211,7 @@ function Select-DomainMenu {
         $checkPoint = $null
         $DC = get-list -type vm  -DomainName $domain | Where-Object { $_.role -eq "DC" }
         if ($DC) {
-            $checkPoint = Get-VMCheckpoint -VMName $DC.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
+            $checkPoint = Get-VMCheckpoint -Id $DC.vmId -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
         }
         if ($checkPoint) {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%white%green"; "X" = "Delete (merge) domain Snapshots%white%green" }

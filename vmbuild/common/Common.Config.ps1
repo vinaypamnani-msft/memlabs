@@ -1136,14 +1136,15 @@ function Test-CacheValid {
     return $false
 }
 
-function Get-VMFromHyperV {
+function Update-VMInformation {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
         [object] $vm
     )
     $vmNoteObject = $vm.Notes | convertFrom-Json
-
+    $vmname = $vm.Name
+    Write-Log -Verbose -HostOnly "Updating $vmname"
     # Update LastKnownIP, and timestamp
     if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
         $LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
@@ -1166,30 +1167,7 @@ function Get-VMFromHyperV {
                 }
             }
         }
-    }
 
-    #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
-    $sizeCache = Get-VMSizeCached -vm $vm
-    $memoryStartupGB = $sizeCache.MemoryStartup / 1GB
-    $diskSizeGB = $sizeCache.diskSize / 1GB
-
-    $vmNet = Get-VMNetworkCached -vm $vm
-
-    $vmName = $vm.Name
-    #VmState is now updated  in Update-VMFromHyperV
-    #$vmState = $vm.State.ToString()
-
-    $vmObject = [PSCustomObject]@{
-        vmName          = $vm.Name
-        vmId            = $vm.Id
-        subnet          = $vmNet.SwitchName
-        memoryGB        = $vm.MemoryAssigned / 1GB
-        memoryStartupGB = $memoryStartupGB
-        diskUsedGB      = [math]::Round($diskSizeGB, 2)
-    }
-
-
-    if ($vmNoteObject) {
         $vmDomain = $vmNoteObject.domain
 
         # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
@@ -1240,6 +1218,36 @@ function Get-VMFromHyperV {
             }
         }
     }
+}
+
+
+
+function Get-VMFromHyperV {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $vm
+    )
+
+    #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
+    $sizeCache = Get-VMSizeCached -vm $vm
+    $memoryStartupGB = $sizeCache.MemoryStartup / 1GB
+    $diskSizeGB = $sizeCache.diskSize / 1GB
+
+    $vmNet = Get-VMNetworkCached -vm $vm
+
+    #VmState is now updated  in Update-VMFromHyperV
+    #$vmState = $vm.State.ToString()
+
+    $vmObject = [PSCustomObject]@{
+        vmName          = $vm.Name
+        vmId            = $vm.Id
+        subnet          = $vmNet.SwitchName
+        memoryGB        = $vm.MemoryAssigned / 1GB
+        memoryStartupGB = $memoryStartupGB
+        diskUsedGB      = [math]::Round($diskSizeGB, 2)
+    }
+
     Update-VMFromHyperV -vm $vm -vmObject $vmObject -vmNoteObject $vmNoteObject
     return $vmObject
 }

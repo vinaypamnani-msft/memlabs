@@ -1966,7 +1966,11 @@ if (-not $Common.Initialized) {
 
     if (-not $InJob.IsPresent) {
         # Retrieve VM List, and cache results
-        Get-List -Type VM -ResetCache | Out-Null
+        $list = Get-List -Type VM -ResetCache
+        foreach ($vm in $list){
+            $vm2 = Get-VM -id $vm.vmId
+            Update-VMInformation -vm $vm2
+        }
     }
 
     # Add HGS Registry key to allow local CA Cert
