@@ -10,6 +10,6 @@ function Get-VM2 {
         return (Get-VM -Id $vmFromList.vmId)
     }
     else {
-        return (Get-VM -Name "blah" -ErrorAction silentlycontinue)
+        return [System.Management.Automation.Internal.AutomationNull]::Value
     }
 }
