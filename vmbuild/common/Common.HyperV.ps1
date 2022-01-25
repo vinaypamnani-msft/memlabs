@@ -33,8 +33,11 @@ function Start-VM2 {
         $i = 0
         do {
             $i++
+            if ($i -gt 1) {
+                Start-Sleep -Seconds $RetrySeconds
+            }
             Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds $RetrySeconds
+
         }
         until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
@@ -78,9 +81,10 @@ function Stop-VM2 {
         $i = 0
         do {
             $i++
-            write-host "stopping ${$vm.Name}"
+            if ($i -gt 1) {
+                Start-Sleep -Seconds $RetrySeconds
+            }
             Stop-VM -VM $vm -force:$force -ErrorVariable StopError -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds $RetrySeconds
         }
         until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
@@ -135,6 +139,23 @@ function Remove-VMCheckpoint2 {
 
     if ($vm) {
         return Remove-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
+    }
+    return [System.Management.Automation.Internal.AutomationNull]::Value
+}
+
+function Checkpoint-VM2 {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$SnapshotName
+    )
+
+    $vm = Get-VM2 -Name $Name
+
+    if ($vm) {
+        Checkpoint-VM -VM $vm -SnapshotName $SnapshotName -ErrorAction Stop
     }
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }

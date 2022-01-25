@@ -798,8 +798,10 @@ function Get-ExistingForSubnet {
         $existingValue = @()
         $vmList = Get-List -Type VM | Where-Object { $_.Subnet -eq $Subnet }
         foreach ($vm in $vmList) {
-            if ($vm.Role.ToLowerInvariant() -eq $Role.ToLowerInvariant()) {
-                $existingValue += $vm.VmName
+            if ($vm.role) {
+                if ($vm.Role.ToLowerInvariant() -eq $Role.ToLowerInvariant()) {
+                    $existingValue += $vm.VmName
+                }
             }
         }
 

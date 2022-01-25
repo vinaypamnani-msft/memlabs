@@ -278,10 +278,11 @@ function get-SnapshotDomain {
                 (Get-VM2 -Name $($vm.VmName)).notes | Out-File $notesFile
 
 
-                Checkpoint-VM -Name $vm.VmName -SnapshotName 'MemLabs Snapshot' -ErrorAction Stop
+                Checkpoint-VM2 -Name $vm.VmName -SnapshotName 'MemLabs Snapshot' -ErrorAction Stop
                 $complete = $true
             }
             catch {
+                write-log -verbose $_
                 $tries++
                 Start-Sleep 10
 
