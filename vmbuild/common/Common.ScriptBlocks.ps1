@@ -82,7 +82,7 @@ $global:VM_Create = {
         $exists = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
         if ($exists -and $exists.State -ne "Running") {
             # Validation should prevent from ever getting in this block
-            Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue -ErrorVariable StartErr
+            Start-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue -ErrorVariable StartErr
             if ($StartErr) {
                 Write-Log "PSJOB: $($currentItem.vmName): Could not start the VM. Exiting." -Failure -OutputStream
                 return
@@ -99,7 +99,8 @@ $global:VM_Create = {
     # Assign DHCP reservation for PS/CS
     if ($currentItem.role -in "Primary", "CAS", "Secondary" -and $createVM) {
         try {
-            $vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop
+            $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+            #$vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop
             if ($vmnet) {
                 $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
                 if ($currentItem.role -eq "CAS") {
@@ -350,7 +351,7 @@ $global:VM_Config = {
                 Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
             }
             else {
-                Start-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
+                Start-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
                 $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
                 if ($oobeStarted) {
                     Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
