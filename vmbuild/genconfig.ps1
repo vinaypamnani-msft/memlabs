@@ -393,7 +393,7 @@ function select-DeleteSnapshotDomain {
 
                 if ($checkPoint) {
                     Write-Host "Merging $($vm.VmName)"
-                    Remove-VMCheckpoint -VMName $vm.vmName -Name "MemLabs Snapshot"
+                    Remove-VMCheckpoint2 -VMName $vm.vmName -Name "MemLabs Snapshot"
                 }
                 $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
                 if (Test-Path $notesFile) {

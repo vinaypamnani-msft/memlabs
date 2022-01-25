@@ -94,5 +94,22 @@ function Get-VMCheckpoint2 {
     if ($vm) {
             return Get-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
     }
-    return $null
+    return [System.Management.Automation.Internal.AutomationNull]::Value
+}
+
+function Remove-VMCheckpoint2 {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VMName,
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $vm = Get-VM2 -Name $VMName
+
+    if ($vm) {
+            return Remove-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
+    }
+    return [System.Management.Automation.Internal.AutomationNull]::Value
 }

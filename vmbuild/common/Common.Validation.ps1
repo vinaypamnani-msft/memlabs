@@ -449,7 +449,7 @@ function Test-ValidRoleDC {
                     # }
                 }
                 else {
-                    start-vm -name $vm.vmName | out-null
+                    start-vm2 -name $vm.vmName | out-null
                     $vm = Get-List -type VM -SmartUpdate
                     if ($vm.State -ne "Running") {
                         # VM Not running, cannot validate network
