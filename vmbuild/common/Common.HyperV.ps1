@@ -22,9 +22,9 @@ function Start-VM2 {
         [Parameter(Mandatory = $false)]
         [switch]$Passthru,
         [Parameter(Mandatory = $false)]
-        [int]$RetryCount = 0,
+        [int]$RetryCount = 1,
         [Parameter(Mandatory = $false)]
-        [int]$RetrySeconds = 0
+        [int]$RetrySeconds = 60
     )
 
     $vm = Get-VM2 -Name $Name
@@ -65,9 +65,9 @@ function Stop-VM2 {
         [Parameter(Mandatory = $false)]
         [switch]$Passthru,
         [Parameter(Mandatory = $false)]
-        [int]$RetryCount = 0,
+        [int]$RetryCount = 1,
         [Parameter(Mandatory = $false)]
-        [int]$RetrySeconds = 0,
+        [int]$RetrySeconds = 10,
         [Parameter(Mandatory = $false)]
         [switch]$force
     )
