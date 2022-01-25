@@ -209,9 +209,9 @@ function Select-DomainMenu {
             "S"   = "Snapshot all VM's in domain%white%green"
         }
         $checkPoint = $null
-        $DC = get-list -type vm  -DomainName $domain | Where-Object { $_.role -eq "DC" }
+        $DC = get-list -type vm -DomainName $domain | Where-Object { $_.role -eq "DC" }
         if ($DC) {
-            $checkPoint = Get-VMCheckpoint -Id $DC.vmId -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
+            $checkPoint = Get-VMCheckpoint2 -vmname $DC.vmName -Name 'MemLabs Snapshot'
         }
         if ($checkPoint) {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%white%green"; "X" = "Delete (merge) domain Snapshots%white%green" }
@@ -304,7 +304,7 @@ function select-RestoreSnapshotDomain {
     $missingVMS = @()
 
     foreach ($vm in $vms) {
-        $checkPoint = Get-VMCheckpoint -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
+        $checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
         if (-not $checkPoint) {
             $missingVMS += $vm.VmName
         }
@@ -332,7 +332,7 @@ function select-RestoreSnapshotDomain {
                 if ($tries -gt 10) {
                     return
                 }
-                $checkPoint = Get-VMCheckpoint -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
+                $checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
 
                 if ($checkPoint) {
                     Write-Host "Restoring $($vm.VmName)"
@@ -389,7 +389,7 @@ function select-DeleteSnapshotDomain {
                 if ($tries -gt 10) {
                     return
                 }
-                $checkPoint = Get-VMCheckpoint -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
+                $checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
 
                 if ($checkPoint) {
                     Write-Host "Merging $($vm.VmName)"
@@ -632,7 +632,7 @@ function Select-StopDomain {
                 $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
                 if ($vm2.State -eq "Running") {
                     Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
-                    start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm $vm -force } -ArgumentList $vm.vmName | Out-Null
+                    start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm2 $vm -force } -ArgumentList $vm.vmName | Out-Null
                 }
             }
             get-job | wait-job | Out-Null
@@ -641,7 +641,7 @@ function Select-StopDomain {
             return
         }
         else {
-            stop-vm $response -force
+            stop-vm2 $response -force
             get-job | wait-job | Out-Null
             get-job | remove-job | Out-Null
             get-list -type VM -SmartUpdate | out-null
