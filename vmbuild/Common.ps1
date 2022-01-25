@@ -1142,13 +1142,13 @@ function New-VirtualMachine {
 
     try {
         Write-Log "$VmName`: Starting virtual machine"
-        Start-VM -Name $VmName -ErrorAction Stop
+        Start-VM2 -Name $VmName -ErrorAction Stop
     }
     catch {
         try {
             Write-Log "$VmName`: Failed to start newly created VM. $($_.Exception.Message). Retrying once..." -Warning
             Start-Sleep -Seconds 60
-            Start-VM -Name $VmName -ErrorAction Stop
+            Start-VM2 -Name $VmName -ErrorAction Stop
         }
         catch {
             Write-Log "$VmName`: Failed to start newly created VM. $($_.Exception.Message)" -Failure
@@ -1517,8 +1517,8 @@ function Get-VmSession {
     }
 
     $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
-
-    $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
+    $vm = get-vm2 -Name $VmName
+    $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
         if ($VmDomainName -ne $VmName) {
             Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
@@ -1526,7 +1526,7 @@ function Get-VmSession {
             $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
             $cacheKey = $VmName + "-WORKGROUP"
             Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
-            $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
+            $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
             if ($Err1.Count -ne 0) {
                 if ($ShowVMSessionError.IsPresent) {
                     Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning

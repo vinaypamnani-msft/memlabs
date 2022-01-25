@@ -66,7 +66,7 @@ function Remove-Orphaned {
     # Loop through vm's again (in case some were deleted)
     $vmNetworksInUse = @("172.31.250.0") # add internet subnet
     foreach ($vm in (Get-VM)) {
-        $vmnet = Get-VMNetworkAdapter -VmName $vm.Name
+        $vmnet = ($vm | Get-VMNetworkAdapter)
         $vmNetworksInUse += $vmnet.SwitchName
     }
 

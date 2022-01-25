@@ -344,7 +344,7 @@ function Start-VMIfNotRunning {
     if ($vm.State -ne "Running") {
         try {
             Write-Log "$VMName`: Starting VM for maintenance and waiting for it to be ready to connect."
-            Start-VM -Name $VMName -ErrorAction Stop | Out-Null
+            Start-VM2 -Name $VMName -ErrorAction Stop | Out-Null
             $return.StartedVM = $true
             if ($WaitForConnect.IsPresent) {
                 $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2 -Quiet

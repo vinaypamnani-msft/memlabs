@@ -507,7 +507,7 @@ function Select-StartDomain {
             $waitSeconds = 10
             if ($dc -and ($dc.State -ne "Running")) {
                 write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
-                start-vm $dc.vmName
+                start-vm2 $dc.vmName
                 start-Sleep -Seconds $waitSecondsDC
             }
 
@@ -515,7 +515,7 @@ function Select-StartDomain {
                 foreach ($sql in $sqlServers) {
                     if ($sql.State -ne "Running") {
                         write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
-                        start-vm $sql.vmName
+                        start-vm2 $sql.vmName
                     }
                 }
                 start-sleep $waitSeconds
@@ -525,7 +525,7 @@ function Select-StartDomain {
                 foreach ($ss in $cas) {
                     if ($ss.State -ne "Running") {
                         write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
-                        start-vm $ss.vmName
+                        start-vm2 $ss.vmName
                     }
                 }
                 start-sleep $waitSeconds
@@ -535,7 +535,7 @@ function Select-StartDomain {
                 foreach ($ss in $pri) {
                     if ($ss.State -ne "Running") {
                         write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
-                        start-vm $ss.vmName
+                        start-vm2 $ss.vmName
                     }
                 }
                 start-sleep $waitSeconds
@@ -544,7 +544,7 @@ function Select-StartDomain {
                 foreach ($vm in $other) {
                     if ($vm.State -ne "Running") {
                         write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
-                        start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm $vm } -ArgumentList $vm.vmName | Out-Null
+                        start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm2 $vm } -ArgumentList $vm.vmName | Out-Null
                     }
                 }
             }
@@ -556,7 +556,7 @@ function Select-StartDomain {
 
         }
         else {
-            start-vm $response
+            start-vm2 $response
             get-job | wait-job | out-null
             get-job | remove-job | out-null
             #get-list -type VM -SmartUpdate | out-null
