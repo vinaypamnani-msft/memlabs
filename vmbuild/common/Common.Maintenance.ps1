@@ -182,17 +182,18 @@ function Start-VMFixes {
             $vmNote = Get-VMNote -VMName $vm
             if ($vmNote.role -ne "DC") {
                 Write-Log "$vm`: Shutting down VM." -Verbose
-                $i = 0
-                do {
-                    $i++
-                    Stop-VM -Name $vm -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
-                    Start-Sleep -Seconds 3
-                }
-                until ($i -ge 5 -or $StopError.Count -eq 0)
+                Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
+                #$i = 0
+                #do {
+                #    $i++
+                #    Stop-VM -Name $vm -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
+                #    Start-Sleep -Seconds 3
+                #}
+                #until ($i -ge 5 -or $StopError.Count -eq 0)
 
-                if ($StopError.Count -ne 0) {
-                    Write-Log "$vm`: Failed to stop the VM. $StopError" -Warning
-                }
+                #if ($StopError.Count -ne 0) {
+                #    Write-Log "$vm`: Failed to stop the VM. $StopError" -Warning
+                #}
             }
         }
     }
