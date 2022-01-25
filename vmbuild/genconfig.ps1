@@ -544,7 +544,10 @@ function Select-StartDomain {
                 foreach ($vm in $other) {
                     if ($vm.State -ne "Running") {
                         write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
-                        start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm2 $vm } -ArgumentList $vm.vmName | Out-Null
+                        #start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm2 $vm } -ArgumentList $vm.vmName | Out-Null
+                        $vm2 = get-vm2 -Name $vm.VmName
+                        start-vm -VM $vm2 -AsJob  | Out-Null
+
                     }
                 }
             }
@@ -632,7 +635,7 @@ function Select-StopDomain {
                 $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
                 if ($vm2.State -eq "Running") {
                     Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
-                    start-job -Name $vm.vmName -ScriptBlock { param($vm) stop-vm2 $vm -force } -ArgumentList $vm.vmName | Out-Null
+                    stop-vm -VM $VM2 -force -AsJob | Out-Null
                 }
             }
             get-job | wait-job | Out-Null
