@@ -211,7 +211,7 @@ function Select-DomainMenu {
         $checkPoint = $null
         $DC = get-list -type vm -DomainName $domain | Where-Object { $_.role -eq "DC" }
         if ($DC) {
-            $checkPoint = Get-VMCheckpoint2 -vmname $DC.vmName -Name 'MemLabs Snapshot'
+            $checkPoint = Get-VMCheckpoint2 -vmname $DC.vmName | where-object {$_.Name -like 'MemLabs Snapshot*' }
         }
         if ($checkPoint) {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%white%green"; "X" = "Delete (merge) domain Snapshots%white%green" }
@@ -264,6 +264,7 @@ function get-SnapshotDomain {
     $vms = get-list -type vm -DomainName $domain
     Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
     Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
+    $date = Get-Date -Format "yyyy-MM-ddThh.mmtt"
     foreach ($vm in $vms) {
         $complete = $false
         $tries = 0
@@ -273,12 +274,12 @@ function get-SnapshotDomain {
                     return
                 }
                 Write-Host "Checkpointing $($vm.VmName)"
-
-                $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
+                $snapshot = "MemLabs Snapshot " + $date
+                $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path $snapshot+'.json'
                 (Get-VM2 -Name $($vm.VmName)).notes | Out-File $notesFile
 
 
-                Checkpoint-VM2 -Name $vm.VmName -SnapshotName 'MemLabs Snapshot' -ErrorAction Stop
+                Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
                 $complete = $true
             }
             catch {
@@ -301,11 +302,23 @@ function select-RestoreSnapshotDomain {
         [string] $domain
     )
 
+
     $vms = get-list -type vm -DomainName $domain
+    $dc = $vms | Where-Object { $_.role -eq "DC" }
+
+    $snapshots = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "MemLabs Snapshot*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
+    if (-not $snapshots) {
+        write-host "No snapshots found for $domain"
+        return
+    }
+    $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots
+    if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+        return
+    }
     $missingVMS = @()
 
     foreach ($vm in $vms) {
-        $checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
+        $checkPoint =  Get-VMCheckpoint2 -VMName $vm.vmName -Name $response -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
         if (-not $checkPoint) {
             $missingVMS += $vm.VmName
         }
@@ -333,12 +346,17 @@ function select-RestoreSnapshotDomain {
                 if ($tries -gt 10) {
                     return
                 }
-                $checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
+                $checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name $response -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
 
                 if ($checkPoint) {
                     Write-Host "Restoring $($vm.VmName)"
                     $checkPoint | Restore-VMCheckpoint -Confirm:$false
-                    $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
+                    if ($response -eq "MemLabs Snapshot") {
+                        $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
+                    }
+                    else {
+                        $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path $response + '.json'
+                    }
                     if (Test-Path $notesFile) {
                         $notes = Get-Content $notesFile
                         set-vm -VMName $vm.vmName -notes $notes
@@ -390,16 +408,27 @@ function select-DeleteSnapshotDomain {
                 if ($tries -gt 10) {
                     return
                 }
-                $checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
+                $snapshots = Get-VMCheckpoint2 -VMName $vm.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "MemLabs Snapshot*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
+                #$checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
 
-                if ($checkPoint) {
-                    Write-Host "Merging $($vm.VmName)"
-                    Remove-VMCheckpoint2 -VMName $vm.vmName -Name "MemLabs Snapshot"
+                if ($snapshots) {
+                    foreach ($snapshot in $snapshots) {
+                        Write-Host "Merging $($vm.VmName) - $snapshot"
+                        Remove-VMCheckpoint2 -VMName $vm.vmName -Name $snapshot
+
+                        if ($snapshot -eq "MemLabs Snapshot") {
+                            $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
+                        }
+                        else {
+                            $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path $snapshot + '.json'
+                        }
+
+                        if (Test-Path $notesFile) {
+                            Remove-Item $notesFile -Force
+                        }
+                    }
                 }
-                $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
-                if (Test-Path $notesFile) {
-                    Remove-Item $notesFile -Force
-                }
+
                 $complete = $true
             }
             catch {
@@ -409,7 +438,7 @@ function select-DeleteSnapshotDomain {
             }
         }
     }
-
+    get-list -type vm -SmartUpdate | out-null
     write-host
     Write-Host "$domain snapshots have been merged"
 
@@ -552,7 +581,9 @@ function Select-StartDomain {
                     }
                 }
             }
+            Write-Log -HostOnly "Waiting for VM Start Jobs to complete" -Verbose
             get-job | wait-job | out-null
+            Write-Log -HostOnly "VM Start Jobs are complete" -Verbose
             get-job | remove-job | out-null
 
             get-list -type VM -SmartUpdate | out-null

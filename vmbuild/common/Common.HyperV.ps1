@@ -114,14 +114,19 @@ function Get-VMCheckpoint2 {
     param (
         [Parameter(Mandatory = $true)]
         [string]$VMName,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
         [string]$Name
     )
 
     $vm = Get-VM2 -Name $VMName
 
     if ($vm) {
+        if ($name) {
         return Get-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
+        }
+        else{
+            return Get-VMCheckpoint -VM $vm  -ErrorAction SilentlyContinue
+        }
     }
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }
