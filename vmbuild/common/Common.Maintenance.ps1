@@ -1,7 +1,7 @@
 
 function Start-Maintenance {
 
-    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true}
+    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
     $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
 
@@ -40,13 +40,13 @@ function Start-Maintenance {
     # Check if failed domain is -le 211125.1
     $failedDCs = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -in $failedDomains }
     $criticalDomains = @()
-    foreach($dc in $failedDCs) {
+    foreach ($dc in $failedDCs) {
         $vmNote = Get-VMNote $dc.vmName
         if ($vmNote.memlabsVersion -le "211125.1") {
             $criticalDomains += $dc.domain
             write-log "Adding $($dc.domain) to Critical List" -LogOnly
         }
-        else{
+        else {
             #write-host "Not Adding $($dc.domain) to Critical List"
         }
     }
@@ -93,7 +93,7 @@ function Show-FailedDomains {
     Write-Host "#".PadRight($longest, "#") -ForegroundColor Yellow
     Write-Host "# DC Maintenance failed for below domains. This may be because the passwords for the required accounts (listed below) expired. #" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#"
-    foreach($line in $dcList) {Write-Host "# $line".PadRight($longestMinus2," ") "#" -ForegroundColor Yellow}
+    foreach ($line in $dcList) { Write-Host "# $line".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow }
     Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#"
@@ -343,9 +343,9 @@ function Start-VMIfNotRunning {
     }
 
     if ($vm.State -ne "Running") {
-        try {
-            Write-Log "$VMName`: Starting VM for maintenance and waiting for it to be ready to connect."
-            Start-VM2 -Name $VMName -ErrorAction Stop | Out-Null
+        Write-Log "$VMName`: Starting VM for maintenance and waiting for it to be ready to connect."
+        $started = Start-VM2 -Name $VMName -Passthru
+        if ($started) {
             $return.StartedVM = $true
             if ($WaitForConnect.IsPresent) {
                 $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2 -Quiet
@@ -355,8 +355,7 @@ function Start-VMIfNotRunning {
                 }
             }
         }
-        catch {
-            Write-Log "$VMName`: Failed to start VM. Error: $_"
+        else {
             $return.StartFailed = $true
             $return.ConnectFailed = $true
         }

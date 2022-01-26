@@ -279,7 +279,7 @@ function Add-ExistingVMToDeployConfig {
 
     Write-Log -Verbose "Adding $vmName as an existing VM"
     if ($existingVM.state -ne "Running") {
-        start-vm2 -name $existingVM.vmName
+        Start-VM2 -Name $existingVM.vmName
     }
 
     $newVMObject = [PSCustomObject]@{
@@ -1366,7 +1366,7 @@ function Get-List {
             }
         }
 
-        if ($null -eq $global:vm_List) {
+        if (-not $global:vm_List) {
 
             Write-Log "Obtaining '$Type' list and caching it." -Verbose
             $return = @()

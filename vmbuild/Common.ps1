@@ -1140,20 +1140,10 @@ function New-VirtualMachine {
         }
     }
 
-    try {
-        Write-Log "$VmName`: Starting virtual machine"
-        Start-VM2 -Name $VmName -ErrorAction Stop
-    }
-    catch {
-        try {
-            Write-Log "$VmName`: Failed to start newly created VM. $($_.Exception.Message). Retrying once..." -Warning
-            Start-Sleep -Seconds 60
-            Start-VM2 -Name $VmName -ErrorAction Stop
-        }
-        catch {
-            Write-Log "$VmName`: Failed to start newly created VM. $($_.Exception.Message)" -Failure
-            return $false
-        }
+    Write-Log "$VmName`: Starting virtual machine"
+    $started = Start-VM2 -Name $VmName -Passthru
+    if (-not $started) {
+        return $false
     }
 
     return $true

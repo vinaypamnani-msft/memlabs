@@ -82,8 +82,8 @@ $global:VM_Create = {
         $exists = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
         if ($exists -and $exists.State -ne "Running") {
             # Validation should prevent from ever getting in this block
-            Start-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue -ErrorVariable StartErr
-            if ($StartErr) {
+            $started = Start-VM2 -Name $currentItem.vmName -Passthru
+            if (-not $started) {
                 Write-Log "PSJOB: $($currentItem.vmName): Could not start the VM. Exiting." -Failure -OutputStream
                 return
             }
@@ -351,15 +351,21 @@ $global:VM_Config = {
                 Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
             }
             else {
-                Start-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
-                $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
-                if ($oobeStarted) {
-                    Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
-                    Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
+                $started = Start-VM2 -Name $currentItem.vmName -Passthru
+                if ($started) {
+                    $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
+                    if ($oobeStarted) {
+                        Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
+                        Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
+                    }
+                    else {
+                        Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
+                    }
                 }
                 else {
-                    Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
+                    Write-Log "PSJOB: $($currentItem.vmName): VM Failed to start." -OutputStream -Failure
                 }
+
             }
         }
         # Update VMNote and set new version, this code doesn't run when VM_Create failed

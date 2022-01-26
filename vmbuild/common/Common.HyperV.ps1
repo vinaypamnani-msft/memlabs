@@ -31,18 +31,19 @@ function Start-VM2 {
 
     if ($vm) {
         $i = 0
+
         do {
             $i++
             if ($i -gt 1) {
                 Start-Sleep -Seconds $RetrySeconds
             }
             Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue
-
         }
+
         until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
         if ($StopError.Count -ne 0) {
-            Write-Log "${$vm}: Failed to start the VM. $StopError" -Warning
+            Write-Log "${$Name}: Failed to start the VM. $StopError" -Warning
             if ($Passthru.IsPresent) {
                 return $false
             }
@@ -54,8 +55,8 @@ function Start-VM2 {
         }
     }
     else {
+        Write-Log "$Name`: VM was not found in Hyper-V." -Warning
         if ($Passthru.IsPresent) {
-            Write-Log "$Name`: VM was not found in Hyper-V." -Warning
             return $false
         }
     }
@@ -76,9 +77,11 @@ function Stop-VM2 {
     )
 
     $vm = Get-VM2 -Name $Name
-    write-host "stopping ${$Name}"
+    Write-Log "${$Name}: Stopping VM" -HostOnly
+
     if ($vm) {
         $i = 0
+
         do {
             $i++
             if ($i -gt 1) {
@@ -89,7 +92,7 @@ function Stop-VM2 {
         until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
         if ($StopError.Count -ne 0) {
-            Write-Log "${$vm}: Failed to stop the VM. $StopError" -Warning
+            Write-Log "${$Name}: Failed to stop the VM. $StopError" -Warning
             if ($Passthru.IsPresent) {
                 return $false
             }
