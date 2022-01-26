@@ -455,7 +455,7 @@ function New-RDCManFileFromHyperV {
         }
         $roles = $vmListFull | Select-Object -ExpandProperty role
         $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | where-object {$_.properties.name -eq "Servers" } | Select-Object -First 1
-        write-host $SmartGroupToClone.properties.name
+        #write-host $SmartGroupToClone.properties.name
         #$ruleToClone = $SmartGroupToClone.ruleGroup.rule
         $clonedSG = $SmartGroupToClone.clone()
         if ($roles -contains "OSDClient" -or $roles -contains "AADClient") {

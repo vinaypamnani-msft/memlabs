@@ -413,7 +413,7 @@ function select-DeleteSnapshotDomain {
 
                 if ($snapshots) {
                     foreach ($snapshot in $snapshots) {
-                        Write-Host "Merging $($vm.VmName) - $snapshot"
+                        Write-Host "Removing $snapshot for $($vm.VmName) and merging into vhdx"
                         Remove-VMCheckpoint2 -VMName $vm.vmName -Name $snapshot
 
                         if ($snapshot -eq "MemLabs Snapshot") {
