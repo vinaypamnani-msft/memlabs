@@ -824,7 +824,7 @@ function Get-VMNote {
         [string]$VMName
     )
 
-    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    $vm = Get-VM2 -Name $VMName
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
@@ -882,13 +882,13 @@ function Set-VMNote {
 
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-    $vm = Get-VM $VmName -ErrorAction SilentlyContinue
+    $vm = Get-VM2 $VmName
     if ($vm) {
         if ($vmVersionUpdated) {
             Write-Log "Setting VM Note for $vmName (version $vmVersion)" -Verbose
         }
         else {
-            Write-Log "Setting VM Note for $vmName" -Verbose
+            Write-Log "Setting VM Note for $vmName to $vmNoteJson" -Verbose -LogOnly
         }
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
     }
@@ -908,6 +908,22 @@ function Update-VMNoteVersion {
 
     $vmNote = Get-VMNote -VMName $VmName
     $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
+    Set-VMNote -vmName $VmName -vmNote $vmNote
+}
+
+function Update-VMNoteProperty {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyName,
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyValue
+    )
+
+    $vmNote = Get-VMNote -VMName $VmName
+    $vmNote | Add-Member -MemberType NoteProperty -Name $PropertyName -Value $PropertyValue -Force
     Set-VMNote -vmName $VmName -vmNote $vmNote
 }
 

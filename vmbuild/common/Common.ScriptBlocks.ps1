@@ -204,10 +204,7 @@ $global:VM_Create = {
         }
 
         # Set vm note
-        if ($skipVersionUpdate) {
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
-        }
-        else {
+        if (-not $skipVersionUpdate) {
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true -UpdateVersion
         }
     }
