@@ -107,7 +107,14 @@ function New-VMJobs {
     $job_created_yes = 0
     $job_created_no = 0
 
+    # Track all VM's for removal, if failures encountered
+    $global:vm_remove_list = @()
+
     foreach ($currentItem in $deployConfig.virtualMachines) {
+
+        if ($Phase -eq 1) {
+            $global:vm_remove_list += $currentItem.vmName
+        }
 
         if ($Phase -eq 2 -and $currentItem.role -eq "OSDClient") {
             continue
@@ -427,6 +434,9 @@ try {
     }
     else {
 
+        # Clear out vm remove list
+        $global:vm_remove_list = @()
+
         # Create/Updated RDCMan file
         if (Test-Path "C:\tools\rdcman.exe") {
             Start-Sleep -Seconds 5
@@ -455,14 +465,29 @@ catch {
 finally {
     # Ctrl + C brings us here :)
     if ($NewLabsuccess -ne $true) {
-        Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs" -LogOnly
+        Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
     }
-    get-job | stop-job
+
+    Get-Job | Stop-Job
 
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose
         Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue
+    }
+
+    # Delete in progress or failed VM's
+    if ($global:vm_remove_list.Count -gt 0) {
+        Write-Host
+        if ($NewLabsuccess) {
+            Write-Log "Phase 1 encountered failures. Removing all VM's created in Phase 1." -Warning
+        }
+        else {
+            Write-Log "Script exited before Phase 1 completion. Removing all VM's created in Phase 1." -Warning
+        }
+        foreach ($vmname in $global:vm_remove_list) {
+            Remove-VirtualMachine -VmName $vmname
+        }
     }
 
     # uninit common
