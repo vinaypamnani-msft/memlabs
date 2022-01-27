@@ -4,13 +4,19 @@ function Get-VM2 {
         [string]$Name
     )
 
-    $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name }
+    $vmFromList = Get-List -Type VM | Where-Object { $_.vmName -eq $Name }
 
     if ($vmFromList) {
         return (Get-VM -Id $vmFromList.vmId)
     }
     else {
-        return [System.Management.Automation.Internal.AutomationNull]::Value
+        $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name }
+        if ($vmFromList) {
+            return (Get-VM -Id $vmFromList.vmId)
+        }
+        else {
+            return [System.Management.Automation.Internal.AutomationNull]::Value
+        }
     }
 }
 
