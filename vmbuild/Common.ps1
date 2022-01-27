@@ -586,21 +586,21 @@ function Test-NetworkSwitch {
         [string]$DomainName
     )
 
-    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $NetworkName }
+    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -like "*$NetworkName*" }
     if (-not $exists) {
         Write-Log "HyperV Network switch for $NetworkName not found. Creating a new one."
         try {
             New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Stop | Out-Null
         }
         catch {
-            Write-Log "HyperV Network switch for $NetworkName failed. Trying again in 30 seconds"
+            Write-Log "Failed to create HyperV Network switch for $NetworkName. Trying again in 30 seconds"
             start-sleep -seconds 30
             New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Continue | Out-Null
         }
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
     }
 
-    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $NetworkName }
+    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -like "*$NetworkName*" }
     if (-not $exists) {
         Write-Log "HyperV Network switch could not be created."
         return $false
@@ -618,7 +618,7 @@ function Test-NetworkSwitch {
 
     $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
     if ($currentIp.IPAddress -ne $desiredIp) {
-        Write-Log "$interfaceAlias IP is $($currentIp.IPAddress). Changing it to $desiredIp."
+        Write-Log "$interfaceAlias IP is '$($currentIp.IPAddress)'. Changing it to $desiredIp."
         New-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $desiredIp -PrefixLength 24 | Out-Null
         Start-Sleep -Seconds 5 # Sleep to make sure IP changed
     }
