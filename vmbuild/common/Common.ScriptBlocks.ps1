@@ -153,6 +153,24 @@ $global:VM_Create = {
         Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
     }
 
+    # Add TLS keys, without these upgradeToLatest can fail when accessing the new endpoints that require TLS 1.2
+    $Set_TLS12Keys = {
+
+        $netRegKey = "HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319"
+        if (Test-Path $netRegKey) {
+            New-ItemProperty -Path $netRegKey -Name "SystemDefaultTlsVersions" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+            New-ItemProperty -Path $netRegKey -Name "SchUseStrongCrypto" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+            New-ItemProperty -Path $netRegKey -Name "MemLabsComment" -Value "SystemDefaultTlsVersions and SchUseStrongCrypto set by MemLabs" -PropertyType STRING -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        $netRegKey32 = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v4.0.30319"
+        if (Test-Path $netRegKey32) {
+            New-ItemProperty -Path $netRegKey32 -Name "SystemDefaultTlsVersions" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+            New-ItemProperty -Path $netRegKey32 -Name "SchUseStrongCrypto" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+            New-ItemProperty -Path $netRegKey32 -Name "MemLabsComment" -Value "SystemDefaultTlsVersions and SchUseStrongCrypto set by MemLabs" -PropertyType STRING -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+
     if ($createVM) {
         Write-Log "PSJOB: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile"
@@ -177,6 +195,12 @@ $global:VM_Create = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { param ($timezone) Set-TimeZone -Id $timezone } -ArgumentList $timeZone -DisplayName "Setting timezone to '$timeZone'"
         if ($result.ScriptBlockFailed) {
             Write-Log "PSJOB: $($currentItem.vmName): Failed to set the timezone." -Warning -OutputStream
+        }
+
+        Write-Log "PSJOB: $($currentItem.vmName): Setting TLS 1.2 registry keys."
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Set_TLS12Keys -DisplayName "Setting TLS 1.2 Registry Keys"
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): Failed to set TLS 1.2 Registry Keys." -Warning -OutputStream
         }
 
         # Set vm note

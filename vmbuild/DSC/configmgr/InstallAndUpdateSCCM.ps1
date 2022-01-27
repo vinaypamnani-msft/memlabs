@@ -11,7 +11,6 @@ $scenario = $deployConfig.parameters.Scenario
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
-$ThisMachineName = $deployConfig.thisParams.MachineName
 $ThisVM = $deployConfig.thisParams.thisVM
 $CurrentRole = $ThisVM.role
 $PSVM = $deployConfig.thisParams.PrimaryVM
