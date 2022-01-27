@@ -22,7 +22,7 @@ function Get-UserConfiguration {
     # Get deployment configuration
     $configPath = Join-Path $Common.ConfigPath $Configuration
     if (-not (Test-Path $configPath)) {
-        $sampleConfigPath = Join-Path $Common.ConfigPath "samples\$Configuration"
+        $sampleConfigPath = Join-Path $Common.ConfigPath "reserved\$Configuration"
         if (-not (Test-Path $sampleConfigPath)) {
             $return.Message = "Get-UserConfiguration: $Configuration not found in $configPath or $sampleConfigPath. Please create the config manually or use genconfig.ps1, and try again."
             return $return
@@ -1692,31 +1692,4 @@ Function Show-Summary {
     | Out-String
     Write-Host
     $out.Trim() | Out-Host
-}
-
-function Copy-SampleConfigs {
-
-    $realConfigPath = $Common.ConfigPath
-    $sampleConfigPath = Join-Path $Common.ConfigPath "samples"
-
-    Write-Log "Checking if any sample configs need to be copied to config directory" -LogOnly -Verbose
-    foreach ($item in Get-ChildItem $sampleConfigPath -File -Filter *.json) {
-        $copyFile = $true
-        $sampleFile = $item.FullName
-        $fileName = Split-Path -Path $sampleFile -Leaf
-        $configFile = Join-Path -Path $realConfigPath $fileName
-        if (Test-Path $configFile) {
-            $sampleFileHash = Get-FileHash $sampleFile
-            $configFileHash = Get-FileHash $configFile
-            if ($configFileHash -ne $sampleFileHash) {
-                Write-Log "Skip copying $fileName to config directory. File exists, and has different hash." -LogOnly -Verbose
-                $copyFile = $false
-            }
-        }
-
-        if ($copyFile) {
-            Write-Log "Copying $fileName to config directory." -LogOnly -Verbose
-            Copy-Item -Path $sampleFile -Destination $configFile -Force
-        }
-    }
 }

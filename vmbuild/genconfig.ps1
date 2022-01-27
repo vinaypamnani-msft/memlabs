@@ -24,7 +24,7 @@ if (-not $InternalUseOnly.IsPresent) {
 }
 
 $configDir = Join-Path $PSScriptRoot "config"
-$sampleDir = Join-Path $PSScriptRoot "config\samples"
+$sampleDir = Join-Path $PSScriptRoot "config\reserved"
 
 Write-Host -ForegroundColor Cyan ""
 Write-Host -ForegroundColor Green "New-Lab Configuration generator:"
