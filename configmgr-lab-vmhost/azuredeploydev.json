@@ -63,9 +63,9 @@
     "aadLoginExtensionName": "AADLoginForWindows",
     "windowsAdminCenterPort": "6516",
     "dscFunction": "Host.ps1\\Host",
-    "dscScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/DSC/Host.zip",
-    "hostScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/scripts/configureHostTask.ps1",
-    "hostScriptParam": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/main/configmgr-lab-vmhost/scripts/configureHost.ps1"
+    "dscScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/develop/configmgr-lab-vmhost/DSC/Host.zip",
+    "hostScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/develop/configmgr-lab-vmhost/scripts/configureHostTask.ps1",
+    "hostScriptParam": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/develop/configmgr-lab-vmhost/scripts/configureHost.ps1"
   },
   "resources": [
     {
