@@ -586,9 +586,9 @@ function Test-NetworkSwitch {
         [string]$DomainName
     )
 
-    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -like "*$NetworkName*" }
+    $exists = Get-VMSwitch2 -NetworkName $NetworkName
     if (-not $exists) {
-        Write-Log "HyperV Network switch for $NetworkName not found. Creating a new one."
+        Write-Log "HyperV Network switch for '$NetworkName' not found. Creating a new one."
         try {
             New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Stop | Out-Null
         }
@@ -600,7 +600,7 @@ function Test-NetworkSwitch {
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
     }
 
-    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -like "*$NetworkName*" }
+    $exists = Get-VMSwitch2 -NetworkName $NetworkName
     if (-not $exists) {
         Write-Log "HyperV Network switch could not be created."
         return $false
@@ -609,7 +609,7 @@ function Test-NetworkSwitch {
     $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
 
     if (-not $adapter) {
-        Write-Log "Network adapter for $NetworkName was not found."
+        Write-Log "Network adapter for '$NetworkName' switch was not found."
         return $false
     }
 
@@ -631,11 +631,11 @@ function Test-NetworkSwitch {
 
     $text = & netsh routing ip nat show interface
     if ($text -like "*$interfaceAlias*") {
-        Write-Log "'$interfaceAlias' interface is already present in NAT."
+        Write-Log "'$interfaceAlias' interface for '$NetworkName' is already present in NAT."
         return $true
     }
     else {
-        Write-Log "'$interfaceAlias' not found in NAT. Restarting RemoteAccess service before adding it."
+        Write-Log "'$interfaceAlias' interface for '$NetworkName' not found in NAT. Restarting RemoteAccess service before adding it."
         $success = $false
         while (-not $success) {
             try {
@@ -652,11 +652,11 @@ function Test-NetworkSwitch {
 
     $text = & netsh routing ip nat show interface
     if ($text -like "*$interfaceAlias*") {
-        Write-Log "'$interfaceAlias' interface added to NAT." -Success
+        Write-Log "'$interfaceAlias' interface for '$NetworkName' added to NAT." -Success
         return $true
     }
     else {
-        Write-Log "Unable to add '$interfaceAlias' to NAT." -Failure
+        Write-Log "Unable to add '$interfaceAlias' for '$NetworkName' to NAT." -Failure
         return $false
     }
 }

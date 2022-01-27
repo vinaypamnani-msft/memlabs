@@ -53,11 +53,12 @@ $global:VM_Create = {
         }
 
         # Create VM
+        $vmSwitch = Get-VMSwitch2 -NetworkName $network
         if ($currentItem.role -eq "OSDClient") {
-            $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -OSDClient -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig
+            $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -OSDClient -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $vmSwitch.Name -DeployConfig $deployConfig
         }
         else {
-            $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $network -DeployConfig $deployConfig
+            $created = New-VirtualMachine -VmName $currentItem.vmName -VmPath $virtualMachinePath -SourceDiskPath $vhdxPath -AdditionalDisks $currentItem.additionalDisks -Memory $currentItem.memory -Generation 2 -Processors $currentItem.virtualProcs -SwitchName $vmSwitch.Name -DeployConfig $deployConfig
         }
         if (-not $created) {
             Write-Log "PSJOB: $($currentItem.vmName): VM was not created. Check vmbuild logs." -Failure -OutputStream -HostOnly

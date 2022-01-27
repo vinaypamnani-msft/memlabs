@@ -1,7 +1,9 @@
 function Get-VM2 {
     param (
         [Parameter(Mandatory = $true)]
-        [string]$Name
+        [string]$Name,
+        [Parameter(Mandatory = $false)]
+        [switch]$Fallback
     )
 
     $vmFromList = Get-List -Type VM | Where-Object { $_.vmName -eq $Name }
@@ -15,9 +17,24 @@ function Get-VM2 {
             return (Get-VM -Id $vmFromList.vmId)
         }
         else {
+            # VM may exist, without vmNotes object, try fallback if caller explicitly wants it.
+            if ($Fallback.IsPresent) {
+                return (Get-VM -Name $Name -ErrorAction SilentlyContinue)
+            }
+
             return [System.Management.Automation.Internal.AutomationNull]::Value
         }
     }
+}
+
+function Get-VMSwitch2 {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$NetworkName
+    )
+
+    return (Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -like "*$NetworkName*" })
+
 }
 
 function Start-VM2 {
