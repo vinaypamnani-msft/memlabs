@@ -112,7 +112,7 @@ function New-VMJobs {
 
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
-        if ($Phase -eq 1) {
+        if ($Phase -eq 1 -and -not $currentItem.hidden) {
             $global:vm_remove_list += $currentItem.vmName
         }
 
