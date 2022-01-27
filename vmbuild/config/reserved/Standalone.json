@@ -1,0 +1,77 @@
+{
+    "cmOptions" : {
+        "version": "current-branch",
+        "install": true,
+        "updateToLatest": false,
+        "pushClientToDomainMembers": true
+    },
+    "vmOptions": {
+        "prefix": "CM-",
+        "basePath": "E:\\VirtualMachines",
+        "domainName": "contoso.com",
+        "adminName": "admin",
+        "network": "192.168.1.0"
+    },
+    "virtualMachines": [
+        {
+            "vmName": "DC1",
+            "role": "DC",
+            "operatingSystem": "Server 2022",
+            "memory": "2GB",
+            "virtualProcs": 4
+        },
+        {
+            "vmName": "PRISITE",
+            "role": "Primary",
+            "siteCode": "PRI",
+            "operatingSystem": "Server 2022",
+            "cmInstallDir": "E:\\ConfigMgr",
+            "remoteSQLVM": "PRISQL",
+            "additionalDisks": {
+                "E": "250GB"
+            },
+            "memory": "8GB",
+            "virtualProcs": 8
+        },
+        {
+            "vmName": "PRISQL",
+            "role": "DomainMember",
+            "operatingSystem": "Server 2022",
+            "sqlVersion": "SQL Server 2019",
+            "sqlInstanceName": "MSSQLSERVER",
+            "sqlInstanceDir": "E:\\SQL",
+            "additionalDisks": {
+                "E": "250GB"
+            },
+            "memory": "8GB",
+            "virtualProcs": 8
+        },
+        {
+            "vmName": "DPMP1",
+            "role": "DPMP",
+            "operatingSystem": "Server 2022",
+            "additionalDisks": {
+                "E": "250GB"
+            },
+            "memory": "3GB",
+            "virtualProcs": 4,
+            "siteCode": "PRI",
+            "InstallMP": true,
+            "InstallDP": true
+        },
+        {
+            "vmName": "W10Client1",
+            "role": "DomainMember",
+            "operatingSystem": "Windows 10 Latest (64-bit)",
+            "memory": "2GB",
+            "virtualProcs": 2
+        },
+        {
+            "vmName": "W11Client2",
+            "role": "DomainMember",
+            "operatingSystem": "Windows 11 Latest",
+            "memory": "2GB",
+            "virtualProcs": 2
+        }
+    ]
+}

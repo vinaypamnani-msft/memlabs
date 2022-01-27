@@ -1,0 +1,32 @@
+{
+    "vmOptions": {
+        "prefix": "NOCM-",
+        "basePath": "E:\\VirtualMachines",
+        "domainName": "fabrikam.com",
+        "adminName": "admin",
+        "network": "192.168.9.0"
+    },
+    "virtualMachines": [
+        {
+            "vmName": "DC1",
+            "role": "DC",
+            "operatingSystem": "Server 2022",
+            "memory": "2GB",
+            "virtualProcs": 4
+        },
+        {
+            "vmName": "W22Server1",
+            "operatingSystem": "Server 2022",
+            "role": "DomainMember",
+            "memory": "3GB",
+            "virtualProcs": 4
+        },
+        {
+            "vmName": "W10Client1",
+            "operatingSystem": "Windows 10 Latest (64-bit)",
+            "role": "DomainMember",
+            "memory": "2GB",
+            "virtualProcs": 2
+        }
+    ]
+}
