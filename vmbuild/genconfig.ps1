@@ -211,7 +211,7 @@ function Select-DomainMenu {
         $checkPoint = $null
         $DC = get-list -type vm -DomainName $domain | Where-Object { $_.role -eq "DC" }
         if ($DC) {
-            $checkPoint = Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like 'MemLabs Snapshot*' }
+            $checkPoint = Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }
         }
         if ($checkPoint) {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%white%green"; "X" = "Delete (merge) domain Snapshots%white%green" }
@@ -264,19 +264,19 @@ function get-SnapshotDomain {
     $vms = get-list -type vm -DomainName $domain
     Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
     Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
-    $date = Get-Date -Format "yyyy-MM-ddThh.mmtt"
-    $snapshot = "MemLabs Snapshot " + $date
+    $date = Get-Date -Format "yyyy-MM-dd hh.mmtt"
+    $snapshot = $date + " (MemLabs)"
     $valid = $false
     while (-not $valid) {
         $comment = Read-Host2 -Prompt "Snapshot Comment (Optional) []" $splitpath -HideHelp
-        if ($comment -match "^[\\\/\:\*\?\<\>\|]*$") {
+        if (-not [string]::IsNullOrWhiteSpace($comment) -and $comment -match "^[\\\/\:\*\?\<\>\|]*$") {
             Write-Host "$comment contains invalid characters"
         }
         else {
             $valid = $true
         }
     }
-    $snapshot = "MemLabs Snapshot " + $date
+
     if (-not [string]::IsNullOrWhiteSpace($comment)) {
         $snapshot = $snapshot + " " + $comment
     }
@@ -289,7 +289,8 @@ function get-SnapshotDomain {
                     return
                 }
                 Write-Host "Checkpointing $($vm.VmName) to [$($snapshot)]"
-                $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path $snapshot+'.json'
+                $json = $snapshot + ".json"
+                $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path $json
                 (Get-VM2 -Name $($vm.VmName)).notes | Out-File $notesFile
 
 
@@ -297,7 +298,8 @@ function get-SnapshotDomain {
                 $complete = $true
             }
             catch {
-                write-log -verbose $_
+                write-log "Error: $_"
+                write-log "Retrying."
                 $tries++
                 Start-Sleep 10
 
@@ -320,7 +322,7 @@ function select-RestoreSnapshotDomain {
     $vms = get-list -type vm -DomainName $domain
     $dc = $vms | Where-Object { $_.role -eq "DC" }
 
-    $snapshots = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "MemLabs Snapshot*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
+    $snapshots = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*MemLabs*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
     if (-not $snapshots) {
         write-host "No snapshots found for $domain"
         return
@@ -413,7 +415,7 @@ function select-DeleteSnapshotDomain {
     $vms = get-list -type vm -DomainName $domain
     $dc = $vms | Where-Object { $_.role -eq "DC" }
 
-    $snapshots = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "MemLabs Snapshot*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
+    $snapshots = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*MemLabs*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
     if (-not $snapshots) {
         write-host "No snapshots found for $domain"
         return
@@ -434,7 +436,7 @@ function select-DeleteSnapshotDomain {
                 if ($tries -gt 10) {
                     return
                 }
-                $snapshots = Get-VMCheckpoint2 -VMName $vm.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "MemLabs Snapshot*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
+                $snapshots = Get-VMCheckpoint2 -VMName $vm.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*MemLabs*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
                 #$checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name 'MemLabs Snapshot' -ErrorAction SilentlyContinue
 
                 if ($snapshots) {
