@@ -1325,6 +1325,9 @@ function Get-List {
             return
         }
 
+        if ($DeployConfig){
+            $DeployConfigClone = $DeployConfig |ConvertTo-Json -Depth 3 | ConvertFrom-Json
+        }
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null
         }
@@ -1383,14 +1386,14 @@ function Get-List {
 
         $return = $global:vm_List
 
-        if ($null -ne $DeployConfig) {
+        if ($null -ne $DeployConfigClone) {
             foreach ($vm in $return) {
                 $vm | Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
             }
-            $domain = $DeployConfig.vmoptions.domainName
-            $subnet = $DeployConfig.vmoptions.network
-            $prefix = $DeployConfig.vmoptions.prefix
-            foreach ($vm in $DeployConfig.virtualMachines) {
+            $domain = $DeployConfigClone.vmoptions.domainName
+            $subnet = $DeployConfigClone.vmoptions.network
+            $prefix = $DeployConfigClone.vmoptions.prefix
+            foreach ($vm in $DeployConfigClone.virtualMachines) {
                 $found = $false
                 if ($vm.hidden) {
                     continue

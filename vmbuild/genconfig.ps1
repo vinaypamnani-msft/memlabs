@@ -2659,6 +2659,52 @@ Function Get-remoteSQLVM {
     }
 }
 
+Function Get-domainUser {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+
+    $users = get-list2 -DeployConfig $Global:Config | Where-Object {$_.domainUser} | Select-Object -ExpandProperty domainUser -Unique
+    $valid = $false
+    while ($valid -eq $false) {
+        $additionalOptions = @{ "N" = "New User" }
+
+
+        $result = Get-Menu "Select User" $($users) $CurrentValue -Test:$false -additionalOptions $additionalOptions
+
+        switch ($result.ToLowerInvariant()) {
+            "n" {
+                $result = Read-Host2 -Prompt "Enter desired Username"
+            }
+
+            Default {
+                if ([string]::IsNullOrWhiteSpace($result)) {
+                    return
+                }
+            }
+        }
+        if ($null -ne $name) {
+            $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -force
+        }
+        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+            return
+        }
+        else {
+            if ($null -ne $name) {
+                if ($property."$name" -eq $CurrentValue) {
+                    return
+                }
+            }
+        }
+    }
+}
+
 Function Get-CMVersionMenu {
     [CmdletBinding()]
     param (
@@ -3182,6 +3228,10 @@ function Select-Options {
                 }
                 "remoteSQLVM" {
                     Get-remoteSQLVM -property $property -name $name -CurrentValue $value
+                    return "REFRESH"
+                }
+                "domainUser" {
+                    Get-domainUser -property $property -name $name -CurrentValue $value
                     return "REFRESH"
                 }
                 "siteCode" {
@@ -3814,6 +3864,14 @@ function Select-VirtualMachines {
                                 }
                             }
                             else {
+                                if ($virtualMachine.Role -eq "DomainMember") {
+                                    if (-not $virtualMachine.domainUser) {
+                                        $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User (This account will be made a local admin)%cyan"; "U" = "Add domain user as admin on this machine" }
+                                    }
+                                    else {
+                                        $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User%cyan"; "U" = "Remove domainUser from this machine" }
+                                    }
+                                }
                                 if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not ($virtualMachine.Role -eq "DC")) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         if ($virtualMachine.Role -eq "Secondary") {
@@ -3865,6 +3923,15 @@ function Select-VirtualMachines {
                                 }
                                 continue VMLoop
 
+                            }
+                            if ($newValue -eq "U") {
+                                if ($virtualMachine.domainUser) {
+                                    $virtualMachine.psobject.properties.remove('domainUser')
+                                }
+                                else {
+                                    Get-DomainUser -property $virtualMachine -name "domainUser"
+                                    #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value "bob"
+                                }
                             }
                             if ($newValue -eq "S") {
                                 if ($virtualMachine.Role -eq "Primary" -or $virtualMachine.Role -eq "CAS") {
