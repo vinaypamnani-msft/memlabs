@@ -363,8 +363,12 @@ function Add-PerVMSettings {
         SQLSysAdminAccounts = @()
         LocalAdminAccounts  = @($cm_svc)
         WaitOnDomainJoin    = @()
+        DomainAccounts      = @($deployConfig.vmOptions.adminName, "cm_svc", "vmbuildadmin")
+        DomainAdmins        = @($deployConfig.vmOptions.adminName)
+        SchemaAdmins        = @($deployConfig.vmOptions.adminName)
     }
 
+    $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object {$_.domainUser} | Select-Object -ExpandProperty domainUser -Unique
 
 
 
@@ -636,6 +640,11 @@ function Add-PerVMSettings {
     $LocalAdminAccounts = $accountLists.LocalAdminAccounts | Sort-Object | Get-Unique
     if ($LocalAdminAccounts.Count -gt 0) {
         $thisParams | Add-Member -MemberType NoteProperty -Name "LocalAdminAccounts" -Value $LocalAdminAccounts -Force
+    }
+    if ($thisVM.role -in "DC"){
+        $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccounts" -Value $accountLists.DomainAccounts -Force
+        $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAdmins" -Value $accountLists.DomainAdmins -Force
+        $thisParams | Add-Member -MemberType NoteProperty -Name "SchemaAdmins" -Value $accountLists.SchemaAdmins -Force
     }
 
     #    $thisParams | ConvertTo-Json -Depth 4 | out-Host
@@ -1325,8 +1334,8 @@ function Get-List {
             return
         }
 
-        if ($DeployConfig){
-            $DeployConfigClone = $DeployConfig |ConvertTo-Json -Depth 3 | ConvertFrom-Json
+        if ($DeployConfig) {
+            $DeployConfigClone = $DeployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
         }
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null

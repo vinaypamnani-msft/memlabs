@@ -880,7 +880,12 @@ function Select-MainMenu {
             "c" { Select-Options -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" }
             "d" { return $true }
             "s" { return $false }
-            "r" { return Test-Configuration -InputObject $Global:Config }
+            "r" {
+                $c = Test-Configuration -InputObject $Global:Config
+                $global:DebugConfig = $c
+                write-Host 'Debug Config stored in $global:DebugConfig'
+                return $global:DebugConfig
+            }
             "p" {
                 $returnArray = [pscustomObject]@{
                     VMs = @()
@@ -893,7 +898,9 @@ function Select-MainMenu {
                     $vm | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $deployConfigCopy.thisParams -Force
                     $returnArray.VMs += $vm
                 }
-                return $returnArray
+                $global:DebugPerVMSettings = $returnArray
+                write-Host 'Per VM Settings stored in $global:DebugPerVMSettings'
+                return $global:DebugPerVMSettings
 
             }
             "!" {
