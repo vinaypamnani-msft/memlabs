@@ -2677,7 +2677,7 @@ Function Get-domainUser {
         [Object] $CurrentValue
     )
 
-    $users = get-list2 -DeployConfig $Global:Config | Where-Object {$_.domainUser} | Select-Object -ExpandProperty domainUser -Unique
+    $users = get-list2 -DeployConfig $Global:Config | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
     $valid = $false
     while ($valid -eq $false) {
         $additionalOptions = @{ "N" = "New User" }
@@ -2692,6 +2692,12 @@ Function Get-domainUser {
 
             Default {
                 if ([string]::IsNullOrWhiteSpace($result)) {
+                    if (-not $CurrentValue) {
+                        $property.psobject.properties.remove($name)
+                    }
+                    else {
+                        $property | Add-Member -MemberType NoteProperty -Name $name -Value $CurrentValue -force
+                    }
                     return
                 }
             }
