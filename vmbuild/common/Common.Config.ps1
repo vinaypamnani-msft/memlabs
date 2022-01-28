@@ -368,7 +368,7 @@ function Add-PerVMSettings {
         SchemaAdmins        = @($deployConfig.vmOptions.adminName)
     }
 
-    $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object {$_.domainUser} | Select-Object -ExpandProperty domainUser -Unique
+
 
 
 
@@ -378,6 +378,10 @@ function Add-PerVMSettings {
     }
     $thisParams | Add-Member -MemberType NoteProperty -Name "thisVM" -Value $thisVM -Force
     # All DSC's should at minimum be adding cm_svc as a local admin.. Array will be appended if more local admins are needed
+
+    if ($thisVM.domainUser) {
+        $accountLists.LocalAdminAccounts += $thisVM.domainUser
+    }
 
     #Get the current network from get-list or config
     $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
@@ -391,6 +395,8 @@ function Add-PerVMSettings {
 
     # DC DSC needs a list of SiteServers to wait on.
     if ($thisVM.role -eq "DC") {
+        $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object {$_.domainUser} | Select-Object -ExpandProperty domainUser -Unique
+
         $ServersToWaitOn = @()
         $thisPSName = $null
         $thisCSName = $null
