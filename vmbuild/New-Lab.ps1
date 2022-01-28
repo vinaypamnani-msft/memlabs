@@ -490,6 +490,9 @@ finally {
         }
     }
 
+    # Clear vm remove list
+    $global:vm_remove_list = @()
+
     # uninit common
     $Common.Initialized = $false
 
