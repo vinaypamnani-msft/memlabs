@@ -432,12 +432,16 @@ function New-RDCManFileFromHyperV {
                     $displayName = $displayName + "(Missing IP)"
                 }
             }
+            if ($vm.domainUser) {
+                $displayName = $displayName + " ($($vm.domainUser))"
+            }
             $ForceOverwrite = $true
             $vmID = $null
             if ($vm.Role -eq "OSDClient" -or $vm.Role -eq "AADClient") {
                 $vmID = $vm.vmId
             }
-            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID) -eq $True) {
+
+            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser) -eq $True) {
                 $shouldSave = $true
             }
         }
@@ -592,6 +596,8 @@ function Add-RDCManServerToGroup {
         [object]$existing,
         [string]$comment,
         [string]$vmID = $null,
+        [string]$username = $null,
+        [string]$domain = $null,
         [bool]$ForceOverwrite
     )
 
@@ -648,6 +654,26 @@ function Add-RDCManServerToGroup {
             [void]$clonedNode.properties.AppendChild($clonedNode2)
         }
 
+        if (-not [string]::IsNullOrWhiteSpace($username)) {
+
+            [xml]$logonCredsXml = @"
+            <logonCredentials inherit="None">
+             <profileName scope="Local">Custom</profileName>
+             <userName>labadmin</userName>
+             <password>password</password>
+             <domain>domain</domain>
+            </logonCredentials>
+"@
+            $clonedNode.AppendChild($existing.ImportNode($logonCredsXml.logonCredentials, $true))
+            $clonedNode.logonCredentials.userName = $username
+            $clonedNode.logonCredentials.domain = $domain
+            $encryptedPass = Get-RDCManPassword $Global:newrdcmanpath
+            if ($null -eq $encryptedPass) {
+                Write-Log "Password was not generated correctly." -Failure
+                return
+            }
+            $clonedNode.logonCredentials.password = $encryptedPass
+        }
         $findgroup.group.AppendChild($clonedNode)
         return $True
     }
