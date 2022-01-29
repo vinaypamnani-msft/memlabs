@@ -4120,15 +4120,16 @@ function Save-Config {
     $filename = Join-Path $configDir $file
     if ($Global:configfile) {
         $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile).Name)
+        $filename = Join-Path $configDir $filename
     }
     $splitpath = Split-Path -Path $fileName -Leaf
-    $response = Read-Host2 -Prompt "Save Filename" $splitpath -HideHelp
+    $response = Read-Host2 -Prompt "Save Filename" -currentValue $splitpath -HideHelp
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $filename = Join-Path $configDir $response
     }
 
-    if (!$filename.EndsWith("json")) {
+    if (!$filename.EndsWith(".json")) {
         $filename += ".json"
     }
 
