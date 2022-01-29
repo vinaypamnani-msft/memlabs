@@ -862,15 +862,15 @@ function Test-Configuration {
         if ($vm.domainUser) {
             $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
             if ($vm.domainUser -match $pattern) {
-                Add-ValidationMessage -Message "Domain User Validation: vmOptions.adminName [$($vm.domainUser)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "Domain User Validation: $($vm.vmName) domainUser [$($vm.domainUser)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $return -Failure
             }
 
             if ($vm.domainUser.Length -gt 64) {
-                Add-ValidationMessage -Message "Domain User Validation: vmOptions.adminName [$($vm.domainUser)] is too long. Must be less than 64 chars" -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "Domain User Validation: $($vm.vmName) domainUser [$($vm.domainUser)] is too long. Must be less than 64 chars" -ReturnObject $return -Failure
             }
 
             if ($vm.domainUser.Length -lt 3) {
-                Add-ValidationMessage -Message "Domain User Validation: vmOptions.adminName [$($vm.domainUser)] is too short. Must be at least 3 chars" -ReturnObject $return -Failure
+                Add-ValidationMessage -Message "Domain User Validation: $($vm.vmName) domainUser [$($vm.domainUser)] is too short. Must be at least 3 chars" -ReturnObject $return -Failure
             }
         }
 

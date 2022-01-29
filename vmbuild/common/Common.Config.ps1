@@ -363,7 +363,7 @@ function Add-PerVMSettings {
         SQLSysAdminAccounts = @()
         LocalAdminAccounts  = @($cm_svc)
         WaitOnDomainJoin    = @()
-        DomainAccounts      = @($deployConfig.vmOptions.adminName, "cm_svc", "vmbuildadmin")
+        DomainAccounts      = @($deployConfig.vmOptions.adminName, "cm_svc", "vmbuildadmin","administrator")
         DomainAdmins        = @($deployConfig.vmOptions.adminName)
         SchemaAdmins        = @($deployConfig.vmOptions.adminName)
     }

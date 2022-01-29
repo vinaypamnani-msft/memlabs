@@ -20,6 +20,7 @@
     $PSName = $deployConfig.thisParams.PSName
     $CSName = $deployConfig.thisParams.CSName
 
+    $DomainAccounts = $deployConfig.thisParams.DomainAccounts
     $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
     $DHCP_DNSAddress = $network + ".1"
     $DHCP_DefaultGateway = $network + ".200"
@@ -99,67 +100,41 @@
             DomainFullName                = $DomainName
             SafemodeAdministratorPassword = $DomainCreds
         }
-
-        ADUser Admin {
-            Ensure               = 'Present'
-            UserName             = $DomainAdminName
-            Password             = $DomainCreds
-            PasswordNeverResets  = $true
-            PasswordNeverExpires = $true
-            CannotChangePassword = $true
-            DomainName           = $DomainName
-            DependsOn            = "[SetupDomain]FirstDS"
+        $adUsersDependancy = @()
+        $i = 0
+        foreach ($user in $DomainAccounts) {
+            $i++
+            ADUser "User$($i)" {
+                Ensure               = 'Present'
+                UserName             = $user
+                Password             = $DomainCreds
+                PasswordNeverResets  = $true
+                PasswordNeverExpires = $true
+                CannotChangePassword = $true
+                DomainName           = $DomainName
+                DependsOn            = "[SetupDomain]FirstDS"
+            }
+            $adUsersDependancy += "[ADUser]User$($i)"
         }
 
-        ADUser administrator {
-            Ensure               = 'Present'
-            UserName             = 'administrator'
-            Password             = $DomainCreds
-            PasswordNeverResets  = $true
-            PasswordNeverExpires = $true
-            CannotChangePassword = $true
-            DomainName           = $DomainName
-            DependsOn            = "[ADUser]Admin"
-        }
 
-        ADUser cm-svc {
-            Ensure               = 'Present'
-            UserName             = 'cm_svc'
-            Password             = $DomainCreds
-            PasswordNeverResets  = $true
-            PasswordNeverExpires = $true
-            CannotChangePassword = $true
-            DomainName           = $DomainName
-            DependsOn            = "[SetupDomain]FirstDS"
-        }
-
-        ADUser vmbuildadmin {
-            Ensure               = 'Present'
-            UserName             = 'vmbuildadmin'
-            Password             = $DomainCreds
-            PasswordNeverResets  = $true
-            PasswordNeverExpires = $true
-            CannotChangePassword = $true
-            DomainName           = $DomainName
-            DependsOn            = "[SetupDomain]FirstDS"
-        }
 
         ADGroup AddToAdmin {
             GroupName        = "Administrators"
             MembersToInclude = @($DomainAdminName)
-            DependsOn        = "[ADUser]Admin"
+            DependsOn        = $adUsersDependancy
         }
 
         ADGroup AddToDomainAdmin {
             GroupName        = "Domain Admins"
             MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-            DependsOn        = @("[ADUser]Admin", "[ADUser]cm-svc")
+            DependsOn        = $adUsersDependancy
         }
 
         ADGroup AddToSchemaAdmin {
             GroupName        = "Schema Admins"
             MembersToInclude = @($DomainAdminName)
-            DependsOn        = "[ADUser]Admin"
+            DependsOn        = $adUsersDependancy
         }
 
         $adSiteDependency = @()

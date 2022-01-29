@@ -12,7 +12,9 @@ $DomainName = $DomainFullName.Split(".")[0]
 $ThisMachineName = $deployConfig.thisParams.MachineName
 $ThisVM = $deployConfig.thisParams.thisVM
 
-$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
+#bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
+$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
+#$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
 $cm_svc = "$DomainName\cm_svc"
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 

@@ -371,7 +371,8 @@ function select-RestoreSnapshotDomain {
                         $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
                     }
                     else {
-                        $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path $response + '.json'
+                        $jsonfile = $response + ".json"
+                        $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path $jsonfile
                     }
                     if (Test-Path $notesFile) {
                         $notes = Get-Content $notesFile
@@ -382,6 +383,8 @@ function select-RestoreSnapshotDomain {
                 $complete = $true
             }
             catch {
+                write-log "$_"
+                write-host "Retrying..."
                 Start-Sleep 10
                 $tries++
 
