@@ -259,7 +259,9 @@ function get-SnapshotDomain {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
-        [string] $domain
+        [string] $domain,
+        [Parameter(Mandatory = $false, HelpMessage = "Comment")]
+        [string] $comment
     )
     $vms = get-list -type vm -DomainName $domain
     Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
@@ -268,9 +270,12 @@ function get-SnapshotDomain {
     $snapshot = $date + " (MemLabs)"
     $valid = $false
     while (-not $valid) {
-        $comment = Read-Host2 -Prompt "Snapshot Comment (Optional) []" $splitpath -HideHelp
+        if (-not $comment) {
+            $comment = Read-Host2 -Prompt "Snapshot Comment (Optional) []" $splitpath -HideHelp
+        }
         if (-not [string]::IsNullOrWhiteSpace($comment) -and $comment -match "^[\\\/\:\*\?\<\>\|]*$") {
             Write-Host "$comment contains invalid characters"
+            $comment = $null
         }
         else {
             $valid = $true
@@ -4113,7 +4118,9 @@ function Save-Config {
     $file = $date + "-" + $file
 
     $filename = Join-Path $configDir $file
-
+    if ($Global:configfile) {
+        $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile).Name)
+    }
     $splitpath = Split-Path -Path $fileName -Leaf
     $response = Read-Host2 -Prompt "Save Filename" $splitpath -HideHelp
 
@@ -4149,6 +4156,7 @@ if ($currentBranch -and $currentBranch -notmatch "main") {
 $Global:SavedConfig = $null
 do {
     $Global:Config = $null
+    $Global:configfile = $null
     $Global:Config = Select-ConfigMenu
 
     $Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
@@ -4226,7 +4234,9 @@ if ($InternalUseOnly.IsPresent) {
         $response = Read-Host2 -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (Y/n)" -HideHelp
         if ([String]::IsNullOrWhiteSpace($response) -or $response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes" ) {
             Select-StopDomain -domain $Global:DeployConfig.vmOptions.DomainName -response "C"
-            get-SnapshotDomain -domain $Global:DeployConfig.vmOptions.DomainName
+            $filename = $splitpath = Split-Path -Path $return.ConfigFileName -Leaf
+            $comment = [System.Io.Path]::GetFileNameWithoutExtension($filename)
+            get-SnapshotDomain -domain $Global:DeployConfig.vmOptions.DomainName -comment $comment
             Select-StartDomain -domain $Global:DeployConfig.vmOptions.DomainName -response "C"
         }
     }
