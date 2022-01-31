@@ -92,16 +92,25 @@ function New-VMJobs {
         [object]$deployConfig
     )
 
-    if ($Phase -eq 1) {
-        $PhaseDescription = "Creation"
-        Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
-        Write-Host
+    switch ($Phase) {
+        0 {
+            $PhaseDescription = "Preparation"
+            Write-Log "Phase $Phase - Preparing existing Virtual Machines" -Activity
+        }
+
+        1 {
+            $PhaseDescription = "Creation"
+            Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
+        }
+
+        2 {
+            $PhaseDescription = "Configuration"
+            Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
+        }
     }
-    else {
-        $PhaseDescription = "Configuration"
-        Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
-        Write-Host
-    }
+
+    Write-Host
+
 
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
@@ -112,10 +121,22 @@ function New-VMJobs {
 
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
+        # Don't touch non-hidden VM's in Phase 0
+        if ($Phase -eq 0 -and -not $currentItem.hidden) {
+            continue
+        }
+
+        # Don't touch hidden VM's in Phase 1
+        if ($Phase -eq 1 -and $currentItem.hidden) {
+            continue
+        }
+
+        # Add non-hidden VM's to removal list, in case Phase 1 fails
         if ($Phase -eq 1 -and -not $currentItem.hidden) {
             $global:vm_remove_list += $currentItem.vmName
         }
 
+        # Skip Phase 2 for OSDClient, nothing for us to do
         if ($Phase -eq 2 -and $currentItem.role -eq "OSDClient") {
             continue
         }
@@ -128,7 +149,7 @@ function New-VMJobs {
             continue
         }
 
-        if ($Phase -eq 1) {
+        if ($Phase -eq 0 -or $Phase -eq 1) {
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
         }
         else {
@@ -427,23 +448,43 @@ try {
         return $deployConfig
     }
 
-    $created = New-VMJobs -Phase 1 -deployConfig $deployConfig
+    # Phases:
+    # 0 - Prepare existing VMs
+    # 1 - Create new VMs
+    # 2 - Configure VMs (run DSC)
 
-    if (-not $created) {
-        Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
+    $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
+    if ($containsHidden) {
+        $prepared = New-VMJobs -Phase 0 -deployConfig $deployConfig
+    }
+    else {
+        $prepared = $true
+    }
+
+    if (-not $prepared) {
+        Write-Log "Phase 1 - Skipped Virtual Machine Creation and Configuration because errors were encountered in Phase 0." -Activity
+        $created = $configured = $false
     }
     else {
 
-        # Clear out vm remove list
-        $global:vm_remove_list = @()
+        $created = New-VMJobs -Phase 1 -deployConfig $deployConfig
 
-        # Create/Updated RDCMan file
-        if (Test-Path "C:\tools\rdcman.exe") {
-            Start-Sleep -Seconds 5
-            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+        if (-not $created) {
+            Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
         }
+        else {
 
-        $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
+            # Clear out vm remove list
+            $global:vm_remove_list = @()
+
+            # Create/Updated RDCMan file
+            if (Test-Path "C:\tools\rdcman.exe") {
+                Start-Sleep -Seconds 5
+                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+            }
+
+            $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
+        }
     }
 
     $timer.Stop()
