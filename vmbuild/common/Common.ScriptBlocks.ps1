@@ -568,7 +568,7 @@ $global:VM_Config = {
             $failedHeartbeats++
             # Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
             if ($failedHeartbeats -gt 10) {
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($failedHeartbeats / $failedHeartbeatThreshold * 100)
             }
         }
         else {
