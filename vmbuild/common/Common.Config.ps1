@@ -363,7 +363,7 @@ function Add-PerVMSettings {
         SQLSysAdminAccounts = @()
         LocalAdminAccounts  = @($cm_svc)
         WaitOnDomainJoin    = @()
-        DomainAccounts      = @($deployConfig.vmOptions.adminName, "cm_svc", "vmbuildadmin","administrator")
+        DomainAccounts      = @($deployConfig.vmOptions.adminName, "cm_svc", "vmbuildadmin", "administrator")
         DomainAdmins        = @($deployConfig.vmOptions.adminName)
         SchemaAdmins        = @($deployConfig.vmOptions.adminName)
     }
@@ -395,7 +395,7 @@ function Add-PerVMSettings {
 
     # DC DSC needs a list of SiteServers to wait on.
     if ($thisVM.role -eq "DC") {
-        $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object {$_.domainUser} | Select-Object -ExpandProperty domainUser -Unique
+        $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
 
         $ServersToWaitOn = @()
         $thisPSName = $null
@@ -647,7 +647,7 @@ function Add-PerVMSettings {
     if ($LocalAdminAccounts.Count -gt 0) {
         $thisParams | Add-Member -MemberType NoteProperty -Name "LocalAdminAccounts" -Value $LocalAdminAccounts -Force
     }
-    if ($thisVM.role -in "DC"){
+    if ($thisVM.role -in "DC") {
         $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccounts" -Value $accountLists.DomainAccounts -Force
         $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAdmins" -Value $accountLists.DomainAdmins -Force
         $thisParams | Add-Member -MemberType NoteProperty -Name "SchemaAdmins" -Value $accountLists.SchemaAdmins -Force
@@ -1053,29 +1053,26 @@ function Get-VMSizeCached {
         [Parameter(Mandatory = $false, ParameterSetName = "FlushCache")]
         [switch] $FlushCache
     )
-    $cacheFile = Join-Path $global:common.CachePath "diskcache.json"
-    if (-not ($global:common.SizeCache)) {
-        $global:common.SizeCache = @()
-        if (Test-Path $cacheFile -PathType Leaf) {
-            $global:common.SizeCache = Get-Content $cacheFile | ConvertFrom-Json
-        }
-    }
 
+    $jsonFile = $($vm.vmID).toString() + ".disk.json"
+    $cacheFile = Join-Path $global:common.CachePath $jsonFile
+    Write-Log -hostonly "Cache File $cacheFile" -Verbose
     $vmCacheEntry = $null
-    #return Cached entry
-    #if (-not $FlushCache -and $diskCache) {
-    if ($global:common.SizeCache) {
+    if (Test-Path $cacheFile) {
+        try {
+            $vmCacheEntry = Get-Content $cacheFile | ConvertFrom-Json
+        }
+        catch {}
+    }
 
-        $vmCacheEntry = $global:common.SizeCache | Where-Object { $_.vmId -eq $vm.vmId } | Select-Object -Last 1
-        if ($vmCacheEntry) {
-            if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
-                return $vmCacheEntry
-            }
-            else {
-                $global:common.SizeCache = $global:common.SizeCache | Where-Object { $_.vmId -ne $vm.vmId }
-            }
+
+    if ($vmCacheEntry) {
+        if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
+            return $vmCacheEntry
         }
     }
+
+
     #write-host "Making new Entry for $($vm.vmName)"
     # if we didnt return the cache entry, get new data, and add it to cache
     $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
@@ -1086,8 +1083,7 @@ function Get-VMSizeCached {
         MemoryStartup = $MemoryStartup
         EntryAdded    = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
-    $global:common.SizeCache += $vmCacheEntry
-    ConvertTo-Json  $global:common.SizeCache | Out-File $cacheFile -Force
+    ConvertTo-Json  $vmCacheEntry| Out-File $cacheFile -Force
     return $vmCacheEntry
 }
 
@@ -1100,29 +1096,24 @@ function Get-VMNetworkCached {
         [Parameter(Mandatory = $false, ParameterSetName = "FlushCache")]
         [switch] $FlushCache
     )
-    $cacheFile = Join-Path $global:common.CachePath "netCache.json"
-    if (-not ($global:common.NetCache)) {
-        $global:common.NetCache = @()
-        if (Test-Path $cacheFile -PathType Leaf) {
-            $global:common.NetCache = Get-Content $cacheFile | ConvertFrom-Json
-        }
-    }
+    $jsonFile = $($vm.vmID).toString() + ".network.json"
+    $cacheFile = Join-Path $global:common.CachePath $jsonFile
 
     $vmCacheEntry = $null
-    #return Cached entry
-    #if (-not $FlushCache -and $diskCache) {
-    if ($global:common.NetCache) {
-        $vmCacheEntry = $global:common.NetCache | Where-Object { $_.vmId -eq $vm.vmId } | Select-Object -Last 1
-        if ($vmCacheEntry) {
+    if (Test-Path $cacheFile) {
+        try {
+            $vmCacheEntry = Get-Content $cacheFile | ConvertFrom-Json
+        }
+        catch {}
+    }
 
-            if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
-                return $vmCacheEntry
-            }
-            else {
-                $global:common.NetCache = $global:common.NetCache | Where-Object { $_.vmId -ne $vm.vmId }
-            }
+
+    if ($vmCacheEntry) {
+        if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
+            return $vmCacheEntry
         }
     }
+
 
     # if we didnt return the cache entry, get new data, and add it to cache
     $vmNet = ($vm | Get-VMNetworkAdapter)
@@ -1132,8 +1123,8 @@ function Get-VMNetworkCached {
         #IPAddresses = $vmNet.IPAddresses
         EntryAdded = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
-    $global:common.NetCache += $vmCacheEntry
-    ConvertTo-Json $global:common.NetCache | Out-File $cacheFile -Force
+
+    ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
     return $vmCacheEntry
 }
 
@@ -1637,7 +1628,7 @@ Function Show-Summary {
 
         if ($containsMember) {
             if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                $MemberNames = ($fixedConfig | Where-Object { $_.Role -eq "DomainMember" }).vmName
+                $MemberNames = ($fixedConfig | Where-Object { $_.Role -eq "DomainMember" } -and $null -eq $($_.SqlVersion)).vmName
                 Write-GreenCheck "Client Push: Yes [$($MemberNames -join ",")]"
             }
             else {

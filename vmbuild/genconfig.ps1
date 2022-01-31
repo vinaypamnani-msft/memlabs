@@ -1160,7 +1160,7 @@ function Get-NewMachineName {
         $ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
     }
     Write-Verbose "[Get-NewMachineName] found $ConfigCount machines in Config with role $Role"
-    $TotalCount = [int]$RoleCount + [int]$ConfigCount
+    #$TotalCount = [int]$RoleCount + [int]$ConfigCount
 
     [int]$i = 1
     while ($true) {

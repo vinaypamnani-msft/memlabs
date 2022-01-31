@@ -53,7 +53,6 @@ function Save-RdcManSettignsFile {
 
     # Gets the blank template, or returns the existing settings xml if available.
     $file = $template
-    $existingIsPresent = $false
     Write-Verbose "Checking for $existingfile"
     if (Test-Path $existingfile) {
         [xml]$file = Get-Content -Path $existingfile
@@ -622,7 +621,7 @@ function Add-RDCManServerToGroup {
     $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName } | Select-Object -First 1
     if ($null -eq $findserver) {
         Write-Log "Added $displayName to RDG Group" -LogOnly -Verbose
-        $subgroup = $groupFromTemplate.group
+        #$subgroup = $groupFromTemplate.group
         $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
         $newserver = $server.clone()
         $newserver.properties.name = $serverName

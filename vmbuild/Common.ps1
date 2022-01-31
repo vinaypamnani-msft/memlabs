@@ -727,8 +727,8 @@ function Test-DHCPScope {
 
         if ($internetScope) {
             $HashArguments = @{
-                ScopeId   = $ScopeID
-                Router    = $DHCPDefaultGateway
+                ScopeId = $ScopeID
+                Router  = $DHCPDefaultGateway
             }
         }
         else {
@@ -1971,9 +1971,18 @@ if (-not $Common.Initialized) {
     Set-SupportedOptions
 
     if (-not $InJob.IsPresent) {
+
+        try {
+            if ($global:common.CachePath) {
+                $threshold = 2
+                Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force | out-null
+            }
+        }
+        catch {}
+
         # Retrieve VM List, and cache results
         $list = Get-List -Type VM -ResetCache
-        foreach ($vm in $list){
+        foreach ($vm in $list) {
             $vm2 = Get-VM -id $vm.vmId
             Update-VMInformation -vm $vm2
         }
