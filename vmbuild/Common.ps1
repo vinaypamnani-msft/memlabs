@@ -1239,8 +1239,11 @@ function Wait-ForVm {
             # Check OOBE complete registry key
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
 
-            # Wait until OOBE is ready
+            if ($out.ScriptBlockFailed) {
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $originalStatus -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            }
 
+            # Wait until OOBE is ready
             if ($null -ne $out.ScriptBlockOutput -and -not $readyOobe) {
                 Write-Log "$VmName`: OOBE State is $($out.ScriptBlockOutput)"
                 $status = $originalStatus
