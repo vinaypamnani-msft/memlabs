@@ -1628,7 +1628,7 @@ Function Show-Summary {
 
         if ($containsMember) {
             if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                $MemberNames = ($fixedConfig | Where-Object { $_.Role -eq "DomainMember" } -and $null -eq $($_.SqlVersion)).vmName
+                $MemberNames = ($fixedConfig | Where-Object { $_.Role -eq "DomainMember"  -and $null -eq $($_.SqlVersion)}).vmName
                 Write-GreenCheck "Client Push: Yes [$($MemberNames -join ",")]"
             }
             else {
