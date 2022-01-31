@@ -557,9 +557,30 @@ $global:VM_Config = {
     $complete = $false
     $previousStatus = ""
     $suppressNoisyLogging = $enableVerbose -eq $false
+    $failedHeartbeats = 0
+    $failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
+
     do {
         $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
         Start-Sleep -Seconds 3
+
+        if ($status.ScriptBlockFailed) {
+            $failedHeartbeats++
+            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
+        }
+        else {
+            $failedHeartbeats = 0
+        }
+
+        if ($failedHeartbeats -gt $failedHeartbeatThreshold) {
+            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to get job status updates after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
+            $vm = Get-VM2 -Name $($currentItem.vmName)
+            Stop-VM -VM $vm -TurnOff | Out-Null
+            Start-Sleep -Seconds 5
+            Start-VM2 -Name $currentItem.vmName
+            Start-Sleep -Seconds 15
+            $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
+        }
 
         if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {
 
