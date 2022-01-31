@@ -16,14 +16,15 @@ function Remove-VirtualMachine {
         if ($vmTest.State -ne "Off") {
             $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf
         }
-        $jsondiskFile = $($vm.vmID).toString() + ".disk.json"
-        $cachediskFile = Join-Path $global:common.CachePath $jsondiskFile
-        remove-item -path $cachediskFile -Force
-        $jsonnetFile = $($vm.vmID).toString() + ".network.json"
-        $cachenetFile = Join-Path $global:common.CachePath $jsonnetFile
-        remove-item -path $cachenetFile -Force
+
+        $cachediskFile = Join-Path $global:common.CachePath ($($vm.vmID).toString() + ".disk.json")
+        if (Test-Path $cachediskFile) { Remove-Item -path $cachediskFile -Force -WhatIf:$WhatIf | Out-Null }
+
+        $cachenetFile = Join-Path $global:common.CachePath ($($vm.vmID).toString() + ".network.json")
+        if (Test-Path $cachenetFile) { Remove-Item -path $cachenetFile -Force -WhatIf:$WhatIf | Out-Null }
 
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf
+
         Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
         Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
     }
