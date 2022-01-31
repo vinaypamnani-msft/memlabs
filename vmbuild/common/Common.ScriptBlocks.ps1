@@ -566,14 +566,19 @@ $global:VM_Config = {
 
         if ($status.ScriptBlockFailed) {
             $failedHeartbeats++
-            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
+            # Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
+            if ($failedHeartbeats -gt 10) {
+                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            }
         }
         else {
             $failedHeartbeats = 0
         }
 
         if ($failedHeartbeats -gt $failedHeartbeatThreshold) {
-            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to get job status updates after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
+            Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } | Out-Null # Try the command one more time to get failure in logs
+            Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
             $vm = Get-VM2 -Name $($currentItem.vmName)
             Stop-VM -VM $vm -TurnOff | Out-Null
             Start-Sleep -Seconds 5
@@ -626,6 +631,7 @@ $global:VM_Config = {
             # Check if complete
             $complete = $status.ScriptBlockOutput -eq "Complete!"
         }
+
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
     # NLA Service starts before domain is ready sometimes, and causes RDP to fail because network is considered public by firewall.
