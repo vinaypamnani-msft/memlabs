@@ -208,10 +208,8 @@ function Write-Exception {
         $AdditionalInfo
     )
 
-    $crashLogsFolder = Join-Path $PSScriptRoot "crashlogs"
-    if (-not (Test-Path $crashLogsFolder)) { New-Item -Path $crashLogsFolder -ItemType Directory -Force | Out-Null }
     $guid = (New-Guid).Guid
-    $crashFile = Join-Path $crashLogsFolder "$guid.txt"
+    $crashFile = Join-Path $Common.CrashLogsPath "$guid.txt"
 
     $sb = [System.Text.StringBuilder]::new()
 
@@ -1947,6 +1945,7 @@ if (-not $Common.Initialized) {
         StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
         StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
         LogPath               = Join-Path $logsPath "VMBuild.log"                                         # Log File
+        CrashLogsPath         = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
         RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
         VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
         DevBranch             = $devBranch                                                                # Git dev branch
@@ -1990,6 +1989,11 @@ if (-not $Common.Initialized) {
 
     # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
     Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
+    $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
+    if (Test-Path $oldCrashPath) {
+        Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+    }
 
     # Add HGS Registry key to allow local CA Cert
     New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
