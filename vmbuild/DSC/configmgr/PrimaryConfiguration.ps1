@@ -221,24 +221,12 @@
             DependsOn    = "[WriteEvent]WriteJoinDomain"
         }
 
-        $waitOnDependency = @('[InstallADK]ADKInstall')
-        foreach ($server in $waitOnDomainJoin) {
-
-            VerifyComputerJoinDomain "WaitFor$server" {
-                ComputerName = $server
-                Ensure       = "Present"
-                DependsOn    = "[InstallADK]ADKInstall"
-            }
-
-            $waitOnDependency += "[VerifyComputerJoinDomain]WaitFor$server"
-        }
-
         if ($installSQL) {
 
             if ($sqlUpdateEnabled) {
 
                 WriteStatus DownloadSQLCU {
-                    DependsOn = $waitOnDependency
+                    DependsOn = '[InstallADK]ADKInstall'
                     Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
                 }
 
@@ -258,13 +246,25 @@
             }
             else {
                 WriteStatus WaitDomainJoin {
-                    DependsOn = $waitOnDependency
+                    DependsOn = '[InstallADK]ADKInstall'
                     Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
                 }
             }
 
+            $waitOnDependency = @('[WriteStatus]WaitDomainJoin')
+            foreach ($server in $waitOnDomainJoin) {
+
+                VerifyComputerJoinDomain "WaitFor$server" {
+                    ComputerName = $server
+                    Ensure       = "Present"
+                    DependsOn    = "[WriteStatus]WaitDomainJoin"
+                }
+
+                $waitOnDependency += "[VerifyComputerJoinDomain]WaitFor$server"
+            }
+
             WriteStatus InstallSQL {
-                DependsOn = "[WriteStatus]WaitDomainJoin"
+                DependsOn = $waitOnDependency
                 Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
             }
 
