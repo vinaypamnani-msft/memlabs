@@ -34,7 +34,21 @@ function Get-VMSwitch2 {
     )
 
     return (Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -like "*$NetworkName*" })
+}
 
+function Remove-VMSwitch2 {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $NetworkName,
+        [Parameter()]
+        [switch] $WhatIf
+    )
+
+    $switch = Get-VMSwitch2 -NetworkName $NetworkName
+    if ($switch) {
+        Write-Log "Hyper-V VM Switch '$($switch.Name)' exists. Removing." -SubActivity
+        $switch | Remove-VMSwitch -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+    }
 }
 
 function Start-VM2 {
