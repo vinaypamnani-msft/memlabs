@@ -24,7 +24,6 @@ if (-not $InternalUseOnly.IsPresent) {
 }
 
 $configDir = Join-Path $PSScriptRoot "config"
-$sampleDir = Join-Path $PSScriptRoot "config\reserved"
 
 Write-Host -ForegroundColor Cyan ""
 Write-Host -ForegroundColor Green "New-Lab Configuration generator:"
@@ -1370,27 +1369,47 @@ function Select-NewDomainConfig {
             }
         }
 
-        $CASJson = Join-Path $sampleDir "Hierarchy.json"
-        $PRIJson = Join-Path $sampleDir "Standalone.json"
-        $NoCMJson = Join-Path $sampleDir "NoConfigMgr.json"
-        $TPJson = Join-Path $sampleDir "TechPreview.json"
+
+        $templateDomain = "TEMPLATE2222.com"
+        $newconfig = New-UserConfig -Domain $templateDomain -Subnet "10.234.241.0"
+        $test = $false
+        $version = $null
         switch ($response.ToLowerInvariant()) {
-            "1" { $newConfig = Get-Content $CASJson -Force | ConvertFrom-Json }
-            "2" { $newConfig = Get-Content $PRIJson -Force | ConvertFrom-Json }
+            "1" {
+                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "CAS" -Domain $templateDomain -ConfigToModify $newconfig -SiteCode "CS1" -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
+                $version = "current-branch"
+            }
+
+            "2" {
+                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -SiteCode "PS1" -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
+                $version = "current-branch"
+
+            }
             "3" {
-                $newConfig = Get-Content $TPJson -Force | ConvertFrom-Json
+                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -SiteCode "PS1" -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
+                #$newConfig = Get-Content $TPJson -Force | ConvertFrom-Json
                 $usedPrefixes = Get-List -Type UniquePrefix
                 if ("CTP-" -notin $usedPrefixes) {
                     $prefix = "CTP-"
                     $domain = "techpreview.com"
                 }
+                $version = "tech-preview"
             }
-            "4" { $newConfig = Get-Content $NoCMJson -Force | ConvertFrom-Json }
+            "4" {
+                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
+            }
         }
-        #Dummy Values that are likely not to be already used to pass intial validation.
-        $newConfig.vmOptions.domainName = "TEMPLATE2222.com"
-        $newConfig.vmOptions.network = "10.234.241.0"
-        $newConfig.vmOptions.prefix = "z4w"
         $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
 
         if ($valid) {
@@ -1405,6 +1424,9 @@ function Select-NewDomainConfig {
                 Write-Verbose "Prefix = $prefix"
                 $newConfig.vmOptions.domainName = $domain
                 $newConfig.vmOptions.prefix = $prefix
+                if ($version) {
+                    $newConfig.cmOptions.version = $version
+                }
                 $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
                 if (-not $valid) {
                     $domain = $null
@@ -2027,34 +2049,20 @@ function Select-ExistingSubnets {
     return [string]$response
 }
 
-function Get-ExistingConfig {
+function New-UserConfig {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [String] $Domain,
         [Parameter(Mandatory = $true, HelpMessage = "Subnet Name")]
-        [string] $Subnet,
-        [Parameter(Mandatory = $true, HelpMessage = "Role")]
-        [String] $Role,
-        [Parameter(Mandatory = $false, HelpMessage = "Parent Site code, if we are deploying a primary in a heirarchy")]
-        [string] $parentSiteCode = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
-        [string] $SiteCode = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
-        [bool] $test = $false
-
+        [string] $Subnet
     )
-
 
     $adminUser = (Get-List -Type vm -DomainName $Domain | Where-Object { $_.Role -eq "DC" }).adminName
 
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
     }
-
-    Write-Verbose "[Get-ExistingConfig] Generating $Domain $Subnet $role $parentSiteCode"
-
-    #    $prefix = Get-List -Type UniquePrefix -Domain $Domain | Select-Object -First 1
     $prefix = get-PrefixForDomain -Domain $Domain
     if ([string]::IsNullOrWhiteSpace($prefix)) {
         $prefix = "NULL-"
@@ -2073,6 +2081,30 @@ function Get-ExistingConfig {
         vmOptions       = $vmOptions
         virtualMachines = $()
     }
+    return $configGenerated
+}
+function Get-ExistingConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [String] $Domain,
+        [Parameter(Mandatory = $true, HelpMessage = "Subnet Name")]
+        [string] $Subnet,
+        [Parameter(Mandatory = $true, HelpMessage = "Role")]
+        [String] $Role,
+        [Parameter(Mandatory = $false, HelpMessage = "Parent Site code, if we are deploying a primary in a heirarchy")]
+        [string] $parentSiteCode = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
+        [string] $SiteCode = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
+        [bool] $test = $false
+
+    )
+
+    Write-Verbose "[Get-ExistingConfig] Generating $Domain $Subnet $role $parentSiteCode"
+
+    $configGenerated = New-UserConfig -Domain $Domain -Subnet $Subnet
+
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated $($configGenerated.vmOptions.domainName)"
     Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -parentSiteCode $parentSiteCode -SiteCode $SiteCode -Quiet:$true -test:$test
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated"
