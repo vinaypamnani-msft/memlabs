@@ -115,7 +115,7 @@ configuration PassiveSiteConfiguration
         InstallDotNet4 DotNet {
             DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
             FileName    = "ndp48-x86-x64-allos-enu.exe"
-            NetVersion  = "528049"
+            NetVersion  = "528040"
             Ensure      = "Present"
             DependsOn   = "[WriteStatus]InstallDotNet"
         }
