@@ -112,7 +112,11 @@ function Select-ConfigMenu {
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%white%green" }
         }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load saved config from File%gray%green"; "*B3" = ""; }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load saved config from File%gray%green"; }
+        if ($Global:common.Devbranch){
+            $customOptions += [ordered]@{"4" = "Load TEST config from File%gray%yellow"; }
+        }
+        $customOptions += [ordered]@{"*B3" = ""; }
         $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
         $vmsTotal = (Get-List -Type VM | Measure-Object).Count
         $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
@@ -140,6 +144,10 @@ function Select-ConfigMenu {
             "2" { $SelectedConfig = Show-ExistingNetwork }
             #"3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "3" { $SelectedConfig = Select-Config $configDir -NoMore }
+            "4" {
+                $testPath = Join-Path $configDir "tests"
+                $SelectedConfig = Select-Config $testPath -NoMore
+            }
             "!" {
                 $SelectedConfig = $Global:SavedConfig
                 $Global:SavedConfig = $null
@@ -1396,7 +1404,6 @@ function Select-NewDomainConfig {
                 Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -SiteCode "CTP" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
-                #$newConfig = Get-Content $TPJson -Force | ConvertFrom-Json
                 $usedPrefixes = Get-List -Type UniquePrefix
                 if ("CTP-" -notin $usedPrefixes) {
                     $prefix = "CTP-"
@@ -1466,6 +1473,11 @@ function Select-Config {
         [Parameter(Mandatory = $false, HelpMessage = "will hide the [M] More options when we go into the submenu")]
         [switch] $NoMore
     )
+
+    if (-not (Test-Path $ConfigPath)) {
+        write-log "No files found in $configPath"
+        return
+    }
     $files = @()
     $files += Get-ChildItem $ConfigPath\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
     $files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
@@ -1488,7 +1500,7 @@ function Select-Config {
 
         Write-Host
         Write-Verbose "3 Select-Config"
-        $response = Read-Host2 -Prompt "Which config do you want to deploy"
+        $response = Read-Host2 -Prompt "Which config do you want to load"
         try {
             if ([int]$response -is [int]) {
                 if ([int]$response -le [int]$i -and [int]$response -gt 0 ) {
