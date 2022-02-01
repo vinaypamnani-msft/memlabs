@@ -113,7 +113,7 @@ function Select-ConfigMenu {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%white%green" }
         }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load saved config from File%gray%green"; }
-        if ($Global:common.Devbranch){
+        if ($Global:common.Devbranch) {
             $customOptions += [ordered]@{"4" = "Load TEST config from File%gray%yellow"; }
         }
         $customOptions += [ordered]@{"*B3" = ""; }
@@ -4281,7 +4281,12 @@ if ($InternalUseOnly.IsPresent) {
             Select-StopDomain -domain $Global:DeployConfig.vmOptions.DomainName -response "C"
             $filename = $splitpath = Split-Path -Path $return.ConfigFileName -Leaf
             $comment = [System.Io.Path]::GetFileNameWithoutExtension($filename)
-            get-SnapshotDomain -domain $Global:DeployConfig.vmOptions.DomainName -comment $comment
+            if ($comment -ne $splitpath) {
+                get-SnapshotDomain -domain $Global:DeployConfig.vmOptions.DomainName -comment $comment
+            }
+            else {
+                get-SnapshotDomain -domain $Global:DeployConfig.vmOptions.DomainName
+            }
             Select-StartDomain -domain $Global:DeployConfig.vmOptions.DomainName -response "C"
         }
     }
