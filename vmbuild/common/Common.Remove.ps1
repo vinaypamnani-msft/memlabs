@@ -65,7 +65,7 @@ function Remove-Orphaned {
         [switch] $WhatIf
     )
 
-    Write-Log "Detecting orphaned Virtual Machines, DHCP Scopes and Hyper-V Switches" -Activity
+    Write-Log "Detecting orphaned Virtual Machines" -Activity
     $virtualMachines = Get-List -Type VM
     foreach ($vm in $virtualMachines) {
 
@@ -88,6 +88,7 @@ function Remove-Orphaned {
     $vmNetworksInUse = Get-List -Type UniqueSubnet -SmartUpdate
     $vmNetworksInUse2 = $vmNetworksInUse -replace "Internet", "172.31.250.0"
 
+    Write-Log "Detecting orphaned DHCP Scopes" -Activity
     $scopes = Get-DhcpServerv4Scope
     foreach ($scope in $scopes) {
         $scopeId = $scope.ScopeId.IPAddressToString # This requires us to replace "Internet" with subnet
@@ -100,6 +101,7 @@ function Remove-Orphaned {
         }
     }
 
+    Write-Log "Detecting orphaned Hyper-V Switches" -Activity
     $switches = Get-VMSwitch -SwitchType Internal
     foreach ($switch in $switches) {
         $inUse = $false
@@ -214,6 +216,8 @@ function Remove-All {
             Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
         }
     }
+
+    Remove-Orphaned -WhatIf:$WhatIf
 
     Write-Host
 
