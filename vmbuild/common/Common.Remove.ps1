@@ -66,7 +66,7 @@ function Remove-Orphaned {
     )
 
     Write-Log "Detecting orphaned Virtual Machines" -Activity
-    $virtualMachines = Get-List -Type VM
+    $virtualMachines = Get-List -Type VM -SmartUpdate
     foreach ($vm in $virtualMachines) {
 
         if (-not $vm.Domain) {
@@ -116,7 +116,7 @@ function Remove-Orphaned {
             Write-Host
             $response = Read-Host -Prompt "Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]"
             if ($response.ToLowerInvariant() -eq "y") {
-                $switch | Remove-VMSwitch -Force -WhatIf:$WhatIf
+                Remove-VMSwitch2 -NetworkName $switch.Name
             }
         }
     }
