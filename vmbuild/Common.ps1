@@ -1920,6 +1920,7 @@ if (-not $Common.Initialized) {
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
+    $logsPath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "logs")                      # Path for log files
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
     # Get latest hotfix version
@@ -1945,7 +1946,7 @@ if (-not $Common.Initialized) {
         StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
         StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
         StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
-        LogPath               = Join-Path $PSScriptRoot "VMBuild.log"                                     # Log File
+        LogPath               = Join-Path $logsPath "VMBuild.log"                                         # Log File
         RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
         VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
         DevBranch             = $devBranch                                                                # Git dev branch
@@ -1986,6 +1987,9 @@ if (-not $Common.Initialized) {
             Update-VMInformation -vm $vm2
         }
     }
+
+    # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
+    Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
 
     # Add HGS Registry key to allow local CA Cert
     New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null

@@ -11,6 +11,7 @@ _fileList_develop.json
 
 # Ignore vmbuild log(s)
 *.log
+/vmbuild/logs
 /vmbuild/crashlogs
 
 # Ignore winre.wim, created by WindowsImageTools module
@@ -30,6 +31,7 @@ _fileList_develop.json
 # Ignore everything that is not inside /vmbuild/baseimagestaging/filesToInject/staging
 
 /vmbuild/baseimagestaging/*
+!/vmbuild/baseimagestaging/*.ps1
 !/vmbuild/baseimagestaging/_toolsList.json
 !/vmbuild/baseimagestaging/filestoInject/
 /vmbuild/baseimagestaging/filestoInject/*

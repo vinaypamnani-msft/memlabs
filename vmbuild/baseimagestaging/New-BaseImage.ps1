@@ -31,7 +31,8 @@ param (
 $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
 
 # Dot source common
-. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
+$RootPath = Split-Path -Path $PSScriptRoot -Parent
+. $RootPath\Common.ps1 -VerboseEnabled:$enableVerbose
 
 # Validate token exists
 if ($Common.FatalError) {
