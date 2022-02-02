@@ -1018,29 +1018,22 @@ function Get-ValidSubnets {
 function Get-NewMachineName {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
-        [String] $Domain,
-        [Parameter(Mandatory = $true, HelpMessage = "Role of the new machine")]
-        [String] $Role,
-        [Parameter(Mandatory = $false, HelpMessage = "OS of the new machine")]
-        [String] $OS,
-        [Parameter(Mandatory = $false, HelpMessage = "Site Code")]
-        [String] $SiteCode,
-        [Parameter(Mandatory = $false, HelpMessage = "Install MP")]
-        [Bool] $InstallMP,
-        [Parameter(Mandatory = $false, HelpMessage = "Install DP")]
-        [Bool] $InstallDP,
-        [Parameter(Mandatory = $false, HelpMessage = "Current Machine Name")]
-        [String] $CurrentName,
+        [Parameter(Mandatory = $true, HelpMessage = "VM to rename")]
+        [object] $vm,
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
         [Object] $ConfigToCheck = $global:config
     )
 
     #Get-PSCallStack | Out-Host
-    $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
-    $ConfigCount = ($ConfigToCheckvirtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
-    Write-Verbose "[Get-NewMachineName] found $RoleCount machines in HyperV with role $Role"
-    $RoleName = $Role
+
+    $Domain = $vm.vmOptions.DomainName
+    $OS = $vm.OperatingSystem
+    $SiteCode = $vm.SiteCode
+    $InstallDP = $vm.InstallDP
+    $InstallMP = $vm.InstallMP
+    $CurrentName = $vm.vmName
+    $Role = $vm.Role
+    $RoleName = $vm.Role
     if ($Role -eq "OSDClient") {
         $RoleName = "OSD"
     }
@@ -1053,14 +1046,18 @@ function Get-NewMachineName {
         }
 
         if ($OS -like "*Server*") {
-            if (($ConfigToCheck.vmOptions.prefix.length) -gt 4) {
-                $RoleName = "Srv"
+            if ($vm.SqlVersion) {
+                $RoleName = "SQL"
             }
             else {
-                $RoleName = "Server"
+                if (($ConfigToCheck.vmOptions.prefix.length) -gt 4) {
+                    $RoleName = "Srv"
+                }
+                else {
+                    $RoleName = "Server"
+                }
             }
-            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "*Server*" } | Measure-Object).Count
-            $ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "*Server*" } | Measure-Object).count
+
         }
         else {
             if (($ConfigToCheck.vmOptions.prefix.length) -gt 4) {
@@ -1069,8 +1066,7 @@ function Get-NewMachineName {
             else {
                 $RoleName = "Client"
             }
-            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { -not ($_.deployedOS -like "*Server*") } | Measure-Object).Count
-            $ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { -not ($_.OperatingSystem -like "*Server*") } | Measure-Object).count
+
 
         }
 
@@ -1090,30 +1086,25 @@ function Get-NewMachineName {
         Write-Verbose "Rolename is now $RoleName"
 
         if ($OS -like "Windows 10*") {
-            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "Windows 10*" } | Measure-Object).Count
-            $ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "Windows 10*" } | Measure-Object).count
+
             $RoleName = "W10" + $RoleName
         }
         if ($OS -like "Windows 11*") {
-            $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -like "Windows 11*" } | Measure-Object).Count
-            $ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -like "Windows 11*" } | Measure-Object).count
+
             $RoleName = "W11" + $RoleName
         }
 
         switch ($OS) {
             "Server 2022" {
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -eq "Server 2022" } | Measure-Object).Count
-                $ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -eq "Server 2022" } | Measure-Object).count
+
                 $RoleName = "W22" + $RoleName
             }
             "Server 2019" {
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -eq "Server 2019" } | Measure-Object).Count
-                $ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -eq "Server 2019" } | Measure-Object).count
+
                 $RoleName = "W19" + $RoleName
             }
             "Server 2016" {
-                $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Where-Object { $_.deployedOS -eq "Server 2016" } | Measure-Object).Count
-                $ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role } | Where-Object { $_.OperatingSystem -eq "Server 2016" } | Measure-Object).count
+
                 $RoleName = "W16" + $RoleName
             }
             Default {}
@@ -1143,31 +1134,22 @@ function Get-NewMachineName {
 
     if ($role -eq "DPMP") {
         $RoleName = $siteCode + $role
-        $RoleCount = 0
-        $ConfigCount = 0
+
         if ($InstallMP -and -not $InstallDP) {
             $RoleName = $siteCode + "MP"
-            #$RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role -and ($_.installMP -eq $true -or $null -eq $_.installMP)} | Measure-Object).Count
-            #$ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role -and $_.installMP -eq $true -and $CurrentName -ne $_.vmName} | Measure-Object).count
-            $RoleCount = 0
-            $ConfigCount = 0
+
         }
         if ($InstallDP -and -not $InstallMP) {
             $RoleName = $siteCode + "DP"
-            #$RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role -and ($_.installDP -eq $true -or $null -eq $_.installDP)} | Measure-Object).Count
-            #$ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role -and $_.installDP -eq $true -and $CurrentName -ne $_.vmName} | Measure-Object).count
-            $RoleCount = 0
-            $ConfigCount = 0
+
         }
 
     }
     if ($Role -eq "FileServer") {
         $RoleName = "FS"
-        $RoleCount = (get-list -Type VM -DomainName $Domain | Where-Object { $_.Role -eq $Role } | Measure-Object).Count
-        $ConfigCount = ($ConfigToCheck.virtualMachines | Where-Object { $_.Role -eq $Role } | Measure-Object).count
+
     }
-    Write-Verbose "[Get-NewMachineName] found $ConfigCount machines in Config with role $Role"
-    #$TotalCount = [int]$RoleCount + [int]$ConfigCount
+
 
     [int]$i = 1
     while ($true) {
@@ -2917,7 +2899,7 @@ function Get-AdditionalValidations {
                 write-host -ForegroundColor Yellow "Can not install an MP for a secondary site"
                 $property.installMP = $false
             }
-            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
+            $newName = Get-NewMachineName -vm $property
             if ($($property.vmName) -ne $newName) {
                 $rename = $true
                 $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
@@ -2932,7 +2914,7 @@ function Get-AdditionalValidations {
             }
         }
         "installDP" {
-            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
+            $newName = Get-NewMachineName -vm $property
             if ($($property.vmName) -ne $newName) {
                 $rename = $true
                 $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
@@ -2962,7 +2944,7 @@ function Get-AdditionalValidations {
                 }
             }
 
-            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -SiteCode $value -CurrentName $property.vmName
+            $newName = Get-NewMachineName -vm $property
             $NewSSName = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newName }
             if ($NewSSName) {
                 write-host
@@ -3243,7 +3225,7 @@ function Select-Options {
                     Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
                     if ($property.role -eq "DomainMember") {
                         if (-not $property.SqlVersion) {
-                            $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -CurrentName $property.vmName
+                            $newName = Get-NewMachineName -vm $property
                             if ($($property.vmName) -ne $newName) {
                                 $rename = $true
                                 $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
@@ -3307,7 +3289,7 @@ function Select-Options {
                     }
                     if ($property.role -eq "DPMP") {
                         Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
-                        $newName = Get-NewMachineName -Domain $Global:Config.vmOptions.DomainName -Role $property.role -OS $property.operatingSystem -ConfigToCheck $Global:Config -InstallMP $property.installMP -InstallDP $property.installDP -CurrentName $property.vmName -SiteCode $property.siteCode
+                        $newName = Get-NewMachineName -vm $property
                         if ($($property.vmName) -ne $newName) {
                             $rename = $true
                             $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
@@ -3608,7 +3590,9 @@ function Add-NewVMForRole {
                     $parentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
                 }
             }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
+            if ($parentSiteCode) {
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
+            }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
@@ -3693,10 +3677,10 @@ function Add-NewVMForRole {
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
         if ($virtualMachine.InstallMP -or $virtualMachine.InstallDP) {
-            $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig -InstallMP $virtualMachine.installMP -InstallDP $virtualMachine.installDP -CurrentName $virtualMachine.vmName
+            $machineName = Get-NewMachineName -ConfigToCheck $oldConfig -vm $virtualMachine
         }
         else {
-            $machineName = Get-NewMachineName $Domain $actualRoleName -OS $virtualMachine.OperatingSystem -SiteCode $SiteCode -ConfigToCheck $oldConfig -CurrentName $virtualMachine.vmName
+            $machineName = Get-NewMachineName -ConfigToCheck $oldConfig -vm $virtualMachine
         }
         Write-Verbose "Machine Name Generated $machineName"
     }
@@ -4016,12 +4000,40 @@ function Select-VirtualMachines {
                                             $virtualMachine.memory = "6GB"
                                         }
                                     }
+
+                                    $newName = Get-NewMachineName -vm $virtualMachine
+                                    if ($($virtualMachine.vmName) -ne $newName) {
+                                        $rename = $true
+                                        $response = Read-Host2 -Prompt "Rename $($virtualMachine.vmName) to $($newName)? (Y/n)" -HideHelp
+                                        if (-not [String]::IsNullOrWhiteSpace($response)) {
+                                            if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                                                $rename = $false
+                                            }
+                                        }
+                                        if ($rename -eq $true) {
+                                            $virtualMachine.vmName = $newName
+                                        }
+                                    }
+
                                 }
                             }
                             if ($newValue -eq "X") {
                                 $virtualMachine.psobject.properties.remove('sqlversion')
                                 $virtualMachine.psobject.properties.remove('sqlInstanceDir')
                                 $virtualMachine.psobject.properties.remove('sqlInstanceName')
+                                $newName = Get-NewMachineName -vm $virtualMachine
+                                if ($($virtualMachine.vmName) -ne $newName) {
+                                    $rename = $true
+                                    $response = Read-Host2 -Prompt "Rename $($virtualMachine.vmName) to $($newName)? (Y/n)" -HideHelp
+                                    if (-not [String]::IsNullOrWhiteSpace($response)) {
+                                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                                            $rename = $false
+                                        }
+                                    }
+                                    if ($rename -eq $true) {
+                                        $virtualMachine.vmName = $newName
+                                    }
+                                }
                             }
                             if ($newValue -eq "A") {
                                 if ($null -eq $virtualMachine.additionalDisks) {
@@ -4204,7 +4216,7 @@ do {
     $Global:configfile = $null
     $Global:Config = Select-ConfigMenu
 
-    $Global:DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
+    # $DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
 
     $valid = $false
     while ($valid -eq $false) {
@@ -4264,6 +4276,7 @@ do {
         }
     }
 } while ($null -ne $Global:SavedConfig -and $global:StartOver -eq $true)
+
 $return.ConfigFileName = Save-Config $Global:Config
 
 if (-not $InternalUseOnly.IsPresent) {
@@ -4273,21 +4286,21 @@ if (-not $InternalUseOnly.IsPresent) {
 
 #================================= NEW LAB SCENERIO ============================================
 if ($InternalUseOnly.IsPresent) {
-    $domainExists = Get-List -Type VM -DomainName $Global:DeployConfig.vmOptions.domainName
+    $domainExists = Get-List -Type VM -DomainName $Global:Config.vmOptions.domainName
     if ($domainExists) {
-        write-host -ForegroundColor Green "This configuration will make modifications to $($Global:DeployConfig.vmOptions.DomainName)"
+        write-host -ForegroundColor Green "This configuration will make modifications to $($Global:Config.vmOptions.DomainName)"
         $response = Read-Host2 -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (Y/n)" -HideHelp
         if ([String]::IsNullOrWhiteSpace($response) -or $response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes" ) {
-            Select-StopDomain -domain $Global:DeployConfig.vmOptions.DomainName -response "C"
+            Select-StopDomain -domain $Global:Config.vmOptions.DomainName -response "C"
             $filename = $splitpath = Split-Path -Path $return.ConfigFileName -Leaf
             $comment = [System.Io.Path]::GetFileNameWithoutExtension($filename)
             if ($comment -ne $splitpath) {
-                get-SnapshotDomain -domain $Global:DeployConfig.vmOptions.DomainName -comment $comment
+                get-SnapshotDomain -domain $Global:Config.vmOptions.DomainName -comment $comment
             }
             else {
-                get-SnapshotDomain -domain $Global:DeployConfig.vmOptions.DomainName
+                get-SnapshotDomain -domain $Global:Config.vmOptions.DomainName
             }
-            Select-StartDomain -domain $Global:DeployConfig.vmOptions.DomainName -response "C"
+            Select-StartDomain -domain $Global:Config.vmOptions.DomainName -response "C"
         }
     }
     return $return

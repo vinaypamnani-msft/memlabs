@@ -22,7 +22,7 @@ function Get-UserConfiguration {
     # Get deployment configuration
     $configPath = Join-Path $Common.ConfigPath $Configuration
     if (-not (Test-Path $configPath)) {
-        $sampleConfigPath = Join-Path $Common.ConfigPath "reserved\$Configuration"
+        $sampleConfigPath = Join-Path $Common.ConfigPath "tests\$Configuration"
         if (-not (Test-Path $sampleConfigPath)) {
             $return.Message = "Get-UserConfiguration: $Configuration not found in $configPath or $sampleConfigPath. Please create the config manually or use genconfig.ps1, and try again."
             return $return
