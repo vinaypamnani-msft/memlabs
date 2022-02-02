@@ -11,7 +11,6 @@ $global:VM_Create = {
     $azureFileList = $using:Common.AzureFileList
 
     # Params for child script blocks
-    $cmDscFolder = "configmgr"
     $createVM = $true
     if ($currentItem.hidden -eq $true) { $createVM = $false }
 
@@ -221,13 +220,12 @@ $global:VM_Create = {
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to copy required PS modules to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
     }
-    Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC\$cmDscFolder" -Destination "C:\staging\DSC" -Recurse -Container -Force
+    Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
     Write-Log "PSJOB: $($currentItem.vmName): Expanding modules inside the VM."
     $Expand_Archive = {
-        param($cmDscFolder)
-        $zipPath = "C:\staging\DSC\$cmDscFolder\DSC.zip"
-        $extractPath = "C:\staging\DSC\$cmDscFolder\modules"
+        $zipPath = "C:\staging\DSC\DSC.zip"
+        $extractPath = "C:\staging\DSC\modules"
         try {
             Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
         }
@@ -240,10 +238,21 @@ $global:VM_Create = {
 
             Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
         }
+
+        # Do some cleanup after we re-worked folder structure
+        try {
+            Remove-Item -Path "C:\staging\DSC\configmgr\modules" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+            Remove-Item -Path "C:\staging\DSC\configmgr\TemplateHelpDSC" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+            Remove-Item -Path "C:\staging\DSC\configmgr\DSC.zip" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+            Remove-Item -Path "C:\staging\DSC\createGuestDscZip.ps1" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+            Remove-Item -Path "C:\staging\DSC\DummyConfig.ps1" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+        }
+        catch {
+        }
     }
 
     # Extract DSC modules
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -ArgumentList $cmDscFolder
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -283,8 +292,6 @@ $global:VM_Create = {
     # Install DSC Modules
     $DSC_InstallModules = {
 
-        param($cmDscFolder)
-
         # Create init log
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
@@ -292,7 +299,7 @@ $global:VM_Create = {
 
         # Install modules
         "Installing modules" | Out-File $log -Append
-        $modules = Get-ChildItem -Path "C:\staging\DSC\$cmDscFolder\modules" -Directory
+        $modules = Get-ChildItem -Path "C:\staging\DSC\modules" -Directory
         foreach ($folder in $modules) {
             try {
                 Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction Stop
@@ -310,7 +317,7 @@ $global:VM_Create = {
 
     Write-Log "PSJOB: $($currentItem.vmName): Installing DSC Modules."
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -ArgumentList $cmDscFolder -DisplayName "DSC: Install Modules"
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -DisplayName "DSC: Install Modules"
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return

@@ -31,6 +31,8 @@ class InstallADK {
             Start-BitsTransfer -Source $adkurl -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
+
+
         $_adkWinPEpath = $this.ADKWinPEPath
         if (!(Test-Path $_adkWinPEpath)) {
             # $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"  # ADK add-on (19041)

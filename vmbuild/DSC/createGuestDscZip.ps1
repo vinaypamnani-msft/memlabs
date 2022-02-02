@@ -4,13 +4,14 @@ param(
     [switch]$force
 )
 
-if (-not $vmName) {
-    Write-Host "Specify VMName."
-    return
+if (-not $configName) {
+    Write-Host "Using test config: CSTest1-A-CSPS.json, and test VM Name: CT1-DC1"
+    $configName = "CSTest1-A-CSPS.json"
+    $vmName = "CT1-DC1"
 }
 
-if (-not $configName) {
-    Write-Host "Specify configName."
+if (-not $vmName) {
+    Write-Host "Specify configName and vmName."
     return
 }
 
@@ -34,7 +35,9 @@ $modules = @(
     'DnsServerDsc',
     'SqlServerDsc',
     'xDhcpServer',
-    'NetworkingDsc'
+    'NetworkingDsc',
+    'xFailOverCluster',
+    'AccessControlDsc'
 )
 
 foreach ($module in $modules) {
@@ -72,18 +75,15 @@ Add-PerVMSettings -deployConfig $result.DeployConfig -thisVM $ThisVM
 $filePath = "C:\temp\deployConfig.json"
 $result.DeployConfig | ConvertTo-Json -Depth 3 | Out-File $filePath -Force
 
-# DSC folder name
-$dscFolder = "configmgr"
-
 # Create local compressed file and inject appropriate appropriate TemplateHelpDSC
-Write-Host "Creating DSC.zip for $dscFolder.."
-Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\$dscFolder\DSC.zip -Force -Confirm:$false
-Write-Host "Adding $dscFolder TemplateHelpDSC to DSC.ZIP.."
-Compress-Archive -Path .\$dscFolder\TemplateHelpDSC -Update -DestinationPath .\$dscFolder\DSC.zip
+Write-Host "Creating DSC.zip..."
+Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\DSC.zip -Force -Confirm:$false
+Write-Host "Adding TemplateHelpDSC to DSC.ZIP.."
+Compress-Archive -Path .\TemplateHelpDSC -Update -DestinationPath .\DSC.zip
 
 # install templatehelpdsc module on this machine
-Write-Host "Installing $dscFolder TemplateHelpDSC on this machine.."
-Copy-Item .\$dscFolder\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
+Write-Host "Installing TemplateHelpDSC on this machine.."
+Copy-Item .\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
 
 # Create test config, for testing if the config definition is good.
 $role  = $ThisVM.role
@@ -99,6 +99,7 @@ Write-Host "Creating a test config for $role in C:\Temp"
 if ($Common.LocalAdmin) { $adminCreds = $Common.LocalAdmin }
 else { $adminCreds = Get-Credential }
 
+$dscFolder = "configmgr"
 . ".\$dscFolder\$($role)Configuration.ps1"
 
 # Configuration Data
