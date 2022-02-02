@@ -44,20 +44,7 @@
       <smartGroup>
         <properties>
           <expanded>True</expanded>
-          <name>DC</name>
-        </properties>
-        <ruleGroup operator="All">
-          <rule>
-            <property>Comment</property>
-            <operator>Matches</operator>
-            <value>"DC"</value>
-          </rule>
-        </ruleGroup>
-      </smartGroup>
-      <smartGroup>
-        <properties>
-          <expanded>True</expanded>
-          <name>Members</name>
+          <name>Servers</name>
         </properties>
         <ruleGroup operator="Any">
           <rule>
@@ -65,10 +52,36 @@
             <operator>Matches</operator>
             <value>"PlainMemberServer"</value>
           </rule>
+        </ruleGroup>
+      </smartGroup>
+      <smartGroup>
+        <properties>
+          <expanded>True</expanded>
+          <name>DomainServers</name>
+        </properties>
+        <ruleGroup operator="Any">
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
-            <value>"WorkgroupMember"</value>
+            <value>"DC"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"FileServer"</value>
+          </rule>
+        </ruleGroup>
+      </smartGroup>
+      <smartGroup>
+        <properties>
+          <expanded>True</expanded>
+          <name>Clients</name>
+        </properties>
+        <ruleGroup operator="Any">
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"PlainMemberClient"</value>
           </rule>
           <rule>
             <property>Comment</property>
@@ -112,11 +125,6 @@
             <property>Comment</property>
             <operator>Matches</operator>
             <value>"PassiveSite"</value>
-          </rule>
-          <rule>
-            <property>Comment</property>
-            <operator>Matches</operator>
-            <value>"FileServer"</value>
           </rule>
           <rule>
             <property>Comment</property>

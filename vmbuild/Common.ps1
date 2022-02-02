@@ -208,10 +208,8 @@ function Write-Exception {
         $AdditionalInfo
     )
 
-    $crashLogsFolder = Join-Path $PSScriptRoot "crashlogs"
-    if (-not (Test-Path $crashLogsFolder)) { New-Item -Path $crashLogsFolder -ItemType Directory -Force | Out-Null }
     $guid = (New-Guid).Guid
-    $crashFile = Join-Path $crashLogsFolder "$guid.txt"
+    $crashFile = Join-Path $Common.CrashLogsPath "$guid.txt"
 
     $sb = [System.Text.StringBuilder]::new()
 
@@ -586,21 +584,21 @@ function Test-NetworkSwitch {
         [string]$DomainName
     )
 
-    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $NetworkName }
+    $exists = Get-VMSwitch2 -NetworkName $NetworkName
     if (-not $exists) {
-        Write-Log "HyperV Network switch for $NetworkName not found. Creating a new one."
+        Write-Log "HyperV Network switch for '$NetworkName' not found. Creating a new one."
         try {
             New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Stop | Out-Null
         }
         catch {
-            Write-Log "HyperV Network switch for $NetworkName failed. Trying again in 30 seconds"
+            Write-Log "Failed to create HyperV Network switch for $NetworkName. Trying again in 30 seconds"
             start-sleep -seconds 30
             New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Continue | Out-Null
         }
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
     }
 
-    $exists = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -eq $NetworkName }
+    $exists = Get-VMSwitch2 -NetworkName $NetworkName
     if (-not $exists) {
         Write-Log "HyperV Network switch could not be created."
         return $false
@@ -609,7 +607,7 @@ function Test-NetworkSwitch {
     $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
 
     if (-not $adapter) {
-        Write-Log "Network adapter for $NetworkName was not found."
+        Write-Log "Network adapter for '$NetworkName' switch was not found."
         return $false
     }
 
@@ -618,7 +616,7 @@ function Test-NetworkSwitch {
 
     $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
     if ($currentIp.IPAddress -ne $desiredIp) {
-        Write-Log "$interfaceAlias IP is $($currentIp.IPAddress). Changing it to $desiredIp."
+        Write-Log "$interfaceAlias IP is '$($currentIp.IPAddress)'. Changing it to $desiredIp."
         New-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $desiredIp -PrefixLength 24 | Out-Null
         Start-Sleep -Seconds 5 # Sleep to make sure IP changed
     }
@@ -631,11 +629,11 @@ function Test-NetworkSwitch {
 
     $text = & netsh routing ip nat show interface
     if ($text -like "*$interfaceAlias*") {
-        Write-Log "'$interfaceAlias' interface is already present in NAT."
+        Write-Log "'$interfaceAlias' interface for '$NetworkName' is already present in NAT."
         return $true
     }
     else {
-        Write-Log "'$interfaceAlias' not found in NAT. Restarting RemoteAccess service before adding it."
+        Write-Log "'$interfaceAlias' interface for '$NetworkName' not found in NAT. Restarting RemoteAccess service before adding it."
         $success = $false
         while (-not $success) {
             try {
@@ -652,30 +650,36 @@ function Test-NetworkSwitch {
 
     $text = & netsh routing ip nat show interface
     if ($text -like "*$interfaceAlias*") {
-        Write-Log "'$interfaceAlias' interface added to NAT." -Success
+        Write-Log "'$interfaceAlias' interface for '$NetworkName' added to NAT." -Success
         return $true
     }
     else {
-        Write-Log "Unable to add '$interfaceAlias' to NAT." -Failure
+        Write-Log "Unable to add '$interfaceAlias' for '$NetworkName' to NAT." -Failure
         return $false
     }
 }
 
 function Test-DHCPScope {
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Parameters object of deploy Configuration.")]
-        [object]$ConfigParams
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]
+        [string]$ScopeID,
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope Name.")]
+        [string]$ScopeName,
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Domain Name option.")]
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "DC VM Name for extracting the DNS IP.")]
+        [string]$DCVMName
     )
 
-    $scopeID = $ConfigParams.DHCPScopeId
-    $scopeName = $ConfigParams.DHCPScopeName
-    $createScope = $false
-
+    # Define Lease Time
     $leaseTimespan = New-TimeSpan -Days 16
-    if ($scopeName -eq "Internet") {
+    $internetScope = $false
+    if ($ScopeName.ToLowerInvariant() -eq "internet") {
         $leaseTimespan = New-TimeSpan -Days 365
+        $internetScope = $true
     }
 
+    # Install DHCP, if not found
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
         Write-Log "DHCP is not installed. Installing..."
@@ -687,85 +691,78 @@ function Test-DHCPScope {
         }
     }
 
+    # Check if scope exists
+    $createScope = $false
     $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
     if ($scope) {
-        Write-Log "'$scopeID' scope is already present in DHCP."
-        $createScope = $false
+        Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
     }
     else {
         $createScope = $true
     }
 
+    # Define scope options
+    $network = $ScopeID.Substring(0, $ScopeID.LastIndexOf("."))
+    $DHCPDNSAddress = $network + ".1"
+    $DHCPDefaultGateway = $network + ".200"
+    $DHCPScopeStart = $network + ".20"
+    $DHCPScopeEnd = $network + ".199"
+
+    # Create scope, if needed
     if ($createScope) {
-        Add-DhcpServerv4Scope -Name $scopeName -StartRange $ConfigParams.DHCPScopeStart -EndRange $ConfigParams.DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction SilentlyContinue
-        $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorVariable ScopeErr -ErrorAction SilentlyContinue
+        Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction SilentlyContinue
+        $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction SilentlyContinue
         if ($scope) {
-            Write-Log "'$scopeID' scope added to DHCP."
+            Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
         }
         else {
-            Write-Log "Failed to add '$scopeID' to DHCP. $ScopeErr" -Failure
+            Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
             return $false
         }
     }
 
     try {
-        $HashArguments = @{
-            ScopeId   = $scopeID
-            Router    = $ConfigParams.DHCPDefaultGateway
-            DnsDomain = $ConfigParams.DomainName
-        }
 
-        if ($ConfigParams.DCName) {
-            $dcnet = Get-Vm -Name $ConfigParams.DCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
-        }
-
-        if (-not $dcnet -and $ConfigParams.ExistingDCName) {
-            $dcnet = Get-Vm -Name $ConfigParams.ExistingDCName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
-        }
-
-        if ($dcnet) {
-            $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
-            $HashArguments.Add("DnsServer", $dcIpv4)
-            $HashArguments.Add("WinsServer", $dcIpv4)
+        if ($internetScope) {
+            $HashArguments = @{
+                ScopeId = $ScopeID
+                Router  = $DHCPDefaultGateway
+            }
         }
         else {
-            $HashArguments.Add("DnsServer", $ConfigParams.DHCPDNSAddress)
+            $HashArguments = @{
+                ScopeId   = $ScopeID
+                Router    = $DHCPDefaultGateway
+                DnsDomain = $DomainName
+            }
+        }
+
+        if ($DCVMName -and -not $internetScope) {
+            $dcnet = Get-VM2 -Name $DCVMName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
+            if ($dcnet) {
+                $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
+                $HashArguments.Add("DnsServer", $dcIpv4)
+                $HashArguments.Add("WinsServer", $dcIpv4)
+            }
+            else {
+                $HashArguments.Add("DnsServer", $DHCPDNSAddress)
+            }
+        }
+
+        if ($internetScope) {
+            $DHCPDNSAddress = @("4.4.4.4", "8.8.8.8")
+            $HashArguments.Add("DnsServer", $DHCPDNSAddress)
         }
 
         Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
-        Write-Log "Added/updated scope options for '$scopeID' scope in DHCP." -Success
+        Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
         return $true
     }
     catch {
-        Write-Log "Failed to add/update scope options for '$scopeID' scope in DHCP. $_" -Failure
+        Write-Log "Failed to add/update scope options for '$ScopeID ($ScopeName)' scope in DHCP. $_" -Failure
         return $false
     }
 
-}
-
-function New-DhcpScopeDescription {
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Parameters object of deploy Configuration.")]
-        [object]$ConfigParams
-    )
-
-    try {
-        $scopeID = $ConfigParams.DHCPScopeId
-
-        $dhcpDesc = [PSCustomObject]@{
-            Domain  = $ConfigParams.domainName
-            DC      = $ConfigParams.DCName
-            Primary = $ConfigParams.PSName
-            CAS     = $ConfigParams.CSName
-        }
-
-        $dhcpDescJson = ($dhcpDesc | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-        Set-DhcpServerv4Scope -ScopeId $scopeID -Description $dhcpDescJson
-
-    }
-    catch {
-        Write-Log "Failed to add/update description for '$scopeID' scope in DHCP. $_" -Failure
-    }
 }
 
 function New-VmNote {
@@ -779,7 +776,7 @@ function New-VmNote {
         [Parameter(Mandatory = $false)]
         [bool]$InProgress,
         [Parameter(Mandatory = $false)]
-        [bool]$SkipVersionUpdate = $false
+        [switch]$UpdateVersion
     )
 
     try {
@@ -799,7 +796,7 @@ function New-VmNote {
             memLabsDeployVersion = $Common.MemLabsVersion
         }
 
-        if (-not $SkipVersionUpdate) {
+        if ($UpdateVersion.IsPresent) {
             $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $Common.MemLabsVersion -Force
         }
 
@@ -825,7 +822,7 @@ function Get-VMNote {
         [string]$VMName
     )
 
-    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    $vm = Get-VM2 -Name $VMName
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
@@ -883,13 +880,13 @@ function Set-VMNote {
 
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-    $vm = Get-Vm $VmName -ErrorAction SilentlyContinue
+    $vm = Get-VM2 $VmName
     if ($vm) {
         if ($vmVersionUpdated) {
             Write-Log "Setting VM Note for $vmName (version $vmVersion)" -Verbose
         }
         else {
-            Write-Log "Setting VM Note for $vmName" -Verbose
+            Write-Log "Setting VM Note for $vmName to $vmNoteJson" -Verbose -LogOnly
         }
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
     }
@@ -909,6 +906,22 @@ function Update-VMNoteVersion {
 
     $vmNote = Get-VMNote -VMName $VmName
     $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
+    Set-VMNote -vmName $VmName -vmNote $vmNote
+}
+
+function Update-VMNoteProperty {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyName,
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyValue
+    )
+
+    $vmNote = Get-VMNote -VMName $VmName
+    $vmNote | Add-Member -MemberType NoteProperty -Name $PropertyName -Value $PropertyValue -Force
     Set-VMNote -vmName $VmName -vmNote $vmNote
 }
 
@@ -1013,7 +1026,7 @@ function New-VirtualMachine {
     }
 
     # VM Exists
-    $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    $vmTest = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
     if ($vmTest -and $ForceNew.IsPresent) {
         Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is present."
         if ($vmTest.State -ne "Off") {
@@ -1103,7 +1116,7 @@ function New-VirtualMachine {
     Add-VMDvdDrive -VMName $VmName
 
     Write-Log "$VmName`: Changing boot order"
-    $f = Get-VM $VmName | Get-VMFirmware
+    $f = Get-VM2 -Name $VmName | Get-VMFirmware
     $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
     $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
     $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
@@ -1141,20 +1154,10 @@ function New-VirtualMachine {
         }
     }
 
-    try {
-        Write-Log "$VmName`: Starting virtual machine"
-        Start-VM -Name $VmName -ErrorAction Stop
-    }
-    catch {
-        try {
-            Write-Log "$VmName`: Failed to start newly created VM. $($_.Exception.Message). Retrying once..." -Warning
-            Start-Sleep -Seconds 60
-            Start-VM -Name $VmName -ErrorAction Stop
-        }
-        catch {
-            Write-Log "$VmName`: Failed to start newly created VM. $($_.Exception.Message)" -Failure
-            return $false
-        }
+    Write-Log "$VmName`: Starting virtual machine"
+    $started = Start-VM2 -Name $VmName -Passthru
+    if (-not $started) {
+        return $false
     }
 
     return $true
@@ -1210,7 +1213,7 @@ function Wait-ForVm {
         Write-Log "$VmName`: Waiting for VM to go in $VmState state..."
         do {
             try {
-                $vmTest = Get-VM -Name $VmName
+                $vmTest = Get-VM2 -Name $VmName
                 Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 $ready = $vmTest.State -eq $VmState
                 Start-Sleep -Seconds 5
@@ -1234,19 +1237,18 @@ function Wait-ForVm {
             # Check OOBE complete registry key
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
 
-            # Wait until OOBE is ready
+            if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $originalStatus -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Start-Sleep -Seconds 5
+            }
 
+            # Wait until OOBE is ready
             if ($null -ne $out.ScriptBlockOutput -and -not $readyOobe) {
                 Write-Log "$VmName`: OOBE State is $($out.ScriptBlockOutput)"
                 $status = $originalStatus
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
                 Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-                Start-Sleep -Seconds 5
-            }
-
-            if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $originalStatus -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 Start-Sleep -Seconds 5
             }
 
@@ -1518,8 +1520,8 @@ function Get-VmSession {
     }
 
     $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
-
-    $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
+    $vm = get-vm2 -Name $VmName
+    $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
         if ($VmDomainName -ne $VmName) {
             Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
@@ -1527,7 +1529,7 @@ function Get-VmSession {
             $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
             $cacheKey = $VmName + "-WORKGROUP"
             Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
-            $ps = New-PSSession -Name $VmName -VMName $VmName -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
+            $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
             if ($Err1.Count -ne 0) {
                 if ($ShowVMSessionError.IsPresent) {
                     Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
@@ -1897,9 +1899,12 @@ if ($currentBranch -and $currentBranch -notmatch "main") {
 ####################
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
+. $PSScriptRoot\common\Common.Validation.ps1
 . $PSScriptRoot\common\Common.RdcMan.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
+. $PSScriptRoot\common\Common.ScriptBlocks.ps1
+. $PSScriptRoot\common\Common.HyperV.ps1
 
 ############################
 ### Common Object        ###
@@ -1913,6 +1918,7 @@ if (-not $Common.Initialized) {
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
+    $logsPath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "logs")                      # Path for log files
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
     # Get latest hotfix version
@@ -1920,12 +1926,15 @@ if (-not $Common.Initialized) {
 
     # Common global props
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "211130"
+        MemLabsVersion        = "220202"
         LatestHotfixVersion   = $latestHotfixVersion
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
-        ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\samples")   # Path for Config files
+       # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
+        CachePath             = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
+        SizeCache             = $null                                                                     # Cache for Memory Assigned, and Disk Usage
+        NetCache              = $null                                                                     # Cache for Get-NetworkAdapter
         AzureFilesPath        = $storagePath                                                              # Path for downloaded files
         AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
         AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
@@ -1935,7 +1944,8 @@ if (-not $Common.Initialized) {
         StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
         StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
         StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
-        LogPath               = Join-Path $PSScriptRoot "VMBuild.log"                                     # Log File
+        LogPath               = Join-Path $logsPath "VMBuild.log"                                         # Log File
+        CrashLogsPath         = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
         RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
         VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
         DevBranch             = $devBranch                                                                # Git dev branch
@@ -1960,8 +1970,29 @@ if (-not $Common.Initialized) {
     Set-SupportedOptions
 
     if (-not $InJob.IsPresent) {
+
+        try {
+            if ($global:common.CachePath) {
+                $threshold = 2
+                Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force | out-null
+            }
+        }
+        catch {}
+
         # Retrieve VM List, and cache results
-        Get-List -Type VM -ResetCache | Out-Null
+        $list = Get-List -Type VM -ResetCache
+        foreach ($vm in $list) {
+            $vm2 = Get-VM -id $vm.vmId
+            Update-VMInformation -vm $vm2
+        }
+    }
+
+    # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
+    Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
+    $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
+    if (Test-Path $oldCrashPath) {
+        Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
     }
 
     # Add HGS Registry key to allow local CA Cert

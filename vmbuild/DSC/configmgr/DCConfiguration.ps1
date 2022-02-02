@@ -20,8 +20,10 @@
     $PSName = $deployConfig.thisParams.PSName
     $CSName = $deployConfig.thisParams.CSName
 
-    $DHCP_DNSAddress = $deployConfig.parameters.DHCPDNSAddress
-    $DHCP_DefaultGateway = $deployConfig.parameters.DHCPDefaultGateway
+    $DomainAccounts = $deployConfig.thisParams.DomainAccounts
+    $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
+    $DHCP_DNSAddress = $network + ".1"
+    $DHCP_DefaultGateway = $network + ".200"
 
     $setNetwork = $true
     if ($ThisVM.hidden) {
@@ -98,67 +100,41 @@
             DomainFullName                = $DomainName
             SafemodeAdministratorPassword = $DomainCreds
         }
-
-        ADUser Admin {
-            Ensure               = 'Present'
-            UserName             = $DomainAdminName
-            Password             = $DomainCreds
-            PasswordNeverResets  = $true
-            PasswordNeverExpires = $true
-            CannotChangePassword = $true
-            DomainName           = $DomainName
-            DependsOn            = "[SetupDomain]FirstDS"
+        $adUsersDependancy = @()
+        $i = 0
+        foreach ($user in $DomainAccounts) {
+            $i++
+            ADUser "User$($i)" {
+                Ensure               = 'Present'
+                UserName             = $user
+                Password             = $DomainCreds
+                PasswordNeverResets  = $true
+                PasswordNeverExpires = $true
+                CannotChangePassword = $true
+                DomainName           = $DomainName
+                DependsOn            = "[SetupDomain]FirstDS"
+            }
+            $adUsersDependancy += "[ADUser]User$($i)"
         }
 
-        ADUser administrator {
-            Ensure               = 'Present'
-            UserName             = 'administrator'
-            Password             = $DomainCreds
-            PasswordNeverResets  = $true
-            PasswordNeverExpires = $true
-            CannotChangePassword = $true
-            DomainName           = $DomainName
-            DependsOn            = "[ADUser]Admin"
-        }
 
-        ADUser cm-svc {
-            Ensure               = 'Present'
-            UserName             = 'cm_svc'
-            Password             = $DomainCreds
-            PasswordNeverResets  = $true
-            PasswordNeverExpires = $true
-            CannotChangePassword = $true
-            DomainName           = $DomainName
-            DependsOn            = "[SetupDomain]FirstDS"
-        }
-
-        ADUser vmbuildadmin {
-            Ensure               = 'Present'
-            UserName             = 'vmbuildadmin'
-            Password             = $DomainCreds
-            PasswordNeverResets  = $true
-            PasswordNeverExpires = $true
-            CannotChangePassword = $true
-            DomainName           = $DomainName
-            DependsOn            = "[SetupDomain]FirstDS"
-        }
 
         ADGroup AddToAdmin {
             GroupName        = "Administrators"
             MembersToInclude = @($DomainAdminName)
-            DependsOn        = "[ADUser]Admin"
+            DependsOn        = $adUsersDependancy
         }
 
         ADGroup AddToDomainAdmin {
             GroupName        = "Domain Admins"
             MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-            DependsOn        = @("[ADUser]Admin", "[ADUser]cm-svc")
+            DependsOn        = $adUsersDependancy
         }
 
         ADGroup AddToSchemaAdmin {
             GroupName        = "Schema Admins"
             MembersToInclude = @($DomainAdminName)
-            DependsOn        = "[ADUser]Admin"
+            DependsOn        = $adUsersDependancy
         }
 
         $adSiteDependency = @()
@@ -241,11 +217,13 @@
 
         WriteStatus InstallDotNet {
             DependsOn = "[InstallCA]InstallCA"
-            Status    = "Installing .NET 4.7.2"
+            Status    = "Installing .NET 4.8"
         }
 
-        InstallDotNet472 DotNet {
-            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/1f5af042-d0e4-4002-9c59-9ba66bcf15f6/089f837de42708daacaae7c04b7494db/ndp472-kb4054530-x86-x64-allos-enu.exe"
+        InstallDotNet4 DotNet {
+            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
+            FileName    = "ndp48-x86-x64-allos-enu.exe"
+            NetVersion  = "528040"
             Ensure      = "Present"
             DependsOn   = "[WriteStatus]InstallDotNet"
         }
@@ -254,7 +232,7 @@
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = "[InstallDotNet472]DotNet"
+            DependsOn       = "[InstallDotNet4]DotNet"
         }
 
         FileReadAccessShare DomainSMBShare {

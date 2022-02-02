@@ -165,11 +165,13 @@
 
         WriteStatus InstallDotNet {
             DependsOn = '[OpenFirewallPortForSCCM]OpenFirewall'
-            Status    = "Installing .NET 4.7.2"
+            Status    = "Installing .NET 4.8"
         }
 
-        InstallDotNet472 DotNet {
-            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/1f5af042-d0e4-4002-9c59-9ba66bcf15f6/089f837de42708daacaae7c04b7494db/ndp472-kb4054530-x86-x64-allos-enu.exe"
+        InstallDotNet4 DotNet {
+            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
+            FileName    = "ndp48-x86-x64-allos-enu.exe"
+            NetVersion  = "528040"
             Ensure      = "Present"
             DependsOn   = "[WriteStatus]InstallDotNet"
         }
@@ -178,7 +180,7 @@
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = '[InstallDotNet472]DotNet'
+            DependsOn       = '[InstallDotNet4]DotNet'
         }
 
         FileReadAccessShare DomainSMBShare {

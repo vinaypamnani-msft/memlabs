@@ -16,6 +16,9 @@
       },
       "timeZone": {
        "value": "Eastern Standard Time"
+      },
+      "branchName": {
+        "value": "main"
       }
     }
   }

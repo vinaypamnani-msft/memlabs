@@ -194,9 +194,15 @@ class InstallSSMS {
 }
 
 [DscResource()]
-class InstallDotNet472 {
+class InstallDotNet4 {
     [DscProperty(Key)]
     [string] $DownloadUrl
+
+    [DscProperty(Mandatory)]
+    [string] $FileName
+
+    [DscProperty(Mandatory)]
+    [string] $NetVersion
 
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
@@ -204,9 +210,9 @@ class InstallDotNet472 {
     [void] Set() {
 
         # Download
-        $setup = "C:\temp\NDP472-KB4054530-x86-x64-AllOS-ENU.exe"
+        $setup = "C:\temp\$($this.FileName)"
         if (!(Test-Path $setup)) {
-            Write-Verbose "Downloading .NET 4.7.2 Full from $($this.DownloadUrl)..."
+            Write-Verbose "Downloading .NET $($this.FileName) from $($this.DownloadUrl)..."
             Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
         }
 
@@ -216,18 +222,19 @@ class InstallDotNet472 {
         $arg2 = "/norestart"
 
         try {
-            Write-Verbose "Installing .NET 4.7.2..."
+            Write-Verbose "Installing .NET $($this.FileName)..."
             & $cmd $arg1 $arg2 | out-null
 
+            $processName = ($this.FileName -split ".exe")[0]
             while ($true) {
                 Start-Sleep -Seconds 15
-                $process = Get-Process "NDP472-KB4054530-x86-x64-AllOS-ENU" -ErrorAction SilentlyContinue
+                $process = Get-Process $processName -ErrorAction SilentlyContinue
                 if ($null -eq $process) {
                     break
                 }
             }
             Start-Sleep -Seconds 120 ## Buffer Wait
-            Write-Verbose ".NET 4.7.2 Installed Successfully!"
+            Write-Verbose ".NET $($this.FileName) Installed Successfully!"
 
             # Reboot
             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
@@ -241,18 +248,17 @@ class InstallDotNet472 {
 
     [bool] Test() {
 
-        $NetVersion = (Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP' -Recurse | Get-ItemProperty -Name version -EA 0 `
-            | Where-Object { $_.PSChildName -Match '^(?!S)\p{L}' } | Select-Object PSChildName, version) `
-        | Where-Object { $_.PsChildName -eq "Full" } | Select-Object Version
+        $NETval = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Name "Release"
 
-        if ($NetVersion -and [Version]($NetVersion.Version) -gt [Version]"4.7.3061") {
+        If ($NETval.Release -ge $this.NetVersion) {
+            Write-Host ".NET $($this.FileName) or greater $($NETval.Release) is installed"
             return $true
         }
 
         return $false
     }
 
-    [InstallDotNet472] Get() {
+    [InstallDotNet4] Get() {
         return $this
     }
 }
@@ -1932,6 +1938,9 @@ class InstallFeatureForSCCM {
         $_Role = $this.Role
 
         Write-Verbose "Current Role is : $_Role"
+
+        # Install on all devices
+        Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
 
         if ($_Role -notcontains "DomainMember") {
             Install-WindowsFeature -Name "Rdc"

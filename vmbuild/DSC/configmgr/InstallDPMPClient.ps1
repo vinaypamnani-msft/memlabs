@@ -9,10 +9,12 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $DomainName = $DomainFullName.Split(".")[0]
-$ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+$ThisMachineName = $deployConfig.thisParams.MachineName
+$ThisVM = $deployConfig.thisParams.thisVM
 
-$ClientNames = $deployConfig.parameters.DomainMembers
+#bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
+$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
+#$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
 $cm_svc = "$DomainName\cm_svc"
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 
@@ -265,7 +267,7 @@ if ($mpCount -eq 0) {
 }
 
 # exit if rerunning DSC to add passive site
-if ($null -ne $deployConfig.parameters.ExistingActiveName) {
+if ($null -ne $deployConfig.thisParams.PassiveVM) {
     Write-DscStatus "Skip Client Push since we're adding Passive site server"
     return
 }
@@ -338,10 +340,14 @@ Write-DscStatus "Enabling AD system discovery"
 $lastdomainname = $DomainFullName.Split(".")[-1]
 do {
     $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
-    Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
-    Start-Sleep -Seconds 30
+
     if ($adiscovery.Value1.ToLower() -ne "active") {
+        Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
+        Start-Sleep -Seconds 30
         Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://DC=$DomainName,DC=$lastdomainname" -Recursive
+    }
+    else {
+        Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)"
     }
 } until ($adiscovery.Value1.ToLower() -eq "active")
 

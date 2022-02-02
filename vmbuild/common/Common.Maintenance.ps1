@@ -1,7 +1,7 @@
 
 function Start-Maintenance {
 
-    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true}
+    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
     $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
 
@@ -40,13 +40,13 @@ function Start-Maintenance {
     # Check if failed domain is -le 211125.1
     $failedDCs = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -in $failedDomains }
     $criticalDomains = @()
-    foreach($dc in $failedDCs) {
+    foreach ($dc in $failedDCs) {
         $vmNote = Get-VMNote $dc.vmName
         if ($vmNote.memlabsVersion -le "211125.1") {
             $criticalDomains += $dc.domain
             write-log "Adding $($dc.domain) to Critical List" -LogOnly
         }
-        else{
+        else {
             #write-host "Not Adding $($dc.domain) to Critical List"
         }
     }
@@ -85,17 +85,19 @@ function Show-FailedDomains {
     $dcList = ($failedDCs | Select-Object vmName, domain, @{Name = "accountsToUpdate"; Expression = { @("vmbuildadmin", $_.adminName, "cm_svc") } }, @{ Name = "desiredPassword"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | Out-String).Trim()
     $dcList = $dcList -split "`r`n"
 
+    Write-Log "Displaying the failed domains message for ($($failedDomains -join ','))." -LogOnly
+
     $longest = 128
     $longestMinus2 = 126
     Write-Host
     Write-Host "#".PadRight($longest, "#") -ForegroundColor Yellow
     Write-Host "# DC Maintenance failed for below domains. This may be because the passwords for the required accounts (listed below) expired. #" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#"
-    foreach($line in $dcList) {Write-Host "# $line".PadRight($longestMinus2," ") "#" -ForegroundColor Yellow}
+    foreach ($line in $dcList) { Write-Host "# $line".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow }
     Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#"
-    Write-Host "# 1. Logon to the affected DC's.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host "# 1. Logon to the affected DC's using Hyper-V console.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# 2. Launch 'AD Users and Computers', and reset the account for the above listed accounts to the desiredPassword.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "# 3. Run 'VMBuild.cmd' again.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
     Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
@@ -180,17 +182,18 @@ function Start-VMFixes {
             $vmNote = Get-VMNote -VMName $vm
             if ($vmNote.role -ne "DC") {
                 Write-Log "$vm`: Shutting down VM." -Verbose
-                $i = 0
-                do {
-                    $i++
-                    Stop-VM -Name $vm -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
-                    Start-Sleep -Seconds 3
-                }
-                until ($i -ge 5 -or $StopError.Count -eq 0)
+                Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
+                #$i = 0
+                #do {
+                #    $i++
+                #    Stop-VM -Name $vm -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
+                #    Start-Sleep -Seconds 3
+                #}
+                #until ($i -ge 5 -or $StopError.Count -eq 0)
 
-                if ($StopError.Count -ne 0) {
-                    Write-Log "$vm`: Failed to stop the VM. $StopError" -Warning
-                }
+                #if ($StopError.Count -ne 0) {
+                #    Write-Log "$vm`: Failed to stop the VM. $StopError" -Warning
+                #}
             }
         }
     }
@@ -330,7 +333,7 @@ function Start-VMIfNotRunning {
         ConnectFailed = $false
     }
 
-    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    $vm = Get-VM2 -Name $VMName -ErrorAction SilentlyContinue
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_" -Warning
@@ -340,9 +343,9 @@ function Start-VMIfNotRunning {
     }
 
     if ($vm.State -ne "Running") {
-        try {
-            Write-Log "$VMName`: Starting VM for maintenance and waiting for it to be ready to connect."
-            Start-VM -Name $VMName -ErrorAction Stop | Out-Null
+        Write-Log "$VMName`: Starting VM for maintenance and waiting for it to be ready to connect."
+        $started = Start-VM2 -Name $VMName -Passthru
+        if ($started) {
             $return.StartedVM = $true
             if ($WaitForConnect.IsPresent) {
                 $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2 -Quiet
@@ -352,8 +355,7 @@ function Start-VMIfNotRunning {
                 }
             }
         }
-        catch {
-            Write-Log "$VMName`: Failed to start VM. Error: $_"
+        else {
             $return.StartFailed = $true
             $return.ConnectFailed = $true
         }
@@ -483,7 +485,17 @@ function Get-VMFixes {
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
         $transcriptPath = "C:\staging\Fix\Fix-CMFullAdmin.txt"
         Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
-        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar
+
+        if ($ErrVar.Count -ne 0) {
+            return $false
+        }
+
+        if ([string]::IsNullOrWhiteSpace($SiteCode)) {
+            # Deployment was done with cmOptions.Install=False, or site was uninstalled
+            return $true
+        }
+
         $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
 
         # Get CM module path
