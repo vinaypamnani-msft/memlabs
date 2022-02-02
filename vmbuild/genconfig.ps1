@@ -2335,10 +2335,10 @@ function get-ValidResponse {
 
 Function Get-SupportedOperatingSystemsForRole {
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "role")]
-        [string] $role
+        [Parameter(Mandatory = $true, HelpMessage = "vm")]
+        [object] $vm
     )
-
+    $role = $vm.Role
     $ServerList = $Common.Supported.OperatingSystems | Where-Object { $_ -like 'Server*' }
     $ClientList = $Common.Supported.OperatingSystems | Where-Object { $_ -notlike 'Server*' }
     $AllList = $Common.Supported.OperatingSystems
@@ -2350,7 +2350,14 @@ Function Get-SupportedOperatingSystemsForRole {
         "Secondary" { return $ServerList }
         "FileServer" { return $ServerList }
         "DPMP" { return $ServerList }
-        "DomainMember" { return $AllList }
+        "DomainMember" {
+            if ($vm.SqlVersion){
+            return $ServerList
+            }
+            else{
+                return $AllList
+            }
+        }
         "DomainMember (Server)" { return $ServerList }
         "DomainMember (Client)" { return $ClientList }
         "WorkgroupMember" { return $AllList }
@@ -2378,7 +2385,7 @@ Function Get-OperatingSystemMenu {
 
     $valid = $false
     while ($valid -eq $false) {
-        $OSList = Get-SupportedOperatingSystemsForRole -role $property.role
+        $OSList = Get-SupportedOperatingSystemsForRole -vm $property
         if ($null -eq $OSList ) {
             return
         }
@@ -2982,14 +2989,27 @@ function Get-AdditionalValidations {
                 if ($PRIVM) {
                     $PRIVM.parentSiteCode = $value
                 }
+                $VMs = @()
+                $VMs += $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+                if ($VMs) {
+                    foreach ($VM in $VMS) {
+                        if ($VM.siteCode -eq $CurrentValue ) {
+                            $VM.SiteCode = $value
+                            Get-AdditionalValidations -property $VM -name "SiteCode" -CurrentValue $CurrentValue
+                        }
+                    }
+                }
             }
             if ($property.role -eq "Primary") {
-                $VMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                $VMs = @()
+                $VMs += $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                $VMs += $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
                 $SecVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Secondary" }
                 if ($VMs) {
                     foreach ($VM in $VMS) {
                         if ($VM.siteCode -eq $CurrentValue ) {
                             $VM.SiteCode = $value
+                            Get-AdditionalValidations -property $VM -name "SiteCode" -CurrentValue $CurrentValue
                         }
                     }
                 }
@@ -3228,7 +3248,7 @@ function Select-Options {
                 "operatingSystem" {
                     Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
                     if ($property.role -eq "DomainMember") {
-                        if (-not $property.SqlVersion) {
+                        #if (-not $property.SqlVersion) {
                             $newName = Get-NewMachineName -vm $property
                             if ($($property.vmName) -ne $newName) {
                                 $rename = $true
@@ -3242,7 +3262,7 @@ function Select-Options {
                                     $property.vmName = $newName
                                 }
                             }
-                        }
+                        #}
                     }
                     continue MainLoop
                 }
