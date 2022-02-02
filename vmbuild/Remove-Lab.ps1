@@ -43,12 +43,8 @@ if ($InProgress.IsPresent) {
 }
 
 if ($VmName) {
-    Write-Log "Main: Remove-Lab called for VM $VmName." -Activity -HostOnly
-    $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
-    if ($vmTest) {
-        Remove-VirtualMachine -VmName $VmName -WhatIf:$WhatIf
-    }
-
+    Write-Log "Remove-Lab called for VM $VmName." -Activity -HostOnly
+    Remove-VirtualMachine -VmName $VmName -WhatIf:$WhatIf
     Write-Host
     return
 }

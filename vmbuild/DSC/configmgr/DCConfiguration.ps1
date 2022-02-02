@@ -13,34 +13,25 @@
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
-    $PSName = $deployConfig.parameters.PSName
-    $CSName = $deployConfig.parameters.CSName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
+    $PSName = $deployConfig.thisParams.PSName
+    $CSName = $deployConfig.thisParams.CSName
 
-    $DHCP_DNSAddress = $deployConfig.parameters.DHCPDNSAddress
-    $DHCP_DefaultGateway = $deployConfig.parameters.DHCPDefaultGateway
-    $DHCP_ScopeId = $deployConfig.parameters.DHCPScopeId
-    $Configuration = $deployConfig.parameters.Scenario
+    $DomainAccounts = $deployConfig.thisParams.DomainAccounts
+    $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
+    $DHCP_DNSAddress = $network + ".1"
+    $DHCP_DefaultGateway = $network + ".200"
 
     $setNetwork = $true
-    if ($deployConfig.parameters.ExistingDCName) {
+    if ($ThisVM.hidden) {
         $setNetwork = $false
     }
 
-    # AD Site Name
-    if ($PSName) {
-        $PSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PSName }
-        if ($PSVM) { $ADSiteName = $PSVM.siteCode }
-    }
-
-    if (-not $ADSiteName) {
-        $ADSiteName = "vmbuild"
-    }
-
-    # Domain Admin User name
-    $DomainAdminName = $deployConfig.vmOptions.adminName
+    # AD Sites
+    $adsites = $deployConfig.thisParams.sitesAndNetworks
 
     # Define log share
     $LogFolder = "DSC"
@@ -49,16 +40,8 @@
     # CM Files folder/share
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
-    # Passive Site
-    $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
-    if ($containsPassive) {
-        $PassiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-    }
-
-    $waitOnServers = @()
-    if ($PSName) { $waitOnServers += $PSName }
-    if ($PassiveVM) { $waitOnServers += $PassiveVM.vmName }
-    if ($CSName) { $waitOnServers += $CSName }
+    # Servers for which permissions need to be added to systems management contaienr
+    $waitOnDomainJoin = $deployConfig.thisParams.ServersToWaitOn
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -117,60 +100,67 @@
             DomainFullName                = $DomainName
             SafemodeAdministratorPassword = $DomainCreds
         }
-
-        ADUser Admin {
-            Ensure              = 'Present'
-            UserName            = $DomainAdminName
-            Password            = $DomainCreds
-            PasswordNeverResets = $true
-            DomainName          = $DomainName
-            DependsOn           = "[SetupDomain]FirstDS"
+        $adUsersDependancy = @()
+        $i = 0
+        foreach ($user in $DomainAccounts) {
+            $i++
+            ADUser "User$($i)" {
+                Ensure               = 'Present'
+                UserName             = $user
+                Password             = $DomainCreds
+                PasswordNeverResets  = $true
+                PasswordNeverExpires = $true
+                CannotChangePassword = $true
+                DomainName           = $DomainName
+                DependsOn            = "[SetupDomain]FirstDS"
+            }
+            $adUsersDependancy += "[ADUser]User$($i)"
         }
 
-        ADUser cm-svc {
-            Ensure              = 'Present'
-            UserName            = 'cm_svc'
-            Password            = $DomainCreds
-            PasswordNeverResets = $true
-            DomainName          = $DomainName
-            DependsOn           = "[SetupDomain]FirstDS"
-        }
+
 
         ADGroup AddToAdmin {
             GroupName        = "Administrators"
             MembersToInclude = @($DomainAdminName)
-            DependsOn        = "[ADUser]Admin"
+            DependsOn        = $adUsersDependancy
         }
 
         ADGroup AddToDomainAdmin {
             GroupName        = "Domain Admins"
             MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-            DependsOn        = @("[ADUser]Admin", "[ADUser]cm-svc")
+            DependsOn        = $adUsersDependancy
         }
 
         ADGroup AddToSchemaAdmin {
             GroupName        = "Schema Admins"
             MembersToInclude = @($DomainAdminName)
-            DependsOn        = "[ADUser]Admin"
+            DependsOn        = $adUsersDependancy
         }
 
-        ADReplicationSite ADSite {
-            Ensure    = 'Present'
-            Name      = $ADSiteName
-            DependsOn = "[ADGroup]AddToSchemaAdmin"
-        }
+        $adSiteDependency = @()
+        $i = 0
+        foreach ($site in $adsites) {
+            $i++
+            ADReplicationSite "ADSite$($i)" {
+                Ensure    = 'Present'
+                Name      = $site.SiteCode
+                DependsOn = "[ADGroup]AddToSchemaAdmin"
+            }
 
-        ADReplicationSubnet ADSubnet {
-            Name        = "$DHCP_ScopeId/24"
-            Site        = $ADSiteName
-            Location    = $ADSiteName
-            Description = 'Created by vmbuild'
-            DependsOn   = "[ADReplicationSite]ADSite"
+            ADReplicationSubnet "ADSubnet$($i)" {
+                Name        = "$($site.Subnet)/24"
+                Site        = $site.SiteCode
+                Location    = $site.SiteCode
+                Description = 'Created by vmbuild'
+                DependsOn   = "[ADReplicationSite]ADSite$($i)"
+            }
+
+            $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
         }
 
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = "[ADReplicationSubnet]ADSubnet"
+            DependsOn = $adSiteDependency
         }
 
         OpenFirewallPortForSCCM OpenFirewall {
@@ -225,11 +215,24 @@
             HashAlgorithm = "SHA256"
         }
 
+        WriteStatus InstallDotNet {
+            DependsOn = "[InstallCA]InstallCA"
+            Status    = "Installing .NET 4.8"
+        }
+
+        InstallDotNet4 DotNet {
+            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
+            FileName    = "ndp48-x86-x64-allos-enu.exe"
+            NetVersion  = "528040"
+            Ensure      = "Present"
+            DependsOn   = "[WriteStatus]InstallDotNet"
+        }
+
         File ShareFolder {
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = "[InstallCA]InstallCA"
+            DependsOn       = "[InstallDotNet4]DotNet"
         }
 
         FileReadAccessShare DomainSMBShare {
@@ -240,11 +243,11 @@
 
         WriteStatus WaitDomainJoin {
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
-            Status    = "Waiting for $($waitOnServers -join ',') to join the domain"
+            Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
         }
 
         $waitOnDependency = @()
-        foreach ($server in $waitOnServers) {
+        foreach ($server in $waitOnDomainJoin) {
 
             VerifyComputerJoinDomain "WaitFor$server" {
                 ComputerName = $server
@@ -262,8 +265,7 @@
             $waitOnDependency += "[DelegateControl]Add$server"
         }
 
-        WriteConfigurationFile WriteDelegateControlfinished {
-            Role      = "DC"
+        WriteEvent WriteDelegateControlfinished {
             LogPath   = $LogPath
             WriteNode = "DelegateControl"
             Status    = "Passed"
@@ -271,32 +273,10 @@
             DependsOn = $waitOnDependency
         }
 
-        if ($PSName) {
-            WriteConfigurationFile WritePSJoinDomain {
-                Role      = "DC"
-                LogPath   = $LogPath
-                WriteNode = "PSJoinDomain"
-                Status    = "Passed"
-                Ensure    = "Present"
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
-            }
-        }
-
-        if ($CSName) {
-            WriteConfigurationFile WriteCSJoinDomain {
-                Role      = "DC"
-                LogPath   = $LogPath
-                WriteNode = "CSJoinDomain"
-                Status    = "Passed"
-                Ensure    = "Present"
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
-            }
-        }
-
         if (-not ($PSName -or $CSName)) {
 
             WriteStatus Complete {
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
                 Status    = "Complete!"
             }
 
@@ -304,15 +284,15 @@
         else {
 
             WriteStatus WaitExtSchema {
-                DependsOn = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn = "[WriteEvent]WriteDelegateControlfinished"
                 Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = if ($Configuration -eq 'Standalone') { $PSName } else { $CSName }
+                MachineName = if ($CSName) { $CSName } else { $PSName }
                 ExtFolder   = $CM
                 Ensure      = "Present"
-                DependsOn   = "[WriteConfigurationFile]WriteDelegateControlfinished"
+                DependsOn   = "[WriteEvent]WriteDelegateControlfinished"
             }
 
             WriteStatus Complete {
@@ -320,6 +300,14 @@
                 Status    = "Complete!"
             }
 
+        }
+
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
         }
     }
 }

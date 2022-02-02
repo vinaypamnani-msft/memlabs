@@ -8,6 +8,7 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
+$DomainName = $DomainFullName.Split(".")[0]
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -48,12 +49,13 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 Set-Location "$($SiteCode):\" @initParams
 
 # Get info for Passive Site Server
-$ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
-$SSVM = $deployConfig.virtualMachines | Where-Object { $_.siteCode -eq $ThisVM.siteCode -and $_.vmName -ne $ThisVm.vmName }
+$ThisMachineName = $deployConfig.thisParams.MachineName
+$ThisVM = $deployConfig.thisParams.thisVM
+$SSVM = $deployConfig.virtualMachines | Where-Object { $_.siteCode -eq $ThisVM.siteCode -and $_.role -eq "PassiveSite" }
 $shareName = $SiteCode
 $sharePath = "E:\$shareName"
 $remoteLibVMName = $SSVM.remoteContentLibVM
+if ($remoteLibVMName -is [string]) {$remoteLibVMName = $remoteLibVMName.Trim() }
 $computersToAdd = @("$($SSVM.vmName)$", "$($ThisMachineName)$")
 $contentLibShare = "\\$remoteLibVMName\$shareName\ContentLib"
 
@@ -100,6 +102,39 @@ Invoke-Command -Session (New-PSSession -ComputerName $remoteLibVMName) -ScriptBl
 if ($Err2.Count -ne 0) {
     Write-DscStatus "Invoke-Command: Failed to create share $contentLibShare on $remoteLibVMName. Error: $Err2" -Failure
     return
+}
+
+$add_local_admin = {
+    param($computersToAdd, $domainName)
+    foreach($computer in $computersToAdd) {
+        if ($computer -eq "$($env:COMPUTERNAME)$") { continue }
+        $memberToCheck = "$domainName\$computer"
+        $exists = Get-LocalGroupMember -Name "Administrators" -Member $memberToCheck
+        if (-not $exists) {
+            Add-LocalGroupMember -Group "Administrators" -Member $computer
+        }
+    }
+}
+
+Write-DscStatus "Verifying/adding Active and Passive computer accounts on all site system servers"
+$siteSystems = Get-CMSiteSystemServer -SiteCode PRI | Select-Object -Expand NetworkOSPath
+$siteSystems += "\\$remoteLibVMName"
+foreach ($server in $siteSystems) {
+    $serverName = $server.Substring(2, $server.Length - 2) # NetworkOSPath = \\server.domain.dom
+    if ($serverName -eq $localSiteServer) {
+        Invoke-Command -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $domainName -ErrorVariable Err3
+    }
+    else {
+        Invoke-Command -Session (New-PSSession -ComputerName $serverName) -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $domainName -ErrorVariable Err3
+    }
+
+    if ($Err3.Count -ne 0) {
+        Write-DscStatus "WARNING: Failed to add $computersToAdd to local Administrators group on $serverName. Error: $Err3"
+    }
+    else {
+        $displayName = $computersToAdd -join ","
+        Write-Host "Verified/added [$displayName] as members of local Administrators group on $serverName."
+    }
 }
 
 # Remove SCP?
@@ -159,10 +194,14 @@ else {
 
 # Add Passive site
 $passiveFQDN = $SSVM.vmName + "." + $DomainFullName
+$SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
+if ($SSVM.cmInstallDir) {
+    $SMSInstallDir = $SSVM.cmInstallDir
+}
 Write-DscStatus "Adding passive site server on $passiveFQDN"
 try {
     New-CMSiteSystemServer -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN | Out-File $global:StatusLog -Append
-    Add-CMPassiveSite -InstallDirectory $SSVM.cmInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
+    Add-CMPassiveSite -InstallDirectory $SMSInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
 }
 catch {
     Write-DscStatus "Failed to add passive site on $passiveFQDN. Error: $_" -Failure
@@ -184,15 +223,20 @@ do {
     }
 
     $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 2 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+
     if ($state) {
         Write-DscStatus "Adding passive site server on $passiveFQDN`: $($state.SubStageName)" -RetrySeconds 60
     }
 
-    if (0 -eq $i % 10 -and (-not $state)) {
-        Write-DscStatus "No Progress after $i tries, Adding passive site server again on $passiveFQDN`: $($state.SubStageName)"
-        Add-CMPassiveSite -InstallDirectory $SSVM.cmInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
+    if (-not $state) {
+        if (0 -eq $i % 10) {
+            Write-DscStatus "No Progress for adding passive site server reported after $($i * 30) seconds, restarting SMS_Executive"
+            Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 60
+        }
+
         if ($i -gt 31) {
-            Write-DscStatus "No Progress for adding passive site server after $i tries, giving up." -Falure
+            Write-DscStatus "No Progress for adding passive site server reported after $($i * 30) seconds, giving up." -Failure
             $installFailure = $true
         }
     }

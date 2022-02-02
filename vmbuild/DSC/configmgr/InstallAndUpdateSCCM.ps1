@@ -6,15 +6,14 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $scenario = $deployConfig.parameters.Scenario
-$CurrentRole = $deployConfig.parameters.ThisMachineRole
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-$PSName = $deployConfig.parameters.PSName
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
-$ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+$ThisVM = $deployConfig.thisParams.thisVM
+$CurrentRole = $ThisVM.role
+$PSVM = $deployConfig.thisParams.PrimaryVM
 
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
@@ -245,7 +244,7 @@ if ($null -eq (Get-Module ConfigurationManager)) {
 
 # Connect to the site's drive if it is not already present
 Write-DscStatus "Setting PS Drive"
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
 
 while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
     Write-DscStatus "Retry in 10s to Set PS Drive for site $SiteCode on $ProviderMachineName"
@@ -256,6 +255,29 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 # Set the current location to be the site code.
 Set-Location "$($SiteCode):\" @initParams
 
+# Add vmbuildadmin as Full Admin
+Write-DscStatus "Adding 'vmbuildadmin' account as Full Administrator in ConfigMgr"
+$userName = "vmbuildadmin"
+$userDomain = $env:USERDOMAIN
+$domainUserName = "$userDomain\$userName"
+$exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" }
+
+if (-not $exists) {
+    $i = 0
+    do {
+        $i++
+        New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+            -SecurityScopeName "All", "All Systems", "All Users and User Groups"
+        Start-Sleep -Seconds 30
+        $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName }
+    }
+    until ($exists -or $i -gt 10)
+}
+
+if (-not $exists) {
+    Write-DscStatus "Failed to add 'vmbuildadmin' account as Full Administrator in ConfigMgr"
+}
+
 # Check if we should update to the  latest version
 if ($UpdateToLatest) {
 
@@ -263,8 +285,6 @@ if ($UpdateToLatest) {
     $Configuration.UpgradeSCCM.Status = 'Running'
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-
-
 
     # Wait for 2 mins before checking DMP Downloader status
     Write-DscStatus "Checking for updates. Waiting for DMP Downloader."
@@ -577,8 +597,6 @@ else {
     $Configuration.PSReadyToUse.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-    $PSVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PSName }
-
     if ($PSVM) {
         $PSSiteCode = $PSVM.siteCode
         $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
@@ -592,8 +610,9 @@ else {
         # Wait for replication ready
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
         Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'"
+        Start-Sleep -Seconds 30
         while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-            Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'" -RetrySeconds 60
+            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 60
             Start-Sleep -Seconds 60
             $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
         }

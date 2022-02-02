@@ -39,21 +39,21 @@ function Write-DscStatus {
     }
 }
 
-# Read required items from config json
-$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
-$scenario = $deployConfig.parameters.Scenario
-$CurrentRole = $deployConfig.parameters.ThisMachineRole
-
 # Provision Tool path, RegisterTaskScheduler copies files here
 $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
 if (!(Test-Path $ProvisionToolPath)) {
     New-Item $ProvisionToolPath -ItemType directory | Out-Null
 }
 
+# Read required items from config json
+$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
+$scenario = $deployConfig.parameters.Scenario
+$ThisVM = $deployConfig.thisParams.thisVM
+$CurrentRole = $ThisVM.role
+
 # contains passive?
-$ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+$containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
 
 # Script Workflow json file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -149,6 +149,11 @@ else {
                     StartTime = ''
                     EndTime   = ''
                 }
+                InstallSecondary = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
                 ScriptWorkflow               = @{
                     Status    = 'NotStart'
                     StartTime = ''
@@ -159,15 +164,13 @@ else {
     }
 
     if ($containsPassive) {
-
         $Actions += @{
-            InstallPassive   = @{
+            InstallPassive = @{
                 Status    = 'NotStart'
                 StartTime = ''
                 EndTime   = ''
             }
         }
-
     }
 
     $Configuration = New-Object -TypeName psobject -Property $Actions
@@ -181,6 +184,12 @@ if ($scenario -eq "Standalone") {
     #Install CM and Config
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
+
+    if ($containsSecondary) {
+        # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
 
     #Install DP/MP/Client
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
@@ -203,6 +212,12 @@ if ($scenario -eq "Hierarchy") {
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPSForHierarchy.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
 
+        if ($containsSecondary) {
+            # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+            $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+
         #Install DP/MP/Client
         $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
@@ -210,11 +225,9 @@ if ($scenario -eq "Hierarchy") {
 }
 
 if ($containsPassive) {
-
     # Install Passive Site Server
     $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPassiveSiteServer.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
-
 }
 
 Write-DscStatus "Finished setting up ConfigMgr."
