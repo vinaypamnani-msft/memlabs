@@ -26,91 +26,97 @@ Set-Location $PSScriptRoot
 
 # Modules used by VM Guests, include all so the ZIP contains all required modules to make it easier to move them to guest VMs.
 
-Write-Host "Importing Modules.."
-$modules = @(
-    'Az.Compute',
-    'ActiveDirectoryDsc',
-    'xDscDiagnostics',
-    'ComputerManagementDsc',
-    'DnsServerDsc',
-    'SqlServerDsc',
-    'xDhcpServer',
-    'NetworkingDsc',
-    'xFailOverCluster',
-    'AccessControlDsc'
-)
+try {
+    Write-Host "Importing Modules.."
+    $modules = @(
+        'Az.Compute',
+        'ActiveDirectoryDsc',
+        'xDscDiagnostics',
+        'ComputerManagementDsc',
+        'DnsServerDsc',
+        'SqlServerDsc',
+        'xDhcpServer',
+        'NetworkingDsc',
+        'xFailOverCluster',
+        'AccessControlDsc'
+    )
 
-foreach ($module in $modules) {
-    if (Get-Module -ListAvailable -Name $module) {
-        if ($force) {
-            Write-Host "Module exists: $module. Updating..."
-            Update-Module $module -Force
+    foreach ($module in $modules) {
+        if (Get-Module -ListAvailable -Name $module) {
+            if ($force) {
+                Write-Host "Module exists: $module. Updating..."
+                Update-Module $module -Force
+            }
+            else {
+                Write-Host "Module exists: $module "
+            }
         }
         else {
-            Write-Host "Module exists: $module "
+            Write-Host "Import Module: $module "
+            Install-Module $module -Force
         }
     }
-    else {
-        Write-Host "Import Module: $module "
-        Install-Module $module -Force
+
+    # Tell common to re-init
+    if ($Common.Initialized) {
+        $Common.Initialized = $false
     }
+    . "..\Common.ps1"
+    $ConfirmPreference = $false
+
+    # Create dummy file so config doesn't fail
+    $userConfig = Get-UserConfiguration -Configuration $configName
+    $result = Test-Configuration -InputObject $userConfig.Config
+    Add-ExistingVMsToDeployConfig -config $result.DeployConfig
+    $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
+    Add-PerVMSettings -deployConfig $result.DeployConfig -thisVM $ThisVM
+
+    # Dump config to file, for debugging
+    #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
+    $filePath = "C:\temp\deployConfig.json"
+    $result.DeployConfig | ConvertTo-Json -Depth 3 | Out-File $filePath -Force
+
+    # Create local compressed file and inject appropriate appropriate TemplateHelpDSC
+    Write-Host "Creating DSC.zip..."
+    Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\DSC.zip -Force -Confirm:$false
+    Write-Host "Adding TemplateHelpDSC to DSC.ZIP.."
+    Compress-Archive -Path .\TemplateHelpDSC -Update -DestinationPath .\DSC.zip
+
+    # install templatehelpdsc module on this machine
+    Write-Host "Installing TemplateHelpDSC on this machine.."
+    Copy-Item .\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
+
+    # Create test config, for testing if the config definition is good.
+    $role = $ThisVM.role
+    switch (($role)) {
+        "DPMP" { $role = "DomainMember" }
+        "FileServer" { $role = "DomainMember" }
+        "AADClient" { $role = "WorkgroupMember" }
+        "InternetClient" { $role = "WorkgroupMember" }
+        Default { $role = $role }
+    }
+    Write-Host "Creating a test config for $role in C:\Temp"
+
+    if ($Common.LocalAdmin) { $adminCreds = $Common.LocalAdmin }
+    else { $adminCreds = Get-Credential }
+
+    $dscFolder = "configmgr"
+    . ".\$dscFolder\$($role)Configuration.ps1"
+
+    # Configuration Data
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName                    = 'LOCALHOST'
+                PSDscAllowPlainTextPassword = $true
+                PSDscAllowDomainUser        = $true
+            }
+        )
+    }
+
+    & "$($role)Configuration" -ConfigFilePath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config" | out-host
 }
-
-# Tell common to re-init
-if ($Common.Initialized) {
-    $Common.Initialized = $false
+finally {
+    $parentDir = Split-Path -Path $PSScriptRoot -Parent
+    Set-Location $parentDir
 }
-. "..\Common.ps1"
-$ConfirmPreference = $false
-
-# Create dummy file so config doesn't fail
-$userConfig = Get-UserConfiguration -Configuration $configName
-$result = Test-Configuration -InputObject $userConfig.Config
-Add-ExistingVMsToDeployConfig -config $result.DeployConfig
-$ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
-Add-PerVMSettings -deployConfig $result.DeployConfig -thisVM $ThisVM
-
-# Dump config to file, for debugging
-#$result.DeployConfig | ConvertTo-Json | Set-Clipboard
-$filePath = "C:\temp\deployConfig.json"
-$result.DeployConfig | ConvertTo-Json -Depth 3 | Out-File $filePath -Force
-
-# Create local compressed file and inject appropriate appropriate TemplateHelpDSC
-Write-Host "Creating DSC.zip..."
-Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\DSC.zip -Force -Confirm:$false
-Write-Host "Adding TemplateHelpDSC to DSC.ZIP.."
-Compress-Archive -Path .\TemplateHelpDSC -Update -DestinationPath .\DSC.zip
-
-# install templatehelpdsc module on this machine
-Write-Host "Installing TemplateHelpDSC on this machine.."
-Copy-Item .\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
-
-# Create test config, for testing if the config definition is good.
-$role  = $ThisVM.role
-switch (($role)) {
-    "DPMP" { $role = "DomainMember" }
-    "FileServer" { $role = "DomainMember" }
-    "AADClient" { $role = "WorkgroupMember" }
-    "InternetClient" { $role = "WorkgroupMember" }
-    Default { $role = $role }
-}
-Write-Host "Creating a test config for $role in C:\Temp"
-
-if ($Common.LocalAdmin) { $adminCreds = $Common.LocalAdmin }
-else { $adminCreds = Get-Credential }
-
-$dscFolder = "configmgr"
-. ".\$dscFolder\$($role)Configuration.ps1"
-
-# Configuration Data
-$cd = @{
-    AllNodes = @(
-        @{
-            NodeName                    = 'LOCALHOST'
-            PSDscAllowPlainTextPassword = $true
-            PSDscAllowDomainUser        = $true
-        }
-    )
-}
-
-& "$($role)Configuration" -ConfigFilePath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config" | out-host
