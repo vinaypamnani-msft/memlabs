@@ -191,7 +191,7 @@ $vmName = "z$vmName"
 
 # Check if VM exists
 $createVm = $true
-$vmTest = Get-VM2 -Name $vmName -ErrorAction SilentlyContinue
+$vmTest = Get-VM2 -Name $vmName
 if ($vmTest) {
     Write-Log "Found $vmName in Hyper-V."
     if ($ForceNewVm.IsPresent) {
