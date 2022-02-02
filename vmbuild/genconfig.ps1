@@ -1466,6 +1466,10 @@ function Select-Config {
     $files += Get-ChildItem $ConfigPath\*.json -Include "NoConfigMgr.json"
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property CreationTime
+    write-host $ConfigPath
+    if ($ConfigPath.EndsWith("tests")){
+        $files = $files | sort-Object -Property Name
+    }
     $responseValid = $false
 
     while ($responseValid -eq $false) {
