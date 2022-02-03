@@ -1467,7 +1467,7 @@ function Select-Config {
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property CreationTime
     write-host $ConfigPath
-    if ($ConfigPath.EndsWith("tests")){
+    if ($ConfigPath.EndsWith("tests")) {
         $files = $files | sort-Object -Property Name
     }
     $responseValid = $false
@@ -2350,11 +2350,12 @@ Function Get-SupportedOperatingSystemsForRole {
         "Secondary" { return $ServerList }
         "FileServer" { return $ServerList }
         "DPMP" { return $ServerList }
+        "SQLAO" { return $ServerList }
         "DomainMember" {
-            if ($vm.SqlVersion){
-            return $ServerList
+            if ($vm.SqlVersion) {
+                return $ServerList
             }
-            else{
+            else {
                 return $AllList
             }
         }
@@ -2888,7 +2889,7 @@ function Get-AdditionalValidations {
             $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
 
             $Passive = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
-
+            $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
             #This is a SQL Server being renamed.  Lets check if we need to update CAS or PRI
             if (($Property.Role -eq "DomainMember") -and ($null -ne $Property.sqlVersion)) {
                 if (($null -ne $PRIVM.remoteSQLVM) -and $PRIVM.remoteSQLVM -eq $CurrentValue) {
@@ -2899,6 +2900,11 @@ function Get-AdditionalValidations {
                 }
             }
 
+            if ($Property.Role -eq "FileServer" -and $null -ne $SQLAO) {
+                if ($SQLAO.FileServerVM -eq $CurrentValue) {
+                    $SQLAO.FileServerVM = $value
+                }
+            }
             if ($Property.Role -eq "FileServer" -and $null -ne $Passive) {
                 if ($Passive.remoteContentLibVM -eq $CurrentValue) {
                     $Passive.remoteContentLibVM = $value
@@ -3249,25 +3255,29 @@ function Select-Options {
                     Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
                     if ($property.role -eq "DomainMember") {
                         #if (-not $property.SqlVersion) {
-                            $newName = Get-NewMachineName -vm $property
-                            if ($($property.vmName) -ne $newName) {
-                                $rename = $true
-                                $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
-                                if (-not [String]::IsNullOrWhiteSpace($response)) {
-                                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                                        $rename = $false
-                                    }
-                                }
-                                if ($rename -eq $true) {
-                                    $property.vmName = $newName
+                        $newName = Get-NewMachineName -vm $property
+                        if ($($property.vmName) -ne $newName) {
+                            $rename = $true
+                            $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                            if (-not [String]::IsNullOrWhiteSpace($response)) {
+                                if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                                    $rename = $false
                                 }
                             }
+                            if ($rename -eq $true) {
+                                $property.vmName = $newName
+                            }
+                        }
                         #}
                     }
                     continue MainLoop
                 }
                 "remoteContentLibVM" {
                     $property.remoteContentLibVM = select-FileServerMenu -HA:$true
+                    continue MainLoop
+                }
+                "fileServerVM" {
+                    $property.fileServerVM = select-FileServerMenu -HA:$false
                     continue MainLoop
                 }
                 "domainName" {
@@ -3577,6 +3587,7 @@ function Add-NewVMForRole {
     $existingPrimary = $null
     $existingDPMP = $null
     $NewFSServer = $null
+    $firstSQLAO = $null
     switch ($Role) {
         "SQLServer" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -3587,6 +3598,19 @@ function Add-NewVMForRole {
             $virtualMachine.Memory = "8GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
+        }
+        "SQLAO" {
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
+            $disk = [PSCustomObject]@{"E" = "120GB" }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine.Memory = "8GB"
+            $virtualMachine.virtualProcs = 8
+            $virtualMachine.operatingSystem = $OperatingSystem
+            if ((($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "SQLAO" } | Measure-Object).Count) -eq 0) {
+                $firstSQLAO = $true
+            }
         }
         "CAS" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -3747,6 +3771,12 @@ function Add-NewVMForRole {
             Write-Host "New Primary server found. Adding new DPMP for sitecode $newSiteCode"
         }
         Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -SiteCode $newSiteCode -Quiet:$Quiet
+    }
+    if ($firstSQLAO) {
+        $SQLAONode = Add-NewVMForRole -Role SQLAO -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem  -Quiet:$Quiet -ReturnMachineName:$true
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'OtherNode' -Value $SQLAONode
+        $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$false
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'fileServerVM' -Value $FSName
     }
     if ($NewFSServer -eq $true) {
         #Get-PSCallStack | out-host
@@ -4121,6 +4151,12 @@ function Select-VirtualMachines {
                                             write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
                                             $removeVM = $false
                                         }
+                                    }
+                                }
+                                if ($virtualMachine.role -eq "SQLAO") {
+                                    $SQLAOVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" }
+                                    foreach ($svm in $SQLAOVMs) {
+                                        Remove-VMFromConfig -vmName $svm.vmName -ConfigToModify $global:config
                                     }
                                 }
                                 if ($removeVM -eq $true) {

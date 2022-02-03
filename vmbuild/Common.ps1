@@ -1841,7 +1841,8 @@ function Set-SupportedOptions {
         "WorkgroupMember",
         "InternetClient",
         "AADClient",
-        "OSDClient"
+        "OSDClient",
+        "SQLAO"
     )
 
     $rolesForExisting = @(
@@ -1855,7 +1856,8 @@ function Set-SupportedOptions {
         "WorkgroupMember",
         "InternetClient",
         "AADClient",
-        "OSDClient"
+        "OSDClient",
+        "SQLAO"
     )
 
     $cmVersions = @(
