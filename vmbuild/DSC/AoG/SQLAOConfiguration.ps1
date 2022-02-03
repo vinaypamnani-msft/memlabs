@@ -95,6 +95,7 @@ Configuration FullClusterSetup
         }
 
     }
+
     Node $AllNodes.Where{ $_.Role -eq 'FileServer' }.NodeName
     {
         WaitForAll AD {
@@ -175,6 +176,7 @@ Configuration FullClusterSetup
             DependsOn             = '[NTFSAccessEntry]ClusterWitnessPermissions'
         }
     }
+
     Node $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
     {
         WaitForAll FS {
