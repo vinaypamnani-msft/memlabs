@@ -396,6 +396,8 @@ function Add-PerVMSettings {
     # DC DSC needs a list of SiteServers to wait on.
     if ($thisVM.role -eq "DC") {
         $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
+        $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentUser } | Select-Object -ExpandProperty domainUser -Unique
+        $accountLists.DomainAccounts =  $accountLists.DomainAccounts | Select-Object -Unique
 
         $ServersToWaitOn = @()
         $thisPSName = $null

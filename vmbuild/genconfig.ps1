@@ -3608,6 +3608,7 @@ function Add-NewVMForRole {
             $virtualMachine.Memory = "8GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
+
             if ((($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "SQLAO" } | Measure-Object).Count) -eq 0) {
                 $firstSQLAO = $true
             }
@@ -3777,6 +3778,7 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'OtherNode' -Value $SQLAONode
         $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$false
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'fileServerVM' -Value $FSName
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SQLAgentUser' -Value "SqlAgentUser"
     }
     if ($NewFSServer -eq $true) {
         #Get-PSCallStack | out-host
@@ -4149,6 +4151,14 @@ function Select-VirtualMachines {
                                         if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
                                             Write-Host
                                             write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
+                                            $removeVM = $false
+                                        }
+                                    }
+                                    $SQLAOVM = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.fileServerVM }
+                                    if ($SQLAOVM) {
+                                        if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
+                                            Write-Host
+                                            write-host -ForegroundColor Yellow "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
                                             $removeVM = $false
                                         }
                                     }
