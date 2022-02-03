@@ -464,7 +464,7 @@ $global:VM_Config = {
         # Dot Source config script
         . "$dscConfigScript"
         $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
-        $sqlAgentUser = $netbiosName + "\"  + $deployConfig.thisParams.thisVM.SQLAgentUser
+        $sqlAgentUser = $netbiosName + "\" + $deployConfig.thisParams.thisVM.SQLAgentUser
         $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\CASClusterWitness"
         $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
         $cnName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
@@ -485,32 +485,32 @@ $global:VM_Config = {
                 # Node01 - First cluster node.
                 @{
                     # Replace with the name of the actual target node.
-                    NodeName = $deployConfig.thisParams.MachineName
+                    NodeName        = $deployConfig.thisParams.MachineName
 
                     # This is used in the configuration to know which resource to compile.
-                    Role              = 'ClusterNode1'
-                    CheckModuleName   = 'SqlServer'
-                    Address           = $deployConfig.thisParams.network
-                    AddressMask       = '255.255.255.0'
-                    Name              = 'Domain Network'
-                    Address2          = '10.250.250.0'
-                    AddressMask2      = '255.255.255.0'
-                    Name2             = 'Cluster Network'
-                    InstanceName      = $deployConfig.thisParams.thisVM.sqlInstanceName
-                    ClusterNameAoG    = 'CASAlwaysOn'
-                    SQLAgentUser      = $sqlAgentUser
+                    Role            = 'ClusterNode1'
+                    CheckModuleName = 'SqlServer'
+                    Address         = $deployConfig.thisParams.network
+                    AddressMask     = '255.255.255.0'
+                    Name            = 'Domain Network'
+                    Address2        = '10.250.250.0'
+                    AddressMask2    = '255.255.255.0'
+                    Name2           = 'Cluster Network'
+                    InstanceName    = $deployConfig.thisParams.thisVM.sqlInstanceName
+                    ClusterNameAoG  = 'CASAlwaysOn'
+                    SQLAgentUser    = $sqlAgentUser
 
                 },
 
                 # Node02 - Second cluster node
                 @{
                     # Replace with the name of the actual target node.
-                    NodeName = $deployConfig.thisParams.thisVM.OtherNode
+                    NodeName                 = $deployConfig.thisParams.thisVM.OtherNode
 
                     # This is used in the configuration to know which resource to compile.
-                    Role      = 'ClusterNode2'
-                    Resource  = $resourceDir
-                    PrimaryReplicaServerName = $deployConfig.thisParams.MachineName +"." + $deployConfig.vmOptions.DomainName
+                    Role                     = 'ClusterNode2'
+                    Resource                 = $resourceDir
+                    PrimaryReplicaServerName = $deployConfig.thisParams.MachineName + "." + $deployConfig.vmOptions.DomainName
                 },
                 @{
                     NodeName          = 'SCCM-CAS'
@@ -525,25 +525,25 @@ $global:VM_Config = {
 
                 },
                 @{
-                    NodeName         = $deployConfig.thisParams.thisVM.fileServerVM
-                    Role             = 'FileServer'
-                    Name             = 'CASClusterWitness'
-                    Path             = 'F:\CASClusterWitness'
-                    Description      = 'CASWitnessShare'
-                    WitnessPath      = "F:\CASClusterWitness"
-                    Accounts         = $ADAccounts2
-                    Principal1       = $ADAccounts2[0]
-                    Principal2       = $ADAccounts2[1]
-                    Principal3       = $ADAccounts2[2]
-                    Principal4       = $ADAccounts2[3]
-                    FullAccess       = $ADAccounts2
-                    ReadAccess       = 'Everyone'
-                    CheckModuleName  = 'AccessControlDSC'
+                    NodeName        = $deployConfig.thisParams.thisVM.fileServerVM
+                    Role            = 'FileServer'
+                    Name            = 'CASClusterWitness'
+                    Path            = 'F:\CASClusterWitness'
+                    Description     = 'CASWitnessShare'
+                    WitnessPath     = "F:\CASClusterWitness"
+                    Accounts        = $ADAccounts2
+                    Principal1      = $ADAccounts2[0]
+                    Principal2      = $ADAccounts2[1]
+                    Principal3      = $ADAccounts2[2]
+                    Principal4      = $ADAccounts2[3]
+                    FullAccess      = $ADAccounts2
+                    ReadAccess      = 'Everyone'
+                    CheckModuleName = 'AccessControlDSC'
                 },
                 @{
-                    NodeName                     = "*"
-                    PSDscAllowDomainUser         = $true
-                    PSDscAllowPlainTextPassword  = $true
+                    NodeName                    = "*"
+                    PSDscAllowDomainUser        = $true
+                    PSDscAllowPlainTextPassword = $true
                     ClusterName                 = $deployConfig.thisParams.thisVM.ClusterName
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
