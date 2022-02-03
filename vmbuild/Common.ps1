@@ -1014,6 +1014,8 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $true)]
         [string]$SwitchName,
         [Parameter(Mandatory = $false)]
+        [string]$SwitchName2,
+        [Parameter(Mandatory = $false)]
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
@@ -1129,6 +1131,10 @@ function New-VirtualMachine {
     Write-Log "$VmName`: Adding a DVD drive"
     Add-VMDvdDrive -VMName $VmName
 
+    if ($SwitchName2) {
+        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2"
+        Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2
+    }
     Write-Log "$VmName`: Changing boot order"
     $f = Get-VM2 -Name $VmName | Get-VMFirmware
     $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
