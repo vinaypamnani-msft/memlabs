@@ -466,7 +466,19 @@ $global:VM_Config = {
         $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
         $sqlAgentUser = $netbiosName + "\"  + $deployConfig.thisParams.thisVM.SQLAgentUser
         $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\CASClusterWitness"
+        $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
+        $cnName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
+        $ADAccounts = @()
+        $ADAccounts += $deployConfig.thisParams.MachineName + "$"
+        $ADAccounts += $deployConfig.thisParams.thisVM.OtherNode + "$"
+        $ADAccounts += $deployConfig.thisParams.thisVM.ClusterName + "$"
+
+        $ADAccounts2 = @()
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.MachineName + "$"
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.thisVM.OtherNode + "$"
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.thisVM.ClusterName + "$"
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
         # Configuration Data
         $Configuration = @{
             AllNodes = @(
@@ -503,28 +515,28 @@ $global:VM_Config = {
                 @{
                     NodeName          = 'SCCM-CAS'
                     Role              = 'ADSetup'
-                    ADmembers         = 'SCCM-CASClust1$','SCCM-CASClust2$', 'CASCluster$'
-                    ComputerName      = 'CASCluster'
+                    ADmembers         = $ADAccounts
+                    ComputerName      = $deployConfig.thisParams.thisVM.ClusterName
                     SQLServiceAccount = 'SQLServerServiceCAS'
                     SQLServiceAgent   = $deployConfig.thisParams.thisVM.SQLAgentUser
                     UserNameCluster   = 'SQLServerServiceCAS'
-                    DomainName        = 'contosomd.com'
-                    OUUserPath        = 'CN=Users,DC=contosomd,DC=com'
+                    DomainName        = $deployConfig.vmOptions.domainName
+                    OUUserPath        = $cnName
 
                 },
                 @{
-                    NodeName         = 'SCCM-FileServer'
+                    NodeName         = $deployConfig.thisParams.thisVM.fileServerVM
                     Role             = 'FileServer'
                     Name             = 'CASClusterWitness'
                     Path             = 'F:\CASClusterWitness'
                     Description      = 'CASWitnessShare'
                     WitnessPath      = "F:\CASClusterWitness"
-                    Accounts         = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
-                    Principal1       = 'CONTOSOMD\SCCM-CASClust1$'
-                    Principal2       = 'CONTOSOMD\SCCM-CASClust2$'
-                    Principal3       = 'CONTOSOMD\CASCluster$'
-                    Principal4       = 'CONTOSOMD\Admin'
-                    FullAccess       = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
+                    Accounts         = $ADAccounts2
+                    Principal1       = $ADAccounts2[0]
+                    Principal2       = $ADAccounts2[1]
+                    Principal3       = $ADAccounts2[2]
+                    Principal4       = $ADAccounts2[3]
+                    FullAccess       = $ADAccounts2
                     ReadAccess       = 'Everyone'
                     CheckModuleName  = 'AccessControlDSC'
                 },
@@ -532,7 +544,7 @@ $global:VM_Config = {
                     NodeName                     = "*"
                     PSDscAllowDomainUser         = $true
                     PSDscAllowPlainTextPassword  = $true
-                    ClusterName                 = 'CASCluster'
+                    ClusterName                 = $deployConfig.thisParams.thisVM.ClusterName
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
