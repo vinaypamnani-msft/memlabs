@@ -361,8 +361,10 @@ $global:VM_Config = {
     $currentItem = $using:currentItem
 
     # Params for child script blocks
-    $cmDscFolder = "configmgr"
-    $aogDscFolder = "AoG"
+    $DscFolder = "configmgr"
+    if ($currentItem.role -eq "SQLAO" -and $using:Phase -eq 3) {
+        $DscFolder = "AoG"
+    }
 
     $createVM = $true
     if ($currentItem.hidden -eq $true) { $createVM = $false }
@@ -391,44 +393,7 @@ $global:VM_Config = {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to stop any running DSC's." -Warning -OutputStream
     }
 
-    # Boot To OOBE?
-    $bootToOOBE = $currentItem.role -eq "AADClient"
-    if ($bootToOOBE) {
-        # Run Sysprep
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown }
-        if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
-        }
-        else {
-            $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 15
-            if (-not $ready) {
-                Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
-            }
-            else {
-                $started = Start-VM2 -Name $currentItem.vmName -Passthru
-                if ($started) {
-                    $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
-                    if ($oobeStarted) {
-                        Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
-                        Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
-                    }
-                    else {
-                        Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
-                    }
-                }
-                else {
-                    Write-Log "PSJOB: $($currentItem.vmName): VM Failed to start." -OutputStream -Failure
-                }
-
-            }
-        }
-        # Update VMNote and set new version, this code doesn't run when VM_Create failed
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -UpdateVersion
-        return
-    }
-
-    $DSC_CreateAoGConfig = {
+    $DSC_CreateSQLAOConfig = {
 
         param($DscFolder)
 
@@ -436,16 +401,7 @@ $global:VM_Config = {
         $currentItem = $using:currentItem
         $adminCreds = $using:Common.LocalAdmin
         $deployConfig = $using:deployConfig
-
-        # Set current role
-        switch (($currentItem.role)) {
-            "DPMP" { $dscRole = "DomainMember" }
-            "FileServer" { $dscRole = "DomainMember" }
-            "SQLAO" { $dscRole = "DomainMember" }
-            "AADClient" { $dscRole = "WorkgroupMember" }
-            "InternetClient" { $dscRole = "WorkgroupMember" }
-            Default { $dscRole = $currentItem.role }
-        }
+        $dscRole = $currentItem.role
 
         # Define DSC variables
         $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
@@ -454,7 +410,7 @@ $global:VM_Config = {
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_CreateConfig: Started at $time`r`n=====" | Out-File $log -Append
+        "`r`n=====`r`nDSC_CreateSQLAOConfig: Started at $time`r`n=====" | Out-File $log -Append
         "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
         "Current Item = $currentItem" | Out-File $log -Append
         "Role Name = $dscRole" | Out-File $log -Append
@@ -479,8 +435,9 @@ $global:VM_Config = {
         $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.thisVM.OtherNode + "$"
         $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.thisVM.ClusterName + "$"
         $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
+
         # Configuration Data
-        $Configuration = @{
+        $cd = @{
             AllNodes = @(
                 # Node01 - First cluster node.
                 @{
@@ -564,8 +521,6 @@ $global:VM_Config = {
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
         & "$($dscRole)Configuration" -ConfigFilePath $configFilePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
     }
-
-
 
     $DSC_CreateConfig = {
 
@@ -691,9 +646,51 @@ $global:VM_Config = {
 
     }
 
+    # Boot To OOBE?
+    $bootToOOBE = $currentItem.role -eq "AADClient"
+    if ($bootToOOBE) {
+        # Run Sysprep
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown }
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
+        }
+        else {
+            $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 15
+            if (-not $ready) {
+                Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
+            }
+            else {
+                $started = Start-VM2 -Name $currentItem.vmName -Passthru
+                if ($started) {
+                    $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
+                    if ($oobeStarted) {
+                        Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
+                        Write-Log "PSJOB: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
+                    }
+                    else {
+                        Write-Log "PSJOB: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
+                    }
+                }
+                else {
+                    Write-Log "PSJOB: $($currentItem.vmName): VM Failed to start." -OutputStream -Failure
+                }
+
+            }
+        }
+        # Update VMNote and set new version, this code doesn't run when VM_Create failed
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -UpdateVersion
+        return
+    }
+
     Write-Log "PSJOB: $($currentItem.vmName): Starting $($currentItem.role) role configuration via DSC."
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $cmDscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
+    $ConfigToCreate = $DSC_CreateConfig
+    if ($currentItem.role -eq "SQLAO" -and $using:Phase -eq 3) {
+        $ConfigToCreate = $DSC_CreateSQLAOConfig
+    }
+
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $ConfigToCreate -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -704,11 +701,11 @@ $global:VM_Config = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures."
     }
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $cmDscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
         # Retry once before exiting
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $cmDscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
         if ($result.ScriptBlockFailed) {
             Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return

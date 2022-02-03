@@ -107,6 +107,11 @@ function New-VMJobs {
             $PhaseDescription = "Configuration"
             Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
         }
+
+        3 {
+            $PhaseDescription = "Configuration"
+            Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
+        }
     }
 
     Write-Host
@@ -138,6 +143,11 @@ function New-VMJobs {
 
         # Skip Phase 2 for OSDClient, nothing for us to do
         if ($Phase -eq 2 -and $currentItem.role -eq "OSDClient") {
+            continue
+        }
+
+        # Skip Phase 3 for all machines, except SQLAO's primary node
+        if ($Phase -eq 3 -and ($currentItem.role -ne "SQLAO" -or ($currentItem.role -eq "SQLAO" -and -not $currentItem.OtherNode))) {
             continue
         }
 
@@ -431,6 +441,7 @@ try {
     # 0 - Prepare existing VMs
     # 1 - Create new VMs
     # 2 - Configure VMs (run DSC)
+    # 3 - Configure SQL AO
 
     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
     if ($containsHidden) {
@@ -463,6 +474,10 @@ try {
             }
 
             $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
+
+            if ($configured -and $containsAO) {
+                $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
+            }
         }
     }
 
