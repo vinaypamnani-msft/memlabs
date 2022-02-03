@@ -31,6 +31,8 @@ class InstallADK {
             Start-BitsTransfer -Source $adkurl -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
+
+
         $_adkWinPEpath = $this.ADKWinPEPath
         if (!(Test-Path $_adkWinPEpath)) {
             # $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"  # ADK add-on (19041)
@@ -2224,5 +2226,445 @@ class InstallCA {
     [InstallCA] Get() {
         return $this
     }
+
+}
+
+[DscResource()]
+class FileACLPermission {
+	[DscProperty(Key)]
+	[string]$Path
+
+	[DscProperty(Mandatory)]
+	[string[]]$accounts
+
+	[DscProperty()]
+	[string]$access = "Allow"
+
+	[DscProperty()]
+	[string]$rights = "FullControl"
+
+	[DscProperty()]
+	[string]$inherit = "ContainerInherit,ObjectInherit"
+
+	[DscProperty()]
+	[string]$propagate = "None"
+
+
+	[void] Set()
+	{
+		foreach ($account in $this.accounts)
+		{
+			$_account = $account
+			$_path = $this.Path
+
+			write-verbose -message ('Set Entered:  Path Set to:' + $_path + 'Account Operating on:' + $_account)
+
+			$_access = $this.access
+			$_rights = $this.rights
+			$_inherit = $this.inherit
+			$_propagate = $this.propagate
+
+			write-verbose -Message ('Variables Set to:' + $_account + ' ' + $_rights + ' ' + $_inherit + ' ' + $_propagate + ' ' + $_access)
+
+			# Configure the access object values - READ-ONLY
+			$_access = [System.Security.AccessControl.AccessControlType]::$_access
+			$_rights = [System.Security.AccessControl.FileSystemRights]$_rights
+			$_inherit = [System.Security.AccessControl.InheritanceFlags]$_inherit
+			$_propagate = [System.Security.AccessControl.PropagationFlags]::$_propagate
+
+			$ace = New-Object System.Security.AccessControl.FileSystemAccessRule($_account, $_rights, $_inherit, $_propagate, $_access)
+
+			#Retrieve the directory ACL and add a new ACL rule
+			$acl = Get-Acl $_path
+			$acl.AddAccessRule($ace)
+			$acl.SetAccessRuleProtection($false, $false)
+
+			#Set-Acl  $directory $acl
+			set-acl -aclobject $acl $_path
+		}
+	}
+
+	[bool] Test()
+	{
+		$PermissionTest = $false
+
+
+		$_access = $this.access
+		$_rights = $this.rights
+		$_inherit = $this.inherit
+		$_propagate = $this.propagate
+		$AccountTrack = @{ }
+
+		$GetACL = Get-Acl $this.Path
+
+		foreach ($account in $this.accounts)
+		{
+
+			$_account = $account
+
+			Foreach ($AccessRight in $GetACL.access)
+			{
+				IF ($AccessRight.IdentityReference -eq "$_account")
+				{
+					write-verbose -Message ("Account Discovered:" + $_account)
+					IF ($AccessRight.InheritanceFlags -eq $_inherit)
+					{
+						write-verbose -Message ("InheritanceFlags Passed")
+						IF ($AccessRight.AccessControlType -eq $_access)
+						{
+							write-verbose -Message ("Access Passed")
+							IF ($AccessRight.FileSystemRights -eq $_rights)
+							{
+								write-verbose -Message ("Rights Passed")
+								IF ($AccessRight.PropagationFlags -eq $_propagate)
+								{
+									write-verbose -Message ("Propagate Passed")
+									$PermissionTest = $true
+									$AccountTrack.Add($_account, $PermissionTest)
+								}
+							}
+						}
+					}
+				}
+			}
+			$PermissionTest = $false
+		}
+
+		IF (($AccountTrack.Count -eq 0) -or $AccountTrack.Count -ne $this.accounts.count)
+		{
+			$PermissionTest = $false
+			Return $PermissionTest
+		}
+
+		$PermissionTest = $true
+
+
+		foreach ($object in $AccountTrack.Values)
+		{
+
+			IF ($object -eq "$false")
+			{
+				write-verbose -Message ("Permission check failed set to false")
+				$PermissionTest = $false
+			}
+		}
+
+
+		Return $PermissionTest
+	}
+
+	[FileACLPermission] Get()
+	{
+		return $this
+	}
+}
+
+[DscResource()]
+class ModuleAdd {
+	[DscProperty(Key)]
+	[string]$key = 'Always'
+
+	[DscProperty(Mandatory)]
+	[string]$CheckModuleName
+
+	[DscProperty()]
+	[string]$Clobber = 'Yes'
+
+	[DscProperty()]
+	[string]$UserScope = 'AllUsers'
+
+	[void] Set()
+	{
+
+		$_moduleName = $this.CheckModuleName
+		$_userScope = $this.UserScope
+
+		$NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
+
+		IF ($null -eq $NuGet)
+		{
+			#Install-PackageProvider Nuget -force -Confirm:$false
+			Find-PackageProvider -Name NuGet -Force | Install-PackageProvider -Force -Scope AllUsers -Confirm:$false
+			Register-PackageSource -Name nuget.org -Location https://www.nuget.org/api/v2 -ProviderName NuGet -Force -Trusted
+		}
+
+		$module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+
+		IF ($null -eq $module)
+		{
+			Install-Module -Name PowerShellGet -Force -Scope $_userScope
+		}
+
+		$module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+
+		IF ($null -eq $module)
+		{
+			IF ($this.Clobber -eq 'Yes')
+			{
+				Install-Module -Name $_moduleName -Force -Scope $_userScope -AllowClobber
+			}
+			ELSE
+			{
+				Install-Module -Name $_moduleName -Force -Scope $_userScope
+			}
+
+		}
+	}
+
+	[bool] Test()
+	{
+
+		$_ModuleName = $this.CheckModuleName
+		$GetModuleStatus = Get-InstalledModule -Name $_ModuleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+
+		write-verbose ('Searching for module:' + $_ModuleName + 'ModuleStatus:' + $GetModuleStatus)
+
+
+		IF ($null -eq $GetModuleStatus)
+		{
+			Return $false
+		}
+		ELSE
+		{
+			Return $true
+		}
+	}
+
+	[ModuleAdd] Get()
+	{
+		return $this
+	}
+
+}
+
+[DscResource()]
+class ActiveDirectorySPN {
+	[DscProperty(Key)]
+	[string]$key = 'Always'
+
+	[DscProperty()]
+	[string[]]$UserName
+
+    [DscProperty()]
+	[string]$UserNameCluster
+
+	[DscProperty()]
+	[string[]]$ClusterDevice
+
+	[DscProperty(Mandatory)]
+	[string]$FQDNDomainName = "contoso.com"
+
+	[DscProperty()]
+	[string]$OULocationUser = 'CN=Users,DC=contosomd,DC=com'
+
+	[DscProperty()]
+	[string]$OULocationDevice = 'CN=Computers,DC=contosomd,DC=com'
+
+	[void] Set()
+	{
+
+		Import-Module ActiveDirectory
+
+		Set-Location AD:
+
+		#Set SPN permissions to object to allow it to update SPN registrations.
+		$_OULocationUser = $this.OULocationUser
+        $_OULocationDevice = $this.OULocationDevice
+		$_FQDNDomainName = $this.FQDNDomainName
+        $_UserNameCluster = $this.UserNameCluster
+
+		Foreach ($user in $this.UserName)
+		{
+			$_UserName = $user
+
+			write-verbose ('Setting Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
+			#Set SPN permissions to object to allow it to update SPN registrations.
+
+			$oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
+			$UserObject = "CN=$_UserName,$_OULocationUser"
+
+            write-verbose ('ObjectPath set to  AD:' + $UserObject)
+
+			$UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+			$UserSID = $UserSID.Value
+
+            write-verbose ('User:' + $_UserName + ' SIDValue is:' + $UserSID + ' On Domain:' + $_FQDNDomainName)
+
+			$oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+			$SIDMatch = $Matches[0]
+
+			$oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
+
+			#$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+			#$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+
+			$ACL = Get-Acl -Path "AD:$UserObject"
+			$currentSSDL = $ACL.Sddl
+
+			$newSSDL = $currentSSDL + $oldSddl
+			$ACL.SetSecurityDescriptorSddlForm($newSSDL)
+
+			Set-Acl -AclObject $acl -Path "AD:$UserObject"
+			write-verbose (' Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName + ' have been set')
+		}
+
+        Foreach ($device in $this.ClusterDevice)
+		{
+			$_DeviceName = $device
+
+			write-verbose ('Setting Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName)
+
+			$oldSddl = "(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1145)"
+			$DeviceObject = "CN=$_DeviceName,$_OULocationDevice"
+            $UserObject = "CN=$_UserNameCluster,$_OULocationUser"
+
+            write-verbose ('ObjectPath set to  AD:' + $DeviceObject)
+
+			$ComputerSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADComputer -Server "$_FQDNDomainName" $DeviceObject).SID
+			$ComputerSID = $ComputerSID.Value
+
+            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+			$UserSID = $UserSID.Value
+
+			write-verbose ('Device:' + $_DeviceName + ' SIDValue is:' + $ComputerSID + ' On Domain:' + $_FQDNDomainName)
+
+			$oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+			$SIDMatch = $Matches[0]
+
+			$oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
+
+			#$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+			#$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+
+            write-verbose ('Device:' + $_DeviceName + ' UserSet is:' + $_UserNameCluster + ' On Domain:' + $_FQDNDomainName)
+
+			$ACL = Get-Acl -Path "AD:$DeviceObject"
+			$currentSSDL = $ACL.Sddl
+
+
+			$newSSDL = $currentSSDL + $oldSddl
+			$ACL.SetSecurityDescriptorSddlForm($newSSDL)
+
+			Set-Acl -AclObject $acl -Path "AD:$DeviceObject"
+			write-verbose (' Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName + ' have been set')
+		}
+	}
+
+	[bool] Test()
+	{
+
+		Import-Module ActiveDirectory
+
+		Set-Location AD:
+
+		#Set SPN permissions to object to allow it to update SPN registrations.
+		$_OULocationUser = $this.OULocationUser
+        $_OULocationDevice = $this.OULocationDevice
+		$_FQDNDomainName = $this.FQDNDomainName
+        $_UserNameCluster = $this.UserNameCluster
+        $PermissionTest = $false
+        $AccountTrack = @{ }
+
+		Foreach ($user in $this.UserName)
+		{
+			$_UserName = $user
+
+			write-verbose ('Checking Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
+
+			$oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
+			$UserObject = "CN=$_UserName,$_OULocationUser"
+
+            write-verbose ('ObjectPath set to  AD:' + $UserObject)
+
+			$UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+			$UserSID = $UserSID.Value
+
+			write-verbose ('User:' + $_UserName + ' SIDValue is:' + $UserSID + ' On Domain:' + $_FQDNDomainName)
+
+			$oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+			$SIDMatch = $Matches[0]
+
+			$oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
+
+			#$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+			#$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+
+			$ACL = Get-Acl -Path "AD:$UserObject"
+			$currentSSDL = $ACL.Sddl
+
+			IF ($currentSSDL -match ("\(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;$UserSID\)"))
+			{
+				write-verbose ('Permissions for SPN are already set')
+                $AccountTrack.Add($_UserName, $true)
+			}
+			ELSE
+			{
+				write-verbose ('Permissions for SPN are not currently set')
+				$AccountTrack.Add($_UserName, $false)
+			}
+		}
+
+        Foreach ($device in $this.ClusterDevice)
+		{
+			$_DeviceName = $device
+
+			write-verbose ('Checking Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName)
+
+			$oldSddl = "(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1145)"
+			$DeviceObject = "CN=$_DeviceName,$_OULocationDevice"
+            $UserObject = "CN=$_UserNameCluster,$_OULocationUser"
+
+            write-verbose ('ObjectPath set to  AD:' + $DeviceObject)
+
+			$ComputerSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADComputer -Server "$_FQDNDomainName" $DeviceObject).SID
+			$ComputerSID = $ComputerSID.Value
+
+            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+			$UserSID = $UserSID.Value
+
+			write-verbose ('Device:' + $_DeviceName + ' SIDValue is:' + $ComputerSID + ' On Domain:' + $_FQDNDomainName)
+
+			$oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+			$SIDMatch = $Matches[0]
+
+			$oldSddl = $oldSddl -replace ($SIDMatch, $ComputerSID)
+
+			#$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+			#$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+
+            write-verbose ('Device:' + $_DeviceName + ' UserSet is:' + $_UserNameCluster + ' On Domain:' + $_FQDNDomainName)
+
+			$ACL = Get-Acl -Path "AD:$DeviceObject"
+			$currentSSDL = $ACL.Sddl
+
+			IF ($currentSSDL -match ("\(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;$UserSID\)"))
+			{
+				write-verbose ('Permissions for SPN are already set')
+                $AccountTrack.Add($_DeviceName, $true)
+			}
+			ELSE
+			{
+				write-verbose ('Permissions for SPN are not currently set')
+				$AccountTrack.Add($_DeviceName, $false)
+			}
+		}
+
+        $PermissionTest = $true
+        foreach ($object in $AccountTrack.Values)
+		{
+			#write-verbose ('Permissions for Object:' + $object)
+			IF ($object -eq $false)
+			{
+				$PermissionTest = $false
+			}
+		}
+
+		Return $PermissionTest
+	}
+
+	[ActiveDirectorySPN] Get()
+	{
+		return $this
+	}
 
 }
