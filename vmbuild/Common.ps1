@@ -584,7 +584,7 @@ function Add-SwitchAndDhcp {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name.")]
         [string]$DomainName
     )
-    Write-Log "Creating/verifying whether a Hyper-V switch for '$NetworkName' network exists." -Activity
+    Write-Log "Creating/verifying whether a Hyper-V switch and DHCP Scopes for '$NetworkName' network exists." -Activity
 
     $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName
     if (-not $switch) {
@@ -593,7 +593,6 @@ function Add-SwitchAndDhcp {
     }
 
     # Test if DHCP scope exists, if not create it
-    Write-Log "Creating/verifying DHCP scope options for the '$NetworkName' network. ($NetworkSubnet)" -Activity
     $worked = Test-DHCPScope -ScopeID $NetworkSubnet -ScopeName $NetworkName -DomainName $DomainName
     if (-not $worked) {
         Write-Log "Failed to verify/create DHCP Scope for the '$NetworkName' network. ($NetworkSubnet) Exiting." -Failure
