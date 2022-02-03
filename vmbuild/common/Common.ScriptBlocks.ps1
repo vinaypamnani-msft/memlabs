@@ -426,6 +426,132 @@ $global:VM_Config = {
         return
     }
 
+    $DSC_CreateAoGConfig = {
+
+        param($cmDscFolder)
+
+        # Get required variables from parent scope
+        $currentItem = $using:currentItem
+        $adminCreds = $using:Common.LocalAdmin
+        $deployConfig = $using:deployConfig
+
+        # Set current role
+        switch (($currentItem.role)) {
+            "DPMP" { $dscRole = "DomainMember" }
+            "FileServer" { $dscRole = "DomainMember" }
+            "SQLAO" { $dscRole = "DomainMember" }
+            "AADClient" { $dscRole = "WorkgroupMember" }
+            "InternetClient" { $dscRole = "WorkgroupMember" }
+            Default { $dscRole = $currentItem.role }
+        }
+
+        # Define DSC variables
+        $dscConfigScript = "C:\staging\DSC\$cmDscFolder\$($dscRole)Configuration.ps1"
+        $dscConfigPath = "C:\staging\DSC\$cmDscFolder\DSCConfiguration"
+
+        # Update init log
+        $log = "C:\staging\DSC\DSC_Init.txt"
+        $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
+        "`r`n=====`r`nDSC_CreateConfig: Started at $time`r`n=====" | Out-File $log -Append
+        "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
+        "Current Item = $currentItem" | Out-File $log -Append
+        "Role Name = $dscRole" | Out-File $log -Append
+        "Config Script = $dscConfigScript" | Out-File $log -Append
+        "Config Path = $dscConfigPath" | Out-File $log -Append
+
+        # Dot Source config script
+        . "$dscConfigScript"
+        $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+        $sqlAgentUser = $netbiosName + "\"  + $deployConfig.thisParams.thisVM.SQLAgentUser
+        $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\CASClusterWitness"
+        # Configuration Data
+        $Configuration = @{
+            AllNodes = @(
+                # Node01 - First cluster node.
+                @{
+                    # Replace with the name of the actual target node.
+                    NodeName = $deployConfig.thisParams.MachineName
+
+                    # This is used in the configuration to know which resource to compile.
+                    Role              = 'ClusterNode1'
+                    CheckModuleName   = 'SqlServer'
+                    Address           = $deployConfig.thisParams.network
+                    AddressMask       = '255.255.255.0'
+                    Name              = 'Domain Network'
+                    Address2          = '10.250.250.0'
+                    AddressMask2      = '255.255.255.0'
+                    Name2             = 'Cluster Network'
+                    InstanceName      = $deployConfig.thisParams.thisVM.sqlInstanceName
+                    ClusterNameAoG    = 'CASAlwaysOn'
+                    SQLAgentUser      = $sqlAgentUser
+
+                },
+
+                # Node02 - Second cluster node
+                @{
+                    # Replace with the name of the actual target node.
+                    NodeName = $deployConfig.thisParams.thisVM.OtherNode
+
+                    # This is used in the configuration to know which resource to compile.
+                    Role      = 'ClusterNode2'
+                    Resource  = $resourceDir
+                    PrimaryReplicaServerName = $deployConfig.thisParams.MachineName +"." + $deployConfig.vmOptions.DomainName
+                },
+                @{
+                    NodeName          = 'SCCM-CAS'
+                    Role              = 'ADSetup'
+                    ADmembers         = 'SCCM-CASClust1$','SCCM-CASClust2$', 'CASCluster$'
+                    ComputerName      = 'CASCluster'
+                    SQLServiceAccount = 'SQLServerServiceCAS'
+                    SQLServiceAgent   = $deployConfig.thisParams.thisVM.SQLAgentUser
+                    UserNameCluster   = 'SQLServerServiceCAS'
+                    DomainName        = 'contosomd.com'
+                    OUUserPath        = 'CN=Users,DC=contosomd,DC=com'
+
+                },
+                @{
+                    NodeName         = 'SCCM-FileServer'
+                    Role             = 'FileServer'
+                    Name             = 'CASClusterWitness'
+                    Path             = 'F:\CASClusterWitness'
+                    Description      = 'CASWitnessShare'
+                    WitnessPath      = "F:\CASClusterWitness"
+                    Accounts         = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
+                    Principal1       = 'CONTOSOMD\SCCM-CASClust1$'
+                    Principal2       = 'CONTOSOMD\SCCM-CASClust2$'
+                    Principal3       = 'CONTOSOMD\CASCluster$'
+                    Principal4       = 'CONTOSOMD\Admin'
+                    FullAccess       = 'CONTOSOMD\SCCM-CASClust1$', 'CONTOSOMD\SCCM-CASClust2$', 'CONTOSOMD\CASCluster$', 'CONTOSOMD\Admin'
+                    ReadAccess       = 'Everyone'
+                    CheckModuleName  = 'AccessControlDSC'
+                },
+                @{
+                    NodeName                     = "*"
+                    PSDscAllowDomainUser         = $true
+                    PSDscAllowPlainTextPassword  = $true
+                    ClusterName                 = 'CASCluster'
+                    #ClusterIPAddress            = '10.250.250.30/24'
+                }
+            )
+        }
+
+        # Write config to file
+        $configFilePath = "C:\staging\DSC\deployConfig.json"
+
+        "Writing DSC config to $configFilePath" | Out-File $log -Append
+        if (Test-Path $configFilePath) {
+            $newName = $configFilePath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
+            Rename-Item -Path $configFilePath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+        }
+        $deployConfig | ConvertTo-Json -Depth 3 | Out-File $configFilePath -Force -Confirm:$false
+
+        # Compile config, to create MOF
+        "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
+        & "$($dscRole)Configuration" -ConfigFilePath $configFilePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
+    }
+
+
+
     $DSC_CreateConfig = {
 
         param($cmDscFolder)

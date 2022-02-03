@@ -3774,10 +3774,13 @@ function Add-NewVMForRole {
         Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -SiteCode $newSiteCode -Quiet:$Quiet
     }
     if ($firstSQLAO) {
+        write-host "$($virtualMachine.VmName) is the 1st SQLAO"
         $SQLAONode = Add-NewVMForRole -Role SQLAO -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem  -Quiet:$Quiet -ReturnMachineName:$true
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'OtherNode' -Value $SQLAONode
-        $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$false
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'fileServerVM' -Value $FSName
+        if ($test -eq $false ) {
+            $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'fileServerVM' -Value $FSName
+        }
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SQLAgentUser' -Value "SqlAgentUser"
     }
     if ($NewFSServer -eq $true) {
@@ -3805,6 +3808,7 @@ function select-FileServerMenu {
         [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
         [object] $ConfigToModify = $global:config
     )
+    #Get-PSCallStack | Out-Host
     $result = $null
     if ((Get-ListOfPossibleFileServers -Config $ConfigToModify).Count -eq 0) {
         $result = "n"
