@@ -371,45 +371,24 @@ try {
     }
 
     # Test if hyper-v switch exists, if not create it
-    Write-Log "Creating/verifying whether a Hyper-V switch for specified network exists." -Activity
-    $switch = Test-NetworkSwitch -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
-    if (-not $switch) {
-        Write-Log "Failed to verify/create Hyper-V switch for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
-        return
-    }
-
-    # Test if DHCP scope exists, if not create it
-    Write-Log "Creating/verifying DHCP scope options for specified network." -Activity
-    $DCVM = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.role -eq 'DC' }
-    if ($DCVM) {
-        $worked = Test-DHCPScope -ScopeID $deployConfig.vmOptions.network -ScopeName $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -DCVMName $DCVM.vmName
-    }
-    else {
-        $worked = Test-DHCPScope -ScopeID $deployConfig.vmOptions.network -ScopeName $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
-    }
-
+    $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
     if (-not $worked) {
-        Write-Log "Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
         return
     }
 
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
     if ($containsIN) {
-        Write-Log "Creating/verifying whether a Hyper-V switch for 'Internet' network exists." -Activity
-        $internetSwitchName = "Internet"
-        $internetSubnet = "172.31.250.0"
-        $switch = Test-NetworkSwitch -NetworkName $internetSwitchName -NetworkSubnet $internetSubnet -DomainName $internetSwitchName
-        if (-not $switch) {
-            Write-Log "Failed to verify/create Hyper-V switch for 'Internet' network ($internetSwitchName). Exiting." -Failure
+        $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0"
+        if (-not $worked) {
             return
         }
+    }
 
-        # Test if DHCP scope exists, if not create it
-        Write-Log "Creating/verifying DHCP scope options for the 'Internet' network." -Activity
-        $worked = Test-DHCPScope -ScopeID $internetSubnet -ScopeName $internetSwitchName -DomainName $deployConfig.vmOptions.domainName
+    $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
+    if ($containsAO) {
+        $worked = Add-SwitchAndDhcp -NetworkName "cluster" -NetworkSubnet "10.250.250.0"
         if (-not $worked) {
-            Write-Log "Failed to verify/create DHCP Scope for the 'Internet' network. Exiting." -Failure
             return
         }
     }

@@ -574,26 +574,58 @@ Function Set-Window {
     }
 }
 
+
+function Add-SwitchAndDhcp {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Network Name.")]
+        [string]$NetworkName,
+        [Parameter(Mandatory = $true, HelpMessage = "Network Subnet.")]
+        [string]$NetworkSubnet,
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name.")]
+        [string]$DomainName
+    )
+    Write-Log "Creating/verifying whether a Hyper-V switch for '$NetworkName' network exists." -Activity
+
+    $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName
+    if (-not $switch) {
+        Write-Log "Failed to verify/create Hyper-V switch for $NetworkName network ($NetworkSubnet). Exiting." -Failure
+        return $false
+    }
+
+    # Test if DHCP scope exists, if not create it
+    Write-Log "Creating/verifying DHCP scope options for the '$NetworkName' network. ($NetworkSubnet)" -Activity
+    $worked = Test-DHCPScope -ScopeID $NetworkSubnet -ScopeName $NetworkName -DomainName $DomainName
+    if (-not $worked) {
+        Write-Log "Failed to verify/create DHCP Scope for the '$NetworkName' network. ($NetworkSubnet) Exiting." -Failure
+        return $false
+    }
+    return $true
+}
+
 function Test-NetworkSwitch {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Network Name.")]
         [string]$NetworkName,
         [Parameter(Mandatory = $true, HelpMessage = "Network Subnet.")]
         [string]$NetworkSubnet,
-        [Parameter(Mandatory = $true, HelpMessage = "Domain Name.")]
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name.")]
         [string]$DomainName
     )
 
+    $notes = $DomainName
+    if (-not $notes) {
+        $notes = $NetworkName
+    }
     $exists = Get-VMSwitch2 -NetworkName $NetworkName
     if (-not $exists) {
         Write-Log "HyperV Network switch for '$NetworkName' not found. Creating a new one."
         try {
-            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Stop | Out-Null
+            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Stop | Out-Null
         }
         catch {
             Write-Log "Failed to create HyperV Network switch for $NetworkName. Trying again in 30 seconds"
             start-sleep -seconds 30
-            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Continue | Out-Null
+            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Continue | Out-Null
         }
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
     }
@@ -665,18 +697,16 @@ function Test-DHCPScope {
         [string]$ScopeID,
         [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope Name.")]
         [string]$ScopeName,
-        [Parameter(Mandatory = $true, HelpMessage = "DHCP Domain Name option.")]
-        [string]$DomainName,
-        [Parameter(Mandatory = $false, HelpMessage = "DC VM Name for extracting the DNS IP.")]
-        [string]$DCVMName
+        [Parameter(Mandatory = $false, HelpMessage = "DHCP Domain Name option.")]
+        [string]$DomainName
     )
 
     # Define Lease Time
     $leaseTimespan = New-TimeSpan -Days 16
-    $internetScope = $false
-    if ($ScopeName.ToLowerInvariant() -eq "internet") {
+    $DomainScope = $true
+    if (-not $DomainName) {
         $leaseTimespan = New-TimeSpan -Days 365
-        $internetScope = $true
+        $DomainScope = $false
     }
 
     # Install DHCP, if not found
@@ -722,36 +752,21 @@ function Test-DHCPScope {
     }
 
     try {
-
-        if ($internetScope) {
+        if (-not $DomainScope) {
             $HashArguments = @{
-                ScopeId = $ScopeID
-                Router  = $DHCPDefaultGateway
+                ScopeId   = $ScopeID
+                Router    = $DHCPDefaultGateway
+                DnsServer = @("4.4.4.4", "8.8.8.8")
             }
         }
         else {
             $HashArguments = @{
-                ScopeId   = $ScopeID
-                Router    = $DHCPDefaultGateway
-                DnsDomain = $DomainName
+                ScopeId    = $ScopeID
+                Router     = $DHCPDefaultGateway
+                DnsDomain  = $DomainName
+                WinsServer = $DHCPDNSAddress
+                DnsServer  = $DHCPDNSAddress
             }
-        }
-
-        if ($DCVMName -and -not $internetScope) {
-            $dcnet = Get-VM2 -Name $DCVMName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
-            if ($dcnet) {
-                $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
-                $HashArguments.Add("DnsServer", $dcIpv4)
-                $HashArguments.Add("WinsServer", $dcIpv4)
-            }
-            else {
-                $HashArguments.Add("DnsServer", $DHCPDNSAddress)
-            }
-        }
-
-        if ($internetScope) {
-            $DHCPDNSAddress = @("4.4.4.4", "8.8.8.8")
-            $HashArguments.Add("DnsServer", $DHCPDNSAddress)
         }
 
         Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
@@ -1933,7 +1948,7 @@ if (-not $Common.Initialized) {
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
-       # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
+        # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
         CachePath             = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
         SizeCache             = $null                                                                     # Cache for Memory Assigned, and Disk Usage
         NetCache              = $null                                                                     # Cache for Get-NetworkAdapter
