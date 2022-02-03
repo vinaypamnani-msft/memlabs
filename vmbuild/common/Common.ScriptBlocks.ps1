@@ -362,6 +362,8 @@ $global:VM_Config = {
 
     # Params for child script blocks
     $cmDscFolder = "configmgr"
+    $aogDscFolder = "AoG"
+
     $createVM = $true
     if ($currentItem.hidden -eq $true) { $createVM = $false }
 
@@ -428,7 +430,7 @@ $global:VM_Config = {
 
     $DSC_CreateAoGConfig = {
 
-        param($cmDscFolder)
+        param($DscFolder)
 
         # Get required variables from parent scope
         $currentItem = $using:currentItem
@@ -446,8 +448,8 @@ $global:VM_Config = {
         }
 
         # Define DSC variables
-        $dscConfigScript = "C:\staging\DSC\$cmDscFolder\$($dscRole)Configuration.ps1"
-        $dscConfigPath = "C:\staging\DSC\$cmDscFolder\DSCConfiguration"
+        $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
+        $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
 
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
@@ -464,6 +466,7 @@ $global:VM_Config = {
         $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
         $sqlAgentUser = $netbiosName + "\"  + $deployConfig.thisParams.thisVM.SQLAgentUser
         $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\CASClusterWitness"
+
         # Configuration Data
         $Configuration = @{
             AllNodes = @(
@@ -554,7 +557,7 @@ $global:VM_Config = {
 
     $DSC_CreateConfig = {
 
-        param($cmDscFolder)
+        param($DscFolder)
 
         # Get required variables from parent scope
         $currentItem = $using:currentItem
@@ -572,8 +575,8 @@ $global:VM_Config = {
         }
 
         # Define DSC variables
-        $dscConfigScript = "C:\staging\DSC\$cmDscFolder\$($dscRole)Configuration.ps1"
-        $dscConfigPath = "C:\staging\DSC\$cmDscFolder\DSCConfiguration"
+        $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
+        $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
 
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
@@ -615,13 +618,13 @@ $global:VM_Config = {
 
     $DSC_StartConfig = {
 
-        param($cmDscFolder)
+        param($DscFolder)
 
         # Get required variables from parent scope
         $currentItem = $using:currentItem
 
         # Define DSC variables
-        $dscConfigPath = "C:\staging\DSC\$cmDscFolder\DSCConfiguration"
+        $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
 
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
