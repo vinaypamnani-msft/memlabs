@@ -142,6 +142,16 @@ function New-DeployConfig {
             }
         }
 
+        $SQLAO = $virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode } | Select-Object -First 1
+        if ($SQLAO){
+            if ($SQLAO.fileServerVM -and -not $SQLAO.fileServerVM.StartsWith($configObject.vmOptions.prefix)) {
+                $SQLAO.fileServerVM = $configObject.vmOptions.prefix + $SQLAO.fileServerVM
+            }
+            if ($SQLAO.OtherNode -and -not $SQLAO.OtherNode.StartsWith($configObject.vmOptions.prefix)) {
+                $SQLAO.OtherNode = $configObject.vmOptions.prefix + $SQLAO.OtherNode
+            }
+        }
+
         $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
         if ($PassiveVM) {
             # Add prefix to FS
@@ -392,6 +402,9 @@ function Add-PerVMSettings {
         $thisParams | Add-Member -MemberType NoteProperty -Name "network" -Value $deployConfig.vmOptions.network -Force
     }
 
+    if ($thisVM.role -eq "SQLAO" -and $thisVM.Othernode) {
+
+    }
 
     # DC DSC needs a list of SiteServers to wait on.
     if ($thisVM.role -eq "DC") {
