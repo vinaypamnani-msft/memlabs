@@ -16,6 +16,8 @@ param (
     [switch]$UseCDN,
     [Parameter(Mandatory = $false, HelpMessage = "Skip to Phase 3!")]
     [switch]$Phase3,
+    [Parameter(Mandatory = $false, HelpMessage = "Skip Phase 3!")]
+    [switch]$SkipPhase3,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf
 )
@@ -481,7 +483,9 @@ try {
                 $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
 
                 if ($configured -and $containsAO) {
-                    $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
+                    if (-not $SkipPhase3.IsPresent) {
+                        $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
+                    }
                 }
             }
         }
