@@ -89,6 +89,7 @@ Configuration SQLAOConfiguration
             UserName             = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).SQLServiceAccount
             FQDNDomainName       = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).DomainName
             OULocationUser       = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUUserPath
+            OULocationDevice     = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).OUDevicePath
             ClusterDevice        = @($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' -or $_.role -eq 'ClusterNode2' }).NodeName
             UserNameCluster      = ($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).UserNameCluster
             Dependson            = '[ADUser]SQLServiceAgent'
