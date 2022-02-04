@@ -547,7 +547,10 @@ $global:VM_Config = {
 
 
         # Compile config, to create MOF
-        $creds = New-Object System.Management.Automation.PSCredential ("$domainNameSplit\\$($Common.LocalAdmin.UserName)", $Common.LocalAdmin.Password)
+        $user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
+        "User = $user" | Out-File $log -Append
+        "Password =  $($using:Common.LocalAdmin.Password)"  | Out-File $log -Append
+        $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
         if (-not $creds) {
             "Failed to create creds" | Out-File $log -Append
             return $false
