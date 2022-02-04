@@ -17,7 +17,7 @@ $global:VM_Create = {
 
     # Change log location
     $domainNameForLogging = $deployConfig.vmOptions.domainName
-    $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainNameForLogging.log"
+    $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
     # VM Network Switch
     $isInternet = ($currentItem.role -eq "InternetClient") -or ($currentItem.role -eq "AADClient")
@@ -341,7 +341,7 @@ $global:VM_Config = {
 
     # Change log location
     $domainNameForLogging = $deployConfig.vmOptions.domainName
-    $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainNameForLogging.log"
+    $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
     # Set domain name, depending on whether we need to create new VM or use existing one
     if (-not $createVM -or ($currentItem.role -eq "DC") ) {
