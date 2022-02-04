@@ -1057,6 +1057,7 @@ function New-VirtualMachine {
         Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
         Remove-Item -Path $($vmTest.Path) -Force -Recurse
         Write-Log "$VmName`: Purge complete."
+        Get-List -FlushCache | Out-Null # flush cache
     }
 
     if ($vmTest -and -not $ForceNew.IsPresent) {
