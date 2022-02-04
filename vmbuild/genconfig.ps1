@@ -3782,6 +3782,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'fileServerVM' -Value $FSName
         }
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SQLAgentUser' -Value "SqlAgentUser"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value "SqlCluster"
     }
     if ($NewFSServer -eq $true) {
         #Get-PSCallStack | out-host
