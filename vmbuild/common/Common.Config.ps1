@@ -1368,7 +1368,7 @@ function Get-List {
                     #Remove Missing VM's
                     if (-not ($virtualMachines.vmId -contains $oldListVM.vmID)) {
                         #write-host "removing $($oldListVM.vmID)"
-                        $global:vm_List = $global:vm_List | Where-Object { $_.vmID -ne $oldListVM.vmID -or ($_.vmBuild -eq $false) }
+                        $global:vm_List = $global:vm_List | Where-Object { $_.vmID -ne $oldListVM.vmID }
                     }
                 }
                 foreach ($vm in $virtualMachines) {
