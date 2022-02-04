@@ -761,7 +761,7 @@ function Test-DHCPScope {
         else {
             $DC = get-list -type VM -domain $DomainName | Where-Object {$_.Role -eq "DC" }
             if ($DC) {
-                $DHCPDNSAddress = ($DC.Network.Substring(0, $ScopeID.LastIndexOf(".")) + ".1")
+                $DHCPDNSAddress = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
             }
             $HashArguments = @{
                 ScopeId    = $ScopeID

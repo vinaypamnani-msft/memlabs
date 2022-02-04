@@ -399,7 +399,7 @@ try {
 
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
     if ($containsAO) {
-        $worked = Add-SwitchAndDhcp -NetworkName "cluster" -NetworkSubnet "10.250.250.0"
+        $worked = Add-SwitchAndDhcp -NetworkName "cluster" -NetworkSubnet "10.250.250.0" -DomainName $deployConfig.vmOptions.domainName
         if (-not $worked) {
             return
         }
