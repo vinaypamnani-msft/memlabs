@@ -317,6 +317,14 @@ $global:VM_Config = {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to stop any running DSC's." -Warning -OutputStream
     }
 
+    # Get VM Session
+    $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+
+    if (-not $ps) {
+        Write-Log "PSJOB: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
+        return
+    }
+
     # Copy DSC files
     Write-Log "PSJOB: $($currentItem.vmName): Copying required PS modules to the VM."
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force }
