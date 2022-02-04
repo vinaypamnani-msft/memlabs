@@ -530,8 +530,9 @@ $global:VM_Config = {
 
 
         # Compile config, to create MOF
+        $creds = New-Object System.Management.Automation.PSCredential ("$domainNameSplit\$($Common.LocalAdmin.UserName)", $Common.LocalAdmin.Password)
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
-        & "$($dscRole)Configuration" -GroupName $deployConfig.thisParams.thisVM.ClusterName -Description "Cluster Access Group" -SqlAdministratorCredential $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
+        & "$($dscRole)Configuration" -GroupName $deployConfig.thisParams.thisVM.ClusterName -Description "Cluster Access Group" -SqlAdministratorCredential $creds -ConfigurationData $cd -OutputPath $dscConfigPath
     }
 
     $DSC_CreateConfig = {
