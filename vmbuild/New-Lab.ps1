@@ -356,7 +356,7 @@ try {
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
     Write-Log "Starting deployment. Review VMBuild.$domainName.log" -Activity
-    $Common.LogPath = $Common.LogPath -replace "VMBuild.log", "VMBuild.$domainName.log"
+    $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
 
     # Download required files
     $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
