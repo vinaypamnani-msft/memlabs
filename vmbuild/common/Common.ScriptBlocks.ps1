@@ -430,8 +430,25 @@ $global:VM_Config = {
         # Dot Source config script
         . "$dscConfigScript"
         $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+        if (-not $netbiosName) {
+            "Could not get Netbios name from 'deployConfig.vmOptions.domainName' " | Out-File $log -Append
+            return $false
+        }
+        if (-not $deployConfig.thisParams.thisVM.SQLAgentUser) {
+            "Could not get SQLAgentUser name from deployConfig.thisParams.thisVM.SQLAgentUser " | Out-File $log -Append
+            return $false
+        }
         $sqlAgentUser = $netbiosName + "\" + $deployConfig.thisParams.thisVM.SQLAgentUser
+
+        if (-not $deployConfig.thisParams.thisVM.fileServerVM) {
+            "Could not get fileServerVM name from deployConfig.thisParams.thisVM.fileServerVM " | Out-File $log -Append
+            return $false
+        }
         $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\CASClusterWitness"
+        if (-not $deployConfig.vmOptions.domainName) {
+            "Could not get domainName name from deployConfig" | Out-File $log -Append
+            return $false
+        }
         $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
         $cnName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
@@ -530,9 +547,14 @@ $global:VM_Config = {
 
 
         # Compile config, to create MOF
-        $creds = New-Object System.Management.Automation.PSCredential ("$domainNameSplit\$($Common.LocalAdmin.UserName)", $Common.LocalAdmin.Password)
+        $creds = New-Object System.Management.Automation.PSCredential ("$domainNameSplit\\$($Common.LocalAdmin.UserName)", $Common.LocalAdmin.Password)
+        if (-not $creds) {
+            "Failed to create creds" | Out-File $log -Append
+            return $false
+        }
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
-        & "$($dscRole)Configuration" -GroupName $deployConfig.thisParams.thisVM.ClusterName -Description "Cluster Access Group" -SqlAdministratorCredential $creds -ConfigurationData $cd -OutputPath $dscConfigPath
+        & "$($dscRole)Configuration" -GroupName $deployConfig.thisParams.thisVM.ClusterName -Description "Cluster Access Group" -SqlAdministratorCredential $creds -ConfigurationData $cd -OutputPath $dscConfigPath | Out-File $log -Append
+        "Finished Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append | Out-File $log -Append
     }
 
     $DSC_CreateConfig = {
