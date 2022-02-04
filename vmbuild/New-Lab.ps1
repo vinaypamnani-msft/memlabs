@@ -423,7 +423,7 @@ try {
     $existingDC = $deployConfig.parameters.ExistingDCName
 
     # Remove DNS records for VM's in this config, if existing DC
-    if ($existingDC) {
+    if ($existingDC -and $Phase3.IsPresent) {
         Write-Log "Attempting to remove existing DNS Records" -Activity -HostOnly
         foreach ($item in $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) } ) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
