@@ -21,6 +21,9 @@
     $CSName = $deployConfig.thisParams.CSName
 
     $DomainAccounts = $deployConfig.thisParams.DomainAccounts
+    $DomainAccountsUPN = $deployConfig.thisParams.DomainAccountsUPN
+    $DomainComputers = $deployConfig.thisParams.DomainComputers
+
     $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
     $DHCP_DNSAddress = $network + ".1"
     $DHCP_DefaultGateway = $network + ".200"
@@ -29,6 +32,10 @@
     if ($ThisVM.hidden) {
         $setNetwork = $false
     }
+
+    # SQL AO
+    $SQLAO = $deployConfig.thisParams.SQLAO
+    $SQLAOGroupMembers = $deployConfig.thisParams.SQLAO.GroupMembers
 
     # AD Sites
     $adsites = $deployConfig.thisParams.sitesAndNetworks
@@ -100,7 +107,8 @@
             DomainFullName                = $DomainName
             SafemodeAdministratorPassword = $DomainCreds
         }
-        $adUsersDependancy = @()
+
+        $adObjectDependency = @()
         $i = 0
         foreach ($user in $DomainAccounts) {
             $i++
@@ -112,29 +120,54 @@
                 PasswordNeverExpires = $true
                 CannotChangePassword = $true
                 DomainName           = $DomainName
-                DependsOn            = "[SetupDomain]FirstDS"
+                DependsOn            = "[WindowsFeature]ADPS"
             }
-            $adUsersDependancy += "[ADUser]User$($i)"
+            $adObjectDependency += "[ADUser]User$($i)"
         }
 
+        foreach ($userWithUPN in $DomainAccountsUPN) {
+            $i++
+            ADUser "User$($i)" {
+                Ensure               = 'Present'
+                UserPrincipalName    = $userWithUPN + '@' + $DomainName
+                UserName             = $userWithUPN
+                Password             = $DomainCreds
+                PasswordNeverResets  = $true
+                PasswordNeverExpires = $true
+                CannotChangePassword = $true
+                DomainName           = $DomainName
+                DependsOn            = "[WindowsFeature]ADPS"
+            }
+            $adObjectDependency += "[ADUser]User$($i)"
+        }
 
+        $i = 0
+        foreach ($computer in $DomainComputers) {
+            $i++
+            ADComputer "Computer$($i)" {
+                ComputerName      = $computer
+                EnabledOnCreation = $false
+                Dependson         = '[WindowsFeature]ADPS'
+            }
+            $adObjectDependency += "[ADComputer]Computer$($i)"
+        }
 
         ADGroup AddToAdmin {
             GroupName        = "Administrators"
             MembersToInclude = @($DomainAdminName)
-            DependsOn        = $adUsersDependancy
+            DependsOn        = $adObjectDependency
         }
 
         ADGroup AddToDomainAdmin {
             GroupName        = "Domain Admins"
             MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-            DependsOn        = $adUsersDependancy
+            DependsOn        = $adObjectDependency
         }
 
         ADGroup AddToSchemaAdmin {
             GroupName        = "Schema Admins"
             MembersToInclude = @($DomainAdminName)
-            DependsOn        = $adUsersDependancy
+            DependsOn        = $adObjectDependency
         }
 
         $adSiteDependency = @()
@@ -265,12 +298,53 @@
             $waitOnDependency += "[DelegateControl]Add$server"
         }
 
-        WriteEvent WriteDelegateControlfinished {
-            LogPath   = $LogPath
-            WriteNode = "DelegateControl"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = $waitOnDependency
+        if ($SQLAO) {
+
+            WriteStatus SQLAOGroup {
+                DependsOn = $waitOnDependency
+                Status    = "Creating AD Group and assigning SPN for SQL Availability Group"
+            }
+
+            ADGroup SQLAOGroup {
+                Ensure      = 'Present'
+                GroupName   = $deployConfig.thisParams.SQLAO.GroupName
+                GroupScope  = "Global"
+                Category    = "Security"
+                Description = "$($deployConfig.thisParams.SQLAO.GroupName) Group for SQL Always On"
+                Members     = $SQLAOGroupMembers
+                DependsOn   = '[WriteStatus]SQLAOGroup'
+            }
+
+            ActiveDirectorySPN SQLAOSPN {
+                Key              = 'Always'
+                UserName         = $deployConfig.thisParams.SQLAO.SqlServiceAccount
+                FQDNDomainName   = $DomainName
+                OULocationUser   = $deployConfig.thisParams.SQLAO.OULocationUser
+                OULocationDevice = $deployConfig.thisParams.SQLAO.OULocationDevice
+                ClusterDevice    = $deployConfig.thisParams.SQLAO.ClusterNodes
+                UserNameCluster  = $deployConfig.thisParams.SQLAO.SqlServiceAccount
+                Dependson        = '[ADGroup]SQLAOGroup'
+            }
+
+            WriteEvent WriteDelegateControlfinished {
+                LogPath   = $LogPath
+                WriteNode = "DelegateControl"
+                Status    = "Passed"
+                Ensure    = "Present"
+                DependsOn = "[ActiveDirectorySPN]SQLAOSPN"
+            }
+
+        }
+        else {
+
+            WriteEvent WriteDelegateControlfinished {
+                LogPath   = $LogPath
+                WriteNode = "DelegateControl"
+                Status    = "Passed"
+                Ensure    = "Present"
+                DependsOn = $waitOnDependency
+            }
+
         }
 
         if (-not ($PSName -or $CSName)) {

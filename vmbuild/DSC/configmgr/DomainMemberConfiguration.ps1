@@ -57,6 +57,14 @@
     $waitOnDomainJoin = $deployconfig.thisParams.WaitOnDomainJoin
     $SQLSysAdminAccounts = $deployConfig.thisParams.SQLSysAdminAccounts
 
+    # Windows Feature to install for role
+    $featureRole = @("Distribution Point", "Management Point")
+
+    # SQL AO
+    if ($ThisVM.role -eq "SQLAO") {
+        $featureRole += "SQLAO"
+    }
+
     # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
@@ -106,8 +114,8 @@
             }
 
             InstallFeatureForSCCM InstallFeature {
-                Name      = "DPMP"
-                Role      = "Distribution Point", "Management Point"
+                Name      = "DummyName"
+                Role      = $featureRole
                 DependsOn = "[SetCustomPagingFile]PagingSettings"
             }
 
