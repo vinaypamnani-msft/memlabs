@@ -1,4 +1,4 @@
-Configuration FullClusterSetup
+Configuration SQLAOConfiguration
 {
     param
     (

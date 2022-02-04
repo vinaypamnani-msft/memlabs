@@ -14,6 +14,8 @@ param (
     [switch]$NoWindowResize,
     [Parameter(Mandatory = $false, HelpMessage = "Use Azure CDN for download.")]
     [switch]$UseCDN,
+    [Parameter(Mandatory = $false, HelpMessage = "Skip to Phase 3!")]
+    [switch]$Phase3,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf
 )
@@ -262,7 +264,6 @@ try {
             Write-Log "Validating specified configuration: $Configuration" -Activity
             Write-Log $configResult.Message -Failure
             Write-Host
-            return
         }
 
     }
@@ -315,7 +316,7 @@ try {
     # Load configuration
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
-        if ($testConfigResult.Valid) {
+        if ($testConfigResult.Valid -or $Phase3.IsPresent) {
             $deployConfig = $testConfigResult.DeployConfig
             Add-ExistingVMsToDeployConfig -config $deployConfig
             $InProgessVMs = @()
@@ -344,7 +345,6 @@ try {
         else {
             Write-Log "Config validation failed. `r`n$($testConfigResult.Message)" -Failure
             Write-Host
-            return
         }
     }
     catch {
@@ -443,40 +443,46 @@ try {
     # 2 - Configure VMs (run DSC)
     # 3 - Configure SQL AO
 
-    $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
-    if ($containsHidden) {
-        $prepared = New-VMJobs -Phase 0 -deployConfig $deployConfig
-    }
-    else {
-        $prepared = $true
-    }
-
-    if (-not $prepared) {
-        Write-Log "Phase 1 - Skipped Virtual Machine Creation and Configuration because errors were encountered in Phase 0." -Activity
-        $created = $configured = $false
+    if ($Phase3.IsPresent) {
+        $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
     }
     else {
 
-        $created = New-VMJobs -Phase 1 -deployConfig $deployConfig
+        $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
+        if ($containsHidden) {
+            $prepared = New-VMJobs -Phase 0 -deployConfig $deployConfig
+        }
+        else {
+            $prepared = $true
+        }
 
-        if (-not $created) {
-            Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
+        if (-not $prepared) {
+            Write-Log "Phase 1 - Skipped Virtual Machine Creation and Configuration because errors were encountered in Phase 0." -Activity
+            $created = $configured = $false
         }
         else {
 
-            # Clear out vm remove list
-            $global:vm_remove_list = @()
+            $created = New-VMJobs -Phase 1 -deployConfig $deployConfig
 
-            # Create/Updated RDCMan file
-            if (Test-Path "C:\tools\rdcman.exe") {
-                Start-Sleep -Seconds 5
-                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+            if (-not $created) {
+                Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
             }
+            else {
 
-            $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
+                # Clear out vm remove list
+                $global:vm_remove_list = @()
 
-            if ($configured -and $containsAO) {
-                $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
+                # Create/Updated RDCMan file
+                if (Test-Path "C:\tools\rdcman.exe") {
+                    Start-Sleep -Seconds 5
+                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+                }
+
+                $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
+
+                if ($configured -and $containsAO) {
+                    $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
+                }
             }
         }
     }

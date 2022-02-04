@@ -470,7 +470,7 @@ $global:VM_Config = {
                     PrimaryReplicaServerName = $deployConfig.thisParams.MachineName + "." + $deployConfig.vmOptions.DomainName
                 },
                 @{
-                    NodeName          = 'SCCM-CAS'
+                    NodeName          = $deployConfig.parameters.DCName
                     Role              = 'ADSetup'
                     ADmembers         = $ADAccounts
                     ComputerName      = $deployConfig.thisParams.thisVM.ClusterName
@@ -516,10 +516,12 @@ $global:VM_Config = {
             Rename-Item -Path $configFilePath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
         }
         $deployConfig | ConvertTo-Json -Depth 3 | Out-File $configFilePath -Force -Confirm:$false
+        $cd | ConvertTo-Json -Depth 3 | Out-File "C:\staging\DSC\SQLAOCD.json" -Force -Confirm:$false
+
 
         # Compile config, to create MOF
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
-        & "$($dscRole)Configuration" -ConfigFilePath $configFilePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
+        & "$($dscRole)Configuration" -GroupName $deployConfig.thisParams.thisVM.ClusterName -Description "Cluster Access Group" -SqlAdministratorCredential $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
     }
 
     $DSC_CreateConfig = {
