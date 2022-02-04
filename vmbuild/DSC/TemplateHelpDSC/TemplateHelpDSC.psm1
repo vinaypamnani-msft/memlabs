@@ -2452,13 +2452,13 @@ class ActiveDirectorySPN {
 	[string[]]$ClusterDevice
 
 	[DscProperty(Mandatory)]
-	[string]$FQDNDomainName = "contoso.com"
+	[string]$FQDNDomainName
 
-	[DscProperty()]
-	[string]$OULocationUser = 'CN=Users,DC=contosomd,DC=com'
+	[DscProperty(Mandatory)]
+	[string]$OULocationUser
 
-	[DscProperty()]
-	[string]$OULocationDevice = 'CN=Computers,DC=contosomd,DC=com'
+	[DscProperty(Mandatory)]
+	[string]$OULocationDevice
 
 	[void] Set()
 	{

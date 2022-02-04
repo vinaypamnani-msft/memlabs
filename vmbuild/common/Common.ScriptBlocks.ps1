@@ -450,8 +450,8 @@ $global:VM_Config = {
             return $false
         }
         $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-        $cnName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
-
+        $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+        $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
         $ADAccounts = @()
         $ADAccounts += $deployConfig.thisParams.MachineName + "$"
         $ADAccounts += $deployConfig.thisParams.thisVM.OtherNode + "$"
@@ -505,7 +505,8 @@ $global:VM_Config = {
                     SQLServiceAgent   = $deployConfig.thisParams.thisVM.SQLAgentUser
                     UserNameCluster   = 'SQLServerServiceCAS'
                     DomainName        = $deployConfig.vmOptions.domainName
-                    OUUserPath        = $cnName
+                    OUUserPath        = $cnUsersName
+                    OUDevicePath      = $cnComputersName
 
                 },
                 @{
