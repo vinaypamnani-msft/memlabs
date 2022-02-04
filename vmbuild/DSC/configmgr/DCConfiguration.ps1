@@ -120,7 +120,7 @@
                 PasswordNeverExpires = $true
                 CannotChangePassword = $true
                 DomainName           = $DomainName
-                DependsOn            = "[WindowsFeature]ADPS"
+                DependsOn            = "[SetupDomain]FirstDS"
             }
             $adObjectDependency += "[ADUser]User$($i)"
         }
@@ -136,7 +136,7 @@
                 PasswordNeverExpires = $true
                 CannotChangePassword = $true
                 DomainName           = $DomainName
-                DependsOn            = "[WindowsFeature]ADPS"
+                DependsOn            = "[SetupDomain]FirstDS"
             }
             $adObjectDependency += "[ADUser]User$($i)"
         }
@@ -147,7 +147,7 @@
             ADComputer "Computer$($i)" {
                 ComputerName      = $computer
                 EnabledOnCreation = $false
-                Dependson         = '[WindowsFeature]ADPS'
+                DependsOn         = "[SetupDomain]FirstDS"
             }
             $adObjectDependency += "[ADComputer]Computer$($i)"
         }
