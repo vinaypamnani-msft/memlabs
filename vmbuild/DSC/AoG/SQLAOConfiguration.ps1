@@ -49,9 +49,9 @@ Configuration SQLAOConfiguration
 
         ADGroup 'CASCluster' {
             GroupName            = $GroupName
-            GroupScope           = $Scope
-            Category             = $Category
-            Description          = $Description
+            GroupScope           = 'Global'
+            Category             = 'Security'
+            Description          = "$GroupName Security Group"
             Ensure               = 'Present'
             Members              = @($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).ADmembers
             Dependson            = '[WindowsFeature]ADDADPS', '[ADComputer]ClusterAccount'
@@ -248,16 +248,6 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
-        ADGroup 'CASCluster' {
-            GroupName            = $GroupName
-            GroupScope           = $Scope
-            Category             = $Category
-            Description          = $Description
-            Ensure               = 'Present'
-            Members              = @($AllNodes | Where-Object { $_.Role -eq 'ADSetup' }).ADmembers
-            DependsOn            = '[WindowsFeature]ADDADPS', '[xClusterNetwork]ChangeNetwork-192'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
 
         WaitForAny WaitForClusterJoin {
             NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName
