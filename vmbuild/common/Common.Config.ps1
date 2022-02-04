@@ -150,6 +150,9 @@ function New-DeployConfig {
             if ($SQLAO.OtherNode -and -not $SQLAO.OtherNode.StartsWith($configObject.vmOptions.prefix)) {
                 $SQLAO.OtherNode = $configObject.vmOptions.prefix + $SQLAO.OtherNode
             }
+            if ($SQLAO.ClusterName -and -not $SQLAO.ClusterName.StartsWith($configObject.vmOptions.prefix)) {
+                $SQLAO.ClusterName = $configObject.vmOptions.prefix + $SQLAO.ClusterName
+            }
         }
 
         $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple

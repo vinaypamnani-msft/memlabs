@@ -232,7 +232,7 @@ Configuration SQLAOConfiguration
             Address              = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Address
             AddressMask          = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.AddressMask
             Name                 = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Name
-            Role                 = '0'
+            Role                 = '3'
             DependsOn            = '[xCluster]CreateCluster'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -241,7 +241,7 @@ Configuration SQLAOConfiguration
             Address              = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Address2
             AddressMask          = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.AddressMask2
             Name                 = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Name2
-            Role                 = '3'
+            Role                 = '1'
             DependsOn            = '[xCluster]CreateCluster'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
