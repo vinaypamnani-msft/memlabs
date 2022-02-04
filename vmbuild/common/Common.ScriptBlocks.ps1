@@ -552,12 +552,12 @@ $global:VM_Config = {
         "Password =  $($using:Common.LocalAdmin.Password)"  | Out-File $log -Append
         $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
         if (-not $creds) {
-            "Failed to create creds" | Out-File $log -Append
+            "Failed to create creds" | Out-File $log -Append -ErrorAction SilentlyContinue
             return $false
         }
-        "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
-        & "$($dscRole)Configuration" -GroupName $deployConfig.thisParams.thisVM.ClusterName -Description "Cluster Access Group" -SqlAdministratorCredential $creds -ConfigurationData $cd -OutputPath $dscConfigPath | Out-File $log -Append
-        "Finished Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append | Out-File $log -Append
+        "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append -ErrorAction SilentlyContinue
+        & "$($dscRole)Configuration" -GroupName $deployConfig.thisParams.thisVM.ClusterName -Description "Cluster Access Group" -SqlAdministratorCredential $creds -ConfigurationData $cd -OutputPath $dscConfigPath | Out-File $log -Append -ErrorAction SilentlyContinue
+        "Finished Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append -ErrorAction SilentlyContinue
     }
 
     $DSC_CreateConfig = {
