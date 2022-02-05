@@ -582,7 +582,9 @@ function Add-SwitchAndDhcp {
         [Parameter(Mandatory = $true, HelpMessage = "Network Subnet.")]
         [string]$NetworkSubnet,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name.")]
-        [string]$DomainName
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "Override DNS.")]
+        [string]$DNSServer
     )
     Write-Log "Creating/verifying whether a Hyper-V switch and DHCP Scopes for '$NetworkName' network exists." -Activity
 
@@ -593,7 +595,7 @@ function Add-SwitchAndDhcp {
     }
 
     # Test if DHCP scope exists, if not create it
-    $worked = Test-DHCPScope -ScopeID $NetworkSubnet -ScopeName $NetworkName -DomainName $DomainName
+    $worked = Test-DHCPScope -ScopeID $NetworkSubnet -ScopeName $NetworkName -DomainName $DomainName -DNSServer $DNSServer
     if (-not $worked) {
         Write-Log "Failed to verify/create DHCP Scope for the '$NetworkName' network. ($NetworkSubnet) Exiting." -Failure
         return $false
@@ -762,6 +764,9 @@ function Test-DHCPScope {
             $DC = get-list -type VM -domain $DomainName | Where-Object {$_.Role -eq "DC" }
             if ($DC) {
                 $DHCPDNSAddress = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+            }
+            if ($DNSServer){
+                $DHCPDNSAddress = $DNSServer
             }
             $HashArguments = @{
                 ScopeId    = $ScopeID
