@@ -34,13 +34,6 @@ Configuration SQLAOConfiguration
 
     Node $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
     {
-        WaitForAll FS {
-            ResourceName     = '[SmbShare]CASClusterShare'
-            NodeName         = $AllNodes.Where{ $_.Role -eq 'FileServer' }.NodeName
-            RetryIntervalSec = 60
-            RetryCount       = 4
-        }
-
         WindowsFeature ADDADPS {
             Ensure = 'Present'
             Name   = 'RSAT-AD-PowerShell'
