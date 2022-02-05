@@ -2468,8 +2468,8 @@ class ActiveDirectorySPN {
 	{
 
 		Import-Module ActiveDirectory
-
-		Set-Location AD:
+        New-PSDrive -PSProvider ActiveDirectory -Name AD2 -Root "" -Server localhost -ErrorAction SilentlyContinue
+		Set-Location AD2:
 
 		#Set SPN permissions to object to allow it to update SPN registrations.
 		$_OULocationUser = $this.OULocationUser
@@ -2487,7 +2487,7 @@ class ActiveDirectorySPN {
 			$oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
 			$UserObject = "CN=$_UserName,$_OULocationUser"
 
-            write-verbose ('ObjectPath set to  AD:' + $UserObject)
+            write-verbose ('ObjectPath set to  AD2:' + $UserObject)
 
 			$UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
 			$UserSID = $UserSID.Value
@@ -2502,13 +2502,13 @@ class ActiveDirectorySPN {
 			#$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
 			#$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
 
-			$ACL = Get-Acl -Path "AD:$UserObject"
+			$ACL = Get-Acl -Path "AD2:$UserObject"
 			$currentSSDL = $ACL.Sddl
 
 			$newSSDL = $currentSSDL + $oldSddl
 			$ACL.SetSecurityDescriptorSddlForm($newSSDL)
 
-			Set-Acl -AclObject $acl -Path "AD:$UserObject"
+			Set-Acl -AclObject $acl -Path "AD2:$UserObject"
 			write-verbose (' Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName + ' have been set')
 		}
 
@@ -2522,7 +2522,7 @@ class ActiveDirectorySPN {
 			$DeviceObject = "CN=$_DeviceName,$_OULocationDevice"
             $UserObject = "CN=$_UserNameCluster,$_OULocationUser"
 
-            write-verbose ('ObjectPath set to  AD:' + $DeviceObject)
+            write-verbose ('ObjectPath set to  AD2:' + $DeviceObject)
 
 			$ComputerSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADComputer -Server "$_FQDNDomainName" $DeviceObject).SID
 			$ComputerSID = $ComputerSID.Value
@@ -2542,14 +2542,14 @@ class ActiveDirectorySPN {
 
             write-verbose ('Device:' + $_DeviceName + ' UserSet is:' + $_UserNameCluster + ' On Domain:' + $_FQDNDomainName)
 
-			$ACL = Get-Acl -Path "AD:$DeviceObject"
+			$ACL = Get-Acl -Path "AD2:$DeviceObject"
 			$currentSSDL = $ACL.Sddl
 
 
 			$newSSDL = $currentSSDL + $oldSddl
 			$ACL.SetSecurityDescriptorSddlForm($newSSDL)
 
-			Set-Acl -AclObject $acl -Path "AD:$DeviceObject"
+			Set-Acl -AclObject $acl -Path "AD2:$DeviceObject"
 			write-verbose (' Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName + ' have been set')
 		}
 	}
@@ -2558,8 +2558,8 @@ class ActiveDirectorySPN {
 	{
 
 		Import-Module ActiveDirectory
-
-		Set-Location AD:
+        New-PSDrive -PSProvider ActiveDirectory -Name AD2 -Root "" -Server localhost -ErrorAction SilentlyContinue
+		Set-Location AD2:
 
 		#Set SPN permissions to object to allow it to update SPN registrations.
 		$_OULocationUser = $this.OULocationUser
@@ -2578,7 +2578,7 @@ class ActiveDirectorySPN {
 			$oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
 			$UserObject = "CN=$_UserName,$_OULocationUser"
 
-            write-verbose ('ObjectPath set to  AD:' + $UserObject)
+            write-verbose ('ObjectPath set to  AD2:' + $UserObject)
 
 			$UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
 			$UserSID = $UserSID.Value
@@ -2593,7 +2593,7 @@ class ActiveDirectorySPN {
 			#$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
 			#$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
 
-			$ACL = Get-Acl -Path "AD:$UserObject"
+			$ACL = Get-Acl -Path "AD2:$UserObject"
 			$currentSSDL = $ACL.Sddl
 
 			IF ($currentSSDL -match ("\(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;$UserSID\)"))
@@ -2618,7 +2618,7 @@ class ActiveDirectorySPN {
 			$DeviceObject = "CN=$_DeviceName,$_OULocationDevice"
             $UserObject = "CN=$_UserNameCluster,$_OULocationUser"
 
-            write-verbose ('ObjectPath set to  AD:' + $DeviceObject)
+            write-verbose ('ObjectPath set to  AD2:' + $DeviceObject)
 
 			$ComputerSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADComputer -Server "$_FQDNDomainName" $DeviceObject).SID
 			$ComputerSID = $ComputerSID.Value
@@ -2638,7 +2638,7 @@ class ActiveDirectorySPN {
 
             write-verbose ('Device:' + $_DeviceName + ' UserSet is:' + $_UserNameCluster + ' On Domain:' + $_FQDNDomainName)
 
-			$ACL = Get-Acl -Path "AD:$DeviceObject"
+			$ACL = Get-Acl -Path "AD2:$DeviceObject"
 			$currentSSDL = $ACL.Sddl
 
 			IF ($currentSSDL -match ("\(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;$UserSID\)"))
