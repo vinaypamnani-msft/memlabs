@@ -573,7 +573,6 @@ $global:VM_Config = {
         # Set current role
         switch (($currentItem.role)) {
             "DPMP" { $dscRole = "DomainMember" }
-            "FileServer" { $dscRole = "DomainMember" }
             "SQLAO" { $dscRole = "DomainMember" }
             "AADClient" { $dscRole = "WorkgroupMember" }
             "InternetClient" { $dscRole = "WorkgroupMember" }

@@ -1949,6 +1949,10 @@ class InstallFeatureForSCCM {
         }
 
         if ($_Role -contains "DC") {
+            Install-WindowsFeature RSAT-AD-PowerShell
+        }
+        if ($_Role -contains "SQLAO") {
+            Install-WindowsFeature Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt
         }
         if ($_Role -contains "Site Server") {
             Install-WindowsFeature Net-Framework-Core
