@@ -362,6 +362,42 @@ function Add-VMToAccountLists {
     }
 }
 
+
+function Get-SQLAOConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Config to Modify")]
+        [object] $deployConfig
+    )
+    $PrimaryAO = $deployConfig.virtualMachines | Where-Object {$_.Role -eq "SQLAO" -and $_.OtherNode}
+    $SecondAO = $deployConfig.virtualMachines | Where-Object {$_.Role -eq "SQLAO" -and -not $_.OtherNode}
+    $FSAO =  $deployConfig.virtualMachines | Where-Object {$_.Role -eq "FileServer" -and $_.vmName -eq $PrimaryAO.FileServerVM}
+    $DC =  $deployConfig.virtualMachines | Where-Object {$_.Role -eq "DC"}
+
+    $ClusterName = $PrimaryAO.ClusterName
+    $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix,"")
+    $ServiceAccount = "$($ClusterNameNoPrefix)ServiceAccount"
+    $AgentAccount = "$($ClusterNameNoPrefix)AgentServiceAccount"
+
+    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
+    $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+    $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+
+    $config = [PSCustomObject]@{
+        GroupName = $ClusterName
+        GroupMembers = @("$($PrimaryAO.vmName)$","$($SecondAO.vmName)$","$($ClusterName)$")
+        SqlServiceAccount = $ServiceAccount
+        SqlAgentServiceAccount = $AgentAccount
+        OULocationUser = $cnUsersName
+        OULocationDevice = $cnComputersName
+        ClusterNodes = @($PrimaryAO.vmName,$SecondAO.vmName)
+        WitnessShare = "$($ClusterNameNoPrefix)-Witness"
+        WitnessLocalPath = "F:\$($ClusterNameNoPrefix)-Witness"
+    }
+
+    return $config
+}
+
 function Add-PerVMSettings {
     [CmdletBinding()]
     param (
@@ -405,9 +441,35 @@ function Add-PerVMSettings {
         $thisParams | Add-Member -MemberType NoteProperty -Name "network" -Value $deployConfig.vmOptions.network -Force
     }
 
-    if ($thisVM.role -eq "SQLAO" -and $thisVM.Othernode) {
+    $SQLAO = $deployConfig.virtualMachines | Where-Object {$_.role -eq "SQLAO" -and -not $_.hidden}
+    if ($SQLAO) {
+        $SqlAOConfig = Get-SQLAOConfig -deployConfig $deployConfig
+        $thisParams | Add-Member -MemberType NoteProperty -Name "SQLAO" -Value $SQLAOConfig -Force
 
+        if ($thisVM.role -eq "FileServer") {
+            $ServersToWaitOn = @()
+            foreach ($sql in $SQLAO)   {
+                $ServersToWaitOn+=$sql.vmName
+            }
+            $thisParams | Add-Member -MemberType NoteProperty -Name "ServersToWaitOn" -Value $ServersToWaitOn -Force
+        }
+
+        if ($thisVM.role -eq "DC") {
+            $DomainAccountsUPN = @()
+            $PrimaryAO = $deployConfig.virtualMachines | Where-Object {$_.Role -eq "SQLAO" -and $_.OtherNode}
+            $ClusterName = $PrimaryAO.ClusterName
+            $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix,"")
+            $ServiceAccount = "$($ClusterNameNoPrefix)ServiceAccount"
+            $AgentAccount = "$($ClusterNameNoPrefix)AgentServiceAccount"
+
+            $DomainAccountsUPN = @($ServiceAccount,$AgentAccount)
+
+            $DomainComputers = @($ClusterName)
+            $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccountsUPN" -Value $DomainAccountsUPN -Force
+            $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
+        }
     }
+
 
     # DC DSC needs a list of SiteServers to wait on.
     if ($thisVM.role -eq "DC") {
@@ -418,7 +480,7 @@ function Add-PerVMSettings {
         $ServersToWaitOn = @()
         $thisPSName = $null
         $thisCSName = $null
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary", "CAS", "PassiveSite" -and -not $_.hidden }) {
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary", "CAS", "PassiveSite", "SQLAO" -and -not $_.hidden }) {
             $ServersToWaitOn += $vm.vmName
             if ($vm.Role -eq "Primary") {
                 $thisPSName = $vm.vmName

@@ -106,7 +106,7 @@
             "SqlServiceAccount(Also use for UserNameCluster)": "SQLClusterServiceAccount",
             "OULocationUser" : "CN=Users,DC=sqlao,DC=com",
             "OULocationDevice" : "CN=Computers,DC=sqlao,DC=com",
-            "ClusterNodes" : [
+            "ClusterNodes(add to servers to wait on+fileserver)" : [
                 "SQL-SQLAO1",
                 "SQL-SQLAO2"
             ],
