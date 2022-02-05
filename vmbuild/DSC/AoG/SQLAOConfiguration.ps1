@@ -117,7 +117,7 @@ Configuration SQLAOConfiguration
             ServiceType          = 'DatabaseEngine'
             ServiceAccount       = $SqlAdministratorCredential
             RestartService       = $true
-            DependsOn            = '[xClusterQuorum]ClusterWitness'
+            DependsOn            = '[WaitForAny]WaitForClusterJoin'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
