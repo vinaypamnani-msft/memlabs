@@ -615,7 +615,12 @@ function Test-NetworkSwitch {
 
     $notes = $DomainName
     if (-not $notes) {
-        $notes = $NetworkName
+        if ($NetworkName -eq "cluster") {
+            $notes = "Cluster network shared by all domains"
+        }
+        else {
+            $notes = $NetworkName
+        }
     }
     $exists = Get-VMSwitch2 -NetworkName $NetworkName
     if (-not $exists) {

@@ -637,10 +637,12 @@ $global:VM_Config = {
             $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
         }
 
-        "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
-        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
-        Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
 
+        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
+        if (-not ($DscFolder -eq "AoG")) {
+            "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
+            Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
+        }
         if ($currentItem.hidden) {
             # Don't wait, if we're not creating a new VM and running DSC on an existing VM
             "Start-DscConfiguration for $dscConfigPath for existing VM" | Out-File $log -Append
@@ -649,7 +651,7 @@ $global:VM_Config = {
         }
         else {
             "Start-DscConfiguration for $dscConfigPath for new VM" | Out-File $log -Append
-            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+            Start-DscConfiguration -Path $dscConfigPath -jobname "AoG" -Force -Verbose -ErrorAction Stop
         }
 
     }
@@ -719,6 +721,7 @@ $global:VM_Config = {
             return
         }
     }
+    Write-Log "PSJOB: $($currentItem.vmName): DSC:  Started job for  $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
     # Wait for DSC, timeout after X minutes
     # Write-Log "PSJOB: $($currentItem.vmName): Waiting for $($currentItem.role) role configuration via DSC." -OutputStream
 
@@ -734,6 +737,11 @@ $global:VM_Config = {
     $failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
 
     do {
+
+        #$bob =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -Name AoG -IncludeChildJob).Progress | Select-Object -last 1 | select-object -ExpandProperty CurrentOperation }).ScriptBlockOutput
+        $bob =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ((get-job -Name AoG)).StatusMessage }).ScriptBlockOutput
+
+        Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Output: $bob" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
         Start-Sleep -Seconds 3
 

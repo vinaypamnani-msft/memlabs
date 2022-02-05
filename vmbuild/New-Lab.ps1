@@ -73,7 +73,6 @@ function Write-JobProgress {
         #Extracts the latest progress of the job and writes the progress
         $latestPercentComplete = 0
         $lastProgress = $Job.ChildJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
-
         if ($lastProgress) {
             $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
             $latestActivity = $lastProgress | Select-Object -expand Activity;
@@ -192,6 +191,7 @@ function New-VMJobs {
     $successCount = 0
     $warningCount = 0
     do {
+
         $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
         foreach ($job in $runningJobs) {
             Write-JobProgress($job)
@@ -399,9 +399,9 @@ try {
 
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
     if ($containsAO) {
-        $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
-        $DNS = $network + ".1"
-        $worked = Add-SwitchAndDhcp -NetworkName "cluster" -NetworkSubnet "10.250.250.0" -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNS
+        #$network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
+        #$DNS = $network + ".1"
+        $worked = Add-SwitchAndDhcp -NetworkName "cluster" -NetworkSubnet "10.250.250.0"
         if (-not $worked) {
             return
         }
