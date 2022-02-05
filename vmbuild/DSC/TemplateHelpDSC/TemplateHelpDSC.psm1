@@ -1150,7 +1150,7 @@ class ChangeSQLServicesAccount {
         if ($services.State -eq 'Running') {
             #Check if SQLSERVERAGENT is running
             $sqlserveragentflag = 0
-            $sqlAgentService = if ($_SQLInstanceName -eq "SQLSERVERAGENT") { $_SQLInstanceName } else { "SQLAgent`$$_SQLInstanceName" }
+            $sqlAgentService = if ($_SQLInstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { "SQLAgent`$$_SQLInstanceName" }
             $sqlserveragentservices = Get-WmiObject win32_service -Filter "Name = '$sqlAgentService'"
             if ($null -ne $sqlserveragentservices) {
                 if ($sqlserveragentservices.State -eq 'Running') {
