@@ -650,8 +650,11 @@ $global:VM_Config = {
             Start-Sleep -Seconds 60 # Wait for DSC Status to do tests, and wait on the latest action
         }
         else {
+            $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+$user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
+ $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
             "Start-DscConfiguration for $dscConfigPath for new VM" | Out-File $log -Append
-            Start-DscConfiguration -Path $dscConfigPath -jobname "AoG" -Force -Verbose -ErrorAction Stop
+            Start-DscConfiguration -Path $dscConfigPath -jobname "AoG" -Force -Verbose -ErrorAction Stop -Credential $creds
         }
 
     }
@@ -740,7 +743,8 @@ $global:VM_Config = {
 
         #$bob =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -Name AoG -IncludeChildJob).Progress | Select-Object -last 1 | select-object -ExpandProperty CurrentOperation }).ScriptBlockOutput
         $bob =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ((get-job -Name AoG)).StatusMessage }).ScriptBlockOutput
-
+        $bob2 =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -Name AoG -IncludeChildJob | ConvertTo-Json) }).ScriptBlockOutput
+        write-log $bob2
         Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Output: $bob" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
         Start-Sleep -Seconds 3
