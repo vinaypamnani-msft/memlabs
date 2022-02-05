@@ -444,12 +444,13 @@ $global:VM_Config = {
             "Could not get fileServerVM name from deployConfig.thisParams.thisVM.fileServerVM " | Out-File $log -Append
             return $false
         }
-        $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\CASClusterWitness"
+        $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\" + $deployConfig.thisParams.SQLAO.WitnessShare
         if (-not $deployConfig.vmOptions.domainName) {
             "Could not get domainName name from deployConfig" | Out-File $log -Append
             return $false
         }
         $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
+
         $ADAccounts = @()
         $ADAccounts += $deployConfig.thisParams.MachineName + "$"
         $ADAccounts += $deployConfig.thisParams.thisVM.OtherNode + "$"
