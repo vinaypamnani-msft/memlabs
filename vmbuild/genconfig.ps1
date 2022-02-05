@@ -4244,7 +4244,7 @@ function Save-Config {
         $file += "-PRI-$($config.cmOptions.version)-"
     }
 
-    $file += "($($config.virtualMachines.Count)VMs)"
+    $file += "$($config.virtualMachines.Count)VMs"
     $date = Get-Date -Format "yyyy-MM-dd"
     $file = $date + "-" + $file
 
