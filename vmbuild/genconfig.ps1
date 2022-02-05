@@ -4230,6 +4230,8 @@ function Save-Config {
     Write-Host
     Write-Verbose "9 Save-Config"
 
+
+
     $file = "$($config.vmOptions.domainName)"
     if ($config.vmOptions.existingDCNameWithPrefix) {
         $file += "-ADD-"
@@ -4252,6 +4254,17 @@ function Save-Config {
     if ($Global:configfile) {
         $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile).Name)
         $filename = Join-Path $configDir $filename
+        $fullFilename = Join-Path $configDir (($Global:configfile).Name)
+        $contentEqual = (Get-Content $fullFileName| ConvertFrom-Json| ConvertTo-Json -Depth 3 -Compress) -eq
+                ($config | ConvertTo-Json -Depth 3 -Compress)
+        if ($contentEqual){
+            return Split-Path -Path $fileName -Leaf
+        }
+        else{
+           # Write-Host "Content Not Equal"
+           # (Get-Content $fullFilename | ConvertFrom-Json| ConvertTo-Json -Depth 3) | out-host
+           # ($config | ConvertTo-Json -Depth 3) | out-host
+        }
     }
     $splitpath = Split-Path -Path $fileName -Leaf
     $response = Read-Host2 -Prompt "Save Filename" -currentValue $splitpath -HideHelp

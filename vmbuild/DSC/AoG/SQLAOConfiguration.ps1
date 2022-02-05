@@ -376,9 +376,13 @@ Configuration SQLAOConfiguration
         }
 
         # Add the availability group replica to the availability group
+        $nodename = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName) + '\' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+        if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER"){
+            $nodename = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName)
+        }
         SqlAGReplica 'AddReplica' {
             Ensure                        = 'Present'
-            Name                          = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName) + '\' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            Name                          = $nodename
             AvailabilityGroupName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
             ServerName                    = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
             InstanceName                  = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName

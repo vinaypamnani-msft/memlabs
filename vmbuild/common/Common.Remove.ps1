@@ -50,6 +50,9 @@ function Remove-DhcpScope {
     if ($ScopeId -eq "Internet") {
         $ScopeId = "172.31.250.0"
     }
+    if ($ScopeId -eq "cluster") {
+        $ScopeId = "10.250.250.0"
+    }
 
     $dhcpScope = Get-DhcpServerv4Scope -ScopeID $ScopeId -ErrorAction SilentlyContinue
     if ($dhcpScope) {

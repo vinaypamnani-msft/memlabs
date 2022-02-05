@@ -756,18 +756,26 @@ function Test-DHCPScope {
 
     try {
         if (-not $DomainScope) {
-            $HashArguments = @{
-                ScopeId   = $ScopeID
-                Router    = $DHCPDefaultGateway
-                DnsServer = @("4.4.4.4", "8.8.8.8")
+            if ($ScopeName -eq "cluster") {
+                $HashArguments = @{
+                    ScopeId = $ScopeID
+                    Router  = $DHCPDefaultGateway
+                }
+            }
+            else {
+                $HashArguments = @{
+                    ScopeId   = $ScopeID
+                    Router    = $DHCPDefaultGateway
+                    DnsServer = @("4.4.4.4", "8.8.8.8")
+                }
             }
         }
         else {
-            $DC = get-list -type VM -domain $DomainName | Where-Object {$_.Role -eq "DC" }
+            $DC = get-list -type VM -domain $DomainName | Where-Object { $_.Role -eq "DC" }
             if ($DC) {
                 $DHCPDNSAddress = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
             }
-            if ($DNSServer){
+            if ($DNSServer) {
                 $DHCPDNSAddress = $DNSServer
             }
             $HashArguments = @{
@@ -1143,10 +1151,7 @@ function New-VirtualMachine {
     Write-Log "$VmName`: Adding a DVD drive"
     Add-VMDvdDrive -VMName $VmName
 
-    if ($SwitchName2) {
-        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2"
-        Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2
-    }
+
     Write-Log "$VmName`: Changing boot order"
     $f = Get-VM2 -Name $VmName | Get-VMFirmware
     $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
@@ -1190,6 +1195,27 @@ function New-VirtualMachine {
     $started = Start-VM2 -Name $VmName -Passthru
     if (-not $started) {
         return $false
+    }
+
+    if ($SwitchName2) {
+        #Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2"
+        $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
+        $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2
+        $thisVM = Get-List2 -DeployConfig $DeployConfig | Where-Object { $_.VmName -eq $VmName }
+        if ($thisVM.OtherNode) {
+            $ip = $iprange[0]
+        }
+        else {
+            $ip = $iprange[1]
+        }
+        #Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and Mac $($vmnet.MacAddress)"
+        $dc = Get-List2 -DeployConfig $DeployConfig | Where-Object { $_.Role -eq "DC" }
+        $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
+        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+        Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop
+        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip
+        Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip
+        Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip
     }
 
     return $true
