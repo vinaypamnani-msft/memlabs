@@ -108,6 +108,11 @@
             SafemodeAdministratorPassword = $DomainCreds
         }
 
+        WriteStatus CreateAccounts {
+            DependsOn = "[SetupDomain]FirstDS"
+            Status    = "Creating user accounts and groups"
+        }
+
         $adObjectDependency = @()
         $i = 0
         foreach ($user in $DomainAccounts) {
@@ -120,7 +125,7 @@
                 PasswordNeverExpires = $true
                 CannotChangePassword = $true
                 DomainName           = $DomainName
-                DependsOn            = "[SetupDomain]FirstDS"
+                DependsOn            = "[WriteStatus]CreateAccounts"
             }
             $adObjectDependency += "[ADUser]User$($i)"
         }
@@ -136,7 +141,7 @@
                 PasswordNeverExpires = $true
                 CannotChangePassword = $true
                 DomainName           = $DomainName
-                DependsOn            = "[SetupDomain]FirstDS"
+                DependsOn            = "[WriteStatus]CreateAccounts"
             }
             $adObjectDependency += "[ADUser]User$($i)"
         }
@@ -147,7 +152,7 @@
             ADComputer "Computer$($i)" {
                 ComputerName      = $computer
                 EnabledOnCreation = $false
-                DependsOn         = "[SetupDomain]FirstDS"
+                DependsOn         = "[WriteStatus]CreateAccounts"
             }
             $adObjectDependency += "[ADComputer]Computer$($i)"
         }
@@ -205,7 +210,7 @@
         if ($setNetwork) {
 
             WriteStatus NetworkDNS {
-                DependsOn = "[SetupDomain]FirstDS"
+                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
                 Status    = "Setting Primary DNS, Default Gateway and DNS Forwarders"
             }
 
@@ -238,7 +243,7 @@
         }
         else {
             WriteStatus ADCS {
-                DependsOn = "[SetupDomain]FirstDS"
+                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
                 Status    = "Installing Certificate Authority"
             }
         }

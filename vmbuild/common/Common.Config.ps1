@@ -376,8 +376,8 @@ function Get-SQLAOConfig {
 
     $ClusterName = $PrimaryAO.ClusterName
     $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix,"")
-    $ServiceAccount = "$($ClusterNameNoPrefix)ServiceAccount"
-    $AgentAccount = "$($ClusterNameNoPrefix)AgentServiceAccount"
+    $ServiceAccount = "$($ClusterNameNoPrefix)Svc"
+    $AgentAccount = "$($ClusterNameNoPrefix)AgentSvc"
 
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
@@ -459,8 +459,8 @@ function Add-PerVMSettings {
             $PrimaryAO = $deployConfig.virtualMachines | Where-Object {$_.Role -eq "SQLAO" -and $_.OtherNode}
             $ClusterName = $PrimaryAO.ClusterName
             $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix,"")
-            $ServiceAccount = "$($ClusterNameNoPrefix)ServiceAccount"
-            $AgentAccount = "$($ClusterNameNoPrefix)AgentServiceAccount"
+            $ServiceAccount = "$($ClusterNameNoPrefix)Svc"
+            $AgentAccount = "$($ClusterNameNoPrefix)AgentSvc"
 
             $DomainAccountsUPN = @($ServiceAccount,$AgentAccount)
 
