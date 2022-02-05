@@ -143,9 +143,9 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
             DependsOn            = '[SqlLogin]Add_WindowsUser'
         }
-
+        $agentName = if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") {"SQLSERVERAGENT"} else {'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName }
         Service 'ChangeStartupAgent' {
-            Name                 = 'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            Name                 = $agentName
             StartupType          = "Automatic"
             State                = "Running"
             DependsOn            = '[SqlServiceAccount]SetServiceAccountAgent_User', '[SqlRole]Add_ServerRole'
@@ -318,8 +318,9 @@ Configuration SQLAOConfiguration
             DependsOn            = '[SqlLogin]Add_WindowsUser'
         }
 
+        $agentName = if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") {"SQLSERVERAGENT"} else {'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName }
         Service 'ChangeStartupAgent' {
-            Name                 = 'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            Name                 = $agentName
             StartupType          = "Automatic"
             State                = "Running"
             DependsOn            = '[SqlServiceAccount]SetServiceAccountAgent_User', '[SqlRole]Add_ServerRole'
