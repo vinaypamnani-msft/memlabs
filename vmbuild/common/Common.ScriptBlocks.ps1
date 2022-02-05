@@ -450,8 +450,6 @@ $global:VM_Config = {
             return $false
         }
         $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-        $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
-        $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
         $ADAccounts = @()
         $ADAccounts += $deployConfig.thisParams.MachineName + "$"
         $ADAccounts += $deployConfig.thisParams.thisVM.OtherNode + "$"
@@ -495,35 +493,6 @@ $global:VM_Config = {
                     Role                     = 'ClusterNode2'
                     Resource                 = $resourceDir
                     PrimaryReplicaServerName = $deployConfig.thisParams.MachineName + "." + $deployConfig.vmOptions.DomainName
-                },
-                @{
-                    NodeName          = $deployConfig.parameters.DCName
-                    Role              = 'ADSetup'
-                    ADmembers         = $ADAccounts
-                    ComputerName      = $deployConfig.thisParams.thisVM.ClusterName
-                    SQLServiceAccount = 'SQLServerServiceCAS'
-                    SQLServiceAgent   = $deployConfig.thisParams.thisVM.SQLAgentUser
-                    UserNameCluster   = 'SQLServerServiceCAS'
-                    DomainName        = $deployConfig.vmOptions.domainName
-                    OUUserPath        = $cnUsersName
-                    OUDevicePath      = $cnComputersName
-
-                },
-                @{
-                    NodeName        = $deployConfig.thisParams.thisVM.fileServerVM
-                    Role            = 'FileServer'
-                    Name            = 'CASClusterWitness'
-                    Path            = 'F:\CASClusterWitness'
-                    Description     = 'CASWitnessShare'
-                    WitnessPath     = "F:\CASClusterWitness"
-                    Accounts        = $ADAccounts2
-                    Principal1      = $ADAccounts2[0]
-                    Principal2      = $ADAccounts2[1]
-                    Principal3      = $ADAccounts2[2]
-                    Principal4      = $ADAccounts2[3]
-                    FullAccess      = $ADAccounts2
-                    ReadAccess      = 'Everyone'
-                    CheckModuleName = 'AccessControlDSC'
                 },
                 @{
                     NodeName                    = "*"
