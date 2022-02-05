@@ -699,7 +699,9 @@ function Test-DHCPScope {
         [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope Name.")]
         [string]$ScopeName,
         [Parameter(Mandatory = $false, HelpMessage = "DHCP Domain Name option.")]
-        [string]$DomainName
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "Override DNS Server")]
+        [string]$DNSServer
     )
 
     # Define Lease Time
