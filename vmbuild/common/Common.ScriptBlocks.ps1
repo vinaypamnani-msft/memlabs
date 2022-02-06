@@ -637,24 +637,26 @@ $global:VM_Config = {
             $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
         }
 
-
         Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
         if (-not ($DscFolder -eq "AoG")) {
             "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
             Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
         }
-        if ($currentItem.hidden) {
-            # Don't wait, if we're not creating a new VM and running DSC on an existing VM
-            "Start-DscConfiguration for $dscConfigPath for existing VM" | Out-File $log -Append
-            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
-            Start-Sleep -Seconds 60 # Wait for DSC Status to do tests, and wait on the latest action
-        }
-        else {
+
+        if ($currentItem.hidden -or $DscFolder -eq "AoG") {
+
             $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
             $user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
             $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
+
+            # Don't wait, if we're not creating a new VM and running DSC on an existing VM
+            "Start-DscConfiguration for $dscConfigPath for existing VM" | Out-File $log -Append
+            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds
+            # Start-Sleep -Seconds 30 # Wait for DSC Status to do tests, and wait on the latest action
+        }
+        else {
             "Start-DscConfiguration for $dscConfigPath for new VM" | Out-File $log -Append
-            Start-DscConfiguration -Path $dscConfigPath -jobname "AoG" -Force -Verbose -ErrorAction Stop -Credential $creds
+            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
         }
 
     }
@@ -724,6 +726,7 @@ $global:VM_Config = {
             return
         }
     }
+
     Write-Log "PSJOB: $($currentItem.vmName): DSC: Started job for  $($currentItem.role) configuration. $($result.ScriptBlockOutput)"
     # Wait for DSC, timeout after X minutes
     # Write-Log "PSJOB: $($currentItem.vmName): Waiting for $($currentItem.role) role configuration via DSC." -OutputStream
@@ -738,6 +741,8 @@ $global:VM_Config = {
     $suppressNoisyLogging = $Common.VerboseEnabled -eq $false
     $failedHeartbeats = 0
     $failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
+
+    Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
 
     do {
 
@@ -816,6 +821,11 @@ $global:VM_Config = {
             # Check if complete
             $complete = $status.ScriptBlockOutput -eq "Complete!"
         }
+        else {
+            if ($failedHeartbeats -le 10) {
+                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            }
+        }
 
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
@@ -863,6 +873,10 @@ $global:VM_Monitor = {
     # Get variables from parent scope
     $deployConfig = $using:deployConfigCopy
     $currentItem = $using:currentItem
+
+    # Change log location
+    $domainNameForLogging = $deployConfig.vmOptions.domainName
+    $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
     if ($currentItem.role -eq "DC") {
         $domainName = $deployConfig.parameters.DomainName
@@ -982,7 +996,9 @@ $global:VM_Monitor = {
             $complete = $status.ScriptBlockOutput -eq "Complete!"
         }
         else {
-            Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            if ($failedHeartbeats -le 10) {
+                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            }
         }
 
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
