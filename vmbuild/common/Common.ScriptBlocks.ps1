@@ -644,19 +644,15 @@ $global:VM_Config = {
         }
 
         if ($currentItem.hidden -or $DscFolder -eq "AoG") {
-
-            $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
-            $user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
+            $userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
+            $user = "$userdomain\$($using:Common.LocalAdmin.UserName)"
             $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
-
-            # Don't wait, if we're not creating a new VM and running DSC on an existing VM
-            "Start-DscConfiguration for $dscConfigPath for existing VM" | Out-File $log -Append
-            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds
-            # Start-Sleep -Seconds 30 # Wait for DSC Status to do tests, and wait on the latest action
+            "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
+            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
         }
         else {
-            "Start-DscConfiguration for $dscConfigPath for new VM" | Out-File $log -Append
-            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+            "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
+            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -JobName $currentItem.vmName
         }
 
     }
