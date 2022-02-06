@@ -236,15 +236,15 @@ Configuration SQLAOConfiguration
             DependsOn                     = '[SqlAlwaysOnService]EnableHADR', '[SqlEndpoint]HADREndpoint', '[SqlPermission]AddNTServiceClusSvcPermissions'
             PsDscRunAsCredential          = $SqlAdministratorCredential
         }
-
+        $ClusterIPAddr = "$($($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterIPAddress)/255.255.255.0"
         SqlAGListener 'AvailabilityGroupListener' {
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             AvailabilityGroup    = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-            DHCP                 = $true
+            DHCP                 = $false
             Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-            IpAddress            = '10.250.250.1/255.255.255.0'
+            IpAddress            = $ClusterIPAddr
             Port                 = 1500
             DependsOn            = '[SqlAG]CMCASAG'
             PsDscRunAsCredential = $SqlAdministratorCredential

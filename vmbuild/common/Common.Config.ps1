@@ -143,7 +143,7 @@ function New-DeployConfig {
         }
 
         $SQLAO = $virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode } | Select-Object -First 1
-        if ($SQLAO){
+        if ($SQLAO) {
             if ($SQLAO.fileServerVM -and -not $SQLAO.fileServerVM.StartsWith($configObject.vmOptions.prefix)) {
                 $SQLAO.fileServerVM = $configObject.vmOptions.prefix + $SQLAO.fileServerVM
             }
@@ -236,6 +236,14 @@ function Add-ExistingVMsToDeployConfig {
         $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode
         if ($DPMPPrimary) {
             Add-ExistingVMToDeployConfig -vmName $DPMPPrimary -configToModify $config
+        }
+    }
+
+    # Add FS to list, when adding SQLAO
+    $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
+    foreach ($SQLAOVM in $SQLAOVMs) {
+        if ($SQLAOVM.FileServerVM) {
+            Add-ExistingVMToDeployConfig -vmName $SQLAOVM.FileServerVM -configToModify $config
         }
     }
 
@@ -369,13 +377,13 @@ function Get-SQLAOConfig {
         [Parameter(Mandatory = $true, HelpMessage = "Config to Modify")]
         [object] $deployConfig
     )
-    $PrimaryAO = $deployConfig.virtualMachines | Where-Object {$_.Role -eq "SQLAO" -and $_.OtherNode}
-    $SecondAO = $deployConfig.virtualMachines | Where-Object {$_.Role -eq "SQLAO" -and -not $_.OtherNode}
-    $FSAO =  $deployConfig.virtualMachines | Where-Object {$_.Role -eq "FileServer" -and $_.vmName -eq $PrimaryAO.FileServerVM}
-    $DC =  $deployConfig.virtualMachines | Where-Object {$_.Role -eq "DC"}
+    $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
+    $SecondAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and -not $_.OtherNode }
+    $FSAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "FileServer" -and $_.vmName -eq $PrimaryAO.FileServerVM }
+    $DC = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }
 
     $ClusterName = $PrimaryAO.ClusterName
-    $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix,"")
+    $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix, "")
     $ServiceAccount = "$($ClusterNameNoPrefix)Svc"
     $AgentAccount = "$($ClusterNameNoPrefix)AgentSvc"
 
@@ -384,15 +392,16 @@ function Get-SQLAOConfig {
     $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
     $config = [PSCustomObject]@{
-        GroupName = $ClusterName
-        GroupMembers = @("$($PrimaryAO.vmName)$","$($SecondAO.vmName)$","$($ClusterName)$")
-        SqlServiceAccount = $ServiceAccount
+        GroupName              = $ClusterName
+        GroupMembers           = @("$($PrimaryAO.vmName)$", "$($SecondAO.vmName)$", "$($ClusterName)$")
+        SqlServiceAccount      = $ServiceAccount
         SqlAgentServiceAccount = $AgentAccount
-        OULocationUser = $cnUsersName
-        OULocationDevice = $cnComputersName
-        ClusterNodes = @($PrimaryAO.vmName,$SecondAO.vmName)
-        WitnessShare = "$($ClusterNameNoPrefix)-Witness"
-        WitnessLocalPath = "F:\$($ClusterNameNoPrefix)-Witness"
+        OULocationUser         = $cnUsersName
+        OULocationDevice       = $cnComputersName
+        ClusterNodes           = @($PrimaryAO.vmName, $SecondAO.vmName)
+        WitnessShare           = "$($ClusterNameNoPrefix)-Witness"
+        WitnessLocalPath       = "F:\$($ClusterNameNoPrefix)-Witness"
+        ClusterIPAddress       = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 1
     }
 
     return $config
@@ -441,33 +450,47 @@ function Add-PerVMSettings {
         $thisParams | Add-Member -MemberType NoteProperty -Name "network" -Value $deployConfig.vmOptions.network -Force
     }
 
-    $SQLAO = $deployConfig.virtualMachines | Where-Object {$_.role -eq "SQLAO" -and -not $_.hidden}
+    $SQLAO = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and -not $_.hidden }
     if ($SQLAO) {
         $SqlAOConfig = Get-SQLAOConfig -deployConfig $deployConfig
         $thisParams | Add-Member -MemberType NoteProperty -Name "SQLAO" -Value $SQLAOConfig -Force
 
         if ($thisVM.role -eq "FileServer") {
             $ServersToWaitOn = @()
-            foreach ($sql in $SQLAO)   {
-                $ServersToWaitOn+=$sql.vmName
+            foreach ($sql in $SQLAO) {
+                $ServersToWaitOn += $sql.vmName
             }
             $thisParams | Add-Member -MemberType NoteProperty -Name "ServersToWaitOn" -Value $ServersToWaitOn -Force
         }
 
         if ($thisVM.role -eq "DC") {
             $DomainAccountsUPN = @()
-            $PrimaryAO = $deployConfig.virtualMachines | Where-Object {$_.Role -eq "SQLAO" -and $_.OtherNode}
+            $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
             $ClusterName = $PrimaryAO.ClusterName
-            $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix,"")
+            $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix, "")
             $ServiceAccount = "$($ClusterNameNoPrefix)Svc"
             $AgentAccount = "$($ClusterNameNoPrefix)AgentSvc"
 
-            $DomainAccountsUPN = @($ServiceAccount,$AgentAccount)
+            $DomainAccountsUPN = @($ServiceAccount, $AgentAccount)
 
             $DomainComputers = @($ClusterName)
             $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccountsUPN" -Value $DomainAccountsUPN -Force
             $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
         }
+        if ($thisVM.role -eq "SQLAO") {
+            $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2
+            $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
+            $dns = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            if ($thisVM.OtherNode) {
+                $ip = $iprange[0]
+            }
+            else {
+                $ip = $iprange[1]
+            }
+            $thisParams | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
+            $thisParams | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value  $ip -Force
+        }
+
     }
 
 
@@ -475,7 +498,7 @@ function Add-PerVMSettings {
     if ($thisVM.role -eq "DC") {
         $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
         $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentUser } | Select-Object -ExpandProperty SQLAgentUser -Unique
-        $accountLists.DomainAccounts =  $accountLists.DomainAccounts | Select-Object -Unique
+        $accountLists.DomainAccounts = $accountLists.DomainAccounts | Select-Object -Unique
 
         $ServersToWaitOn = @()
         $thisPSName = $null
@@ -1163,7 +1186,7 @@ function Get-VMSizeCached {
         MemoryStartup = $MemoryStartup
         EntryAdded    = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
-    ConvertTo-Json  $vmCacheEntry| Out-File $cacheFile -Force
+    ConvertTo-Json  $vmCacheEntry | Out-File $cacheFile -Force
     return $vmCacheEntry
 }
 
@@ -1709,7 +1732,7 @@ Function Show-Summary {
 
         if ($containsMember) {
             if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                $MemberNames = ($fixedConfig | Where-Object { $_.Role -eq "DomainMember"  -and $null -eq $($_.SqlVersion)}).vmName
+                $MemberNames = ($fixedConfig | Where-Object { $_.Role -eq "DomainMember" -and $null -eq $($_.SqlVersion) }).vmName
                 Write-GreenCheck "Client Push: Yes [$($MemberNames -join ",")]"
             }
             else {

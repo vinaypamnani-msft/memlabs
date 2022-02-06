@@ -1205,17 +1205,11 @@ function New-VirtualMachine {
     if ($SwitchName2) {
         #Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2"
         $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
-        $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2
-        $thisVM = Get-List2 -DeployConfig $DeployConfig | Where-Object { $_.VmName -eq $VmName }
-        if ($thisVM.OtherNode) {
-            $ip = $iprange[0]
-        }
-        else {
-            $ip = $iprange[1]
-        }
-        #Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and Mac $($vmnet.MacAddress)"
-        $dc = Get-List2 -DeployConfig $DeployConfig | Where-Object { $_.Role -eq "DC" }
-        $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
+
+        $dns = $deployConfig.thisParams.DNSServer
+        $ip =$deployConfig.thisParams.ClusterNetworkIP
+
+
         Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop
         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip

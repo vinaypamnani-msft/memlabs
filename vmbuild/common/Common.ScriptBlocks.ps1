@@ -468,20 +468,21 @@ $global:VM_Config = {
                 # Node01 - First cluster node.
                 @{
                     # Replace with the name of the actual target node.
-                    NodeName        = $deployConfig.thisParams.MachineName
+                    NodeName         = $deployConfig.thisParams.MachineName
 
                     # This is used in the configuration to know which resource to compile.
-                    Role            = 'ClusterNode1'
-                    CheckModuleName = 'SqlServer'
-                    Address         = $deployConfig.thisParams.network
-                    AddressMask     = '255.255.255.0'
-                    Name            = 'Domain Network'
-                    Address2        = '10.250.250.0'
-                    AddressMask2    = '255.255.255.0'
-                    Name2           = 'Cluster Network'
-                    InstanceName    = $deployConfig.thisParams.thisVM.sqlInstanceName
-                    ClusterNameAoG  = 'CASAlwaysOn'
-                    SQLAgentUser    = $sqlAgentUser
+                    Role             = 'ClusterNode1'
+                    CheckModuleName  = 'SqlServer'
+                    Address          = $deployConfig.thisParams.network
+                    AddressMask      = '255.255.255.0'
+                    Name             = 'Domain Network'
+                    Address2         = '10.250.250.0'
+                    AddressMask2     = '255.255.255.0'
+                    Name2            = 'Cluster Network'
+                    InstanceName     = $deployConfig.thisParams.thisVM.sqlInstanceName
+                    ClusterNameAoG   = 'CASAlwaysOn'
+                    SQLAgentUser     = $sqlAgentUser
+                    ClusterIPAddress = $deployConfig.thisParams.SQLAO.ClusterIPAddress
 
                 },
 
@@ -744,7 +745,8 @@ $global:VM_Config = {
 
         #$bob =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -Name AoG -IncludeChildJob).Progress | Select-Object -last 1 | select-object -ExpandProperty CurrentOperation }).ScriptBlockOutput
         #$bob = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ((get-job -Name AoG)).StatusMessage }).ScriptBlockOutput
-        #$bob2 = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -Name AoG -IncludeChildJob | ConvertTo-Json) }).ScriptBlockOutput
+
+        #$bob2 = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -IncludeChildJob | ConvertTo-Json) }).ScriptBlockOutput
         #write-log $bob2
         #Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Output: $bob" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
