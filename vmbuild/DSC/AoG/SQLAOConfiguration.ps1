@@ -34,20 +34,29 @@ Configuration SQLAOConfiguration
 
     Node $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
     {
+
+        $node2 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
+
+        WriteStatus WindowsFeature {
+            Status = "Adding Windows Features"
+        }
+
         WindowsFeature ADDADPS {
-            Ensure = 'Present'
-            Name   = 'RSAT-AD-PowerShell'
+            Ensure    = 'Present'
+            Name      = 'RSAT-AD-PowerShell'
+            DependsOn = "[WriteStatus]WindowsFeature"
         }
 
         ModuleAdd SQLServerModule {
             Key             = 'Always'
             CheckModuleName = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.CheckModuleName
-
+            DependsOn       = "[WriteStatus]WindowsFeature"
         }
 
         WindowsFeature AddFailoverFeature {
-            Ensure = 'Present'
-            Name   = 'Failover-clustering'
+            Ensure    = 'Present'
+            Name      = 'Failover-clustering'
+            DependsOn = "[WriteStatus]WindowsFeature"
         }
 
         WindowsFeature AddRemoteServerAdministrationToolsClusteringPowerShellFeature {
@@ -66,6 +75,11 @@ Configuration SQLAOConfiguration
             Ensure    = 'Present'
             Name      = 'RSAT-Clustering-Mgmt'
             DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature'
+        }
+
+        WriteStatus Cluster {
+            DependsOn = "[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature"
+            Status    = "Creating Windows Cluster and Network"
         }
 
         xCluster CreateCluster {
@@ -94,6 +108,10 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
+        WriteStatus ClusterJoin {
+            DependsOn = "[xClusterNetwork]ChangeNetwork-10"
+            Status    = "Waiting for '$node2' to join Cluster"
+        }
 
         WaitForAny WaitForClusterJoin {
             NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName
@@ -101,6 +119,11 @@ Configuration SQLAOConfiguration
             RetryIntervalSec     = 60
             RetryCount           = 4
             PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+        WriteStatus SvcAccount {
+            DependsOn = '[WaitForAny]WaitForClusterJoin'
+            Status    = "Configuring SQL Service Accounts and SQL Logins"
         }
 
         #Change SQL Service Account
@@ -143,7 +166,8 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
             DependsOn            = '[SqlLogin]Add_WindowsUser'
         }
-        $agentName = if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") {"SQLSERVERAGENT"} else {'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName }
+
+        $agentName = if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName }
         Service 'ChangeStartupAgent' {
             Name                 = $agentName
             StartupType          = "Automatic"
@@ -192,6 +216,11 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
+        WriteStatus SQLAG {
+            DependsOn = '[SqlAlwaysOnService]EnableHADR', '[SqlEndpoint]HADREndpoint', '[SqlPermission]AddNTServiceClusSvcPermissions'
+            Status    = "Creating Availability Group and Listener"
+        }
+
         # Create the availability group on the instance tagged as the primary replica
         SqlAG 'CMCASAG' {
             Ensure                        = 'Present'
@@ -220,10 +249,22 @@ Configuration SQLAOConfiguration
             DependsOn            = '[SqlAG]CMCASAG'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
+
+        WriteStatus Complete {
+            DependsOn = '[SqlAGListener]AvailabilityGroupListener'
+            Status    = "Complete!"
+        }
     }
 
     Node $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName
     {
+
+        $node1 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
+
+        WriteStatus WindowsFeature {
+            Status = "Adding Windows Features"
+        }
+
         WindowsFeature AddFailoverFeature {
             Ensure = 'Present'
             Name   = 'Failover-clustering'
@@ -247,6 +288,11 @@ Configuration SQLAOConfiguration
             DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature'
         }
 
+        WriteStatus WaitCluster {
+            Status    = "Waiting for '$node1' to create Windows Cluster"
+            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
+        }
+
         xWaitForCluster WaitForCluster {
             Name                 = $Node.ClusterName
             RetryIntervalSec     = 60
@@ -255,12 +301,22 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
+        WriteStatus WaitClusterNetwork {
+            Status    = "Waiting for '$node1' to create Windows Cluster Network"
+            DependsOn = '[xWaitForCluster]WaitForCluster'
+        }
+
         WaitForAny WaitForClusteringNetworking {
             NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
             ResourceName         = '[xClusterNetwork]ChangeNetwork-10'
             RetryIntervalSec     = 60
             RetryCount           = 6
             PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+        WriteStatus JoinCluster {
+            Status    = "Joining Windows Cluster '$( $Node.ClusterName)'on '$node1'"
+            DependsOn = '[xWaitForCluster]WaitForCluster'
         }
 
         xCluster JoinSecondNodeToCluster {
@@ -276,6 +332,11 @@ Configuration SQLAOConfiguration
             Resource             = $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.Resource
             DependsOn            = '[xCluster]JoinSecondNodeToCluster'
             PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+        WriteStatus SvcAccount {
+            Dependson = '[xClusterQuorum]ClusterWitness'
+            Status    = "Configuring SQL Service Accounts and SQL Logins"
         }
 
         #Change SQL Service Account
@@ -296,6 +357,7 @@ Configuration SQLAOConfiguration
             ServiceType          = 'SQLServerAgent'
             ServiceAccount       = $SqlAdministratorCredential
             RestartService       = $true
+            Dependson            = '[xClusterQuorum]ClusterWitness'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
@@ -305,6 +367,7 @@ Configuration SQLAOConfiguration
             LoginType            = 'WindowsUser'
             ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            Dependson            = '[xClusterQuorum]ClusterWitness'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
@@ -318,7 +381,7 @@ Configuration SQLAOConfiguration
             DependsOn            = '[SqlLogin]Add_WindowsUser'
         }
 
-        $agentName = if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") {"SQLSERVERAGENT"} else {'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName }
+        $agentName = if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName }
         Service 'ChangeStartupAgent' {
             Name                 = $agentName
             StartupType          = "Automatic"
@@ -334,6 +397,7 @@ Configuration SQLAOConfiguration
             LoginType            = 'WindowsUser'
             ServerName           = $Node.NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            Dependson            = '[xClusterQuorum]ClusterWitness'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
@@ -356,6 +420,7 @@ Configuration SQLAOConfiguration
             Port                 = 5022
             ServerName           = $Node.NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            DependsOn            = "[SqlPermission]AddNTServiceClusSvcPermissions"
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
@@ -366,18 +431,29 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
+        WriteStatus SQLAOWait {
+            Dependson = '[SqlEndpoint]HADREndpoint'
+            Status    = "Waiting for '$node1' to create the Availability Group"
+        }
+
         SqlWaitForAG 'SQLConfigureAG-WaitAG' {
             Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
             RetryIntervalSec     = 60
             RetryCount           = 4
             ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            Dependson            = '[SqlEndpoint]HADREndpoint'
             PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+        WriteStatus SQLAO {
+            DependsOn = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
+            Status    = "Adding replica to the Availability Group"
         }
 
         # Add the availability group replica to the availability group
         $nodename = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName) + '\' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-        if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER"){
+        if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") {
             $nodename = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName)
         }
         SqlAGReplica 'AddReplica' {
@@ -396,6 +472,11 @@ Configuration SQLAOConfiguration
             ProcessOnlyOnActiveNode       = $true
             DependsOn                     = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
             PsDscRunAsCredential          = $SqlAdministratorCredential
+        }
+
+        WriteStatus Complete {
+            DependsOn = '[SqlAGReplica]AddReplica'
+            Status    = "Complete!"
         }
     }
 }

@@ -150,7 +150,7 @@ function New-VMJobs {
         }
 
         # Skip Phase 3 for all machines, except SQLAO's primary node
-        if ($Phase -eq 3 -and ($currentItem.role -ne "SQLAO" -or ($currentItem.role -eq "SQLAO" -and -not $currentItem.OtherNode))) {
+        if ($Phase -eq 3 -and ($currentItem.role -ne "SQLAO")) {
             continue
         }
 
@@ -166,7 +166,12 @@ function New-VMJobs {
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
         }
         else {
-            $job = Start-Job -ScriptBlock $global:VM_Config -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+            if ($Phase -eq 3 -and ($currentItem.role -eq "SQLAO" -and (-not $currentItem.OtherNode))) {
+                $job = Start-Job -ScriptBlock $global:VM_Monitor -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+            }
+            else {
+                $job = Start-Job -ScriptBlock $global:VM_Config -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+            }
         }
 
         if ($Err.Count -ne 0) {
