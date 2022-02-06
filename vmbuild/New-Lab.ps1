@@ -453,6 +453,7 @@ try {
     # 3 - Configure SQL AO
 
     if ($Phase3.IsPresent) {
+        $created = $true
         $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
     }
     else {
