@@ -1212,7 +1212,7 @@ function New-VirtualMachine {
 
         Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop
-        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip
+        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force
         Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip
         Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip
     }
