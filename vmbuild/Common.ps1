@@ -1098,7 +1098,7 @@ function New-VirtualMachine {
         $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
     }
     catch {
-        Write-Log "$VmName`: Failed to create new VM. $_"
+        Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
         return $false
     }
 

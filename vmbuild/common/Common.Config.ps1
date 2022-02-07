@@ -391,6 +391,7 @@ function Get-SQLAOConfig {
     $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
     $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
+    $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
     $config = [PSCustomObject]@{
         GroupName              = $ClusterName
         GroupMembers           = @("$($PrimaryAO.vmName)$", "$($SecondAO.vmName)$", "$($ClusterName)$")
@@ -401,7 +402,8 @@ function Get-SQLAOConfig {
         ClusterNodes           = @($PrimaryAO.vmName, $SecondAO.vmName)
         WitnessShare           = "$($ClusterNameNoPrefix)-Witness"
         WitnessLocalPath       = "F:\$($ClusterNameNoPrefix)-Witness"
-        ClusterIPAddress       = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 1
+        ClusterIPAddress       = $IPs[0]
+        AGIPAddress            = $IPS[1]
     }
 
     return $config
@@ -487,8 +489,12 @@ function Add-PerVMSettings {
             else {
                 $ip = $iprange[1]
             }
-            $thisParams | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
-            $thisParams | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value  $ip -Force
+            if (-not $thisParams.DNSServer) {
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
+            }
+            if (-not $thisParams.ClusterNetworkIP) {
+                $thisParams | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value  $ip -Force
+            }
         }
 
     }

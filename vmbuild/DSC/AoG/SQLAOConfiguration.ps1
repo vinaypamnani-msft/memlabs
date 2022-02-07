@@ -84,7 +84,7 @@ Configuration SQLAOConfiguration
 
         xCluster CreateCluster {
             Name                          = $Node.ClusterName
-            #StaticIPAddress              = $Node.ClusterIPAddress
+            StaticIPAddress               = $Node.ClusterIPAddress
             # This user must have the permission to create the CNO (Cluster Name Object) in Active Directory, unless it is prestaged.
             DomainAdministratorCredential = $SqlAdministratorCredential
             DependsOn                     = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
@@ -116,8 +116,8 @@ Configuration SQLAOConfiguration
         WaitForAny WaitForClusterJoin {
             NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName
             ResourceName         = '[xClusterQuorum]ClusterWitness'
-            RetryIntervalSec     = 60
-            RetryCount           = 4
+            RetryIntervalSec     = 30
+            RetryCount           = 30
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
@@ -236,7 +236,6 @@ Configuration SQLAOConfiguration
             DependsOn                     = '[SqlAlwaysOnService]EnableHADR', '[SqlEndpoint]HADREndpoint', '[SqlPermission]AddNTServiceClusSvcPermissions'
             PsDscRunAsCredential          = $SqlAdministratorCredential
         }
-        $ClusterIPAddr = "$($($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterIPAddress)/255.255.255.0"
         SqlAGListener 'AvailabilityGroupListener' {
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
@@ -244,7 +243,7 @@ Configuration SQLAOConfiguration
             AvailabilityGroup    = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
             DHCP                 = $false
             Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-            IpAddress            = $ClusterIPAddr
+            IpAddress            = $Node.AGIPAddress
             Port                 = 1500
             DependsOn            = '[SqlAG]CMCASAG'
             PsDscRunAsCredential = $SqlAdministratorCredential
@@ -295,8 +294,8 @@ Configuration SQLAOConfiguration
 
         xWaitForCluster WaitForCluster {
             Name                 = $Node.ClusterName
-            RetryIntervalSec     = 60
-            RetryCount           = 6
+            RetryIntervalSec     = 30
+            RetryCount           = 30
             DependsOn            = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -309,8 +308,8 @@ Configuration SQLAOConfiguration
         WaitForAny WaitForClusteringNetworking {
             NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
             ResourceName         = '[xClusterNetwork]ChangeNetwork-10'
-            RetryIntervalSec     = 60
-            RetryCount           = 6
+            RetryIntervalSec     = 30
+            RetryCount           = 30
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
@@ -321,7 +320,7 @@ Configuration SQLAOConfiguration
 
         xCluster JoinSecondNodeToCluster {
             Name                 = $Node.ClusterName
-            #StaticIPAddress               = $Node.ClusterIPAddress
+            StaticIPAddress      = $Node.ClusterIPAddress
             PsDscRunAsCredential = $SqlAdministratorCredential
             DependsOn            = '[xWaitForCluster]WaitForCluster', '[WaitForAny]WaitForClusteringNetworking'
         }
@@ -438,8 +437,8 @@ Configuration SQLAOConfiguration
 
         SqlWaitForAG 'SQLConfigureAG-WaitAG' {
             Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-            RetryIntervalSec     = 60
-            RetryCount           = 4
+            RetryIntervalSec     = 30
+            RetryCount           = 30
             ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             Dependson            = '[SqlEndpoint]HADREndpoint'

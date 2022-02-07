@@ -482,7 +482,6 @@ $global:VM_Config = {
                     InstanceName     = $deployConfig.thisParams.thisVM.sqlInstanceName
                     ClusterNameAoG   = 'CASAlwaysOn'
                     SQLAgentUser     = $sqlAgentUser
-                    ClusterIPAddress = $deployConfig.thisParams.SQLAO.ClusterIPAddress
 
                 },
 
@@ -501,6 +500,8 @@ $global:VM_Config = {
                     PSDscAllowDomainUser        = $true
                     PSDscAllowPlainTextPassword = $true
                     ClusterName                 = $deployConfig.thisParams.thisVM.ClusterName
+                    ClusterIPAddress = $deployConfig.thisParams.SQLAO.ClusterIPAddress+"/24"
+                    AGIPAddress = $deployConfig.thisParams.SQLAO.AGIPAddress+"/255.255.255.0"
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
@@ -746,11 +747,11 @@ $global:VM_Config = {
         #$bob =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -Name AoG -IncludeChildJob).Progress | Select-Object -last 1 | select-object -ExpandProperty CurrentOperation }).ScriptBlockOutput
         #$bob = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ((get-job -Name AoG)).StatusMessage }).ScriptBlockOutput
 
-        #$bob2 = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -IncludeChildJob | ConvertTo-Json) }).ScriptBlockOutput
-        #write-log $bob2
+        $bob2 = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -IncludeChildJob |  ConvertTo-Json) }).ScriptBlockOutput
+        write-log $bob2
         #Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Output: $bob" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 60
 
         if ($status.ScriptBlockFailed) {
             $failedHeartbeats++
