@@ -95,14 +95,37 @@ function Start-Phase {
         [object]$deployConfig
     )
 
+    switch ($Phase) {
+        0 {
+            $PhaseDescription = "Preparation"
+            Write-Log "Phase $Phase - Preparing existing Virtual Machines" -Activity
+        }
+
+        1 {
+            $PhaseDescription = "Creation"
+            Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
+        }
+
+        2 {
+            $PhaseDescription = "Configuration"
+            Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
+        }
+
+        3 {
+            $PhaseDescription = "Configuration"
+            Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
+        }
+    }
+    Write-Host
+
     # Start Phase
-    $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
+    $start = Start-PhaseJobs -Phase $Phase -PhaseDescription $PhaseDescription -deployConfig $deployConfig
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs
     Write-Log "`n$($result.Success) jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
 
     # Start Monitoring for phase (only applicable for Phase 2 and above)
     if ($Phase -gt 1) {
-        $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig -Monitor -MachinesToSkip $result.FailedMachines
+        $start = Start-PhaseJobs -Phase $Phase -PhaseDescription "Monitoring" -deployConfig $deployConfig -Monitor -MachinesToSkip $result.FailedMachines
         $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -Monitor
         Write-Log "`n$($result.Success) jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
     }
@@ -117,38 +140,11 @@ function Start-Phase {
 function Start-PhaseJobs {
     param (
         [int]$Phase,
+        [string]$PhaseDescription,
         [switch]$Monitor,
         [object]$deployConfig,
         [object]$MachinesToSkip
     )
-
-    if (-not $Monitor.IsPresent) {
-        switch ($Phase) {
-            0 {
-                $PhaseDescription = "Preparation"
-                Write-Log "Phase $Phase - Preparing existing Virtual Machines" -Activity
-            }
-
-            1 {
-                $PhaseDescription = "Creation"
-                Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
-            }
-
-            2 {
-                $PhaseDescription = "Configuration"
-                Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
-            }
-
-            3 {
-                $PhaseDescription = "Configuration"
-                Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
-            }
-        }
-        Write-Host
-    }
-    else {
-        $PhaseDescription = "Monitoring"
-    }
 
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
