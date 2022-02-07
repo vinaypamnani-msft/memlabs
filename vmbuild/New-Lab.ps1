@@ -493,6 +493,7 @@ try {
                 if ($configured -and $containsAO) {
                     if (-not $SkipPhase3.IsPresent) {
                         $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
+
                     }
                 }
             }

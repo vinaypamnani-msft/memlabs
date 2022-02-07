@@ -391,7 +391,18 @@ function Get-SQLAOConfig {
     $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
     $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
-    $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
+
+    $SQLAOVM = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $PrimaryAO.vmName -and $_.vmID }
+    if ($SQLAOVM -and $SQLAOVM.ClusterIPAddress -and $SQLAOVM.AGIPAddress) {
+        $clusterIP = $SQLAOVM.ClusterIPAddress
+        $AGIP = $SQLAOVM.AGIPAddress
+    }
+    else {
+        $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
+        $clusterIP = $IPs[0]
+        $AGIP = $IPs[1]
+    }
+
     $config = [PSCustomObject]@{
         GroupName              = $ClusterName
         GroupMembers           = @("$($PrimaryAO.vmName)$", "$($SecondAO.vmName)$", "$($ClusterName)$")
@@ -402,8 +413,8 @@ function Get-SQLAOConfig {
         ClusterNodes           = @($PrimaryAO.vmName, $SecondAO.vmName)
         WitnessShare           = "$($ClusterNameNoPrefix)-Witness"
         WitnessLocalPath       = "F:\$($ClusterNameNoPrefix)-Witness"
-        ClusterIPAddress       = $IPs[0]
-        AGIPAddress            = $IPS[1]
+        ClusterIPAddress       = $clusterIP
+        AGIPAddress            = $AGIP
     }
 
     return $config
