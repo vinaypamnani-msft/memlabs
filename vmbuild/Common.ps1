@@ -814,7 +814,9 @@ function New-VmNote {
         [Parameter(Mandatory = $false)]
         [bool]$InProgress,
         [Parameter(Mandatory = $false)]
-        [switch]$UpdateVersion
+        [switch]$UpdateVersion,
+        [Parameter(Mandatory = $false)]
+        [switch]$AddSQLAOSpecifics
     )
 
     try {
@@ -834,6 +836,10 @@ function New-VmNote {
             memLabsDeployVersion = $Common.MemLabsVersion
         }
 
+        if ($AddSQLAOSpecifics){
+            $vmNote | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $DeployConfig.thisParams.SQLAO.ClusterIPAddress -Force
+            $vmNote | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $DeployConfig.thisParams.SQLAO.AGIPAddress -Force
+        }
         if ($UpdateVersion.IsPresent) {
             $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $Common.MemLabsVersion -Force
         }

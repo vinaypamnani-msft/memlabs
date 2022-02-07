@@ -468,20 +468,20 @@ $global:VM_Config = {
                 # Node01 - First cluster node.
                 @{
                     # Replace with the name of the actual target node.
-                    NodeName         = $deployConfig.thisParams.MachineName
+                    NodeName        = $deployConfig.thisParams.MachineName
 
                     # This is used in the configuration to know which resource to compile.
-                    Role             = 'ClusterNode1'
-                    CheckModuleName  = 'SqlServer'
-                    Address          = $deployConfig.thisParams.network
-                    AddressMask      = '255.255.255.0'
-                    Name             = 'Domain Network'
-                    Address2         = '10.250.250.0'
-                    AddressMask2     = '255.255.255.0'
-                    Name2            = 'Cluster Network'
-                    InstanceName     = $deployConfig.thisParams.thisVM.sqlInstanceName
-                    ClusterNameAoG   = 'CASAlwaysOn'
-                    SQLAgentUser     = $sqlAgentUser
+                    Role            = 'ClusterNode1'
+                    CheckModuleName = 'SqlServer'
+                    Address         = $deployConfig.thisParams.network
+                    AddressMask     = '255.255.255.0'
+                    Name            = 'Domain Network'
+                    Address2        = '10.250.250.0'
+                    AddressMask2    = '255.255.255.0'
+                    Name2           = 'Cluster Network'
+                    InstanceName    = $deployConfig.thisParams.thisVM.sqlInstanceName
+                    ClusterNameAoG  = 'CASAlwaysOn'
+                    SQLAgentUser    = $sqlAgentUser
 
                 },
 
@@ -500,8 +500,8 @@ $global:VM_Config = {
                     PSDscAllowDomainUser        = $true
                     PSDscAllowPlainTextPassword = $true
                     ClusterName                 = $deployConfig.thisParams.thisVM.ClusterName
-                    ClusterIPAddress = $deployConfig.thisParams.SQLAO.ClusterIPAddress+"/24"
-                    AGIPAddress = $deployConfig.thisParams.SQLAO.AGIPAddress+"/255.255.255.0"
+                    ClusterIPAddress            = $deployConfig.thisParams.SQLAO.ClusterIPAddress + "/24"
+                    AGIPAddress                 = $deployConfig.thisParams.SQLAO.AGIPAddress + "/255.255.255.0"
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
@@ -701,6 +701,26 @@ $global:VM_Config = {
     $ConfigToCreate = $DSC_CreateConfig
     if ($currentItem.role -eq "SQLAO" -and $using:Phase -eq 3) {
         $ConfigToCreate = $DSC_CreateSQLAOConfig
+
+        if ($currentItem.OtherNode) {
+            #Add the note here, so the properties are set, even if we fail
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion -AddSQLAOSpecifics
+            write-Log "Adding SQLAO Specifics to Note object on $($currentItem.vmName)"
+
+            $isClusterExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object {$_.StartRange -eq $($deployConfig.thisParams.SQLAO.ClusterIPAddress) }
+            $isAGExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object {$_.StartRange -eq $($deployConfig.thisParams.SQLAO.AGIPAddress) }
+
+            if (-not $isClusterExcluded)
+            {
+                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.thisParams.SQLAO.ClusterIPAddress) -EndRange $($deployConfig.thisParams.SQLAO.ClusterIPAddress) -ErrorAction SilentlyContinue
+            }
+            if (-not $isAGExcluded)
+            {
+                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.thisParams.SQLAO.AGIPAddress) -EndRange $($deployConfig.thisParams.SQLAO.AGIPAddress) -ErrorAction SilentlyContinue
+            }
+
+        }
+
     }
 
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $ConfigToCreate -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
@@ -747,11 +767,11 @@ $global:VM_Config = {
         #$bob =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -Name AoG -IncludeChildJob).Progress | Select-Object -last 1 | select-object -ExpandProperty CurrentOperation }).ScriptBlockOutput
         #$bob = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ((get-job -Name AoG)).StatusMessage }).ScriptBlockOutput
 
-        $bob2 = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -IncludeChildJob |  ConvertTo-Json) }).ScriptBlockOutput
-        write-log $bob2
+        #$bob2 = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -IncludeChildJob |  ConvertTo-Json) }).ScriptBlockOutput
+        #write-log $bob2
         #Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Output: $bob" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
-        Start-Sleep -Seconds 60
+        Start-Sleep -Seconds 3
 
         if ($status.ScriptBlockFailed) {
             $failedHeartbeats++
@@ -860,7 +880,16 @@ $global:VM_Config = {
 
     if ($createVM) {
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked -UpdateVersion
+        if ($currentItem.role -eq "SQLAO" -and $currentItem.OtherNode -and $using:Phase -eq 3) {
+            #It worked.. Add the note again..
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked -UpdateVersion -AddSQLAOSpecifics
+            write-Log "Adding SQLAO Specifics to Note object on $($currentItem.vmName)"
+        }
+        else {
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked -UpdateVersion
+        }
+        write-Log "Current Item: $($currentItem |ConvertTo-Json -depth 3)"
+        write-Log "DeployConfig: $($deployConfig |ConvertTo-Json -depth 3)"
     }
 }
 
