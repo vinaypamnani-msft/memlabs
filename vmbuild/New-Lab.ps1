@@ -88,37 +88,67 @@ function Write-JobProgress {
     }
 }
 
-function New-VMJobs {
+function Start-Phase {
 
     param(
         [int]$Phase,
         [object]$deployConfig
     )
 
-    switch ($Phase) {
-        0 {
-            $PhaseDescription = "Preparation"
-            Write-Log "Phase $Phase - Preparing existing Virtual Machines" -Activity
-        }
+    # Start Phase
+    $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
+    $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs
+    Write-Log "`n$($result.Success) jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
 
-        1 {
-            $PhaseDescription = "Creation"
-            Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
-        }
-
-        2 {
-            $PhaseDescription = "Configuration"
-            Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
-        }
-
-        3 {
-            $PhaseDescription = "Configuration"
-            Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
-        }
+    # Start Monitoring for phase (only applicable for Phase 2 and above)
+    if ($Phase -gt 1) {
+        $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig -Monitor -MachinesToSkip $result.FailedMachines
+        $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -Monitor
+        Write-Log "`n$($result.Success) jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
     }
 
-    Write-Host
+    if ($result.Failed -gt 0) {
+        return $false
+    }
 
+    return $true
+}
+
+function Start-PhaseJobs {
+    param (
+        [int]$Phase,
+        [switch]$Monitor,
+        [object]$deployConfig,
+        [object]$MachinesToSkip
+    )
+
+    if (-not $Monitor.IsPresent) {
+        switch ($Phase) {
+            0 {
+                $PhaseDescription = "Preparation"
+                Write-Log "Phase $Phase - Preparing existing Virtual Machines" -Activity
+            }
+
+            1 {
+                $PhaseDescription = "Creation"
+                Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
+            }
+
+            2 {
+                $PhaseDescription = "Configuration"
+                Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
+            }
+
+            3 {
+                $PhaseDescription = "Configuration"
+                Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
+            }
+        }
+        Write-Host
+    }
+    else {
+        $PhaseDescription = "Monitoring"
+    }
 
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
@@ -128,6 +158,11 @@ function New-VMJobs {
     $global:vm_remove_list = @()
 
     foreach ($currentItem in $deployConfig.virtualMachines) {
+
+        # Skip machines that are in MachinesToSkip array
+        if ($currentItem.vmName -in $MachinesToSkip) {
+            continue
+        }
 
         # Don't touch non-hidden VM's in Phase 0
         if ($Phase -eq 0 -and -not $currentItem.hidden) {
@@ -162,15 +197,20 @@ function New-VMJobs {
             continue
         }
 
-        if ($Phase -eq 0 -or $Phase -eq 1) {
-            $job = Start-Job -ScriptBlock $global:VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+        $jobName = $currentItem.vmName
+        if ($Monitor.IsPresent) {
+            $clearPreviousDscStatus = $false
+            if ($Phase -eq 3 -and $currentIte.role -eq "SQLAO" -and (-not $currentItem.OtherNode)) {
+                $clearPreviousDscStatus = $true
+            }
+            $job = Start-Job -ScriptBlock $global:VM_Monitor -ArgumentList $clearPreviousDscStatus -Name $jobName -ErrorAction Stop -ErrorVariable Err
         }
         else {
-            if ($Phase -eq 3 -and ($currentItem.role -eq "SQLAO" -and (-not $currentItem.OtherNode))) {
-                $job = Start-Job -ScriptBlock $global:VM_Monitor -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+            if ($Phase -eq 0 -or $Phase -eq 1) {
+                $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
             }
             else {
-                $job = Start-Job -ScriptBlock $global:VM_Config -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
+                $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             }
         }
 
@@ -185,6 +225,13 @@ function New-VMJobs {
         }
     }
 
+    # Create return object
+    $return = [PSCustomObject]@{
+        Failed  = $job_created_no
+        Success = $job_created_yes
+        Jobs    = $jobs
+    }
+
     if ($job_created_no -eq 0) {
         Write-Log "Created $job_created_yes jobs for VM $PhaseDescription. Waiting for jobs."
     }
@@ -192,9 +239,26 @@ function New-VMJobs {
         Write-Log "Created $job_created_yes jobs for VM $PhaseDescription. Failed to create $job_created_no jobs."
     }
 
-    $failedCount = 0
-    $successCount = 0
-    $warningCount = 0
+    return $return
+
+}
+
+function Wait-Phase {
+
+    param(
+        [int]$Phase,
+        $Jobs,
+        [switch]$Monitor
+    )
+
+    # Create return object
+    $return = [PSCustomObject]@{
+        Failed         = 0
+        Success        = 0
+        Warning        = 0
+        FailedMachines = @()
+    }
+
     do {
 
         $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
@@ -207,25 +271,31 @@ function New-VMJobs {
 
             Write-JobProgress($job)
 
-            # if ($Phase -eq 2) {
-            #     Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Yellow
-            # }
-
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
             $incrementCount = $true
+
             foreach ($line in $jobOutput) {
                 $line = $line.ToString().Trim()
+
                 if ($line.StartsWith("ERROR")) {
                     Write-Host $line -ForegroundColor Red
-                    if ($incrementCount) { $failedCount++ }
+                    if ($incrementCount) {
+                        $return.Failed++
+                        $return.FailedMachines += $job.Name
+                    }
                 }
                 elseif ($line.StartsWith("WARNING")) {
                     Write-Host $line -ForegroundColor Yellow
-                    if ($incrementCount) { $warningCount++ }
+                    if ($incrementCount) { $return.Warning++ }
                 }
                 else {
-                    Write-Host $line -ForegroundColor Green
-                    if ($incrementCount) { $successCount++ }
+                    if ($Phase -le 1 -or ($Phase -ge 2 -and $Monitor.IsPresent)) {
+                        Write-Host $line -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host $line
+                    }
+                    if ($incrementCount) { $return.Success++ }
                 }
 
                 $incrementCount = $false
@@ -240,16 +310,12 @@ function New-VMJobs {
 
     } until ($runningJobs.Count -eq 0)
 
-    Write-Log "`n$successCount jobs completed successfully; $warningCount warnings, $failedCount failures."
-
-    if ($failedCount -gt 0) {
-        return $false
-    }
-
-    return $true
+    return $return
 }
 
-Clear-Host
+if (-not $Common.DevBranch) {
+    Clear-Host
+}
 
 # Main script starts here
 try {
@@ -454,13 +520,13 @@ try {
 
     if ($Phase3.IsPresent) {
         $created = $true
-        $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
+        $configured = Start-Phase -Phase 3 -deployConfig $deployConfig
     }
     else {
 
         $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
         if ($containsHidden) {
-            $prepared = New-VMJobs -Phase 0 -deployConfig $deployConfig
+            $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig
         }
         else {
             $prepared = $true
@@ -472,7 +538,7 @@ try {
         }
         else {
 
-            $created = New-VMJobs -Phase 1 -deployConfig $deployConfig
+            $created = Start-Phase -Phase 1 -deployConfig $deployConfig
 
             if (-not $created) {
                 Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
@@ -488,11 +554,11 @@ try {
                     New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
                 }
 
-                $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
+                $configured = Start-Phase -Phase 2 -deployConfig $deployConfig
 
                 if ($configured -and $containsAO) {
                     if (-not $SkipPhase3.IsPresent) {
-                        $configured = New-VMJobs -Phase 3 -deployConfig $deployConfig
+                        $configured = Start-Phase -Phase 3 -deployConfig $deployConfig
 
                     }
                 }

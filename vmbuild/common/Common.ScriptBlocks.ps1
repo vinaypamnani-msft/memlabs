@@ -277,12 +277,13 @@ $global:VM_Create = {
 
 $global:VM_Config = {
 
-    # Dot source common
-    . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
-
     # Get variables from parent scope
     $deployConfig = $using:deployConfigCopy
     $currentItem = $using:currentItem
+    $enableVerbose = $using:enableVerbose
+
+    # Dot source common
+    . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$enableVerbose
 
     # Params for child script blocks
     $DscFolder = "configmgr"
@@ -651,10 +652,11 @@ $global:VM_Config = {
             $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
             "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
             Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
+            Start-Sleep -Seconds 30
         }
         else {
             "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
-            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -JobName $currentItem.vmName
+            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
         }
 
     }
@@ -707,15 +709,13 @@ $global:VM_Config = {
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion -AddSQLAOSpecifics
             write-Log "Adding SQLAO Specifics to Note object on $($currentItem.vmName)"
 
-            $isClusterExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object {$_.StartRange -eq $($deployConfig.thisParams.SQLAO.ClusterIPAddress) }
-            $isAGExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object {$_.StartRange -eq $($deployConfig.thisParams.SQLAO.AGIPAddress) }
+            $isClusterExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object { $_.StartRange -eq $($deployConfig.thisParams.SQLAO.ClusterIPAddress) }
+            $isAGExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object { $_.StartRange -eq $($deployConfig.thisParams.SQLAO.AGIPAddress) }
 
-            if (-not $isClusterExcluded)
-            {
+            if (-not $isClusterExcluded) {
                 Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.thisParams.SQLAO.ClusterIPAddress) -EndRange $($deployConfig.thisParams.SQLAO.ClusterIPAddress) -ErrorAction SilentlyContinue
             }
-            if (-not $isAGExcluded)
-            {
+            if (-not $isAGExcluded) {
                 Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.thisParams.SQLAO.AGIPAddress) -EndRange $($deployConfig.thisParams.SQLAO.AGIPAddress) -ErrorAction SilentlyContinue
             }
 
@@ -745,9 +745,75 @@ $global:VM_Config = {
         }
     }
 
-    Write-Log "PSJOB: $($currentItem.vmName): DSC: Started job for  $($currentItem.role) configuration. $($result.ScriptBlockOutput)"
-    # Wait for DSC, timeout after X minutes
-    # Write-Log "PSJOB: $($currentItem.vmName): Waiting for $($currentItem.role) role configuration via DSC." -OutputStream
+    Write-Log "PSJOB: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -OutputStream
+
+}
+
+$global:VM_Monitor = {
+
+    param ([bool]$clearPreviousDscStatus)
+
+    $invokedFromScriptBlock = Test-Path ..\Common.ps1
+    $currentItem = $using:currentItem
+    $enableVerbose = $using:enableVerbose
+
+    if ($invokedFromScriptBlock) {
+
+        # Get variables from parent scope
+        $deployConfig = $using:deployConfig
+
+        # Dot source common
+        . ..\Common.ps1 -InJob -VerboseEnabled:$enableVerbose
+    }
+    else {
+        # Get variables from parent scope
+        $deployConfig = $using:deployConfigCopy
+
+        # Dot source common
+        . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$enableVerbose
+    }
+
+
+    # Change log location
+    $domainNameForLogging = $deployConfig.vmOptions.domainName
+    $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+
+    if ($currentItem.role -eq "DC") {
+        $domainName = $deployConfig.parameters.DomainName
+    }
+    else {
+        $domainName = "WORKGROUP"
+    }
+
+    $DSC_ClearStatus = {
+
+        $log = "C:\staging\DSC\DSC_Init.txt"
+        $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
+        "`r`n=====`r`nDSC_Monitor: Started at $time`r`n=====" | Out-File $log -Append
+
+        # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
+        $dscLog = "C:\staging\DSC\DSC_Log.txt"
+        if (Test-Path $dscLog) {
+            $newName = $dscLog -replace ".txt", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".txt")
+            "Renaming $dscLog to $newName" | Out-File $log -Append
+            Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+        }
+
+        # Remove DSC_Status file, if exists
+        $dscStatus = "C:\staging\DSC\DSC_Status.txt"
+        if (Test-Path $dscStatus) {
+            "Removing $dscStatus" | Out-File $log -Append
+            Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
+        }
+    }
+
+    if ($clearPreviousDscStatus) {
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -DisplayName "DSC: Clear Old Status"
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            return
+        }
+    }
 
     $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
     $timeout = $using:RoleConfigTimeoutMinutes
@@ -769,7 +835,7 @@ $global:VM_Config = {
 
         #$bob2 = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -IncludeChildJob |  ConvertTo-Json) }).ScriptBlockOutput
         #write-log $bob2
-        #Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Output: $bob" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+
         $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
         Start-Sleep -Seconds 3
 
@@ -848,188 +914,39 @@ $global:VM_Config = {
 
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
-    # NLA Service starts before domain is ready sometimes, and causes RDP to fail because network is considered public by firewall.
-    if ($currentItem.role -eq "WorkgroupMember" -or $currentItem.role -eq "InternetClient" -or $currentItem.role -eq "AADClient") {
-        $netProfile = 1
-    }
-    else {
-        $netProfile = 2
-    } # 1 = Private, 2 = Domain
+    if ($using:Phase -eq 2) {
+        # NLA Service starts before domain is ready sometimes, and causes RDP to fail because network is considered public by firewall.
+        if ($currentItem.role -eq "WorkgroupMember" -or $currentItem.role -eq "InternetClient" -or $currentItem.role -eq "AADClient") {
+            $netProfile = 1
+        }
+        else {
+            $netProfile = 2
+        } # 1 = Private, 2 = Domain
 
-    $Trust_Ethernet = {
-        param ($netProfile)
-        Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse `
-        | ForEach-Object { $_.PSChildName } `
-        | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value $netProfile }
-    }
+        $Trust_Ethernet = {
+            param ($netProfile)
+            Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse `
+            | ForEach-Object { $_.PSChildName } `
+            | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value $netProfile }
+        }
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -ArgumentList $netProfile -DisplayName "Set Ethernet as Trusted"
-    if ($result.ScriptBlockFailed) {
-        Write-Log "PSJOB: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
-    }
-
-    if (-not $complete) {
-        $worked = $false
-        Write-Log "PSJOB: $($currentItem.vmName): VM Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -OutputStream -Failure
-    }
-    else {
-        $worked = $true
-        Write-Progress "$($currentItem.role) Configuration completed successfully. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -Completed
-        Write-Log "PSJOB: $($currentItem.vmName): VM Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -ArgumentList $netProfile -DisplayName "Set Ethernet as Trusted"
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
+        }
     }
 
-    if ($createVM) {
+    if ($using:Phase -gt 1) {
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
         if ($currentItem.role -eq "SQLAO" -and $currentItem.OtherNode -and $using:Phase -eq 3) {
             #It worked.. Add the note again..
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked -UpdateVersion -AddSQLAOSpecifics
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion -AddSQLAOSpecifics
             write-Log "Adding SQLAO Specifics to Note object on $($currentItem.vmName)"
         }
         else {
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $worked -UpdateVersion
-        }
-        write-Log "Current Item: $($currentItem |ConvertTo-Json -depth 3)"
-        write-Log "DeployConfig: $($deployConfig |ConvertTo-Json -depth 3)"
-    }
-}
-
-$global:VM_Monitor = {
-
-    # Dot source common
-    . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
-
-    # Get variables from parent scope
-    $deployConfig = $using:deployConfigCopy
-    $currentItem = $using:currentItem
-
-    # Change log location
-    $domainNameForLogging = $deployConfig.vmOptions.domainName
-    $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
-
-    if ($currentItem.role -eq "DC") {
-        $domainName = $deployConfig.parameters.DomainName
-    }
-    else {
-        $domainName = "WORKGROUP"
-    }
-
-    $DSC_ClearStatus = {
-
-        $log = "C:\staging\DSC\DSC_Init.txt"
-
-        # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
-        $dscLog = "C:\staging\DSC\DSC_Log.txt"
-        if (Test-Path $dscLog) {
-            $newName = $dscLog -replace ".txt", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".txt")
-            "Renaming $dscLog to $newName" | Out-File $log -Append
-            Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
-        }
-
-        # Remove DSC_Status file, if exists
-        $dscStatus = "C:\staging\DSC\DSC_Status.txt"
-        if (Test-Path $dscStatus) {
-            "Removing $dscStatus" | Out-File $log -Append
-            Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion
         }
     }
-
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -DisplayName "DSC: Clear Old Status"
-    if ($result.ScriptBlockFailed) {
-        Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
-        return
-    }
-
-    $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
-    $timeout = $using:RoleConfigTimeoutMinutes
-    $timeSpan = New-TimeSpan -Minutes $timeout
-    $stopWatch.Start()
-
-    $complete = $false
-    $previousStatus = ""
-    $suppressNoisyLogging = $Common.VerboseEnabled -eq $false
-    $failedHeartbeats = 0
-    $failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
-
-    Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-
-    do {
-        $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
-        Start-Sleep -Seconds 3
-
-        if ($status.ScriptBlockFailed) {
-            $failedHeartbeats++
-            # Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
-            if ($failedHeartbeats -gt 10) {
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($failedHeartbeats / $failedHeartbeatThreshold * 100)
-            }
-        }
-        else {
-            $failedHeartbeats = 0
-        }
-
-        if ($failedHeartbeats -gt $failedHeartbeatThreshold) {
-            Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
-            Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
-            $vm = Get-VM2 -Name $($currentItem.vmName)
-            Stop-VM -VM $vm -TurnOff | Out-Null
-            Start-Sleep -Seconds 5
-            Start-VM2 -Name $currentItem.vmName
-            Start-Sleep -Seconds 15
-            $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
-        }
-
-        if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {
-
-            $currentStatus = $status.ScriptBlockOutput | Out-String
-
-            # Write to log if status changed
-            if ($currentStatus -ne $previousStatus) {
-                # Trim status for logging
-                if ($currentStatus.Contains("; checking again in ")) {
-                    $currentStatusTrimmed = $currentStatus.Substring(0, $currentStatus.IndexOf("; checking again in "))
-                }
-                else {
-                    $currentStatusTrimmed = $currentStatus
-                }
-
-                if ($currentStatusTrimmed.Contains("JOBFAILURE: ")) {
-                    Write-Log "PSJOB: $($currentItem.vmName): DSC: $($currentItem.role) failed: $currentStatusTrimmed" -Failure -OutputStream
-                    break
-                }
-
-                Write-Log "PSJOB: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
-                $previousStatus = $currentStatus
-            }
-
-            # Special case to write log ConfigMgrSetup.log entries in progress
-            $skipProgress = $false
-            $setupPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
-            if ($currentStatus.StartsWith($setupPrefix)) {
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content "C:\ConfigMgrSetup.log" -tail 1 } -SuppressLog
-                if (-not $result.ScriptBlockFailed) {
-                    $logEntry = $result.ScriptBlockOutput
-                    $logEntry = "ConfigMgrSetup.log: " + $logEntry.Substring(0, $logEntry.IndexOf("$"))
-                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-                    $skipProgress = $true
-                }
-            }
-
-            if (-not $skipProgress) {
-                # Write progress
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-            }
-
-            # Check if complete
-            $complete = $status.ScriptBlockOutput -eq "Complete!"
-        }
-        else {
-            if ($failedHeartbeats -le 10) {
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-            }
-        }
-
-    } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
     if (-not $complete) {
         Write-Log "PSJOB: $($currentItem.vmName): VM Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -OutputStream -Failure
@@ -1038,4 +955,5 @@ $global:VM_Monitor = {
         Write-Progress "$($currentItem.role) Configuration completed successfully. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -Completed
         Write-Log "PSJOB: $($currentItem.vmName): VM Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
     }
+
 }
