@@ -415,6 +415,7 @@ function Get-SQLAOConfig {
         WitnessLocalPath       = "F:\$($ClusterNameNoPrefix)-Witness"
         ClusterIPAddress       = $clusterIP
         AGIPAddress            = $AGIP
+        AlwaysOnName           = "CASAlwaysON"
     }
 
     return $config

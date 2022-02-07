@@ -480,7 +480,7 @@ $global:VM_Config = {
                     AddressMask2    = '255.255.255.0'
                     Name2           = 'Cluster Network'
                     InstanceName    = $deployConfig.thisParams.thisVM.sqlInstanceName
-                    ClusterNameAoG  = 'CASAlwaysOn'
+                    ClusterNameAoG  = $deployConfig.thisParams.SQLAO.AlwaysOnName
                     SQLAgentUser    = $sqlAgentUser
 
                 },
