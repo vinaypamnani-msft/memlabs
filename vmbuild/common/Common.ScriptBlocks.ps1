@@ -607,11 +607,11 @@ $global:VM_Config = {
                 # Node02 - Second cluster node
                 @{
                     # Replace with the name of the actual target node.
-                    NodeName                 = $deployConfig.thisParams.thisVM.OtherNode
+                    NodeName = $deployConfig.thisParams.thisVM.OtherNode
 
                     # This is used in the configuration to know which resource to compile.
-                    Role                     = 'ClusterNode2'
-                    Resource                 = $resourceDir
+                    Role     = 'ClusterNode2'
+                    Resource = $resourceDir
                 },
                 @{
                     NodeName                    = "*"
@@ -620,8 +620,8 @@ $global:VM_Config = {
                     ClusterName                 = $deployConfig.thisParams.thisVM.ClusterName
                     ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
                     AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
-                    PrimaryReplicaServerName = $deployConfig.thisParams.MachineName + "." + $deployConfig.vmOptions.DomainName
-                    SecondaryReplicaServerName = $deployConfig.thisParams.thisVM.OtherNode + "." + $deployConfig.vmOptions.DomainName
+                    PrimaryReplicaServerName    = $deployConfig.thisParams.MachineName + "." + $deployConfig.vmOptions.DomainName
+                    SecondaryReplicaServerName  = $deployConfig.thisParams.thisVM.OtherNode + "." + $deployConfig.vmOptions.DomainName
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
@@ -754,7 +754,6 @@ $global:VM_Config = {
         Write-Log "PSJOB: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on '$($deployConfig.thisParams.DscMachine)'."
     }
     else {
-        Write-Log "PSJOB: $($currentItem.vmName): Starting $($currentItem.role) role configuration via DSC."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $ConfigToCreate -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
         if ($result.ScriptBlockFailed) {
             Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -793,13 +792,53 @@ $global:VM_Config = {
     Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" `
         -Status "Waiting for job progress" `-PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
 
+    $dscStatusPolls = 0
+
     do {
 
         #$bob =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -Name AoG -IncludeChildJob).Progress | Select-Object -last 1 | select-object -ExpandProperty CurrentOperation }).ScriptBlockOutput
         #$bob = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ((get-job -Name AoG)).StatusMessage }).ScriptBlockOutput
-
         #$bob2 = (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -IncludeChildJob |  ConvertTo-Json) }).ScriptBlockOutput
         #write-log $bob2
+
+        $dscStatusPolls++
+
+        if ($dscStatusPolls -ge 10) {
+            $dscStatusPolls = 0 # Do this every 30 seconds or so
+            Write-Log "PSJOB: $($currentItem.vmName): Polling DSC Status via Get-DscConfigurationStatus" -Verbose
+            $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                $ProgressPreference = 'SilentlyContinue'
+                Get-DscConfigurationStatus
+                $ProgressPreference = 'Continue'
+            } -SuppressLog:$suppressNoisyLogging
+
+            if ($dscStatus.ScriptBlockFailed) {
+                # This cmd fails when DSC is running, so it's 'good'
+            }
+            else {
+                if ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -ne "Success") {
+                    $badResources = $dscStatus.ScriptBlockOutput.ResourcesNotInDesiredState
+                    foreach ($badResource in $badResources) {
+                        if (-not $badResource.Error) {
+                            continue
+                        }
+                        $errorResourceId = $badResource.ResourceId
+                        $errorObject = $badResource.Error | ConvertFrom-Json -ErrorAction SilentlyContinue
+                        $msg = "$errorResourceId`: $($errorObject.Exception.Message)"
+                        Write-Log "PSJOB: $($currentItem.vmName): $msg" -Failure -OutputStream
+                    }
+
+                    # Write-Output, and bail
+                    if (-not $msg) {
+                        Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Exiting." -Failure -OutputStream
+                    }
+                    return
+                }
+                else {
+                    # Can't determine what DSC Status is, so do nothing and wait for timer to expire?
+                }
+            }
+        }
 
         $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
         Start-Sleep -Seconds 3
