@@ -2883,6 +2883,34 @@ function Get-AdditionalValidations {
                 }
             }
         }
+
+        "sqlVersion" {
+            if ($property.Role -eq "SQLAO") {
+                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                foreach ($sql in $SQLAO) {
+                    $sql.$name = $value
+                }
+            }
+        }
+        "sqlInstanceName" {
+            if ($property.Role -eq "SQLAO") {
+                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                foreach ($sql in $SQLAO) {
+                    $sql.$name = $value
+                }
+            }
+
+        }
+        "sqlInstanceDir" {
+            if ($property.Role -eq "SQLAO") {
+                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                foreach ($sql in $SQLAO) {
+                    $sql.$name = $value
+                }
+            }
+
+        }
+
         "vmName" {
 
             $CASVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
@@ -2945,7 +2973,6 @@ function Get-AdditionalValidations {
                 }
             }
         }
-
         "siteCode" {
             if ($property.RemoteSQLVM) {
                 $newSQLName = $value + "SQL"
@@ -3996,7 +4023,9 @@ function Select-VirtualMachines {
                                             $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
                                         }
                                         else {
-                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "X" = "Remove SQL" }
+                                            if ($virtualMachine.Role -ne "SQLAO") {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "X" = "Remove SQL" }
+                                            }
                                         }
                                     }
                                 }
@@ -4255,15 +4284,15 @@ function Save-Config {
         $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile).Name)
         $filename = Join-Path $configDir $filename
         $fullFilename = Join-Path $configDir (($Global:configfile).Name)
-        $contentEqual = (Get-Content $fullFileName| ConvertFrom-Json| ConvertTo-Json -Depth 3 -Compress) -eq
+        $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 3 -Compress) -eq
                 ($config | ConvertTo-Json -Depth 3 -Compress)
-        if ($contentEqual){
+        if ($contentEqual) {
             return Split-Path -Path $fileName -Leaf
         }
-        else{
-           # Write-Host "Content Not Equal"
-           # (Get-Content $fullFilename | ConvertFrom-Json| ConvertTo-Json -Depth 3) | out-host
-           # ($config | ConvertTo-Json -Depth 3) | out-host
+        else {
+            # Write-Host "Content Not Equal"
+            # (Get-Content $fullFilename | ConvertFrom-Json| ConvertTo-Json -Depth 3) | out-host
+            # ($config | ConvertTo-Json -Depth 3) | out-host
         }
     }
     $splitpath = Split-Path -Path $fileName -Leaf
