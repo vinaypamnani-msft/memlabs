@@ -748,7 +748,7 @@ $global:VM_Config = {
     }
 
     if ($SkipStartDsc) {
-        Write-Log "PSJOB: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on '$($currentItem.thisParams.DscMachine)'." -OutputStream
+        Write-Log "PSJOB: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on '$($deployConfig.thisParams.DscMachine)'." -OutputStream
     }
     else {
 
