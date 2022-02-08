@@ -153,6 +153,9 @@ function New-DeployConfig {
             if ($SQLAO.ClusterName -and -not $SQLAO.ClusterName.StartsWith($configObject.vmOptions.prefix)) {
                 $SQLAO.ClusterName = $configObject.vmOptions.prefix + $SQLAO.ClusterName
             }
+            if ($SQLAO.AlwaysOnName -and -not $SQLAO.AlwaysOnName.StartsWith($configObject.vmOptions.prefix)) {
+                $SQLAO.AlwaysOnName = $configObject.vmOptions.prefix + $SQLAO.AlwaysOnName
+            }
         }
 
         $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
@@ -427,7 +430,7 @@ function Get-SQLAOConfig {
         WitnessLocalPath       = "F:\$($ClusterNameNoPrefix)-Witness"
         ClusterIPAddress       = $clusterIP
         AGIPAddress            = $AGIP
-        AlwaysOnName           = "CASAlwaysON"
+        AlwaysOnName           = $PrimaryAO.AlwaysOnName
         PrimaryNodeName        = $PrimaryAO.vmName
         SecondaryNodeName      = $SecondAO.vmName
         FileServerName         = $FSAO.vmName

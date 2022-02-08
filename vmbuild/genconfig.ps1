@@ -2689,7 +2689,7 @@ Function Get-remoteSQLVM {
             }
             "n" {
                 $name = $($property.SiteCode) + "SQL"
-                Add-NewVMForRole -Role "SQLServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name
+                Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name
                 Set-SiteServerRemoteSQL $property $name
             }
             Default {
@@ -3593,7 +3593,7 @@ function Add-NewVMForRole {
     }
     $actualRoleName = ($Role -split " ")[0]
 
-    if ($role -eq "SQLServer") {
+    if ($role -eq "SqlServer") {
         $actualRoleName = "DomainMember"
     }
 
@@ -3616,7 +3616,7 @@ function Add-NewVMForRole {
     $NewFSServer = $null
     $firstSQLAO = $null
     switch ($Role) {
-        "SQLServer" {
+        "SqlServer" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
@@ -3810,6 +3810,7 @@ function Add-NewVMForRole {
         }
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SQLAgentUser' -Value "SqlAgentUser"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value "SqlCluster"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnName' -Value "AlwaysOn"
     }
     if ($NewFSServer -eq $true) {
         #Get-PSCallStack | out-host
