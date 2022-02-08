@@ -400,7 +400,7 @@ function Get-SQLAOConfig {
     }
     else {
         $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
-        Write-Log "SQLAO: Could not file $(PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress"
+        Write-Log "SQLAO: Could not file $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress"
         $clusterIP = $IPs[0]
         $AGIP = $IPs[1]
     }
