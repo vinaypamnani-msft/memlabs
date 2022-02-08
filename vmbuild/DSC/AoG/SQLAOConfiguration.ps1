@@ -270,8 +270,21 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
-        WriteStatus Complete {
+        WriteStatus AgListen {
             DependsOn = '[SqlAGListener]AvailabilityGroupListener'
+            Status    = "Waiting on $node2 to Join the Sql Availability Group Listener"
+        }
+
+    WaitForAll AddReplica {
+        ResourceName     = '[SqlAGReplica]AddReplica'
+        NodeName         = $node2
+        RetryIntervalSec = 2
+        RetryCount       = 450
+        Dependson        = '[SqlAGListener]AvailabilityGroupListener'
+    }
+
+        WriteStatus Complete {
+            DependsOn = '[WaitForAll]AddReplica'
             Status    = "Complete!"
         }
     }
