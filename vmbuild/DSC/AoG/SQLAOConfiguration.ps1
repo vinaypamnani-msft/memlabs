@@ -275,13 +275,13 @@ Configuration SQLAOConfiguration
             Status    = "Waiting on $node2 to Join the Sql Availability Group Listener"
         }
 
-    WaitForAll AddReplica {
-        ResourceName     = '[SqlAGReplica]AddReplica'
-        NodeName         = $node2
-        RetryIntervalSec = 2
-        RetryCount       = 450
-        Dependson        = '[SqlAGListener]AvailabilityGroupListener'
-    }
+        WaitForAll AddReplica {
+            ResourceName     = '[SqlAGReplica]AddReplica'
+            NodeName         = $node2
+            RetryIntervalSec = 2
+            RetryCount       = 450
+            Dependson        = '[SqlAGListener]AvailabilityGroupListener'
+        }
 
         WriteStatus Complete {
             DependsOn = '[WaitForAll]AddReplica'

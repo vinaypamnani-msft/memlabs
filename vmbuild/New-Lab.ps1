@@ -255,7 +255,7 @@ function Wait-Phase {
                 $line = $line.ToString().Trim()
 
                 if ($line.StartsWith("ERROR")) {
-                    Write-Host $line -ForegroundColor Red
+                    Write-RedX $line -ForegroundColor Red
                     if ($incrementCount) {
                         $return.Failed++
                     }
@@ -266,7 +266,7 @@ function Wait-Phase {
                 }
                 else {
                     if ($line.StartsWith("SUCCESS")) {
-                        Write-Host $line -ForegroundColor Green
+                        Write-GreenCheck $line -ForegroundColor Green
                     }
                     else {
                         Write-Host $line

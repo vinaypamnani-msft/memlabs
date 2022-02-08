@@ -550,23 +550,31 @@ $global:VM_Config = {
         . "$dscConfigScript"
         $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
         if (-not $netbiosName) {
-            "Could not get Netbios name from 'deployConfig.vmOptions.domainName' " | Out-File $log -Append
-            return $false
+            $error_message = "Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
+            $error_message | Out-File $log -Append
+            Write-Error $error_message
+            return $error_message
         }
-        if (-not $deployConfig.thisParams.thisVM.SQLAgentUser) {
-            "Could not get SQLAgentUser name from deployConfig.thisParams.thisVM.SQLAgentUser " | Out-File $log -Append
-            return $false
+        if (-not $deployConfig.thisParams.thisVM.SQLAgentAccount) {
+            $error_message = "Could not get SQLAgentAccount name from deployConfig.thisParams.thisVM.SQLAgentAccount"
+            $error_message | Out-File $log -Append
+            Write-Error $error_message
+            return $error_message
         }
-        $sqlAgentUser = $netbiosName + "\" + $deployConfig.thisParams.thisVM.SQLAgentUser
-
+        $sqlAgentUser = $netbiosName + "\" + $deployConfig.thisParams.thisVM.SQLAgentAccount
+        $sqlServiceUser = $netbiosName + "\" + $deployConfig.thisParams.thisVM.SqlServiceAccount
         if (-not $deployConfig.thisParams.thisVM.fileServerVM) {
-            "Could not get fileServerVM name from deployConfig.thisParams.thisVM.fileServerVM " | Out-File $log -Append
-            return $false
+            $error_message = "Could not get fileServerVM name from deployConfig.thisParams.thisVM.fileServerVM"
+            $error_message | Out-File $log -Append
+            Write-Error $error_message
+            return $error_message
         }
         $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
         if (-not $deployConfig.vmOptions.domainName) {
-            "Could not get domainName name from deployConfig" | Out-File $log -Append
-            return $false
+            $error_message = "Could not get domainName name from deployConfig"
+            $error_message | Out-File $log -Append
+            Write-Error $error_message
+            return $error_message
         }
         $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
 
@@ -580,6 +588,13 @@ $global:VM_Config = {
         $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.thisVM.OtherNode + "$"
         $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.thisVM.ClusterName + "$"
         $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
+
+        if (-not $deployConfig.SQLAO.AlwaysOnName) {
+            $error_message = "AlwaysOnName not defined in config"
+            $error_message | Out-File $log -Append
+            Write-Error $error_message
+            return $error_message
+        }
 
         # Configuration Data
         $cd = @{
@@ -601,6 +616,7 @@ $global:VM_Config = {
                     InstanceName    = $deployConfig.thisParams.thisVM.sqlInstanceName
                     ClusterNameAoG  = $deployConfig.SQLAO.AlwaysOnName
                     SQLAgentUser    = $sqlAgentUser
+                    SQLServiceUser  = $sqlServiceUser
 
                 },
 
@@ -636,8 +652,10 @@ $global:VM_Config = {
         "Password =  $($using:Common.LocalAdmin.Password)" | Out-File $log -Append
         $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
         if (-not $creds) {
-            "Failed to create creds" | Out-File $log -Append -ErrorAction SilentlyContinue
-            return $false
+            $error_message = "Failed to create creds"
+            $error_message | Out-File $log -Append
+            Write-Error $error_message
+            return $error_message
         }
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append -ErrorAction SilentlyContinue
         & "$($dscRole)Configuration" -GroupName $deployConfig.thisParams.thisVM.ClusterName -Description "Cluster Access Group" -SqlAdministratorCredential $creds -ConfigurationData $cd -OutputPath $dscConfigPath | Out-File $log -Append -ErrorAction SilentlyContinue
@@ -830,7 +848,7 @@ $global:VM_Config = {
 
                     # Write-Output, and bail
                     if (-not $msg) {
-                        Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Exiting." -Failure -OutputStream
+                        Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Exiting. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
                     }
                     return
                 }

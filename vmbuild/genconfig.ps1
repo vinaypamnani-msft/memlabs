@@ -3808,7 +3808,8 @@ function Add-NewVMForRole {
             $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$false
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'fileServerVM' -Value $FSName
         }
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SQLAgentUser' -Value "SqlAgentUser"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SQLAgentAccount' -Value "SqlAgentUser"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "SqlServiceUser"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value "SqlCluster"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnName' -Value "AlwaysOn"
     }

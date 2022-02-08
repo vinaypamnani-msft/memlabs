@@ -534,7 +534,8 @@ function Add-PerVMSettings {
     # DC DSC needs a list of SiteServers to wait on.
     if ($thisVM.role -eq "DC") {
         $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
-        $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentUser } | Select-Object -ExpandProperty SQLAgentUser -Unique
+        $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentAccount } | Select-Object -ExpandProperty SQLAgentAccount -Unique
+        $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SqlServiceAccount } | Select-Object -ExpandProperty SqlServiceAccount -Unique
         $accountLists.DomainAccounts = $accountLists.DomainAccounts | Select-Object -Unique
 
         $ServersToWaitOn = @()
@@ -1631,48 +1632,61 @@ function Get-List2 {
     return ($return | Sort-Object -Property source)
 }
 
+
+Function Write-GreenCheck {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string] $text,
+        [Parameter()]
+        [switch] $NoNewLine,
+        [Parameter()]
+        [string] $ForegroundColor
+    )
+    $CHECKMARK = ([char]8730)
+
+    Write-Host "  [" -NoNewLine
+    Write-Host -ForeGroundColor Green "$CHECKMARK" -NoNewline
+    Write-Host "] " -NoNewline
+    if ($ForegroundColor){
+        Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
+    }else{
+        Write-Host $text -NoNewline
+    }
+    if (!$NoNewLine) {
+        Write-Host
+    }
+}
+
+Function Write-RedX {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string] $text,
+        [Parameter()]
+        [switch] $NoNewLine,
+        [Parameter()]
+        [string] $ForegroundColor
+    )
+    Write-Host "  [" -NoNewLine
+    Write-Host -ForeGroundColor Red "x" -NoNewline
+    Write-Host "] " -NoNewline
+    if ($ForegroundColor){
+        Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
+    }else{
+        Write-Host $text -NoNewline
+    }
+    if (!$NoNewLine) {
+        Write-Host
+    }
+}
+
 Function Show-Summary {
     [CmdletBinding()]
     param (
         [Parameter()]
         [PsCustomObject] $deployConfig
     )
-
-    Function Write-GreenCheck {
-        [CmdletBinding()]
-        param (
-            [Parameter()]
-            [string] $text,
-            [Parameter()]
-            [switch] $NoNewLine
-        )
-        $CHECKMARK = ([char]8730)
-
-        Write-Host "  [" -NoNewLine
-        Write-Host -ForeGroundColor Green "$CHECKMARK" -NoNewline
-        Write-Host "] " -NoNewline
-        Write-Host $text -NoNewline
-        if (!$NoNewLine) {
-            Write-Host
-        }
-    }
-
-    Function Write-RedX {
-        [CmdletBinding()]
-        param (
-            [Parameter()]
-            [string] $text,
-            [Parameter()]
-            [switch] $NoNewLine
-        )
-        Write-Host "  [" -NoNewLine
-        Write-Host -ForeGroundColor Red "x" -NoNewline
-        Write-Host "] " -NoNewline
-        Write-Host $text -NoNewline
-        if (!$NoNewLine) {
-            Write-Host
-        }
-    }
 
     $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
     #$CHECKMARK = ([char]8730)
