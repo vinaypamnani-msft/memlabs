@@ -1644,7 +1644,7 @@ Function Write-GreenCheck {
         [string] $ForegroundColor
     )
     $CHECKMARK = ([char]8730)
-
+    $text = $text.Replace("SUCCESS:", "")
     Write-Host "  [" -NoNewLine
     Write-Host -ForeGroundColor Green "$CHECKMARK" -NoNewline
     Write-Host "] " -NoNewline
@@ -1668,6 +1668,7 @@ Function Write-RedX {
         [Parameter()]
         [string] $ForegroundColor
     )
+    $text = $text.Replace("ERROR:", "")
     Write-Host "  [" -NoNewLine
     Write-Host -ForeGroundColor Red "x" -NoNewline
     Write-Host "] " -NoNewline
