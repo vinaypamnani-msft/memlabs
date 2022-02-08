@@ -116,8 +116,8 @@ Configuration SQLAOConfiguration
         WaitForAny WaitForClusterJoin {
             NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName
             ResourceName         = '[xClusterQuorum]ClusterWitness'
-            RetryIntervalSec     = 30
-            RetryCount           = 30
+            RetryIntervalSec     = 10
+            RetryCount           = 90
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
@@ -335,8 +335,8 @@ Configuration SQLAOConfiguration
         WaitForAny WaitForClusteringNetworking {
             NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
             ResourceName         = '[xClusterNetwork]ChangeNetwork-10'
-            RetryIntervalSec     = 30
-            RetryCount           = 30
+            RetryIntervalSec     = 10
+            RetryCount           = 90
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
@@ -490,8 +490,8 @@ Configuration SQLAOConfiguration
 
         SqlWaitForAG 'SQLConfigureAG-WaitAG' {
             Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-            RetryIntervalSec     = 30
-            RetryCount           = 30
+            RetryIntervalSec     = 10
+            RetryCount           = 90
             ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             Dependson            = '[SqlEndpoint]HADREndpoint'
