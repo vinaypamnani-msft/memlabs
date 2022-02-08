@@ -819,6 +819,7 @@ $global:VM_Monitor = {
     $failedHeartbeats = 0
     $failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
 
+    $noStatus = $true
     Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
 
     do {
@@ -856,7 +857,7 @@ $global:VM_Monitor = {
         }
 
         if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {
-
+            $noStatus = $false
             $currentStatus = $status.ScriptBlockOutput | Out-String
 
             # Write to log if status changed
@@ -899,11 +900,11 @@ $global:VM_Monitor = {
             # Check if complete
             $complete = $status.ScriptBlockOutput -eq "Complete!"
         }
-        # else {
-        #     if ($failedHeartbeats -le 10) {
-        #         Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-        #     }
-        # }
+        else {
+            if ($noStatus) {
+                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            }
+        }
 
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 
