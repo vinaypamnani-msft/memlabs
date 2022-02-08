@@ -125,6 +125,26 @@ Configuration SQLAOConfiguration
             DependsOn = '[WaitForAny]WaitForClusterJoin'
             Status    = "Configuring SQL Service Accounts and SQL Logins"
         }
+        $spn1 =    "MSSQLSvc/"+ $Node.PrimaryReplicaServerName
+        $spn2 =    $spn1 + ":1433"
+
+        ADServicePrincipalName 'spn1'
+        {
+            Ensure               = 'Absent'
+            ServicePrincipalName = $SPN1
+            Account              = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName + "$"
+            Dependson            = '[WaitForAny]WaitForClusterJoin'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+        ADServicePrincipalName 'spn2'
+        {
+            Ensure               = 'Absent'
+            ServicePrincipalName = $SPN2
+            Account              = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName + "$"
+            Dependson            = '[WaitForAny]WaitForClusterJoin'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
 
         #Change SQL Service Account
         SqlServiceAccount 'SetServiceAccountSQL_User' {
@@ -133,8 +153,9 @@ Configuration SQLAOConfiguration
             ServiceType          = 'DatabaseEngine'
             ServiceAccount       = $SqlAdministratorCredential
             RestartService       = $true
-            DependsOn            = '[WaitForAny]WaitForClusterJoin'
+            DependsOn            = '[ADServicePrincipalName]spn2'
             PsDscRunAsCredential = $SqlAdministratorCredential
+            Force                = $true
         }
 
         #Change SQL Service Account
@@ -145,6 +166,7 @@ Configuration SQLAOConfiguration
             ServiceAccount       = $SqlAdministratorCredential
             RestartService       = $true
             PsDscRunAsCredential = $SqlAdministratorCredential
+            DependsOn            = '[SqlServiceAccount]SetServiceAccountSQL_User'
         }
 
         SqlLogin 'Add_WindowsUser' {
@@ -154,6 +176,7 @@ Configuration SQLAOConfiguration
             ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             PsDscRunAsCredential = $SqlAdministratorCredential
+            DependsOn            = '[SqlServiceAccount]SetServiceAccountAgent_User'
         }
 
 
@@ -264,6 +287,12 @@ Configuration SQLAOConfiguration
             Status = "Adding Windows Features"
         }
 
+        WindowsFeature ADDADPS {
+            Ensure    = 'Present'
+            Name      = 'RSAT-AD-PowerShell'
+            DependsOn = "[WriteStatus]WindowsFeature"
+        }
+
         WindowsFeature AddFailoverFeature {
             Ensure = 'Present'
             Name   = 'Failover-clustering'
@@ -288,14 +317,14 @@ Configuration SQLAOConfiguration
         }
 
         WriteStatus WaitCluster {
-            Status    = "Waiting for '$node1' to create Windows Cluster"
+            Status    = "Waiting for Cluster '$($Node.ClusterName)' to become active"
             DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
         }
 
         xWaitForCluster WaitForCluster {
             Name                 = $Node.ClusterName
-            RetryIntervalSec     = 30
-            RetryCount           = 30
+            RetryIntervalSec     = 15
+            RetryCount           = 60
             DependsOn            = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -333,11 +362,38 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
-        WriteStatus SvcAccount {
+
+        $ADComputerName = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName + "$"
+        $spn3 =    "MSSQLSvc/"+ $Node.SecondaryReplicaServerName
+        $spn4 =    $spn3 + ":1433"
+
+        WriteStatus SpnAccount {
             Dependson = '[xClusterQuorum]ClusterWitness'
-            Status    = "Configuring SQL Service Accounts and SQL Logins"
+            Status    = "Removing SQL SPNs ($spn3 $spn4) from $ADComputerName"
         }
 
+
+        ADServicePrincipalName 'spn3'
+        {
+            Ensure               = 'Absent'
+            ServicePrincipalName = $spn3
+            Account              =  $ADComputerName
+            Dependson            = '[xClusterQuorum]ClusterWitness'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+        ADServicePrincipalName 'spn4'
+        {
+            Ensure               = 'Absent'
+            ServicePrincipalName = $spn4
+            Account              =  $ADComputerName
+            Dependson            = '[xClusterQuorum]ClusterWitness'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+        WriteStatus SvcAccount {
+            Dependson = '[ADServicePrincipalName]spn4'
+            Status    = "Configuring SQL Service Accounts and SQL Logins"
+        }
         #Change SQL Service Account
         SqlServiceAccount 'SetServiceAccountSQL_User' {
             ServerName           = $Node.NodeName
@@ -345,8 +401,9 @@ Configuration SQLAOConfiguration
             ServiceType          = 'DatabaseEngine'
             ServiceAccount       = $SqlAdministratorCredential
             RestartService       = $true
-            Dependson            = '[xClusterQuorum]ClusterWitness'
+            Dependson            = '[ADServicePrincipalName]spn4'
             PsDscRunAsCredential = $SqlAdministratorCredential
+            Force                = $true
         }
 
         #Change SQL Service Account
@@ -356,7 +413,7 @@ Configuration SQLAOConfiguration
             ServiceType          = 'SQLServerAgent'
             ServiceAccount       = $SqlAdministratorCredential
             RestartService       = $true
-            Dependson            = '[xClusterQuorum]ClusterWitness'
+            Dependson            = '[SqlServiceAccount]SetServiceAccountSQL_User'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 

@@ -612,7 +612,6 @@ $global:VM_Config = {
                     # This is used in the configuration to know which resource to compile.
                     Role                     = 'ClusterNode2'
                     Resource                 = $resourceDir
-                    PrimaryReplicaServerName = $deployConfig.thisParams.MachineName + "." + $deployConfig.vmOptions.DomainName
                 },
                 @{
                     NodeName                    = "*"
@@ -621,6 +620,8 @@ $global:VM_Config = {
                     ClusterName                 = $deployConfig.thisParams.thisVM.ClusterName
                     ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
                     AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
+                    PrimaryReplicaServerName = $deployConfig.thisParams.MachineName + "." + $deployConfig.vmOptions.DomainName
+                    SecondaryReplicaServerName = $deployConfig.thisParams.thisVM.OtherNode + "." + $deployConfig.vmOptions.DomainName
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
