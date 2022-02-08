@@ -277,6 +277,8 @@ $global:VM_Create = {
 
 $global:VM_Config = {
 
+    param ([bool]$SkipStartDsc)
+
     # Get variables from parent scope
     $deployConfig = $using:deployConfigCopy
     $currentItem = $using:currentItem
@@ -579,35 +581,34 @@ $global:VM_Config = {
             )
         }
 
-        # Write config to file
-        $configFilePath = "C:\staging\DSC\deployConfig.json"
-
-        "Writing DSC config to $configFilePath" | Out-File $log -Append
-        if (Test-Path $configFilePath) {
-            $newName = $configFilePath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
-            Rename-Item -Path $configFilePath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
-        }
-        $deployConfig | ConvertTo-Json -Depth 3 | Out-File $configFilePath -Force -Confirm:$false
-
         # Compile config, to create MOF
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
         & "$($dscRole)Configuration" -ConfigFilePath $configFilePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
     }
 
-    $DSC_StartConfig = {
+    $DSC_ClearStatus = {
 
-        param($DscFolder)
-
-        # Get required variables from parent scope
-        $currentItem = $using:currentItem
-
-        # Define DSC variables
-        $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
-
-        # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n=====" | Out-File $log -Append
+        "`r`n=====`r`nDSC_ClearStatus: Started at $time`r`n=====" | Out-File $log -Append
+
+        # Rename the DSC_Events.json file, if it exists for DSC re-run
+        $jsonPath = Join-Path "C:\staging\DSC" "DSC_Events.json"
+        if (Test-Path $jsonPath) {
+            $newName = $jsonPath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
+            "Renaming $jsonPath to $newName" | Out-File $log -Append
+            Rename-Item -Path $jsonPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+        }
+
+        # For re-run, mark ScriptWorkflow not started
+        $ConfigurationFile = Join-Path -Path "C:\staging\DSC" -ChildPath "ScriptWorkflow.json"
+        if (Test-Path $ConfigurationFile) {
+            "Resetting $ConfigurationFile" | Out-File $log -Append
+            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            $Configuration.ScriptWorkFlow.Status = 'NotStart'
+            $Configuration.ScriptWorkFlow.StartTime = ''
+            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        }
 
         # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
         $dscLog = "C:\staging\DSC\DSC_Log.txt"
@@ -624,21 +625,33 @@ $global:VM_Config = {
             Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
         }
 
-        # Rename the DSC_Events.json file, if it exists for DSC re-run
-        $jsonPath = Join-Path "C:\staging\DSC" "DSC_Events.json"
-        if (Test-Path $jsonPath) {
-            $newName = $jsonPath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
-            Rename-Item -Path $jsonPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
-        }
+        # Write config to file
+        $deployConfig = $using:deployConfig
+        $configFilePath = "C:\staging\DSC\deployConfig.json"
 
-        # For re-run, mark ScriptWorkflow not started
-        $ConfigurationFile = Join-Path -Path "C:\staging\DSC" -ChildPath "ScriptWorkflow.json"
-        if (Test-Path $ConfigurationFile) {
-            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-            $Configuration.ScriptWorkFlow.Status = 'NotStart'
-            $Configuration.ScriptWorkFlow.StartTime = ''
-            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        "Writing DSC config to $configFilePath" | Out-File $log -Append
+        if (Test-Path $configFilePath) {
+            $newName = $configFilePath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
+            "Renaming $configFilePath to $newName" | Out-File $log -Append
+            Rename-Item -Path $configFilePath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
         }
+        $deployConfig | ConvertTo-Json -Depth 3 | Out-File $configFilePath -Force -Confirm:$false
+    }
+
+    $DSC_StartConfig = {
+
+        param($DscFolder)
+
+        # Get required variables from parent scope
+        $currentItem = $using:currentItem
+
+        # Define DSC variables
+        $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+
+        # Update init log
+        $log = "C:\staging\DSC\DSC_Init.txt"
+        $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
+        "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n=====" | Out-File $log -Append
 
         Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
         if (-not ($DscFolder -eq "AoG")) {
@@ -720,12 +733,12 @@ $global:VM_Config = {
             }
 
         }
-
     }
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $ConfigToCreate -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
+    Write-Log "$jobName`: Clearing previous DSC status"
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -DisplayName "DSC: Clear Old Status"
     if ($result.ScriptBlockFailed) {
-        Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
+        Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
     }
 
@@ -734,24 +747,34 @@ $global:VM_Config = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures."
     }
 
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
-    if ($result.ScriptBlockFailed) {
-        Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
-        # Retry once before exiting
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
+    if ($SkipStartDsc) {
+        Write-Log "PSJOB: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on '$($currentItem.thisParams.DscMachine)'." -OutputStream
+    }
+    else {
+
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $ConfigToCreate -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
         if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
         }
-    }
 
-    Write-Log "PSJOB: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -OutputStream
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
+        if ($result.ScriptBlockFailed) {
+            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
+            # Retry once before exiting
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
+            if ($result.ScriptBlockFailed) {
+                Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
+        }
+
+        Write-Log "PSJOB: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -OutputStream
+    }
 
 }
 
 $global:VM_Monitor = {
-
-    param ([bool]$clearPreviousDscStatus)
 
     $invokedFromScriptBlock = Test-Path ..\Common.ps1
     $currentItem = $using:currentItem
@@ -783,36 +806,6 @@ $global:VM_Monitor = {
     }
     else {
         $domainName = "WORKGROUP"
-    }
-
-    $DSC_ClearStatus = {
-
-        $log = "C:\staging\DSC\DSC_Init.txt"
-        $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_Monitor: Started at $time`r`n=====" | Out-File $log -Append
-
-        # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
-        $dscLog = "C:\staging\DSC\DSC_Log.txt"
-        if (Test-Path $dscLog) {
-            $newName = $dscLog -replace ".txt", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".txt")
-            "Renaming $dscLog to $newName" | Out-File $log -Append
-            Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
-        }
-
-        # Remove DSC_Status file, if exists
-        $dscStatus = "C:\staging\DSC\DSC_Status.txt"
-        if (Test-Path $dscStatus) {
-            "Removing $dscStatus" | Out-File $log -Append
-            Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
-        }
-    }
-
-    if ($clearPreviousDscStatus) {
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -DisplayName "DSC: Clear Old Status"
-        if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
-            return
-        }
     }
 
     $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
@@ -906,11 +899,11 @@ $global:VM_Monitor = {
             # Check if complete
             $complete = $status.ScriptBlockOutput -eq "Complete!"
         }
-        else {
-            if ($failedHeartbeats -le 10) {
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-            }
-        }
+        # else {
+        #     if ($failedHeartbeats -le 10) {
+        #         Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+        #     }
+        # }
 
     } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
 

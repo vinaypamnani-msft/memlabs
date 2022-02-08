@@ -180,8 +180,8 @@ function Start-PhaseJobs {
             continue
         }
 
-        # Skip Phase 3 for all machines, except SQLAO's primary node
-        if ($Phase -eq 3 -and ($currentItem.role -ne "SQLAO")) {
+        # Skip Phase 3 for all machines, except SQLAO's
+        if ($Phase -eq 3 -and $currentItem.role -ne "SQLAO") {
             continue
         }
 
@@ -195,18 +195,18 @@ function Start-PhaseJobs {
 
         $jobName = $currentItem.vmName
         if ($Monitor.IsPresent) {
-            $clearPreviousDscStatus = $false
-            if ($Phase -eq 3 -and $currentIte.role -eq "SQLAO" -and (-not $currentItem.OtherNode)) {
-                $clearPreviousDscStatus = $true
-            }
-            $job = Start-Job -ScriptBlock $global:VM_Monitor -ArgumentList $clearPreviousDscStatus -Name $jobName -ErrorAction Stop -ErrorVariable Err
+            $job = Start-Job -ScriptBlock $global:VM_Monitor -Name $jobName -ErrorAction Stop -ErrorVariable Err
         }
         else {
             if ($Phase -eq 0 -or $Phase -eq 1) {
                 $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
             }
             else {
-                $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
+                $skipStartDsc = $false
+                if ($Phase -eq 3 -and $currentItem.role -eq "SQLAO" -and -not $currentItem.OtherNode) {
+                    $skipStartDsc = $true
+                }
+                $job = Start-Job -ScriptBlock $global:VM_Config -ArgumentList $skipStartDsc -Name $jobName -ErrorAction Stop -ErrorVariable Err
             }
         }
 
