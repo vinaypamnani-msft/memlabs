@@ -22,7 +22,7 @@
     $waitOnDomainJoin = $deployconfig.thisParams.WaitOnDomainJoin
 
     # SQL AO
-    $SQLAO = $deployConfig.thisParams.SQLAO
+    $SQLAO = $deployConfig.SQLAO
 
     # Log share
     $LogFolder = "DSC"
@@ -174,17 +174,17 @@
             }
 
             File ClusterWitness {
-                DestinationPath = $deployConfig.thisParams.SQLAO.WitnessLocalPath
+                DestinationPath = $deployConfig.SQLAO.WitnessLocalPath
                 Type            = 'Directory'
                 Ensure          = "Present"
                 DependsOn       = '[WriteStatus]ClusterShare'
             }
 
             NTFSAccessEntry ClusterWitnessPermissions {
-                Path              = $deployConfig.thisParams.SQLAO.WitnessLocalPath
+                Path              = $deployConfig.SQLAO.WitnessLocalPath
                 AccessControlList = @(
                     NTFSAccessControlList {
-                        Principal          = "$DomainName\$($deployConfig.thisParams.SQLAO.GroupMembers[0])"
+                        Principal          = "$DomainName\$($deployConfig.SQLAO.GroupMembers[0])"
                         ForcePrincipal     = $true
                         AccessControlEntry = @(
                             NTFSAccessControlEntry {
@@ -196,7 +196,7 @@
                         )
                     }
                     NTFSAccessControlList {
-                        Principal          = "$DomainName\$($deployConfig.thisParams.SQLAO.GroupMembers[1])"
+                        Principal          = "$DomainName\$($deployConfig.SQLAO.GroupMembers[1])"
                         ForcePrincipal     = $false
                         AccessControlEntry = @(
                             NTFSAccessControlEntry {
@@ -208,7 +208,7 @@
                         )
                     }
                     NTFSAccessControlList {
-                        Principal          = "$DomainName\$($deployConfig.thisParams.SQLAO.GroupMembers[2])"
+                        Principal          = "$DomainName\$($deployConfig.SQLAO.GroupMembers[2])"
                         ForcePrincipal     = $false
                         AccessControlEntry = @(
                             NTFSAccessControlEntry {
@@ -236,11 +236,11 @@
             }
 
             SmbShare ClusterShare {
-                Name                  = $deployConfig.thisParams.SQLAO.WitnessShare
-                Path                  = $deployConfig.thisParams.SQLAO.WitnessLocalPath
-                Description           = $deployConfig.thisParams.SQLAO.WithessShare
+                Name                  = $deployConfig.SQLAO.WitnessShare
+                Path                  = $deployConfig.SQLAO.WitnessLocalPath
+                Description           = $deployConfig.SQLAO.WithessShare
                 FolderEnumerationMode = 'AccessBased'
-                FullAccess            = $deployConfig.thisParams.SQLAO.GroupMembers
+                FullAccess            = $deployConfig.SQLAO.GroupMembers
                 ReadAccess            = "Everyone"
                 DependsOn             = '[NTFSAccessEntry]ClusterWitnessPermissions'
             }

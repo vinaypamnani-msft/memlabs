@@ -447,7 +447,7 @@ $global:VM_Config = {
             "Could not get fileServerVM name from deployConfig.thisParams.thisVM.fileServerVM " | Out-File $log -Append
             return $false
         }
-        $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\" + $deployConfig.thisParams.SQLAO.WitnessShare
+        $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
         if (-not $deployConfig.vmOptions.domainName) {
             "Could not get domainName name from deployConfig" | Out-File $log -Append
             return $false
@@ -483,7 +483,7 @@ $global:VM_Config = {
                     AddressMask2    = '255.255.255.0'
                     Name2           = 'Cluster Network'
                     InstanceName    = $deployConfig.thisParams.thisVM.sqlInstanceName
-                    ClusterNameAoG  = $deployConfig.thisParams.SQLAO.AlwaysOnName
+                    ClusterNameAoG  = $deployConfig.SQLAO.AlwaysOnName
                     SQLAgentUser    = $sqlAgentUser
 
                 },
@@ -503,8 +503,8 @@ $global:VM_Config = {
                     PSDscAllowDomainUser        = $true
                     PSDscAllowPlainTextPassword = $true
                     ClusterName                 = $deployConfig.thisParams.thisVM.ClusterName
-                    ClusterIPAddress            = $deployConfig.thisParams.SQLAO.ClusterIPAddress + "/24"
-                    AGIPAddress                 = $deployConfig.thisParams.SQLAO.AGIPAddress + "/255.255.255.0"
+                    ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
+                    AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
@@ -722,14 +722,14 @@ $global:VM_Config = {
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion -AddSQLAOSpecifics
             write-Log "Adding SQLAO Specifics to Note object on $($currentItem.vmName)"
 
-            $isClusterExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object { $_.StartRange -eq $($deployConfig.thisParams.SQLAO.ClusterIPAddress) }
-            $isAGExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object { $_.StartRange -eq $($deployConfig.thisParams.SQLAO.AGIPAddress) }
+            $isClusterExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object { $_.StartRange -eq $($deployConfig.SQLAO.ClusterIPAddress) }
+            $isAGExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object { $_.StartRange -eq $($deployConfig.SQLAO.AGIPAddress) }
 
             if (-not $isClusterExcluded) {
-                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.thisParams.SQLAO.ClusterIPAddress) -EndRange $($deployConfig.thisParams.SQLAO.ClusterIPAddress) -ErrorAction SilentlyContinue
+                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.SQLAO.ClusterIPAddress) -EndRange $($deployConfig.SQLAO.ClusterIPAddress) -ErrorAction SilentlyContinue
             }
             if (-not $isAGExcluded) {
-                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.thisParams.SQLAO.AGIPAddress) -EndRange $($deployConfig.thisParams.SQLAO.AGIPAddress) -ErrorAction SilentlyContinue
+                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.SQLAO.AGIPAddress) -EndRange $($deployConfig.SQLAO.AGIPAddress) -ErrorAction SilentlyContinue
             }
 
         }

@@ -195,6 +195,11 @@ function New-DeployConfig {
             parameters      = $params
         }
 
+        $AlwaysOn = Get-SQLAOConfig -deployConfig $deploy
+        if ($AlwaysOn) {
+            $deploy | Add-Member -MemberType NoteProperty -Name "SQLAO" -Value $AlwaysOn -Force
+        }
+
         return $deploy
     }
     catch {
@@ -377,10 +382,14 @@ function Get-SQLAOConfig {
         [Parameter(Mandatory = $true, HelpMessage = "Config to Modify")]
         [object] $deployConfig
     )
+
     $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
+    if (-not $PrimaryAO) {
+        return $null
+    }
     $SecondAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and -not $_.OtherNode }
     $FSAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "FileServer" -and $_.vmName -eq $PrimaryAO.FileServerVM }
-    $DC = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }
+    #$DC = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }
 
     $ClusterName = $PrimaryAO.ClusterName
     $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix, "")
@@ -394,15 +403,16 @@ function Get-SQLAOConfig {
 
     $SQLAOVM = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $PrimaryAO.vmName -and $_.vmID }
     if ($SQLAOVM -and $SQLAOVM.ClusterIPAddress -and $SQLAOVM.AGIPAddress) {
-        Write-Log "SQLAO: Setting Existing ClusterIPAddress and AG IPAddress from notes" -LogOnly
         $clusterIP = $SQLAOVM.ClusterIPAddress
         $AGIP = $SQLAOVM.AGIPAddress
+        Write-Log "SQLAO: Setting Existing ClusterIPAddress and AG IPAddress from notes $clusterIP $AGIP" -LogOnly
     }
     else {
         $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
-        Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly -Verbose
+        Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
         $clusterIP = $IPs[0]
         $AGIP = $IPs[1]
+        Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress $clusterIP $AGIP" -LogOnly
     }
 
     $config = [PSCustomObject]@{
@@ -471,8 +481,8 @@ function Add-PerVMSettings {
     $thisParams | Add-Member -MemberType NoteProperty -Name "DscMachine" -Value $deployConfig.vmName -Force
     $SQLAO = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and -not $_.hidden }
     if ($SQLAO) {
-        $SqlAOConfig = Get-SQLAOConfig -deployConfig $deployConfig
-        $thisParams | Add-Member -MemberType NoteProperty -Name "SQLAO" -Value $SQLAOConfig -Force
+        #$SqlAOConfig = Get-SQLAOConfig -deployConfig $deployConfig
+        #$thisParams | Add-Member -MemberType NoteProperty -Name "SQLAO" -Value $deployConfig.SQLAO -Force
 
         if ($thisVM.role -eq "FileServer") {
             $ServersToWaitOn = @()
@@ -505,7 +515,7 @@ function Add-PerVMSettings {
             }
             else {
                 $ip = $iprange[1]
-                $thisParams | Add-Member -MemberType NoteProperty -Name "DscMachine" -Value $thisParams.SQLAO.PrimaryNodeName -Force
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DscMachine" -Value $deployConfig.SQLAO.PrimaryNodeName -Force
             }
             if (-not $thisParams.DNSServer) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force

@@ -837,8 +837,8 @@ function New-VmNote {
         }
 
         if ($AddSQLAOSpecifics){
-            $vmNote | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $DeployConfig.thisParams.SQLAO.ClusterIPAddress -Force
-            $vmNote | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $DeployConfig.thisParams.SQLAO.AGIPAddress -Force
+            $vmNote | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $DeployConfig.SQLAO.ClusterIPAddress -Force
+            $vmNote | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $DeployConfig.SQLAO.AGIPAddress -Force
         }
         if ($UpdateVersion.IsPresent) {
             $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $Common.MemLabsVersion -Force

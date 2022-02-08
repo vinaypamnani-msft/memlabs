@@ -34,8 +34,8 @@
     }
 
     # SQL AO
-    $SQLAO = $deployConfig.thisParams.SQLAO
-    $SQLAOGroupMembers = $deployConfig.thisParams.SQLAO.GroupMembers
+    $SQLAO = $deployConfig.SQLAO
+    $SQLAOGroupMembers = $deployConfig.SQLAO.GroupMembers
 
     # AD Sites
     $adsites = $deployConfig.thisParams.sitesAndNetworks
@@ -312,22 +312,22 @@
 
             ADGroup SQLAOGroup {
                 Ensure      = 'Present'
-                GroupName   = $deployConfig.thisParams.SQLAO.GroupName
+                GroupName   = $deployConfig.SQLAO.GroupName
                 GroupScope  = "Global"
                 Category    = "Security"
-                Description = "$($deployConfig.thisParams.SQLAO.GroupName) Group for SQL Always On"
+                Description = "$($deployConfig.SQLAO.GroupName) Group for SQL Always On"
                 Members     = $SQLAOGroupMembers
                 DependsOn   = '[WriteStatus]SQLAOGroup'
             }
 
             ActiveDirectorySPN SQLAOSPN {
                 Key              = 'Always'
-                UserName         = $deployConfig.thisParams.SQLAO.SqlServiceAccount
+                UserName         = $deployConfig.SQLAO.SqlServiceAccount
                 FQDNDomainName   = $DomainName
-                OULocationUser   = $deployConfig.thisParams.SQLAO.OULocationUser
-                OULocationDevice = $deployConfig.thisParams.SQLAO.OULocationDevice
-                ClusterDevice    = $deployConfig.thisParams.SQLAO.ClusterNodes
-                UserNameCluster  = $deployConfig.thisParams.SQLAO.SqlServiceAccount
+                OULocationUser   = $deployConfig.SQLAO.OULocationUser
+                OULocationDevice = $deployConfig.SQLAO.OULocationDevice
+                ClusterDevice    = $deployConfig.SQLAO.ClusterNodes
+                UserNameCluster  = $deployConfig.SQLAO.SqlServiceAccount
                 Dependson        = '[ADGroup]SQLAOGroup'
             }
 
