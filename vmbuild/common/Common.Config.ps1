@@ -394,13 +394,13 @@ function Get-SQLAOConfig {
 
     $SQLAOVM = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $PrimaryAO.vmName -and $_.vmID }
     if ($SQLAOVM -and $SQLAOVM.ClusterIPAddress -and $SQLAOVM.AGIPAddress) {
-        Write-Log "SQLAO: Setting Existing ClusterIPAddress and AG IPAddress from notes"
+        Write-Log "SQLAO: Setting Existing ClusterIPAddress and AG IPAddress from notes" -LogOnly
         $clusterIP = $SQLAOVM.ClusterIPAddress
         $AGIP = $SQLAOVM.AGIPAddress
     }
     else {
         $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
-        Write-Log "SQLAO: Could not file $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress"
+        Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly -Verbose
         $clusterIP = $IPs[0]
         $AGIP = $IPs[1]
     }
