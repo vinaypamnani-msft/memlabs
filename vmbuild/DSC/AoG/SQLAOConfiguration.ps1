@@ -125,19 +125,17 @@ Configuration SQLAOConfiguration
             DependsOn = '[WaitForAny]WaitForClusterJoin'
             Status    = "Configuring SQL Service Accounts and SQL Logins"
         }
-        $spn1 =    "MSSQLSvc/"+ $Node.PrimaryReplicaServerName
-        $spn2 =    $spn1 + ":1433"
+        $spn1 = "MSSQLSvc/" + $Node.PrimaryReplicaServerName
+        $spn2 = $spn1 + ":1433"
 
-        ADServicePrincipalName 'spn1'
-        {
+        ADServicePrincipalName 'spn1' {
             Ensure               = 'Absent'
             ServicePrincipalName = $SPN1
             Account              = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName + "$"
             Dependson            = '[WaitForAny]WaitForClusterJoin'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
-        ADServicePrincipalName 'spn2'
-        {
+        ADServicePrincipalName 'spn2' {
             Ensure               = 'Absent'
             ServicePrincipalName = $SPN2
             Account              = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName + "$"
@@ -364,8 +362,8 @@ Configuration SQLAOConfiguration
 
 
         $ADComputerName = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName + "$"
-        $spn3 =    "MSSQLSvc/"+ $Node.SecondaryReplicaServerName
-        $spn4 =    $spn3 + ":1433"
+        $spn3 = "MSSQLSvc/" + $Node.SecondaryReplicaServerName
+        $spn4 = $spn3 + ":1433"
 
         WriteStatus SpnAccount {
             Dependson = '[xClusterQuorum]ClusterWitness'
@@ -373,19 +371,17 @@ Configuration SQLAOConfiguration
         }
 
 
-        ADServicePrincipalName 'spn3'
-        {
+        ADServicePrincipalName 'spn3' {
             Ensure               = 'Absent'
             ServicePrincipalName = $spn3
-            Account              =  $ADComputerName
+            Account              = $ADComputerName
             Dependson            = '[xClusterQuorum]ClusterWitness'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
-        ADServicePrincipalName 'spn4'
-        {
+        ADServicePrincipalName 'spn4' {
             Ensure               = 'Absent'
             ServicePrincipalName = $spn4
-            Account              =  $ADComputerName
+            Account              = $ADComputerName
             Dependson            = '[xClusterQuorum]ClusterWitness'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -502,8 +498,21 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
-        WriteStatus SQLAO {
+        WriteStatus SQLAO1 {
             DependsOn = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
+            Status    = "Waiting for $node1 to complete"
+        }
+
+        WaitForAll AG {
+            ResourceName     = '[SqlAGListener]AvailabilityGroupListener'
+            NodeName         = $node1
+            RetryIntervalSec = 2
+            RetryCount       = 450
+            Dependson        = '[WriteStatus]SQLAO1'
+        }
+
+        WriteStatus SQLAO2 {
+            DependsOn = '[WaitForAll]AG'
             Status    = "Adding replica to the Availability Group"
         }
 
