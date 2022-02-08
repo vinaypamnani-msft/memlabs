@@ -116,19 +116,13 @@ function Start-Phase {
             Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
         }
     }
+
     Write-Host
 
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -PhaseDescription $PhaseDescription -deployConfig $deployConfig
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs
     Write-Log "`n$($result.Success) jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
-
-    # Start Monitoring for phase (only applicable for Phase 2 and above)
-    if ($Phase -gt 1) {
-        $start = Start-PhaseJobs -Phase $Phase -PhaseDescription "Monitoring" -deployConfig $deployConfig -Monitor -MachinesToSkip $result.FailedMachines
-        $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -Monitor
-        Write-Log "`n$($result.Success) jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
-    }
 
     if ($result.Failed -gt 0) {
         return $false
@@ -141,9 +135,7 @@ function Start-PhaseJobs {
     param (
         [int]$Phase,
         [string]$PhaseDescription,
-        [switch]$Monitor,
-        [object]$deployConfig,
-        [object]$MachinesToSkip
+        [object]$deployConfig
     )
 
     [System.Collections.ArrayList]$jobs = @()
@@ -154,11 +146,6 @@ function Start-PhaseJobs {
     $global:vm_remove_list = @()
 
     foreach ($currentItem in $deployConfig.virtualMachines) {
-
-        # Skip machines that are in MachinesToSkip array
-        if ($currentItem.vmName -in $MachinesToSkip) {
-            continue
-        }
 
         # Don't touch non-hidden VM's in Phase 0
         if ($Phase -eq 0 -and -not $currentItem.hidden) {
@@ -194,20 +181,16 @@ function Start-PhaseJobs {
         }
 
         $jobName = $currentItem.vmName
-        if ($Monitor.IsPresent) {
-            $job = Start-Job -ScriptBlock $global:VM_Monitor -Name $jobName -ErrorAction Stop -ErrorVariable Err
+
+        if ($Phase -eq 0 -or $Phase -eq 1) {
+            $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
         }
         else {
-            if ($Phase -eq 0 -or $Phase -eq 1) {
-                $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
+            $skipStartDsc = $false
+            if ($Phase -eq 3 -and $currentItem.role -eq "SQLAO" -and -not $currentItem.OtherNode) {
+                $skipStartDsc = $true
             }
-            else {
-                $skipStartDsc = $false
-                if ($Phase -eq 3 -and $currentItem.role -eq "SQLAO" -and -not $currentItem.OtherNode) {
-                    $skipStartDsc = $true
-                }
-                $job = Start-Job -ScriptBlock $global:VM_Config -ArgumentList $skipStartDsc -Name $jobName -ErrorAction Stop -ErrorVariable Err
-            }
+            $job = Start-Job -ScriptBlock $global:VM_Config -ArgumentList $skipStartDsc -Name $jobName -ErrorAction Stop -ErrorVariable Err
         }
 
         if ($Err.Count -ne 0) {
@@ -243,8 +226,7 @@ function Wait-Phase {
 
     param(
         [int]$Phase,
-        $Jobs,
-        [switch]$Monitor
+        $Jobs
     )
 
     # Create return object
@@ -252,7 +234,6 @@ function Wait-Phase {
         Failed         = 0
         Success        = 0
         Warning        = 0
-        FailedMachines = @()
     }
 
     do {
@@ -277,7 +258,6 @@ function Wait-Phase {
                     Write-Host $line -ForegroundColor Red
                     if ($incrementCount) {
                         $return.Failed++
-                        $return.FailedMachines += $job.Name
                     }
                 }
                 elseif ($line.StartsWith("WARNING")) {
@@ -285,12 +265,13 @@ function Wait-Phase {
                     if ($incrementCount) { $return.Warning++ }
                 }
                 else {
-                    if ($Phase -le 1 -or ($Phase -ge 2 -and $Monitor.IsPresent)) {
+                    if ($line.StartsWith("SUCCESS")) {
                         Write-Host $line -ForegroundColor Green
                     }
                     else {
                         Write-Host $line
                     }
+                    # Assume no error/warning was a success
                     if ($incrementCount) { $return.Success++ }
                 }
 
