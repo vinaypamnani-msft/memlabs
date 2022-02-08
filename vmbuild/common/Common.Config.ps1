@@ -416,6 +416,9 @@ function Get-SQLAOConfig {
         ClusterIPAddress       = $clusterIP
         AGIPAddress            = $AGIP
         AlwaysOnName           = "CASAlwaysON"
+        PrimaryNodeName        = $PrimaryAO.vmName
+        SecondaryNodeName      = $SecondAO.vmName
+        FileServerName         = $FSAO.vmName
     }
 
     return $config
@@ -463,7 +466,7 @@ function Add-PerVMSettings {
     else {
         $thisParams | Add-Member -MemberType NoteProperty -Name "network" -Value $deployConfig.vmOptions.network -Force
     }
-
+    $thisParams | Add-Member -MemberType NoteProperty -Name "DscMachine" -Value $deployConfig.vmName -Force
     $SQLAO = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and -not $_.hidden }
     if ($SQLAO) {
         $SqlAOConfig = Get-SQLAOConfig -deployConfig $deployConfig
@@ -500,6 +503,7 @@ function Add-PerVMSettings {
             }
             else {
                 $ip = $iprange[1]
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DscMachine" -Value $deployConfig.thisParams.SQLAO.PrimaryNodeName -Force
             }
             if (-not $thisParams.DNSServer) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
