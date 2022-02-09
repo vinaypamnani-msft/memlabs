@@ -64,8 +64,11 @@ function Write-Log {
 
     If ($Success.IsPresent) {
         $info = $false
+        $TextOutput = "  $Text"
         $Text = "SUCCESS: $Text"
+
         $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Green)
+
     }
 
     If ($Activity.IsPresent) {
@@ -84,19 +87,25 @@ function Write-Log {
 
     If ($Warning.IsPresent) {
         $info = $false
+        $TextOutput = "  WARNING: $Text"
         $Text = "WARNING: $Text"
         $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Yellow)
+
     }
 
     If ($Failure.IsPresent) {
         $info = $false
+        $TextOutput = "  ERROR: $Text"
         $Text = "ERROR: $Text"
         $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Red)
+
     }
 
     If ($IsVerbose) {
         $info = $false
+        $TextOutput = "  VERBOSE: $Text"
         $Text = "VERBOSE: $Text"
+
     }
 
     If ($Highlight.IsPresent) {
@@ -108,7 +117,9 @@ function Write-Log {
 
     if ($info) {
         $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::White)
+        $TextOutput = "  $Text"
         $Text = "INFO: $Text"
+
     }
 
     # Write to output stream
@@ -133,7 +144,12 @@ function Write-Log {
     }
 
     if ($writeHost) {
-        Write-Host $Text @HashArguments
+        if ($TextOutput) {
+            Write-Host $TextOutput @HashArguments
+        }
+        else {
+            Write-Host $Text @HashArguments
+        }
     }
 
     $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss:fff'
@@ -836,7 +852,7 @@ function New-VmNote {
             memLabsDeployVersion = $Common.MemLabsVersion
         }
 
-        if ($AddSQLAOSpecifics){
+        if ($AddSQLAOSpecifics) {
             $vmNote | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $DeployConfig.SQLAO.ClusterIPAddress -Force
             $vmNote | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $DeployConfig.SQLAO.AGIPAddress -Force
         }
@@ -1213,7 +1229,7 @@ function New-VirtualMachine {
         $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
 
         $dns = $deployConfig.thisParams.DNSServer
-        $ip =$deployConfig.thisParams.ClusterNetworkIP
+        $ip = $deployConfig.thisParams.ClusterNetworkIP
 
 
         Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"

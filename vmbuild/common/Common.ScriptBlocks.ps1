@@ -555,14 +555,15 @@ $global:VM_Config = {
             Write-Error $error_message
             return $error_message
         }
-        if (-not $deployConfig.thisParams.thisVM.SQLAgentAccount) {
-            $error_message = "Could not get SQLAgentAccount name from deployConfig.thisParams.thisVM.SQLAgentAccount"
+
+        if (-not $deployConfig.SQLAO.SqlAgentServiceAccount) {
+            $error_message = "Could not get SqlAgentServiceAccount name from deployConfig.SQLAO.SqlAgentServiceAccount"
             $error_message | Out-File $log -Append
             Write-Error $error_message
             return $error_message
         }
-        $sqlAgentUser = $netbiosName + "\" + $deployConfig.thisParams.thisVM.SQLAgentAccount
-        $sqlServiceUser = $netbiosName + "\" + $deployConfig.thisParams.thisVM.SqlServiceAccount
+        $SqlAgentServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlAgentServiceAccount
+        $SqlServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlServiceAccount
         if (-not $deployConfig.thisParams.thisVM.fileServerVM) {
             $error_message = "Could not get fileServerVM name from deployConfig.thisParams.thisVM.fileServerVM"
             $error_message | Out-File $log -Append
@@ -615,8 +616,6 @@ $global:VM_Config = {
                     Name2           = 'Cluster Network'
                     InstanceName    = $deployConfig.thisParams.thisVM.sqlInstanceName
                     ClusterNameAoG  = $deployConfig.SQLAO.AlwaysOnName
-                    SQLAgentUser    = $sqlAgentUser
-                    SQLServiceUser  = $sqlServiceUser
 
                 },
 
@@ -638,6 +637,8 @@ $global:VM_Config = {
                     AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
                     PrimaryReplicaServerName    = $deployConfig.thisParams.MachineName + "." + $deployConfig.vmOptions.DomainName
                     SecondaryReplicaServerName  = $deployConfig.thisParams.thisVM.OtherNode + "." + $deployConfig.vmOptions.DomainName
+                    SqlAgentServiceAccount      = $SqlAgentServiceAccount
+                    SqlServiceAccount           = $SqlServiceAccount
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
@@ -822,6 +823,7 @@ $global:VM_Config = {
         $dscStatusPolls++
 
         if ($dscStatusPolls -ge 10) {
+            $failure = $false
             $dscStatusPolls = 0 # Do this every 30 seconds or so
             Write-Log "PSJOB: $($currentItem.vmName): Polling DSC Status via Get-DscConfigurationStatus" -Verbose
             $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
@@ -835,6 +837,7 @@ $global:VM_Config = {
             }
             else {
                 if ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -ne "Success") {
+
                     $badResources = $dscStatus.ScriptBlockOutput.ResourcesNotInDesiredState
                     foreach ($badResource in $badResources) {
                         if (-not $badResource.Error) {
@@ -842,15 +845,20 @@ $global:VM_Config = {
                         }
                         $errorResourceId = $badResource.ResourceId
                         $errorObject = $badResource.Error | ConvertFrom-Json -ErrorAction SilentlyContinue
-                        $msg = "$errorResourceId`: $($errorObject.Exception.Message)"
-                        Write-Log "PSJOB: $($currentItem.vmName): $msg" -Failure -OutputStream
+                        if ($errorObject.FullyQualifiedErrorId -ne "NonTerminatingErrorFromProvider") {
+                            $msg = "$errorResourceId`: $($errorObject.FullyQualifiedErrorId) $($errorObject.Exception.Message)"
+                            Write-Log "PSJOB: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Failure -OutputStream
+                            $failure = $true
+                        }
                     }
 
                     # Write-Output, and bail
                     if (-not $msg) {
-                        Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Exiting. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                        Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
                     }
-                    return
+                    if ($dscStatus.ScriptBlockOutput.Status -eq "Failure" -and $failure) {
+                        return
+                    }
                 }
                 else {
                     # Can't determine what DSC Status is, so do nothing and wait for timer to expire?

@@ -397,7 +397,7 @@ function Get-SQLAOConfig {
     $ClusterName = $PrimaryAO.ClusterName
     $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix, "")
     $ServiceAccount = "$($ClusterNameNoPrefix)Svc"
-    $AgentAccount = "$($ClusterNameNoPrefix)AgentSvc"
+    $AgentAccount = "$($ClusterNameNoPrefix)Agent"
 
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
@@ -488,22 +488,19 @@ function Add-PerVMSettings {
         #$thisParams | Add-Member -MemberType NoteProperty -Name "SQLAO" -Value $deployConfig.SQLAO -Force
 
         if ($thisVM.role -eq "FileServer") {
-            $ServersToWaitOn = @()
+
             foreach ($sql in $SQLAO) {
-                $ServersToWaitOn += $sql.vmName
+                Add-VMToAccountLists -thisVM $thisVM -VM $sql -accountLists $accountLists -deployConfig $deployconfig -WaitOnDomainJoin
             }
-            $thisParams | Add-Member -MemberType NoteProperty -Name "ServersToWaitOn" -Value $ServersToWaitOn -Force
+
         }
 
         if ($thisVM.role -eq "DC") {
             $DomainAccountsUPN = @()
             $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
             $ClusterName = $PrimaryAO.ClusterName
-            $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix, "")
-            $ServiceAccount = "$($ClusterNameNoPrefix)Svc"
-            $AgentAccount = "$($ClusterNameNoPrefix)AgentSvc"
 
-            $DomainAccountsUPN = @($ServiceAccount, $AgentAccount)
+            $DomainAccountsUPN = @($deployConfig.SQLAO.SqlServiceAccount, $deployConfig.SQLAO.SqlAgentServiceAccount)
 
             $DomainComputers = @($ClusterName)
             $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccountsUPN" -Value $DomainAccountsUPN -Force
@@ -534,8 +531,8 @@ function Add-PerVMSettings {
     # DC DSC needs a list of SiteServers to wait on.
     if ($thisVM.role -eq "DC") {
         $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
-        $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentAccount } | Select-Object -ExpandProperty SQLAgentAccount -Unique
-        $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SqlServiceAccount } | Select-Object -ExpandProperty SqlServiceAccount -Unique
+        #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentAccount } | Select-Object -ExpandProperty SQLAgentAccount -Unique
+        #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SqlServiceAccount } | Select-Object -ExpandProperty SqlServiceAccount -Unique
         $accountLists.DomainAccounts = $accountLists.DomainAccounts | Select-Object -Unique
 
         $ServersToWaitOn = @()
