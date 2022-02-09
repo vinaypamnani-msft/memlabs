@@ -302,8 +302,44 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
+        $lspn1 = "MSSQLSvc/" + $Node.ClusterNameAoG
+        $lspn2 = "MSSQLSvc/" + $Node.ClusterNameAoGFQDN
+        $lspn3 = $lspn1 + ":1500"
+        $lspn4 = $lspn2 + ":1500"
+        $account = ($Node.SqlServiceAccount -Split "\")[1]
+
+        ADServicePrincipalName 'lspn1' {
+            Ensure               = 'Present'
+            ServicePrincipalName = $lspn1
+            Account              = $account
+            Dependson            = '[SqlAGListener]AvailabilityGroupListener'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+        ADServicePrincipalName 'lspn2' {
+            Ensure               = 'Present'
+            ServicePrincipalName = $lspn2
+            Account              = $account
+            Dependson            = '[SqlAGListener]AvailabilityGroupListener'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+        ADServicePrincipalName 'lspn3' {
+            Ensure               = 'Present'
+            ServicePrincipalName = $lspn3
+            Account              = $account
+            Dependson            = '[SqlAGListener]AvailabilityGroupListener'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+        ADServicePrincipalName 'lspn4' {
+            Ensure               = 'Present'
+            ServicePrincipalName = $lspn4
+            Account              = $account
+            Dependson            = '[SqlAGListener]AvailabilityGroupListener'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+
         WriteStatus AgListen {
-            DependsOn = '[SqlAGListener]AvailabilityGroupListener'
+            DependsOn = '[ADServicePrincipalName]lspn4'
             Status    = "Waiting on $node2 to Join the Sql Availability Group Listener"
         }
 

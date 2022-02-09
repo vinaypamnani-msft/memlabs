@@ -231,9 +231,9 @@ function Wait-Phase {
 
     # Create return object
     $return = [PSCustomObject]@{
-        Failed         = 0
-        Success        = 0
-        Warning        = 0
+        Failed  = 0
+        Success = 0
+        Warning = 0
     }
 
     do {
@@ -526,10 +526,10 @@ try {
                 $global:vm_remove_list = @()
 
                 # Create/Updated RDCMan file
-                if (Test-Path "C:\tools\rdcman.exe") {
-                    Start-Sleep -Seconds 5
-                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
-                }
+
+                Start-Sleep -Seconds 5
+                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+
 
                 $configured = Start-Phase -Phase 2 -deployConfig $deployConfig
 

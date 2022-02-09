@@ -615,7 +615,6 @@ $global:VM_Config = {
                     AddressMask2    = '255.255.255.0'
                     Name2           = 'Cluster Network'
                     InstanceName    = $deployConfig.thisParams.thisVM.sqlInstanceName
-                    ClusterNameAoG  = $deployConfig.SQLAO.AlwaysOnName
 
                 },
 
@@ -639,6 +638,8 @@ $global:VM_Config = {
                     SecondaryReplicaServerName  = $deployConfig.thisParams.thisVM.OtherNode + "." + $deployConfig.vmOptions.DomainName
                     SqlAgentServiceAccount      = $SqlAgentServiceAccount
                     SqlServiceAccount           = $SqlServiceAccount
+                    ClusterNameAoG  = $deployConfig.SQLAO.AlwaysOnName
+                    ClusterNameAoGFQDN  = $deployConfig.SQLAO.AlwaysOnName + "." +  $deployConfig.vmOptions.DomainName
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
