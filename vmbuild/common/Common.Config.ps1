@@ -558,6 +558,14 @@ function Add-PerVMSettings {
         if ($thisCSName) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $thisCSName -Force
         }
+        if ($thisVM.hidden){
+            $DC = get-list -type VM -DomainName $deployConfig.vmOptions.DomainName | Where-Object {$_.Role -eq "DC"}
+            $addr = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
+        }else{
+            $addr = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
+            $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
+        }
     }
 
     #add the SiteCodes and Subnets so DC can add ad sites, and primary can setup BG's
