@@ -24,9 +24,8 @@
     $DomainAccountsUPN = $deployConfig.thisParams.DomainAccountsUPN
     $DomainComputers = $deployConfig.thisParams.DomainComputers
 
-    $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
     $DHCP_DNSAddress = $deployConfig.thisParams.DCIPAddress
-    $DHCP_DefaultGateway = $network + ".200"
+    $DHCP_DefaultGateway = $deployConfig.thisParams.DCDefaultGateway
 
     $setNetwork = $true
     if ($ThisVM.hidden) {
