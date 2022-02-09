@@ -269,7 +269,7 @@ function Wait-Phase {
                         Write-GreenCheck $line -ForegroundColor Green
                     }
                     else {
-                        Write-Host $line
+                        Write-GreenCheck $line -ForegroundColor White
                     }
                     # Assume no error/warning was a success
                     if ($incrementCount) { $return.Success++ }

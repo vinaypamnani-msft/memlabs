@@ -1644,12 +1644,46 @@ Function Write-GreenCheck {
         [string] $ForegroundColor
     )
     $CHECKMARK = ([char]8730)
-    $text = $text.Replace("SUCCESS:", "")
+    $text = $text.Replace("SUCCESS: ", "")
     Write-Host "  [" -NoNewLine
     Write-Host -ForeGroundColor Green "$CHECKMARK" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor){
-        Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
+        while (-not [string]::IsNullOrWhiteSpace($text)) {
+            #write-host $text
+            $indexLeft = $text.IndexOf('[')
+            $indexRight = $text.IndexOf(']')
+            if ($indexRight -eq -1 -and $indexLeft -eq -1) {
+                Write-Host -ForegroundColor $ForegroundColor "$text" -NoNewline
+                break
+            }
+            else {
+
+                if ($indexRight -eq -1) {
+                    $indexRight = 100000000
+                }
+                if ($indexLeft -eq -1) {
+                    $indexLeft = 10000000
+                }
+
+                if ($indexRight -lt $indexLeft) {
+                    $text2Display = $text.Substring(0, $indexRight)
+                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
+                    Write-Host -ForegroundColor DarkGray "]" -NoNewline
+                    $text = $text.Substring($indexRight)
+                    $text = $text.Substring(1)
+                }
+                if ($indexLeft -lt $indexRight) {
+                    $text2Display = $text.Substring(0, $indexLeft)
+                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
+                    Write-Host -ForegroundColor DarkGray "[" -NoNewline
+                    $text = $text.Substring($indexLeft)
+                    $text = $text.Substring(1)
+                }
+            }
+
+        }
+        #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
     }else{
         Write-Host $text -NoNewline
     }
@@ -1668,12 +1702,46 @@ Function Write-RedX {
         [Parameter()]
         [string] $ForegroundColor
     )
-    $text = $text.Replace("ERROR:", "")
+    $text = $text.Replace("ERROR: ", "")
     Write-Host "  [" -NoNewLine
     Write-Host -ForeGroundColor Red "x" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor){
-        Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
+        while (-not [string]::IsNullOrWhiteSpace($text)) {
+            #write-host $text
+            $indexLeft = $text.IndexOf('[')
+            $indexRight = $text.IndexOf(']')
+            if ($indexRight -eq -1 -and $indexLeft -eq -1) {
+                Write-Host -ForegroundColor $ForegroundColor "$text" -NoNewline
+                break
+            }
+            else {
+
+                if ($indexRight -eq -1) {
+                    $indexRight = 100000000
+                }
+                if ($indexLeft -eq -1) {
+                    $indexLeft = 10000000
+                }
+
+                if ($indexRight -lt $indexLeft) {
+                    $text2Display = $text.Substring(0, $indexRight)
+                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
+                    Write-Host -ForegroundColor DarkGray "]" -NoNewline
+                    $text = $text.Substring($indexRight)
+                    $text = $text.Substring(1)
+                }
+                if ($indexLeft -lt $indexRight) {
+                    $text2Display = $text.Substring(0, $indexLeft)
+                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
+                    Write-Host -ForegroundColor DarkGray "[" -NoNewline
+                    $text = $text.Substring($indexLeft)
+                    $text = $text.Substring(1)
+                }
+            }
+
+        }
+        #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
     }else{
         Write-Host $text -NoNewline
     }
