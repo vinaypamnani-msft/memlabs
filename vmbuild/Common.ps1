@@ -1333,12 +1333,12 @@ function Wait-ForVm {
 
             # Wait until \\localhost\c$ is accessible
             if (-not $readySmb -and $readyOobe) {
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-                Start-Sleep -Seconds 15
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "OOBE complete. Checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Start-Sleep -Seconds 3
                 $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "$VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
-                if ($readySmb) { Start-Sleep -Seconds 15 } # Extra 15 second wait to ensure wwahost has had a chance to start
+                if ($readySmb) { Start-Sleep -Seconds 10 } # Extra wait to ensure wwahost has had a chance to start
             }
 
             # Wait until wwahost.exe is not found, or not longer running
