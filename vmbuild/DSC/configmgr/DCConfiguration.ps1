@@ -9,7 +9,7 @@
     )
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc', 'xNetworking'
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
@@ -25,7 +25,7 @@
     $DomainComputers = $deployConfig.thisParams.DomainComputers
 
     $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
-    $DHCP_DNSAddress = $network + ".1"
+    $DHCP_DNSAddress = $deployConfig.thisParams.DCIPAddress
     $DHCP_DefaultGateway = $network + ".200"
 
     $setNetwork = $true
@@ -86,8 +86,15 @@
             MaximumSize = '8192'
         }
 
-        WriteStatus InstallFeature {
+        IPAddress DCIPAddress {
             DependsOn = "[SetCustomPagingFile]PagingSettings"
+            IPAddress      = "$DHCP_DNSAddress/24"
+            InterfaceAlias = 'Ethernet'
+            AddressFamily  = 'IPV4'
+        }
+
+        WriteStatus InstallFeature {
+            DependsOn = "[IPAddress]DCIPAddress"
             Status    = "Installing required windows features"
         }
 
@@ -214,15 +221,8 @@
                 Status    = "Setting Primary DNS, Default Gateway and DNS Forwarders"
             }
 
-            IPAddress NewIPAddressDC {
-                DependsOn      = "[SetupDomain]FirstDS"
-                IPAddress      = $DHCP_DNSAddress
-                InterfaceAlias = 'Ethernet'
-                AddressFamily  = 'IPV4'
-            }
-
             DefaultGatewayAddress SetDefaultGateway {
-                DependsOn      = "[IPAddress]NewIPAddressDC"
+                DependsOn      = "[WriteStatus]NetworkDNS"
                 Address        = $DHCP_DefaultGateway
                 InterfaceAlias = 'Ethernet'
                 AddressFamily  = 'IPv4'
