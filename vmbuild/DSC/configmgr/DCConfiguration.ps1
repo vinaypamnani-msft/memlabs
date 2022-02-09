@@ -86,15 +86,27 @@
             MaximumSize = '8192'
         }
 
+        WriteStatus SetIPDG {
+            DependsOn = "[Computer]NewName"
+            Status    = "Assigning Static IP '$DHCP_DNSAddress' and Default Gateway '$DHCP_DefaultGateway'"
+        }
+
         IPAddress DCIPAddress {
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            DependsOn      = "[WriteStatus]SetIPDG"
             IPAddress      = "$DHCP_DNSAddress/24"
             InterfaceAlias = 'Ethernet'
             AddressFamily  = 'IPV4'
         }
 
-        WriteStatus InstallFeature {
+        DefaultGatewayAddress SetDefaultGateway {
             DependsOn = "[IPAddress]DCIPAddress"
+            Address        = $DHCP_DefaultGateway
+            InterfaceAlias = 'Ethernet'
+            AddressFamily  = 'IPv4'
+        }
+
+        WriteStatus InstallFeature {
+            DependsOn = "[DefaultGatewayAddress]SetDefaultGateway"
             Status    = "Installing required windows features"
         }
 
@@ -218,14 +230,7 @@
 
             WriteStatus NetworkDNS {
                 DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
-                Status    = "Setting Primary DNS, Default Gateway and DNS Forwarders"
-            }
-
-            DefaultGatewayAddress SetDefaultGateway {
-                DependsOn      = "[WriteStatus]NetworkDNS"
-                Address        = $DHCP_DefaultGateway
-                InterfaceAlias = 'Ethernet'
-                AddressFamily  = 'IPv4'
+                Status    = "Setting Primary DNS, and DNS Forwarders"
             }
 
             DnsServerForwarder DnsServerForwarder {
