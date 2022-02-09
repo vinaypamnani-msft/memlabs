@@ -967,16 +967,15 @@ $global:VM_Config = {
         }
     }
 
-    if ($using:Phase -gt 1) {
-        # Update VMNote and set new version, this code doesn't run when VM_Create failed
-        if ($currentItem.role -eq "SQLAO" -and $currentItem.OtherNode -and $using:Phase -eq 3) {
-            #It worked.. Add the note again..
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion -AddSQLAOSpecifics
-            write-Log "Adding SQLAO Specifics to Note object on $($currentItem.vmName)"
-        }
-        else {
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion
-        }
+
+    # Update VMNote and set new version, this code doesn't run when VM_Create failed
+    if ($using:Phase -eq 3 -and $currentItem.role -eq "SQLAO" -and $currentItem.OtherNode) {
+        #It worked.. Add the note again..
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion -AddSQLAOSpecifics
+        write-Log "Adding SQLAO Specifics to Note object on $($currentItem.vmName)"
+    }
+    elseif ($using:Phase -gt 1 -and -not $currentItem.hidden) {
+        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion
     }
 
     if (-not $complete) {
