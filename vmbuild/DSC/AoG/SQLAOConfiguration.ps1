@@ -306,7 +306,7 @@ Configuration SQLAOConfiguration
         $lspn2 = "MSSQLSvc/" + $Node.ClusterNameAoGFQDN
         $lspn3 = $lspn1 + ":1500"
         $lspn4 = $lspn2 + ":1500"
-        $account = ($Node.SqlServiceAccount -Split "\")[1]
+        $account = ($Node.SqlServiceAccount -Split "\\")[1]
 
         ADServicePrincipalName 'lspn1' {
             Ensure               = 'Present'
