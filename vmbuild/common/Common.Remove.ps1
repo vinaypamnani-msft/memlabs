@@ -9,16 +9,36 @@ function Remove-VirtualMachine {
         [Parameter()]
         [switch] $WhatIf
     )
-
-    $vmFromList = Get-List -Type VM | Where-Object {$_.vmName -eq $VmName}
+    #{ "network": "10.0.1.0", "ClusterIPAddress": "10.250.250.135", "AGIPAddress": "10.250.250.136",
+    $vmFromList = Get-List -Type VM | Where-Object { $_.vmName -eq $VmName }
     if ($vmFromList.vmBuild -eq $false) {
         Write-Log "VM '$VmName' exists, but it was not deployed via MemLabs. Skipping." -SubActivity
         return
     }
 
+    if ($vmFromList.ClusterIPAddress) {
+        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.ClusterIPAddress -EndRange $vmFromList.ClusterIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+    }
+
+    if ($vmFromList.AGIPAddress) {
+        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.AGIPAddress -EndRange $vmFromList.AGIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+    }
+
     $vmTest = Get-VM2 -Name $VmName -Fallback
+
     if ($vmTest) {
         Write-Log "VM '$VmName' exists. Removing." -SubActivity
+
+        $adapters = $vmTest  | Get-VMNetworkAdapter
+        foreach ($adapter in $adapters) {
+            if ($adapter.SwithName -eq "cluster") {
+                Remove-DhcpServerv4Reservation  -ScopeId 10.250.250.0 -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+            }
+            else {
+                Remove-DhcpServerv4Reservation  -ScopeId $vmFromList.Network -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+            }
+        }
+
         if ($vmTest.State -ne "Off") {
             $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf
         }
