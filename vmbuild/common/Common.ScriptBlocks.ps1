@@ -809,9 +809,11 @@ $global:VM_Config = {
     $failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
 
     $noStatus = $true
-    Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" `
-        -Status "Waiting for job progress" `-PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-
+    try {
+        Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" `
+            -Status "Waiting for job progress" `-PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+    }
+    catch {}
     $dscStatusPolls = 0
 
     do {
@@ -857,7 +859,7 @@ $global:VM_Config = {
                     if (-not $msg) {
                         #  [x] [<ScriptBlock>] PSJOB: ADA-W11Client1: DSC encountered failures. Attempting to continue. Status: Failure Output: Machine reboot failed. Please reboot it manually to finish processing the request.
                         # This condition is expected, and we are actually rebooting.
-                        if ($($dscStatus.ScriptBlockOutput.Error) -like "%Machine reboot failed.%"){
+                        if ($($dscStatus.ScriptBlockOutput.Error) -like "%Machine reboot failed.%") {
                             #If we dont reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
                             continue
                         }
@@ -883,7 +885,10 @@ $global:VM_Config = {
             $failedHeartbeats++
             # Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
             if ($failedHeartbeats -gt 10) {
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($failedHeartbeats / $failedHeartbeatThreshold * 100)
+                try {
+                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($failedHeartbeats / $failedHeartbeatThreshold * 100)
+                }
+                catch {}
             }
         }
         else {
@@ -891,15 +896,18 @@ $global:VM_Config = {
         }
 
         if ($failedHeartbeats -gt $failedHeartbeatThreshold) {
-            Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
-            Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-            Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
-            $vm = Get-VM2 -Name $($currentItem.vmName)
-            Stop-VM -VM $vm -TurnOff | Out-Null
-            Start-Sleep -Seconds 5
-            Start-VM2 -Name $currentItem.vmName
-            Start-Sleep -Seconds 15
-            $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
+            try {
+                Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
+                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
+                $vm = Get-VM2 -Name $($currentItem.vmName)
+                Stop-VM -VM $vm -TurnOff | Out-Null
+                Start-Sleep -Seconds 5
+                Start-VM2 -Name $currentItem.vmName
+                Start-Sleep -Seconds 15
+                $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
+            }
+            catch {}
         }
 
         if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {
@@ -933,14 +941,20 @@ $global:VM_Config = {
                 if (-not $result.ScriptBlockFailed) {
                     $logEntry = $result.ScriptBlockOutput
                     $logEntry = "ConfigMgrSetup.log: " + $logEntry.Substring(0, $logEntry.IndexOf("$"))
-                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                    try {
+                        Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                    }
+                    catch {}
                     $skipProgress = $true
                 }
             }
 
             if (-not $skipProgress) {
                 # Write progress
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                try {
+                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status.ScriptBlockOutput -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                }
+                catch {}
             }
 
             # Check if complete
@@ -948,7 +962,10 @@ $global:VM_Config = {
         }
         else {
             if ($noStatus) {
-                Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                try {
+                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                }
+                catch {}
             }
         }
 

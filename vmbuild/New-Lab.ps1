@@ -83,7 +83,16 @@ function Write-JobProgress {
 
         if ($latestActivity -and $latestStatus) {
             #When adding multiple progress bars, a unique ID must be provided. Here I am providing the JobID as this
+            if ($latestPercentComplete -gt 0 -and $latestPercentComplete -lt 101) {
+
+            }
+            else {
+                $latestPercentComplete = 0
+            }
+            try{
             Write-Progress -Id $Job.Id -Activity "$jobName`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
+            }
+            catch {}
         }
     }
 }
@@ -238,11 +247,20 @@ function Wait-Phase {
 
     do {
 
-        $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
+        $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
         foreach ($job in $runningJobs) {
             Write-JobProgress($job)
         }
 
+        $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
+        foreach ($job in $failedJobs) {
+            $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
+            Write-RedX $jobOutput -ForegroundColor Red
+            Write-Progress -Id $job.Id -Activity $job.Name -Completed
+            $jobs.Remove($job)
+
+            $return.Failed++
+        }
         $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
         foreach ($job in $completedJobs) {
 

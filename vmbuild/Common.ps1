@@ -1399,7 +1399,10 @@ function Wait-ForVm {
 
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
         do {
-            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $msg -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            try {
+                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $msg -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+            }
+            catch {}
             Start-Sleep -Seconds 5
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
@@ -1961,19 +1964,7 @@ function Set-SupportedOptions {
 
 }
 
-###################
-### GIT BRANCH  ###
-###################
-$currentBranch = (& git branch) -match '\*'
-$devBranch = $false
-if ($currentBranch -and $currentBranch -notmatch "main") {
-    $devBranch = $true
-}
 
-# Set-StrictMode -Off
-# if ($devBranch) {
-#     Set-StrictMode -Version 1.0
-# }
 
 ####################
 ### DOT SOURCING ###
@@ -1995,6 +1986,26 @@ if (-not $Common.Initialized) {
 
     # Write progress
     Write-Progress "Loading required modules." -Status "Please wait..." -PercentComplete -1
+
+    ###################
+    ### GIT BRANCH  ###
+    ###################
+    write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
+    $devBranch = $false
+    try {
+        if ($pwd.Path -like '*memlabs*') {
+            $currentBranch = (& git branch) -match '\*'
+        }
+    }
+    catch {}
+    if ($currentBranch -and $currentBranch -notmatch "main") {
+        $devBranch = $true
+    }
+
+    # Set-StrictMode -Off
+    # if ($devBranch) {
+    #     Set-StrictMode -Version 1.0
+    # }
 
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
