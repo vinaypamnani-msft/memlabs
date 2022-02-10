@@ -411,10 +411,17 @@ function Get-SQLAOConfig {
         Write-Log "SQLAO: Setting Existing ClusterIPAddress and AG IPAddress from notes $clusterIP $AGIP" -LogOnly
     }
     else {
-        $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
-        Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
-        $clusterIP = $IPs[0]
-        $AGIP = $IPs[1]
+        $clusterScope = Get-DhcpServerv4Scope | Where-Object { $_.ScopeID -eq "10.250.250.0" }
+        if ($clusterScope) {
+            $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
+            Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
+            $clusterIP = $IPs[0]
+            $AGIP = $IPs[1]
+        } else {
+            #ClusterScope doesnt exist. We can use any IP we want.
+            $clusterIP = "10.250.250.224"
+            $AGIP = "10.250.250.225"
+        }
         Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress $clusterIP $AGIP" -LogOnly
     }
 
@@ -558,13 +565,14 @@ function Add-PerVMSettings {
         if ($thisCSName) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $thisCSName -Force
         }
-        if ($thisVM.hidden){
-            $DC = get-list -type VM -DomainName $deployConfig.vmOptions.DomainName | Where-Object {$_.Role -eq "DC"}
+        if ($thisVM.hidden) {
+            $DC = get-list -type VM -DomainName $deployConfig.vmOptions.DomainName | Where-Object { $_.Role -eq "DC" }
             $addr = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
             $gateway = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".200"
             $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
             $thisParams | Add-Member -MemberType NoteProperty -Name "DCDefaultGateway" -Value $gateway  -Force
-        }else{
+        }
+        else {
             $addr = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
             $gateway = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".200"
             $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
@@ -1657,7 +1665,7 @@ Function Write-GreenCheck {
     Write-Host "  [" -NoNewLine
     Write-Host -ForeGroundColor Green "$CHECKMARK" -NoNewline
     Write-Host "] " -NoNewline
-    if ($ForegroundColor){
+    if ($ForegroundColor) {
         while (-not [string]::IsNullOrWhiteSpace($text)) {
             #write-host $text
             $indexLeft = $text.IndexOf('[')
@@ -1693,7 +1701,8 @@ Function Write-GreenCheck {
 
         }
         #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
-    }else{
+    }
+    else {
         Write-Host $text -NoNewline
     }
     if (!$NoNewLine) {
@@ -1715,7 +1724,7 @@ Function Write-RedX {
     Write-Host "  [" -NoNewLine
     Write-Host -ForeGroundColor Red "x" -NoNewline
     Write-Host "] " -NoNewline
-    if ($ForegroundColor){
+    if ($ForegroundColor) {
         while (-not [string]::IsNullOrWhiteSpace($text)) {
             #write-host $text
             $indexLeft = $text.IndexOf('[')
@@ -1751,7 +1760,8 @@ Function Write-RedX {
 
         }
         #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
-    }else{
+    }
+    else {
         Write-Host $text -NoNewline
     }
     if (!$NoNewLine) {
@@ -1773,7 +1783,7 @@ Function Write-OrangePoint {
     Write-Host "  [" -NoNewLine
     Write-Host -ForeGroundColor Yellow "!" -NoNewline
     Write-Host "] " -NoNewline
-    if ($ForegroundColor){
+    if ($ForegroundColor) {
         while (-not [string]::IsNullOrWhiteSpace($text)) {
             #write-host $text
             $indexLeft = $text.IndexOf('[')
@@ -1809,7 +1819,8 @@ Function Write-OrangePoint {
 
         }
         #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
-    }else{
+    }
+    else {
         Write-Host $text -NoNewline
     }
     if (!$NoNewLine) {

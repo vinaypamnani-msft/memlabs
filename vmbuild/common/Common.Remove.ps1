@@ -16,26 +16,30 @@ function Remove-VirtualMachine {
         return
     }
 
-    if ($vmFromList.ClusterIPAddress) {
-        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.ClusterIPAddress -EndRange $vmFromList.ClusterIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
-    }
-
-    if ($vmFromList.AGIPAddress) {
-        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.AGIPAddress -EndRange $vmFromList.AGIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
-    }
-
     $vmTest = Get-VM2 -Name $VmName -Fallback
 
     if ($vmTest) {
         Write-Log "VM '$VmName' exists. Removing." -SubActivity
 
+        if ($vmFromList.ClusterIPAddress) {
+            Write-Log "$VmName`: Removing $($vmFromList.ClusterIPAddress) Exclusion..." -HostOnly
+            Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.ClusterIPAddress -EndRange $vmFromList.ClusterIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        }
+
+        if ($vmFromList.AGIPAddress) {
+            Write-Log "$VmName`: Removing $($vmFromList.AGIPAddress) Exclusion..." -HostOnly
+            Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.AGIPAddress -EndRange $vmFromList.AGIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        }
+
         $adapters = $vmTest  | Get-VMNetworkAdapter
         foreach ($adapter in $adapters) {
-            if ($adapter.SwithName -eq "cluster") {
+            if ($adapter.SwitchName -eq "cluster") {
                 Remove-DhcpServerv4Reservation  -ScopeId 10.250.250.0 -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+                Write-Log "$VmName`: Removing $($vmFromList.Network) DHCP Reservation on cluster network..." -HostOnly
             }
             else {
                 Remove-DhcpServerv4Reservation  -ScopeId $vmFromList.Network -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+
             }
         }
 
