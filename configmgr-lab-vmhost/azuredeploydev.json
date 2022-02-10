@@ -136,19 +136,19 @@
           {
             "name": "AllowCorpnet",
             "properties": {
-              "description": "CSS Governance Security Rule.  Allow Corpnet inbound.  https://aka.ms/casg",
-              "protocol": "*",
-              "sourcePortRange": "*",
-              "destinationPortRange": "*",
-              "sourceAddressPrefix": "CorpNetPublic",
-              "destinationAddressPrefix": "*",
-              "access": "Allow",
-              "priority": 2700,
-              "direction": "Inbound",
-              "sourcePortRanges": [],
-              "destinationPortRanges": [],
-              "sourceAddressPrefixes": [],
-              "destinationAddressPrefixes": []
+                "description": "CSS Governance Security Rule.  Allow Corpnet inbound.  https://aka.ms/casg",
+                "protocol": "*",
+                "sourcePortRange": "*",
+                "destinationPortRange": "*",
+                "sourceAddressPrefix": "CorpNetPublic",
+                "destinationAddressPrefix": "*",
+                "access": "Allow",
+                "priority": 2700,
+                "direction": "Inbound",
+                "sourcePortRanges": [],
+                "destinationPortRanges": [],
+                "sourceAddressPrefixes": [],
+                "destinationAddressPrefixes": []
             }
           }
         ]
@@ -382,21 +382,40 @@
     },
     {
       "type": "Microsoft.Compute/virtualMachines/extensions",
-      "apiVersion": "2020-12-01",
-      "name": "[concat( parameters('virtualMachineName'), '/configureHost' )]",
+      "apiVersion": "2019-12-01",
+      "name": "[concat( parameters('virtualMachineName'), '/configureHyperV' )]",
       "location": "[variables('location')]",
       "dependsOn": [
         "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
       ],
       "properties": {
-        "publisher": "Microsoft.Compute",
-        "type": "CustomScriptExtension",
-        "typeHandlerVersion": "1.7",
+        "publisher": "Microsoft.Powershell",
+        "type": "DSC",
+        "typeHandlerVersion": "2.21",
         "autoUpgradeMinorVersion": true,
         "settings": {
-          "fileUris": [ "[variables('hostScript')]" ],
-          "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File configureHostTask.ps1 -ScriptUrl ', variables('hostScriptParam'))]"
+          "modulesUrl": "[variables('dscScript')]",
+          "configurationFunction": "[variables('dscFunction')]"
         }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2020-12-01",
+      "name": "[concat( parameters('virtualMachineName'), '/configureHost' )]",
+      "location": "[variables('location')]",
+      "dependsOn": [
+          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/configureHyperV' )]"
+      ],
+      "properties": {
+          "publisher": "Microsoft.Compute",
+          "type": "CustomScriptExtension",
+          "typeHandlerVersion": "1.7",
+          "autoUpgradeMinorVersion":true,
+          "settings": {
+            "fileUris": ["[variables('hostScript')]"],
+            "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File configureHostTask.ps1 -ScriptUrl ', variables('hostScriptParam'))]"
+          }
       }
     }
   ],
