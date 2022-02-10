@@ -638,8 +638,8 @@ $global:VM_Config = {
                     SecondaryReplicaServerName  = $deployConfig.thisParams.thisVM.OtherNode + "." + $deployConfig.vmOptions.DomainName
                     SqlAgentServiceAccount      = $SqlAgentServiceAccount
                     SqlServiceAccount           = $SqlServiceAccount
-                    ClusterNameAoG  = $deployConfig.SQLAO.AlwaysOnName
-                    ClusterNameAoGFQDN  = $deployConfig.SQLAO.AlwaysOnName + "." +  $deployConfig.vmOptions.DomainName
+                    ClusterNameAoG              = $deployConfig.SQLAO.AlwaysOnName
+                    ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
@@ -855,7 +855,16 @@ $global:VM_Config = {
 
                     # Write-Output, and bail
                     if (-not $msg) {
-                        Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                        #  [x] [<ScriptBlock>] PSJOB: ADA-W11Client1: DSC encountered failures. Attempting to continue. Status: Failure Output: Machine reboot failed. Please reboot it manually to finish processing the request.
+                        # This condition is expected, and we are actually rebooting.
+                        if ($($dscStatus.ScriptBlockOutput.Error) -like "%Machine reboot failed.%"){
+                            #If we dont reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
+                            continue
+                        }
+                        if ($($dscStatus.ScriptBlockOutput.Error) -ne $lasterror) {
+                            Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Warning -OutputStream
+                        }
+                        $lasterror = $($dscStatus.ScriptBlockOutput.Error)
                     }
                     if ($dscStatus.ScriptBlockOutput.Status -eq "Failure" -and $failure) {
                         return

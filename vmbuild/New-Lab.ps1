@@ -261,7 +261,7 @@ function Wait-Phase {
                     }
                 }
                 elseif ($line.StartsWith("WARNING")) {
-                    Write-Host $line -ForegroundColor Yellow
+                    Write-OrangePoint $line -ForegroundColor Yellow
                     if ($incrementCount) { $return.Warning++ }
                 }
                 else {
