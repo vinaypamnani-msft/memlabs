@@ -456,12 +456,12 @@ try {
 
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
-    if ($containsIN) {
+    #if ($containsIN) {
         $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0"
-        if (-not $worked) {
+        if ($containsIN -and (-not $worked)) {
             return
         }
-    }
+    #}
 
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
     if ($containsAO) {
