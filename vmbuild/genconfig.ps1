@@ -1021,7 +1021,13 @@ function Get-NewMachineName {
         [Parameter(Mandatory = $true, HelpMessage = "VM to rename")]
         [object] $vm,
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
-        [Object] $ConfigToCheck = $global:config
+        [Object] $ConfigToCheck = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "ClusterName")]
+        [switch] $ClusterName,
+        [Parameter(Mandatory = $false, HelpMessage = "AlwaysOnName")]
+        [switch] $AOName,
+        [Parameter(Mandatory = $false, HelpMessage = "Skip 1 in machine name")]
+        [switch] $SkipOne
     )
 
     #Get-PSCallStack | Out-Host
@@ -1150,10 +1156,23 @@ function Get-NewMachineName {
 
     }
 
+    if ($Role -eq "SQLAO") {
+        if ($ClusterName) {
+            $RoleName = "SqlCluster"
+        }
+        if ($AoName) {
+            $RoleName = "AlwaysOn"
+        }
+    }
 
     [int]$i = 1
     while ($true) {
-        $NewName = $RoleName + ($i)
+        if ($SkipOne -and $i -eq 1) {
+            $NewName = $RoleName
+        }
+        else {
+            $NewName = $RoleName + ($i)
+        }
         if ($null -eq $ConfigToCheck) {
             write-log "Config is NULL..  Machine names will not be checked. Please notify someone of this bug."
             #break
@@ -1161,7 +1180,7 @@ function Get-NewMachineName {
         if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName -and $NewName -ne $CurrentName } | Measure-Object).Count -eq 0) {
 
             $newNameWithPrefix = ($ConfigToCheck.vmOptions.prefix) + $NewName
-            if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {
+            if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix -or $_.ClusterName -eq $newNameWithPrefix -or $_.AlwaysOnName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {
                 break
             }
         }
@@ -3810,8 +3829,11 @@ function Add-NewVMForRole {
         }
         #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'SQLAgentAccount' -Value "SqlAgentUser"
         #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "SqlServiceUser"
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value "SqlCluster"
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnName' -Value "AlwaysOn"
+        $ClusterName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -ClusterName:$true -SkipOne:$true
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value $ClusterName
+        $AOName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -AOName:$true -SkipOne:$true
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnName' -Value $AOName
+
     }
     if ($NewFSServer -eq $true) {
         #Get-PSCallStack | out-host
