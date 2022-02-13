@@ -259,7 +259,6 @@ function Wait-Phase {
     do {
 
         $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
-        write-host "Waiting on $($runningJobs.Count) running jobs"
         foreach ($job in $runningJobs) {
             Write-JobProgress($job)
         }
