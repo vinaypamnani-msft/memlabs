@@ -228,6 +228,7 @@ Configuration SQLAOConfiguration
             DHCP                 = $false
             Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
             IpAddress            = $Node.AGIPAddress
+
             Port                 = 1500
             DependsOn            = '[SqlAG]CMCASAG'
             PsDscRunAsCredential = $SqlAdministratorCredential
@@ -306,7 +307,7 @@ Configuration SQLAOConfiguration
                 ServerName              = $Node.NodeName
                 Ensure                  = 'Present'
                 ProcessOnlyOnActiveNode = $true
-
+                MatchDatabaseOwner      = $true
                 PsDscRunAsCredential    = $SqlAdministratorCredential
                 DependsOn               = '[SqlDatabase]SetRecoveryModel'
             }
@@ -537,19 +538,27 @@ Configuration SQLAOConfiguration
                 RetryCount       = 450
                 Dependson        = $nextDepend
             }
-            SqlAGDatabase 'AddAGDatabaseMemberships' {
-                AvailabilityGroupName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-                BackupPath              = $Node.BackupShare
-                DatabaseName            = $Node.DBName
-                InstanceName            = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-                ServerName              = $Node.NodeName
-                Ensure                  = 'Present'
-                ProcessOnlyOnActiveNode = $true
-
-                PsDscRunAsCredential    = $SqlAdministratorCredential
-                DependsOn = '[WaitForAll]RecoveryModel'
+            WaitForAll AddAGDatabaseMemberships  {
+                ResourceName     = '[SqlAGDatabase]AddAGDatabaseMemberships'
+                NodeName         = $node1
+                RetryIntervalSec = 2
+                RetryCount       = 450
+                Dependson        = '[WaitForAll]RecoveryModel'
             }
-            $nextDepend = '[SqlAGDatabase]AddAGDatabaseMemberships'
+            $nextDepend = '[WaitForAll]AddAGDatabaseMemberships'
+            #SqlAGDatabase 'AddAGDatabaseMemberships' {
+            #    AvailabilityGroupName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
+            #    BackupPath              = $Node.BackupShare
+            #    DatabaseName            = $Node.DBName
+            #    InstanceName            = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            #    ServerName              = $node1
+            #    Ensure                  = 'Present'
+            #    ProcessOnlyOnActiveNode = $true
+            #    MatchDatabaseOwner      = $true
+            #    PsDscRunAsCredential    = $SqlAdministratorCredential
+            #    DependsOn = '[WaitForAll]RecoveryModel'
+            #}
+            #$nextDepend = '[SqlAGDatabase]AddAGDatabaseMemberships'
         }
         WriteStatus Complete {
             DependsOn =  $nextDepend

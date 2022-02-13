@@ -89,8 +89,8 @@ function Write-JobProgress {
             else {
                 $latestPercentComplete = 0
             }
-            try{
-            Write-Progress -Id $Job.Id -Activity "$jobName`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
+            try {
+                Write-Progress -Id $Job.Id -Activity "$jobName`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
             }
             catch {}
         }
@@ -245,6 +245,7 @@ function Wait-Phase {
         Warning = 0
     }
 
+    $FailRetry = 0
     do {
 
         $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
@@ -254,12 +255,17 @@ function Wait-Phase {
 
         $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
         foreach ($job in $failedJobs) {
-            $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
-            Write-RedX $jobOutput -ForegroundColor Red
-            Write-Progress -Id $job.Id -Activity $job.Name -Completed
-            $jobs.Remove($job)
+            $FailRetry = $FailRetry + 1
+            if ($FailRetry -gt 30) {
+                $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
+                $jobJson = $job | convertTo-Json -depth 4
+                Write-Log "Job failed: $jobJson"
+                Write-RedX "Job failed: $jobOutput" -ForegroundColor Red
+                Write-Progress -Id $job.Id -Activity $job.Name -Completed
+                $jobs.Remove($job)
 
-            $return.Failed++
+                $return.Failed++
+            }
         }
         $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
         foreach ($job in $completedJobs) {
@@ -457,10 +463,10 @@ try {
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
     #if ($containsIN) {
-        $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0"
-        if ($containsIN -and (-not $worked)) {
-            return
-        }
+    $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0"
+    if ($containsIN -and (-not $worked)) {
+        return
+    }
     #}
 
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
