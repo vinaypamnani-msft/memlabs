@@ -10,7 +10,7 @@
 
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc', 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc', 'SqlServerDsc', 'ActiveDirectoryDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
@@ -268,7 +268,7 @@
             # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
             $sqlDependency = @('[WriteStatus]AddSQLPermissions')
             $i = 0
-            foreach ($account in $SQLSysAdminAccounts | Where-Object {$_ -notlike "BUILTIN*" } ) {
+            foreach ($account in $SQLSysAdminAccounts | Where-Object { $_ -notlike "BUILTIN*" } ) {
                 $i++
 
                 SqlLogin "AddSqlLogin$i" {
@@ -302,37 +302,142 @@
                 InstanceName = $SQLInstanceName
             }
 
+            ChangeSqlInstancePort SqlInstancePort {
+                SQLInstanceName = $SQLInstanceName
+                SQLInstancePort = 2433
+                Ensure          = "Present"
+                DependsOn       = "[SqlMemory]SetSqlMemory"
+            }
+
+            $nextDepend = '[ChangeSqlInstancePort]SqlInstancePort'
+            if ($ThisVM.SqlServiceAccount) {
+
+                WriteStatus SetSQLSPN {
+                    DependsOn = $nextDepend
+                    Status    = "SQL setting new startup user to ${DName}\$($ThisVM.SqlServiceAccount)"
+                }
+
+
+                $SPNs = @()
+                $SPNs += "MSSQLSvc/" + $thisvm.VmName
+                $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName
+                if ($SQLInstanceName -eq "MSSQLSERVER") {
+                    $port = "1433"
+                }
+                else {
+                    $port = "2433"
+                    $SPNs += "MSSQLSvc/" + $thisvm.VmName + ":" + $SQLInstanceName
+                    $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName + ":" + $SQLInstanceName
+
+                }
+                $SPNs += "MSSQLSvc/" + $thisvm.VmName + ":" + $port
+                $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName + ":" + $port
+
+
+
+                # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
+                $spnDependency = @($nextDepend)
+                $i = 0
+                foreach ($spn in $SPNs ) {
+                    $i++
+
+                    ADServicePrincipalName "spn$i" {
+                        Ensure               = 'Absent'
+                        ServicePrincipalName = $spn
+                        Account              = $thisvm.VmName + "$"
+                        Dependson            = $nextDepend
+                        PsDscRunAsCredential = $CMAdmin
+                    }
+
+                    $spnDependency += "[ADServicePrincipalName]spn$i"
+                }
+
+
+                [System.Management.Automation.PSCredential]$sqlUser = New-Object System.Management.Automation.PSCredential ("${DName}\$($ThisVM.SqlServiceAccount)", $Admincreds.Password)
+                [System.Management.Automation.PSCredential]$sqlAgentUser = New-Object System.Management.Automation.PSCredential ("${DName}\$($ThisVM.SqlAgentAccount)", $Admincreds.Password)
+
+                #Change SQL Service Account
+                SqlServiceAccount 'SetServiceAccountSQL_User' {
+                    ServerName           = $thisvm.VmName
+                    InstanceName         = $SQLInstanceName
+                    ServiceType          = 'DatabaseEngine'
+                    ServiceAccount       = $sqlUser
+                    RestartService       = $true
+                    DependsOn            = $spnDependency
+                    PsDscRunAsCredential = $CMAdmin
+                    Force                = $true
+                }
+
+                #Change SQL Service Account
+                SqlServiceAccount 'SetServiceAccountAgent_User' {
+                    ServerName           = $thisvm.VmName
+                    InstanceName         = $SQLInstanceName
+                    ServiceType          = 'SQLServerAgent'
+                    ServiceAccount       = $sqlAgentUser
+                    RestartService       = $true
+                    PsDscRunAsCredential = $CMAdmin
+                    DependsOn            = '[SqlServiceAccount]SetServiceAccountSQL_User'
+                }
+
+                $agentName = if ($SQLInstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + $SQLInstanceName }
+                Service 'ChangeStartupAgent' {
+                    Name                 = $agentName
+                    StartupType          = "Automatic"
+                    State                = "Running"
+                    DependsOn            = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
+                    PsDscRunAsCredential = $CMAdmin
+                }
+
+                 # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
+                 $spnDependency = @("[Service]ChangeStartupAgent")
+                 $i = 0
+                 foreach ($spn in $SPNs ) {
+                     $i++
+
+                  #   ADServicePrincipalName "spnset$i" {
+                  #       Ensure               = 'present'
+                  #       ServicePrincipalName = $spn
+                  #       Account              = $ThisVM.SqlServiceAccount
+                  #       Dependson            = "[Service]ChangeStartupAgent"
+                  #       PsDscRunAsCredential = $CMAdmin
+                  #   }
+
+                  #   $spnDependency += "[ADServicePrincipalName]spnset$i"
+                 }
+
+                $nextDepend = $spnDependency
+            }
+
             WriteStatus SSMS {
-                DependsOn = '[SqlMemory]SetSqlMemory'
+                DependsOn = $nextDepend
                 Status    = "Downloading and installing SQL Management Studio"
             }
 
             InstallSSMS SSMS {
                 DownloadUrl = "https://aka.ms/ssmsfullsetup"
                 Ensure      = "Present"
-                DependsOn   = '[SqlMemory]SetSqlMemory'
+                DependsOn   = $nextDepend
             }
 
-            WriteStatus ChangeToLocalSystem {
-                DependsOn = "[InstallSSMS]SSMS"
-                Status    = "Configuring SQL services to use LocalSystem"
-            }
 
-            ChangeSqlInstancePort SqlInstancePort {
-                SQLInstanceName = $SQLInstanceName
-                SQLInstancePort = 2433
-                Ensure          = "Present"
-                DependsOn       = "[InstallSSMS]SSMS"
-            }
+            $nextDepend = "[InstallSSMS]SSMS"
+            if (-not $ThisVM.SqlServiceAccount) {
 
-            ChangeSQLServicesAccount ChangeToLocalSystem {
-                SQLInstanceName = $SQLInstanceName
-                Ensure          = "Present"
-                DependsOn       = "[ChangeSqlInstancePort]SqlInstancePort"
+                WriteStatus ChangeToLocalSystem {
+                    DependsOn = $nextDepend
+                    Status    = "Configuring SQL services to use LocalSystem"
+                }
+
+                ChangeSQLServicesAccount ChangeToLocalSystem {
+                    SQLInstanceName = $SQLInstanceName
+                    Ensure          = "Present"
+                    DependsOn       = $nextDepend
+                }
+                $nextDepend = '[ChangeSQLServicesAccount]ChangeToLocalSystem'
             }
 
             WriteStatus AddLocalAdmin {
-                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
+                DependsOn = $nextDepend
                 Status    = "Adding cm_svc domain account to Local Administrators group"
             }
 

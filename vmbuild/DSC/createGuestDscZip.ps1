@@ -93,6 +93,7 @@ try {
         "FileServer" { $role = "DomainMember" }
         "AADClient" { $role = "WorkgroupMember" }
         "InternetClient" { $role = "WorkgroupMember" }
+        "SQLAO" { $role = "DomainMember" }
         Default { $role = $role }
     }
     Write-Host "Creating a test config for $role in C:\Temp"

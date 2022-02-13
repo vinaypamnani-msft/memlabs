@@ -127,8 +127,8 @@ Configuration SQLAOConfiguration
         }
 
 
-          #Change SQL Service Account
-          SqlLogin 'Add_WindowsUserAgent' {
+        #Change SQL Service Account
+        SqlLogin 'Add_WindowsUserAgent' {
             Ensure               = 'Present'
             Name                 = $node.SqlAgentServiceAccount
             LoginType            = 'WindowsUser'
@@ -153,81 +153,11 @@ Configuration SQLAOConfiguration
             ServerRoleName       = 'SysAdmin'
             ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            MembersToInclude     = $node.SqlServiceAccount,$node.SqlAgentServiceAccount, 'BUILTIN\Administrators'
+            MembersToInclude     = $node.SqlServiceAccount, $node.SqlAgentServiceAccount, 'BUILTIN\Administrators'
             PsDscRunAsCredential = $SqlAdministratorCredential
             DependsOn            = '[SqlLogin]Add_WindowsUser'
         }
 
-        $spn1 = "MSSQLSvc/" + $Node.PrimaryReplicaServerName
-        $spn2 = $spn1 + ":1433"
-        $spn2a = $spn3 + ":2433"
-        $spn2b = $spn3 + ":" + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-
-        ADServicePrincipalName 'spn1' {
-            Ensure               = 'Absent'
-            ServicePrincipalName = $spn1
-            Account              = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName + "$"
-            Dependson            = '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
-        ADServicePrincipalName 'spn2' {
-            Ensure               = 'Absent'
-            ServicePrincipalName = $spn2
-            Account              = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName + "$"
-            Dependson            = '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
-        ADServicePrincipalName 'spn2a' {
-            Ensure               = 'Absent'
-            ServicePrincipalName = $spn2a
-            Account              = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName + "$"
-            Dependson            = '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
-        ADServicePrincipalName 'spn2b' {
-            Ensure               = 'Absent'
-            ServicePrincipalName = $spn2b
-            Account              = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName + "$"
-            Dependson            = '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
-
-        $sqlUser  = New-Object System.Management.Automation.PSCredential ($node.SqlServiceAccount, $SqlAdministratorCredential.Password)
-        $sqlAgentUser = New-Object System.Management.Automation.PSCredential ($node.SqlAgentServiceAccount, $SqlAdministratorCredential.Password)
-
-        #Change SQL Service Account
-        SqlServiceAccount 'SetServiceAccountSQL_User' {
-            ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            ServiceType          = 'DatabaseEngine'
-            ServiceAccount       = $sqlUser
-            RestartService       = $true
-            DependsOn            = '[ADServicePrincipalName]spn2'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-            Force                = $true
-        }
-
-        #Change SQL Service Account
-        SqlServiceAccount 'SetServiceAccountAgent_User' {
-            ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            ServiceType          = 'SQLServerAgent'
-            ServiceAccount       = $sqlAgentUser
-            RestartService       = $true
-            PsDscRunAsCredential = $SqlAdministratorCredential
-            DependsOn            = '[SqlServiceAccount]SetServiceAccountSQL_User'
-        }
-
-
-
-        $agentName = if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName }
-        Service 'ChangeStartupAgent' {
-            Name                 = $agentName
-            StartupType          = "Automatic"
-            State                = "Running"
-            DependsOn            = '[SqlServiceAccount]SetServiceAccountAgent_User', '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
 
         # Adding the required service account to allow the cluster to log into SQL
         SqlLogin 'AddNTServiceClusSvc' {
@@ -237,11 +167,12 @@ Configuration SQLAOConfiguration
             ServerName           = $Node.NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
             PsDscRunAsCredential = $SqlAdministratorCredential
+            DependsOn            = '[SqlLogin]Add_WindowsUser'
         }
 
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions' {
-            DependsOn            = '[SqlLogin]AddNTServiceClusSvc', '[Service]ChangeStartupAgent'
+            DependsOn            = '[SqlLogin]AddNTServiceClusSvc'
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
@@ -351,8 +282,38 @@ Configuration SQLAOConfiguration
             Dependson        = '[SqlAGListener]AvailabilityGroupListener'
         }
 
+
+        $nextDepend = '[WaitForAll]AddReplica'
+        if ($Node.DBName) {
+
+            SqlDatabase 'SetRecoveryModel'
+            {
+                Ensure = 'Present'
+                ServerName = $Node.NodeName
+                InstanceName = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+                Name = $Node.DBName
+                RecoveryModel = 'Full'
+
+                PsDscRunAsCredential = $SqlAdministratorCredential
+                DependsOn               = $nextDepend
+            }
+
+            SqlAGDatabase 'AddAGDatabaseMemberships' {
+                AvailabilityGroupName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
+                BackupPath              = $Node.BackupShare
+                DatabaseName            = $Node.DBName
+                InstanceName            = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+                ServerName              = $Node.NodeName
+                Ensure                  = 'Present'
+                ProcessOnlyOnActiveNode = $true
+
+                PsDscRunAsCredential    = $SqlAdministratorCredential
+                DependsOn               = '[SqlDatabase]SetRecoveryModel'
+            }
+            $nextDepend = '[SqlAGDatabase]AddAGDatabaseMemberships'
+        }
         WriteStatus Complete {
-            DependsOn = '[WaitForAll]AddReplica'
+            DependsOn = $nextDepend
             Status    = "Complete!"
         }
     }
@@ -436,7 +397,7 @@ Configuration SQLAOConfiguration
         xClusterQuorum 'ClusterWitness' {
             IsSingleInstance     = 'Yes'
             Type                 = 'NodeAndFileShareMajority'
-            Resource             = $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.Resource
+            Resource             = $Node.WitnessShare
             DependsOn            = '[xCluster]JoinSecondNodeToCluster'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
@@ -465,94 +426,9 @@ Configuration SQLAOConfiguration
             ServerRoleName       = 'SysAdmin'
             ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            MembersToInclude     = $node.SqlAgentServiceAccount,$node.SqlServiceAccount, 'BUILTIN\Administrators'
+            MembersToInclude     = $node.SqlAgentServiceAccount, $node.SqlServiceAccount, 'BUILTIN\Administrators'
             PsDscRunAsCredential = $SqlAdministratorCredential
             DependsOn            = '[SqlLogin]Add_WindowsUser'
-        }
-
-        $ADComputerName = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName + "$"
-        $spn3 = "MSSQLSvc/" + $Node.SecondaryReplicaServerName
-        $spn4 = $spn3 + ":1433"
-        $spn4a = $spn3 + ":2433"
-        $spn4b = $spn3 + ":" + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-
-        WriteStatus SpnAccount {
-            Dependson = '[xClusterQuorum]ClusterWitness'
-            Status    = "Removing SQL SPNs ($spn3 $spn4) from $ADComputerName"
-        }
-
-
-        ADServicePrincipalName 'spn3' {
-            Ensure               = 'Absent'
-            ServicePrincipalName = $spn3
-            Account              = $ADComputerName
-            Dependson            = '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
-        ADServicePrincipalName 'spn4' {
-            Ensure               = 'Absent'
-            ServicePrincipalName = $spn4
-            Account              = $ADComputerName
-            Dependson            = '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
-
-        ADServicePrincipalName 'spn4a' {
-            Ensure               = 'Absent'
-            ServicePrincipalName = $spn4a
-            Account              = $ADComputerName
-            Dependson            = '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
-
-        ADServicePrincipalName 'spn4b' {
-            Ensure               = 'Absent'
-            ServicePrincipalName = $spn4b
-            Account              = $ADComputerName
-            Dependson            = '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
-
-        WriteStatus SvcAccount {
-            Dependson = '[ADServicePrincipalName]spn4'
-            Status    = "Configuring SQL Service Accounts and SQL Logins"
-        }
-        #$sqlUser  = New-Object System.Management.Automation.PSCredential ($node.SqlServiceAccount, $SqlAdministratorCredential.GetNetworkCredential().Password)
-        #$sqlAgentUser = New-Object System.Management.Automation.PSCredential ($node.SqlAgentServiceAccount, $SqlAdministratorCredential.GetNetworkCredential().Password)
-        $sqlUser  = New-Object System.Management.Automation.PSCredential ($node.SqlServiceAccount, $SqlAdministratorCredential.Password)
-        $sqlAgentUser = New-Object System.Management.Automation.PSCredential ($node.SqlAgentServiceAccount, $SqlAdministratorCredential.Password)
-        #Change SQL Service Account
-        SqlServiceAccount 'SetServiceAccountSQL_User' {
-            ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            ServiceType          = 'DatabaseEngine'
-            ServiceAccount       = $sqlUser
-            RestartService       = $true
-            Dependson            = '[ADServicePrincipalName]spn4'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-            Force                = $true
-        }
-
-        #Change SQL Service Account
-        SqlServiceAccount 'SetServiceAccountAgent_User' {
-            ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            ServiceType          = 'SQLServerAgent'
-            ServiceAccount       = $sqlAgentUser
-            RestartService       = $true
-            Dependson            = '[SqlServiceAccount]SetServiceAccountSQL_User'
-            PsDscRunAsCredential = $SqlAdministratorCredential
-        }
-
-
-
-        $agentName = if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName }
-        Service 'ChangeStartupAgent' {
-            Name                 = $agentName
-            StartupType          = "Automatic"
-            State                = "Running"
-            DependsOn            = '[SqlServiceAccount]SetServiceAccountAgent_User', '[SqlRole]Add_ServerRole'
-            PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
         # Adding the required service account to allow the cluster to log into SQL
@@ -568,7 +444,7 @@ Configuration SQLAOConfiguration
 
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions' {
-            DependsOn            = '[SqlLogin]AddNTServiceClusSvc', '[Service]ChangeStartupAgent'
+            DependsOn            = '[SqlLogin]AddNTServiceClusSvc'
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
             InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
@@ -651,9 +527,32 @@ Configuration SQLAOConfiguration
             DependsOn                     = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
             PsDscRunAsCredential          = $SqlAdministratorCredential
         }
+        $nextDepend = '[SqlAGReplica]AddReplica'
+        if ($Node.DBName) {
 
+            WaitForAll RecoveryModel  {
+                ResourceName     = '[SqlDatabase]SetRecoveryModel'
+                NodeName         = $node1
+                RetryIntervalSec = 2
+                RetryCount       = 450
+                Dependson        = $nextDepend
+            }
+            SqlAGDatabase 'AddAGDatabaseMemberships' {
+                AvailabilityGroupName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
+                BackupPath              = $Node.BackupShare
+                DatabaseName            = $Node.DBName
+                InstanceName            = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+                ServerName              = $Node.NodeName
+                Ensure                  = 'Present'
+                ProcessOnlyOnActiveNode = $true
+
+                PsDscRunAsCredential    = $SqlAdministratorCredential
+                DependsOn = '[WaitForAll]RecoveryModel'
+            }
+            $nextDepend = '[SqlAGDatabase]AddAGDatabaseMemberships'
+        }
         WriteStatus Complete {
-            DependsOn = '[SqlAGReplica]AddReplica'
+            DependsOn =  $nextDepend
             Status    = "Complete!"
         }
     }

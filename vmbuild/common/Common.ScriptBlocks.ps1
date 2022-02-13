@@ -570,7 +570,7 @@ $global:VM_Config = {
             Write-Error $error_message
             return $error_message
         }
-        $resourceDir = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
+
         if (-not $deployConfig.vmOptions.domainName) {
             $error_message = "Could not get domainName name from deployConfig"
             $error_message | Out-File $log -Append
@@ -597,6 +597,11 @@ $global:VM_Config = {
             return $error_message
         }
 
+        $siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $deployConfig.thisParams.MachineName }
+        $db_name = $null
+        if ($siteServer) {
+            $db_name = "CM_" + $siteServer.SiteCode
+        }
         # Configuration Data
         $cd = @{
             AllNodes = @(
@@ -625,7 +630,6 @@ $global:VM_Config = {
 
                     # This is used in the configuration to know which resource to compile.
                     Role     = 'ClusterNode2'
-                    Resource = $resourceDir
                 },
                 @{
                     NodeName                    = "*"
@@ -640,6 +644,9 @@ $global:VM_Config = {
                     SqlServiceAccount           = $SqlServiceAccount
                     ClusterNameAoG              = $deployConfig.SQLAO.AlwaysOnName
                     ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
+                    WitnessShare                = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
+                    BackupShare                 = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
+                    DBName                      = $db_name
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )

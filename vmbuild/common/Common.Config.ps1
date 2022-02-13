@@ -417,7 +417,8 @@ function Get-SQLAOConfig {
             Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
             $clusterIP = $IPs[0]
             $AGIP = $IPs[1]
-        } else {
+        }
+        else {
             #ClusterScope doesnt exist. We can use any IP we want.
             $clusterIP = "10.250.250.224"
             $AGIP = "10.250.250.225"
@@ -435,6 +436,8 @@ function Get-SQLAOConfig {
         ClusterNodes           = @($PrimaryAO.vmName, $SecondAO.vmName)
         WitnessShare           = "$($ClusterNameNoPrefix)-Witness"
         WitnessLocalPath       = "F:\$($ClusterNameNoPrefix)-Witness"
+        BackupShare           = "$($ClusterNameNoPrefix)-Backup"
+        BackupLocalPath       = "F:\$($ClusterNameNoPrefix)-Backup"
         ClusterIPAddress       = $clusterIP
         AGIPAddress            = $AGIP
         AlwaysOnName           = $PrimaryAO.AlwaysOnName
@@ -534,7 +537,6 @@ function Add-PerVMSettings {
 
     }
 
-
     # DC DSC needs a list of SiteServers to wait on.
     if ($thisVM.role -eq "DC") {
         $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
@@ -621,6 +623,12 @@ function Add-PerVMSettings {
         $cm_admin = "$DNAME\$DomainAdminName"
         $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, 'BUILTIN\Administrators')
         $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
+
+        if (-not $SiteServerVM) {
+            $OtherNode = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $thisVM.vmName }
+            $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $OtherNode.vmName }
+        }
+
         if (-not $SiteServerVM) {
             $SiteServerVM = Get-List -Type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
         }

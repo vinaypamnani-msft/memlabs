@@ -1187,7 +1187,7 @@ function Get-NewMachineName {
         write-log -verbose "$newName already exists [$CurrentName].. Trying next"
         $i++
     }
-    return $NewName
+    return $NewName.ToUpper()
 }
 
 function Get-NewSiteCode {
@@ -2680,7 +2680,7 @@ Function Get-remoteSQLVM {
     while ($valid -eq $false) {
         $additionalOptions = @{ "L" = "Local SQL" }
 
-        $validVMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Select-Object -ExpandProperty vmName
+        $validVMs = $Global:Config.virtualMachines | Where-Object { ($_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion) -or ($_.Role -eq "SQLAO" -and $_.OtherNode ) } | Select-Object -ExpandProperty vmName
 
         $CASVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
         $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
@@ -2699,6 +2699,7 @@ Function Get-remoteSQLVM {
 
         if (($validVMs | Measure-Object).Count -eq 0) {
             $additionalOptions += @{ "N" = "Create a New SQL VM" }
+            $additionalOptions += @{ "A" = "Create a New SQL Always On Cluster" }
         }
         $result = Get-Menu "Select Remote SQL VM, or Select Local" $($validVMs) $CurrentValue -Test:$false -additionalOptions $additionalOptions
 
@@ -2710,6 +2711,12 @@ Function Get-remoteSQLVM {
                 $name = $($property.SiteCode) + "SQL"
                 Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name
                 Set-SiteServerRemoteSQL $property $name
+            }
+            "a" {
+                $name1 = $($property.SiteCode) + "SQLAO1"
+                $name2 = $($property.SiteCode) + "SQLAO2"
+                Add-NewVMForRole -Role "SQLAO" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name1 -Name2 $Name2
+                Set-SiteServerRemoteSQL $property $name1
             }
             Default {
                 if ([string]::IsNullOrWhiteSpace($result)) {
@@ -2903,6 +2910,22 @@ function Get-AdditionalValidations {
             }
         }
 
+        "SqlServiceAccount" {
+            if ($property.Role -eq "SQLAO") {
+                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                foreach ($sql in $SQLAO) {
+                    $sql.$name = $value
+                }
+            }
+        }
+        "SqlAgentAccount" {
+            if ($property.Role -eq "SQLAO") {
+                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                foreach ($sql in $SQLAO) {
+                    $sql.$name = $value
+                }
+            }
+        }
         "sqlVersion" {
             if ($property.Role -eq "SQLAO") {
                 $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
@@ -3584,6 +3607,8 @@ function Add-NewVMForRole {
         [object] $ConfigToModify = $global:config,
         [Parameter(Mandatory = $false, HelpMessage = "Force VM Name. Otherwise auto-generated")]
         [string] $Name = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Force VM Name for 2nd Node. Otherwise auto-generated")]
+        [string] $Name2 = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary or Secondary in a Heirarchy")]
         [string] $parentSiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite or a DPMP")]
@@ -3821,7 +3846,7 @@ function Add-NewVMForRole {
     }
     if ($firstSQLAO) {
         write-host "$($virtualMachine.VmName) is the 1st SQLAO"
-        $SQLAONode = Add-NewVMForRole -Role SQLAO -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem  -Quiet:$Quiet -ReturnMachineName:$true
+        $SQLAONode = Add-NewVMForRole -Role SQLAO -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Name $Name2  -Quiet:$Quiet -ReturnMachineName:$true
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'OtherNode' -Value $SQLAONode
         if ($test -eq $false ) {
             $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$false
@@ -3833,6 +3858,17 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value $ClusterName
         $AOName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -AOName:$true -SkipOne:$true
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnName' -Value $AOName
+
+        $ServiceAccount = "$($ClusterName)Svc"
+        $AgentAccount = "$($ClusterName)Agent"
+
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value $ServiceAccount
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value $AgentAccount
+
+        $otherNode = $ConfigToModify.VirtualMachines | Where-Object { $_.vmName -eq $SQLAONode }
+        $otherNode | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value $ServiceAccount
+        $otherNode | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value $AgentAccount
+
 
     }
     if ($NewFSServer -eq $true) {
@@ -4200,37 +4236,38 @@ function Select-VirtualMachines {
                 foreach ($virtualMachine in $global:config.virtualMachines) {
                     $i = $i + 1
                     if ($i -eq $response) {
-                        $response = Read-Host2 -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (y/N)" -HideHelp
-                        if (-not [String]::IsNullOrWhiteSpace($response)) {
-                            if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
-                                if ($virtualMachine.role -eq "FileServer") {
-                                    $passiveVM = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-                                    if ($passiveVM) {
-                                        if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
-                                            Write-Host
-                                            write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
-                                            $removeVM = $false
-                                        }
-                                    }
-                                    $SQLAOVM = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.fileServerVM }
-                                    if ($SQLAOVM) {
-                                        if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
-                                            Write-Host
-                                            write-host -ForegroundColor Yellow "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
-                                            $removeVM = $false
-                                        }
+                        $response = Read-Host2 -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (Y/n)" -HideHelp
+                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                        }
+                        else {
+                            if ($virtualMachine.role -eq "FileServer") {
+                                $passiveVM = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+                                if ($passiveVM) {
+                                    if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
+                                        Write-Host
+                                        write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
+                                        $removeVM = $false
                                     }
                                 }
-                                if ($virtualMachine.role -eq "SQLAO") {
-                                    $SQLAOVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" }
-                                    foreach ($svm in $SQLAOVMs) {
-                                        Remove-VMFromConfig -vmName $svm.vmName -ConfigToModify $global:config
+                                $SQLAOVM = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.fileServerVM }
+                                if ($SQLAOVM) {
+                                    if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
+                                        Write-Host
+                                        write-host -ForegroundColor Yellow "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
+                                        $removeVM = $false
                                     }
-                                }
-                                if ($removeVM -eq $true) {
-                                    Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
                                 }
                             }
+                            if ($virtualMachine.role -eq "SQLAO") {
+                                $SQLAOVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" }
+                                foreach ($svm in $SQLAOVMs) {
+                                    Remove-VMFromConfig -vmName $svm.vmName -ConfigToModify $global:config
+                                }
+                            }
+                            if ($removeVM -eq $true) {
+                                Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
+                            }
+
                         }
                     }
                 }

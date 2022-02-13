@@ -173,6 +173,13 @@
                 Status    = "Configuring Cluster Share"
             }
 
+            File ClusterBackup {
+                DestinationPath = $deployConfig.SQLAO.BackupLocalPath
+                Type            = 'Directory'
+                Ensure          = "Present"
+                DependsOn       = '[WriteStatus]ClusterShare'
+            }
+
             File ClusterWitness {
                 DestinationPath = $deployConfig.SQLAO.WitnessLocalPath
                 Type            = 'Directory'
@@ -235,6 +242,50 @@
                 Dependson         = '[File]ClusterWitness'
             }
 
+
+            NTFSAccessEntry ClusterBackupPermissions {
+                Path              = $deployConfig.SQLAO.BackupLocalPath
+                AccessControlList = @(
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\$($deployConfig.SQLAO.SqlServiceAccount)"
+                        ForcePrincipal     = $true
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\$($deployConfig.SQLAO.SqlAgentServiceAccount)"
+                        ForcePrincipal     = $false
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\$DomainAdminName"
+                        ForcePrincipal     = $false
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                )
+                Dependson         = '[File]ClusterBackup'
+            }
+
             SmbShare ClusterShare {
                 Name                  = $deployConfig.SQLAO.WitnessShare
                 Path                  = $deployConfig.SQLAO.WitnessLocalPath
@@ -245,8 +296,18 @@
                 DependsOn             = '[NTFSAccessEntry]ClusterWitnessPermissions'
             }
 
+             SmbShare BackupShare {
+                Name                  = $deployConfig.SQLAO.BackupShare
+                Path                  = $deployConfig.SQLAO.BackupLocalPath
+                Description           = $deployConfig.SQLAO.BackupShare
+                FolderEnumerationMode = 'AccessBased'
+                FullAccess            = "$DomainName\$($deployConfig.SQLAO.SqlServiceAccount)", "$DomainName\$($deployConfig.SQLAO.SqlAgentServiceAccount)"
+                ReadAccess            = "Everyone"
+                DependsOn             = '[NTFSAccessEntry]ClusterBackupPermissions'
+            }
+
             WriteStatus AddLocalAdmin {
-                DependsOn = '[SmbShare]ClusterShare'
+                DependsOn = '[SmbShare]ClusterShare', '[SmbShare]BackupShare'
                 Status    = "Adding cm_svc domain account to Local Administrators group"
             }
 
