@@ -282,6 +282,18 @@
                             }
                         )
                     }
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\vmbuildadmin"
+                        ForcePrincipal     = $false
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
                 )
                 Dependson         = '[File]ClusterBackup'
             }
@@ -301,7 +313,7 @@
                 Path                  = $deployConfig.SQLAO.BackupLocalPath
                 Description           = $deployConfig.SQLAO.BackupShare
                 FolderEnumerationMode = 'AccessBased'
-                FullAccess            = "$DomainName\$($deployConfig.SQLAO.SqlServiceAccount)", "$DomainName\$($deployConfig.SQLAO.SqlAgentServiceAccount)"
+                FullAccess            = "$DomainName\$($deployConfig.SQLAO.SqlServiceAccount)", "$DomainName\$($deployConfig.SQLAO.SqlAgentServiceAccount)", "$DomainName\$DomainAdminName", "$DomainName\vmbuildadmin"
                 ReadAccess            = "Everyone"
                 DependsOn             = '[NTFSAccessEntry]ClusterBackupPermissions'
             }

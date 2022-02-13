@@ -34,7 +34,9 @@ function Remove-VirtualMachine {
         $adapters = $vmTest  | Get-VMNetworkAdapter
         foreach ($adapter in $adapters) {
             if ($adapter.SwitchName -eq "cluster") {
+                try{
                 Remove-DhcpServerv4Reservation  -ScopeId 10.250.250.0 -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+                } catch{}
                 Write-Log "$VmName`: Removing DHCP Reservation on cluster network..." -HostOnly
             }
             else {

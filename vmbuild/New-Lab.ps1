@@ -193,6 +193,11 @@ function Start-PhaseJobs {
 
         if ($Phase -eq 0 -or $Phase -eq 1) {
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
+            if ($null -eq $job)
+            {
+                Write-Log "Failed to create job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
+                $job_created_no++
+            }
         }
         else {
             $skipStartDsc = $false
@@ -200,6 +205,11 @@ function Start-PhaseJobs {
                 $skipStartDsc = $true
             }
             $job = Start-Job -ScriptBlock $global:VM_Config -ArgumentList $skipStartDsc -Name $jobName -ErrorAction Stop -ErrorVariable Err
+            if ($null -eq $job)
+            {
+                Write-Log "Failed to create job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
+                $job_created_no++
+            }
         }
 
         if ($Err.Count -ne 0) {
@@ -249,6 +259,7 @@ function Wait-Phase {
     do {
 
         $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
+        write-host "Waiting on $($runningJobs.Count) running jobs"
         foreach ($job in $runningJobs) {
             Write-JobProgress($job)
         }
@@ -259,7 +270,7 @@ function Wait-Phase {
             if ($FailRetry -gt 30) {
                 $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
                 $jobJson = $job | convertTo-Json -depth 4
-                Write-Log "Job failed: $jobJson"
+                Write-Log "Job failed: $jobJson" -LogOnly
                 Write-RedX "Job failed: $jobOutput" -ForegroundColor Red
                 Write-Progress -Id $job.Id -Activity $job.Name -Completed
                 $jobs.Remove($job)
@@ -309,8 +320,7 @@ function Wait-Phase {
         # Sleep
         Start-Sleep -Seconds 1
 
-    } until ($runningJobs.Count -eq 0)
-
+    } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
     return $return
 }
 
