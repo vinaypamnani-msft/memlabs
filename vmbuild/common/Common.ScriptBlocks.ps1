@@ -866,7 +866,7 @@ $global:VM_Config = {
                     if (-not $msg) {
                         #  [x] [<ScriptBlock>] PSJOB: ADA-W11Client1: DSC encountered failures. Attempting to continue. Status: Failure Output: Machine reboot failed. Please reboot it manually to finish processing the request.
                         # This condition is expected, and we are actually rebooting.
-                        if ($($dscStatus.ScriptBlockOutput.Error) -like "%Machine reboot failed.%") {
+                        if ($($dscStatus.ScriptBlockOutput.Error) -like "*Machine reboot failed*") {
                             #If we dont reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
                             continue
                         }
