@@ -33,6 +33,8 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         [switch]$HostOnly,
         [Parameter(Mandatory = $false)]
+        [switch]$NoIndent,
+        [Parameter(Mandatory = $false)]
         [switch]$ShowNotification
     )
 
@@ -74,15 +76,14 @@ function Write-Log {
     If ($Activity.IsPresent) {
         $info = $false
         Write-Host
-        $Text = "=== $Text"
+        $Text = "=== $Text`r`n"
         $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
     }
 
-    If ($SubActivity.IsPresent) {
+    If ($SubActivity.IsPresent -and -not $Activity.IsPresent) {
         $info = $false
-        Write-Host
-        $Text = "====== $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Magenta)
+        $Text = "  === $Text"
+        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
     }
 
     If ($Warning.IsPresent) {
@@ -105,7 +106,6 @@ function Write-Log {
         $info = $false
         $TextOutput = "  VERBOSE: $Text"
         $Text = "VERBOSE: $Text"
-
     }
 
     If ($Highlight.IsPresent) {
@@ -145,6 +145,9 @@ function Write-Log {
 
     if ($writeHost) {
         if ($TextOutput) {
+            if ($NoIndent.IsPresent) {
+                $TextOutput = $TextOutput.Trim()
+            }
             Write-Host $TextOutput @HashArguments
         }
         else {

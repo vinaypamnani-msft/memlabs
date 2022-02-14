@@ -18,6 +18,18 @@ function Add-ValidationMessage {
     }
 }
 
+function Write-ValidationMessages {
+
+    param (
+        [object]$TestObject
+    )
+
+    $messages = $($TestObject.Message) -split "\r\n"
+    foreach ($msg in $messages.Trim()) {
+        Write-RedX $msg
+    }
+}
+
 function Test-ValidVmOptions {
     param (
         [object] $ConfigObject,
@@ -203,7 +215,8 @@ function Test-ValidVmSupported {
     # Supported DSC Roles for Existing scenario
     if ($configObject.parameters.ExistingDCName) {
         # Supported DSC Roles for Existing Scenario
-        if ($Common.Supported.RolesForExisting -notcontains $vm.role) {
+        if ($Common.Supported.RolesForExisting -notcontains $vm.role -and $vm.role -ne "DC") {
+            # DC is caught in Test-ValidDC
             $supportedRoles = $Common.Supported.RolesForExisting -join ", "
             Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
         }
@@ -1011,7 +1024,7 @@ function Test-Configuration {
     # Primary site without CAS
     if ($deployConfig.parameters.scenario -eq "Hierarchy") {
         $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
-        $existingCS = Get-List2 -DeployConfig $deployConfig | Where-Object {$_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
+        $existingCS = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
         if (-not $existingCS) {
             Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
         }

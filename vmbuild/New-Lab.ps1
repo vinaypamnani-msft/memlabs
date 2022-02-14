@@ -126,8 +126,6 @@ function Start-Phase {
         }
     }
 
-    Write-Host
-
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -PhaseDescription $PhaseDescription -deployConfig $deployConfig
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs
@@ -334,24 +332,21 @@ try {
     Start-Maintenance
 
     if ($Configuration) {
-        # Get user configuration
-        $configResult = Get-UserConfiguration -Configuration $Configuration
+        Write-Log "### START." -Activity
+        Write-Log "Validating specified configuration: $Configuration"
+        $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
             $userConfig = $configResult.Config
             # Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
-            Write-Log "### START." -Success
-            Write-Log "Validating specified configuration: $Configuration" -Activity
         }
         else {
-            Write-Log "### START." -Success
-            Write-Log "Validating specified configuration: $Configuration" -Activity
             Write-Log $configResult.Message -Failure
             Write-Host
+            return
         }
-
     }
     else {
-        Write-Log "No Configuration specified. Calling genconfig." -Activity
+        Write-Log "No Configuration specified. Calling genconfig." -Highlight
         Set-Location $PSScriptRoot
         $result = ./genconfig.ps1 -InternalUseOnly -Verbose:$enableVerbose -Debug:$enableDebug
 
@@ -369,29 +364,28 @@ try {
             $ForceNew = $true
         }
 
-        $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
-
         if (-not $($result.DeployNow)) {
             return
         }
+
+        Write-Log "### START." -Activity
+        Write-Log "Using $($result.ConfigFileName) provided by genconfig"
+        Write-Log "genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)" -Verbose
+        $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
+
         if ($configResult.Loaded) {
             $userConfig = $configResult.Config
-            # Clear-Host
-            # Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
-            Write-Log "### START." -Success
-            Write-Log "Using $($result.ConfigFileName) provided by genconfig" -Activity
-            Write-Log "genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
         }
         else {
-            Write-Log "### START." -Success
-            Write-Log "Validating specified configuration: $Configuration" -Activity
             Write-Log $configResult.Message -Failure
             Write-Host
             return
         }
 
     }
+
     Set-QuickEdit -DisableQuickEdit
+
     # Timer
     $timer = New-Object -TypeName System.Diagnostics.Stopwatch
     $timer.Start()
@@ -411,6 +405,7 @@ try {
                 }
 
             }
+
             if ($InProgessVMs.Count -gt 0) {
                 Write-Host
                 write-host -ForegroundColor Blue "*************************************************************************************************************************************"
@@ -423,11 +418,15 @@ try {
                 return
             }
 
-            Write-Log "Config validated successfully." -Success
+            Write-Log "Configuration validated successfully." -Success
         }
         else {
-            Write-Log "Config validation failed. `r`n$($testConfigResult.Message)" -Failure
             Write-Host
+            Write-Log "Configuration validation failed." -Failure
+            Write-Host
+            Write-ValidationMessages -TestObject $testConfigResult
+            Write-Host
+            return
         }
     }
     catch {
@@ -438,7 +437,7 @@ try {
 
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
-    Write-Log "Starting deployment. Review VMBuild.$domainName.log" -Activity
+    Write-Log "Starting deployment. Review VMBuild.$domainName.log"
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
 
     # Download required files
@@ -514,7 +513,6 @@ try {
     }
 
     Write-Log "Deployment Summary" -Activity -HostOnly
-    Write-Host
     Show-Summary -deployConfig $deployConfig
 
     # Return if debug enabled
@@ -580,11 +578,11 @@ try {
 
     if (-not $created -or -not $configured) {
         Write-Host
-        Write-Log "### SCRIPT FINISHED WITH FAILURES. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Failure
+        Write-Log "### SCRIPT FINISHED WITH FAILURES. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Failure -NoIndent
     }
     else {
         Write-Host
-        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
+        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success -NoIndent
     }
 
     $NewLabsuccess = $true

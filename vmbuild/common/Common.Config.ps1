@@ -2035,5 +2035,9 @@ Function Show-Summary {
     } `
     | Out-String
     Write-Host
-    $out.Trim() | Out-Host
+    $outIndented = $out.Trim() -split "\r\n"
+    foreach($line in $outIndented) {
+        Write-Host "  $line"
+    }
+
 }
