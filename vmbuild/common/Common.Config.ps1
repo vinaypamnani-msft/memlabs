@@ -436,8 +436,8 @@ function Get-SQLAOConfig {
         ClusterNodes           = @($PrimaryAO.vmName, $SecondAO.vmName)
         WitnessShare           = "$($ClusterNameNoPrefix)-Witness"
         WitnessLocalPath       = "F:\$($ClusterNameNoPrefix)-Witness"
-        BackupShare           = "$($ClusterNameNoPrefix)-Backup"
-        BackupLocalPath       = "F:\$($ClusterNameNoPrefix)-Backup"
+        BackupShare            = "$($ClusterNameNoPrefix)-Backup"
+        BackupLocalPath        = "F:\$($ClusterNameNoPrefix)-Backup"
         ClusterIPAddress       = $clusterIP
         AGIPAddress            = $AGIP
         AlwaysOnName           = $PrimaryAO.AlwaysOnName
@@ -627,7 +627,7 @@ function Add-PerVMSettings {
         if (-not $SiteServerVM) {
             $OtherNode = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $thisVM.vmName }
 
-            if ($OtherNode){
+            if ($OtherNode) {
                 $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $OtherNode.vmName }
             }
         }
@@ -1319,12 +1319,15 @@ function Update-VMInformation {
         [Parameter(Mandatory = $true)]
         [object] $vm
     )
-    try{
-    $vmNoteObject = $vm.Notes | convertFrom-Json
+
+    try {
+        $vmNoteObject = $vm.Notes | convertFrom-Json
     }
     catch {
         Write-Log "Could not convert notes $($vm.Notes) from vm $($vm.Name)" -LogOnly -Failure
+        return
     }
+
     $vmname = $vm.Name
     Write-Log -Verbose -HostOnly "Updating $vmname"
     # Update LastKnownIP, and timestamp
@@ -1445,8 +1448,8 @@ function Update-VMFromHyperV {
         [object] $vmNoteObject
     )
     if (-not $vmNoteObject) {
-        try{
-        $vmNoteObject = $vm.Notes | convertFrom-Json
+        try {
+            $vmNoteObject = $vm.Notes | convertFrom-Json
         }
         catch {
             Write-Log -LogOnly -Failure "Could not convert Notes Object on $($vm.Name) $vmNoteObject"
@@ -1511,9 +1514,9 @@ function Get-List {
         }
 
         if ($DeployConfig) {
-            try{
-            $DepoloyConfigJson = $DeployConfig | ConvertTo-Json -Depth 3
-            $DeployConfigClone = $DepoloyConfigJson | ConvertFrom-Json
+            try {
+                $DepoloyConfigJson = $DeployConfig | ConvertTo-Json -Depth 3
+                $DeployConfigClone = $DepoloyConfigJson | ConvertFrom-Json
             }
             catch {
                 write-log "Failed to convert DeployConfig: $DeployConfig" -Failure

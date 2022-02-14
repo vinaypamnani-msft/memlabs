@@ -388,22 +388,22 @@
                     PsDscRunAsCredential = $CMAdmin
                 }
 
-                 # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
-                 $spnDependency = @("[Service]ChangeStartupAgent")
-                 $i = 0
-                 foreach ($spn in $SPNs ) {
-                     $i++
+                # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
+                $spnDependency = @("[Service]ChangeStartupAgent")
+                $i = 0
+                foreach ($spn in $SPNs ) {
+                    $i++
 
-                  #   ADServicePrincipalName "spnset$i" {
-                  #       Ensure               = 'present'
-                  #       ServicePrincipalName = $spn
-                  #       Account              = $ThisVM.SqlServiceAccount
-                  #       Dependson            = "[Service]ChangeStartupAgent"
-                  #       PsDscRunAsCredential = $CMAdmin
-                  #   }
+                    #   ADServicePrincipalName "spnset$i" {
+                    #       Ensure               = 'present'
+                    #       ServicePrincipalName = $spn
+                    #       Account              = $ThisVM.SqlServiceAccount
+                    #       Dependson            = "[Service]ChangeStartupAgent"
+                    #       PsDscRunAsCredential = $CMAdmin
+                    #   }
 
-                  #   $spnDependency += "[ADServicePrincipalName]spnset$i"
-                 }
+                    #   $spnDependency += "[ADServicePrincipalName]spnset$i"
+                }
 
                 $nextDepend = $spnDependency
             }
