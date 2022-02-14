@@ -108,6 +108,15 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
+        #WaitForAny WaitForCluster {
+        #    NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName
+        #    ResourceName         = '[xCluster]JoinSecondNodeToCluster'
+        #    RetryIntervalSec     = 10
+        #    RetryCount           = 90
+        #    PsDscRunAsCredential = $SqlAdministratorCredential
+        #    DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+        #}
+
         WriteStatus ClusterJoin {
             DependsOn = "[xClusterNetwork]ChangeNetwork-10"
             Status    = "Waiting for '$node2' to join Cluster"
@@ -395,11 +404,29 @@ Configuration SQLAOConfiguration
             DependsOn            = '[xWaitForCluster]WaitForCluster', '[WaitForAny]WaitForClusteringNetworking'
         }
 
+        xClusterNetwork 'ChangeNetwork-192' {
+            Address              = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Address
+            AddressMask          = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.AddressMask
+            Name                 = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Name
+            Role                 = '0'
+            DependsOn            = '[xCluster]JoinSecondNodeToCluster'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
+        xClusterNetwork 'ChangeNetwork-10' {
+            Address              = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Address2
+            AddressMask          = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.AddressMask2
+            Name                 = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Name2
+            Role                 = '3'
+            DependsOn            = '[xCluster]JoinSecondNodeToCluster'
+            PsDscRunAsCredential = $SqlAdministratorCredential
+        }
+
         xClusterQuorum 'ClusterWitness' {
             IsSingleInstance     = 'Yes'
             Type                 = 'NodeAndFileShareMajority'
             Resource             = $Node.WitnessShare
-            DependsOn            = '[xCluster]JoinSecondNodeToCluster'
+            DependsOn            = '[xClusterNetwork]ChangeNetwork-10','[xClusterNetwork]ChangeNetwork-192'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 

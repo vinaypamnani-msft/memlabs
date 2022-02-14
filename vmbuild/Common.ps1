@@ -1660,6 +1660,8 @@ function Get-StorageConfig {
 
     if (-not (Test-Path $configPath)) {
         $Common.FatalError = "Storage Config not found. Refer internal documentation."
+        Write-Log "File $configPath does not exist."
+        return
     }
 
     try {
