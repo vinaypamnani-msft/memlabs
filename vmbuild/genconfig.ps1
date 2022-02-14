@@ -754,8 +754,6 @@ function Select-DeleteDomain {
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
                     Remove-Domain -DomainName $domain
-                    Get-List -type VM -SmartUpdate | Out-Null
-                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
                     return
                 }
             }

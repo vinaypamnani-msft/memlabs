@@ -346,7 +346,7 @@ try {
         }
     }
     else {
-        Write-Log "No Configuration specified. Calling genconfig." -Highlight
+        Write-Log "No Configuration specified. Calling genconfig." -Activity
         Set-Location $PSScriptRoot
         $result = ./genconfig.ps1 -InternalUseOnly -Verbose:$enableVerbose -Debug:$enableDebug
 
@@ -579,12 +579,11 @@ try {
     if (-not $created -or -not $configured) {
         Write-Host
         Write-Log "### SCRIPT FINISHED WITH FAILURES. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Failure -NoIndent
+        Write-Host
     }
     else {
-        Write-Host
-        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success -NoIndent
+        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Activity
     }
-
     $NewLabsuccess = $true
 }
 catch {

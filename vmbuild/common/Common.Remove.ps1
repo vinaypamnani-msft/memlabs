@@ -62,7 +62,7 @@ function Remove-VirtualMachine {
         Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
     }
     else {
-        Write-Log "VM '$VmName' does not exist in Hyper-V." -SubActivity
+        Write-Log "VM '$VmName' does not exist in Hyper-V." -Warning
     }
 }
 
@@ -101,7 +101,6 @@ function Remove-Orphaned {
 
         if (-not $vm.Domain) {
             # Prompt for delete, likely no json object in vm notes
-            Write-Host
             $response = Read-Host -Prompt "VM $($vm.VmName) may be orphaned. Delete? [y/N]"
             if ($response.ToLowerInvariant() -eq "y") {
                 Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
@@ -112,6 +111,7 @@ function Remove-Orphaned {
                 Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
             }
         }
+        Write-Host
     }
 
     # Loop through vm's again (in case some were deleted above)
@@ -123,11 +123,11 @@ function Remove-Orphaned {
     foreach ($scope in $scopes) {
         $scopeId = $scope.ScopeId.IPAddressToString # This requires us to replace "Internet" with subnet
         if ($vmNetworksInUse2 -notcontains $scopeId) {
-            Write-Host
             $response = Read-Host -Prompt "DHCP Scope '$($scope.Name)' may be orphaned. Delete DHCP Scope? [y/N]"
             if ($response.ToLowerInvariant() -eq "y") {
                 Remove-DhcpScope -ScopeId $scopeId -WhatIf:$WhatIf
             }
+            Write-Host
         }
     }
 
@@ -143,15 +143,13 @@ function Remove-Orphaned {
         }
 
         if (-not $inUse) {
-            Write-Host
             $response = Read-Host -Prompt "Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]"
             if ($response.ToLowerInvariant() -eq "y") {
                 Remove-VMSwitch2 -NetworkName $switch.Name
             }
+            Write-Host
         }
     }
-
-    Write-Host
 }
 
 function Remove-InProgress {
@@ -211,11 +209,9 @@ function Remove-Domain {
     }
 
     if (-not $WhatIf.IsPresent) {
+        Get-List -type VM -SmartUpdate | Out-Null
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
     }
-
-    Write-Host
-
 }
 
 function Remove-All {
@@ -248,6 +244,7 @@ function Remove-All {
     }
 
     Remove-Orphaned -WhatIf:$WhatIf
+    Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue | Out-Null
 
     Write-Host
 
