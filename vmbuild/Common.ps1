@@ -83,7 +83,7 @@ function Write-Log {
     If ($SubActivity.IsPresent -and -not $Activity.IsPresent) {
         $info = $false
         $Text = "  === $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
+        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Magenta)
     }
 
     If ($Warning.IsPresent) {

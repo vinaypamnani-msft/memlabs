@@ -213,9 +213,6 @@ function Remove-Domain {
     if (-not $WhatIf.IsPresent) {
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
     }
-
-    Write-Host
-
 }
 
 function Remove-All {
