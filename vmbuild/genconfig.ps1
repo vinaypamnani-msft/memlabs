@@ -2410,7 +2410,7 @@ Function Get-OperatingSystemMenu {
             return
         }
         $property."$name" = Get-Menu "Select OS Version" $OSList $CurrentValue -Test:$false
-        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+        if (Get-TestResult -SuccessOnWarning) {
             return
         }
         else {
@@ -2480,7 +2480,7 @@ Function Set-ParentSiteCodeMenu {
             $property."$name" = $value
         }
 
-        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+        if (Get-TestResult -SuccessOnWarning) {
             return
         }
         else {
@@ -2565,7 +2565,7 @@ Function Get-SiteCodeMenu {
         $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -Force
         #$property."$name" = $result
     }
-    if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+    if (Get-TestResult -SuccessOnWarning) {
         return
     }
     else {
@@ -2590,7 +2590,7 @@ Function Get-SqlVersionMenu {
     $valid = $false
     while ($valid -eq $false) {
         $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $CurrentValue -Test:$false
-        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+        if (Get-TestResult -SuccessOnWarning) {
             return
         }
         else {
@@ -2725,7 +2725,7 @@ Function Get-remoteSQLVM {
                 Set-SiteServerRemoteSQL $property $result
             }
         }
-        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+        if (Get-TestResult -SuccessOnWarning) {
             return
         }
         else {
@@ -2777,7 +2777,7 @@ Function Get-domainUser {
         if ($null -ne $name) {
             $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -force
         }
-        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+        if (Get-TestResult -SuccessOnWarning) {
             return
         }
         else {
@@ -2804,7 +2804,7 @@ Function Get-CMVersionMenu {
     $valid = $false
     while ($valid -eq $false) {
         $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $CurrentValue -Test:$false
-        if (Get-TestResult -SuccessOnWarning -NoNewLine) {
+        if (Get-TestResult -SuccessOnWarning) {
             return
         }
         else {
@@ -2848,7 +2848,7 @@ Function Get-RoleMenu {
         Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -Name $property.vmName -Quiet:$true
 
         # We cant do anything with the test result, as our underlying object is no longer in config.
-        Get-TestResult -config $global:config -SuccessOnWarning -NoNewLine | out-null
+        Get-TestResult -config $global:config -SuccessOnWarning | out-null
 
         # return true if the VM is deleted.
         return $true
@@ -3500,10 +3500,9 @@ Function Get-TestResult {
         [Parameter(Mandatory = $false, HelpMessage = "Returns true even if errors are present")]
         [switch] $SuccessOnError,
         [Parameter(Mandatory = $false, HelpMessage = "Config to check")]
-        [object] $config = $Global:Config,
-        [Parameter(Mandatory = $false, HelpMessage = "Supress newline")]
-        [switch] $NoNewLine
+        [object] $config = $Global:Config
     )
+
     #If Config hasnt been generated yet.. Nothing to test
     if ($null -eq $config) {
         return $true
@@ -3512,10 +3511,8 @@ Function Get-TestResult {
         $c = Test-Configuration -InputObject $Config
         $valid = $c.Valid
         if ($valid -eq $false) {
-            Write-Host -ForegroundColor Red "`r`n$($c.Message)"
-            if (!$NoNewLine) {
-                write-host
-            }
+            Write-Host "`r`nERROR: Validation Failures were encountered:`r`n" -ForegroundColor Red
+            Write-ValidationMessages -TestObject $c
             #$MyInvocation | Out-Host
             if ($enableVerbose) {
                 Get-PSCallStack | out-host
@@ -4416,16 +4413,15 @@ do {
         }
         else {
             if ($return.DeployNow -eq $false) {
-                Write-Host
-                write-host -ForegroundColor Yellow "WARNING: Configuration is not valid. Saving is not advised. Proceed with caution."
-                Write-Host -ForegroundColor Red "Configuration contains the following errors: `r`n$($c.Message)`r`n"
-                write-host
+                write-host -ForegroundColor Red "Configuration is not valid. Saving is not advised. Proceed with caution. Hit CTRL-C to exit.`r`n"
+                Write-ValidationMessages -TestObject $c
                 $valid = $true
                 break
             }
             else {
-                Write-Host -ForegroundColor Red "Config file is not valid: `r`n$($c.Message)`r`n"
-                Write-Host -ForegroundColor Red "Please fix the problem(s), or hit CTRL-C to exit."
+                Write-Host -ForegroundColor Red "Config file is not valid:`r`n"
+                Write-ValidationMessages -TestObject $c
+                Write-Host -ForegroundColor Red "`r`nPlease fix the problem(s), or hit CTRL-C to exit."
             }
         }
 
