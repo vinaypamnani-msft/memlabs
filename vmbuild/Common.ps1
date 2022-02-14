@@ -1366,6 +1366,11 @@ function Wait-ForVm {
             }
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+
+        if (-not $ready) {
+            # Try the command one more time, to get real error in logs
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError | Out-Null
+        }
     }
 
     if ($OobeStarted.IsPresent) {
@@ -1387,6 +1392,11 @@ function Wait-ForVm {
                 Start-Sleep -Seconds $WaitSeconds
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+
+        if (-not $ready) {
+            # Try the command one more time, to get real error in logs
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null
+        }
     }
 
     if ($PathToVerify) {
@@ -1410,6 +1420,11 @@ function Wait-ForVm {
             $ready = $true -eq $out.ScriptBlockOutput
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+
+        if (-not $ready) {
+            # Try the command one more time, to get real error in logs
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError | Out-Null
+        }
     }
 
     Write-Progress -Activity "$VmName`: Waiting for virtual machine" -Status "Wait complete." -Completed
