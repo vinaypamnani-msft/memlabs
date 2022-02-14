@@ -1437,7 +1437,12 @@ function Update-VMFromHyperV {
         [object] $vmNoteObject
     )
     if (-not $vmNoteObject) {
+        try{
         $vmNoteObject = $vm.Notes | convertFrom-Json
+        }
+        catch {
+            Write-Log -LogOnly -Failure "Could not convert Notes Object on $($vm.Name) $vmNoteObject"
+        }
     }
 
     if ($vmNoteObject) {
@@ -1498,7 +1503,15 @@ function Get-List {
         }
 
         if ($DeployConfig) {
-            $DeployConfigClone = $DeployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+            try{
+            $DepoloyConfigJson = $DeployConfig | ConvertTo-Json -Depth 3
+            $DeployConfigClone = $DepoloyConfigJson | ConvertFrom-Json
+            }
+            catch {
+                write-log "Failed to convert DeployConfig: $DeployConfig" -Failure
+                write-log "Failed to convert DeployConfig: $DepoloyConfigJson" -Failure
+            }
+
         }
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null
@@ -1621,6 +1634,7 @@ function Get-List {
     }
     catch {
         Write-Log "Failed to get '$Type' list. $_" -Failure -LogOnly
+        write-Log "Trace $_.ScriptStackTrace" -Failure -LogOnly
         return $null
     }
 }
