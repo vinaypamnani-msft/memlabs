@@ -1316,7 +1316,12 @@ function Update-VMInformation {
         [Parameter(Mandatory = $true)]
         [object] $vm
     )
+    try{
     $vmNoteObject = $vm.Notes | convertFrom-Json
+    }
+    catch {
+        Write-Log "Could not convert notes $($vm.Notes) from vm $($vm.Name)" -LogOnly -Failure
+    }
     $vmname = $vm.Name
     Write-Log -Verbose -HostOnly "Updating $vmname"
     # Update LastKnownIP, and timestamp
