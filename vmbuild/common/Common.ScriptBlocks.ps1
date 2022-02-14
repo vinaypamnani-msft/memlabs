@@ -113,6 +113,16 @@ $global:VM_Create = {
             }
         }
 
+        # Check if RDP is enabled on DC. We saw an issue where RDP was enabled on DC, but didn't take effect until reboot.
+        if ($currentItem.role -eq "DC") {
+            $testNet = Test-NetConnection -ComputerName $currentItem.vmName -Port 3389
+            if (-not $testNet.TcpTestSucceeded) {
+                Write-Log "PSJOB: $($currentItem.vmName): Could not verify if RDP is enabled. Restarting the computer." -OutputStream -Warning
+                Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
+                Start-Sleep -Seconds 10
+            }
+        }
+
         $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
         if (-not $connected) {
             Write-Log "PSJOB: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
