@@ -346,7 +346,7 @@ try {
         }
     }
     else {
-        Write-Log "No Configuration specified. Calling genconfig." -Highlight
+        Write-Log "No Configuration specified. Calling genconfig." -Activity
         Set-Location $PSScriptRoot
         $result = ./genconfig.ps1 -InternalUseOnly -Verbose:$enableVerbose -Debug:$enableDebug
 
