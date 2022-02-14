@@ -98,7 +98,7 @@
         }
 
         DefaultGatewayAddress SetDefaultGateway {
-            DependsOn = "[IPAddress]DCIPAddress"
+            DependsOn      = "[IPAddress]DCIPAddress"
             Address        = $DHCP_DefaultGateway
             InterfaceAlias = 'Ethernet'
             AddressFamily  = 'IPv4'
@@ -383,6 +383,13 @@
                 Status    = "Complete!"
             }
 
+        }
+
+        RemoteDesktopAdmin RemoteDesktopSettings {
+            IsSingleInstance   = 'yes'
+            Ensure             = 'Present'
+            UserAuthentication = 'NonSecure'
+            DependsOn          = "[WriteStatus]Complete"
         }
 
         WriteEvent WriteConfigFinished {
