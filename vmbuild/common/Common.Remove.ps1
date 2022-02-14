@@ -211,6 +211,7 @@ function Remove-Domain {
     }
 
     if (-not $WhatIf.IsPresent) {
+        Get-List -type VM -SmartUpdate | Out-Null
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
     }
 }
