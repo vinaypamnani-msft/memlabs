@@ -626,7 +626,10 @@ function Add-PerVMSettings {
 
         if (-not $SiteServerVM) {
             $OtherNode = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $thisVM.vmName }
-            $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $OtherNode.vmName }
+
+            if ($OtherNode){
+                $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $OtherNode.vmName }
+            }
         }
 
         if (-not $SiteServerVM) {
