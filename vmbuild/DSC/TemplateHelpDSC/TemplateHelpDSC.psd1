@@ -42,7 +42,8 @@ DscResourcesToExport = @(
     'InstallCA',
     'FileACLPermission',
     'ModuleAdd',
-    'ActiveDirectorySPN'
+    'ActiveDirectorySPN',
+    'ClusterRemoveUnwantedIPs'
 )
 
 # Version number of this module.

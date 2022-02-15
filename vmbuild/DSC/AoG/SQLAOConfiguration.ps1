@@ -128,10 +128,16 @@ Configuration SQLAOConfiguration
             RetryIntervalSec     = 10
             RetryCount           = 90
             PsDscRunAsCredential = $SqlAdministratorCredential
+            DependsOn            = '[xCluster]CreateCluster'
         }
 
+        ClusterRemoveUnwantedIPs ClusterRemoveUnwantedIPs {
+            ClusterName          = $Node.ClusterName
+            PsDscRunAsCredential = $SqlAdministratorCredential
+            DependsOn            = '[WaitForAny]WaitForClusterJoin'
+        }
         WriteStatus SvcAccount {
-            DependsOn = '[WaitForAny]WaitForClusterJoin'
+            DependsOn = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
             Status    = "Configuring SQL Service Accounts and SQL Logins"
         }
 
@@ -296,16 +302,15 @@ Configuration SQLAOConfiguration
         $nextDepend = '[WaitForAll]AddReplica'
         if ($Node.DBName) {
 
-            SqlDatabase 'SetRecoveryModel'
-            {
-                Ensure = 'Present'
-                ServerName = $Node.NodeName
-                InstanceName = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-                Name = $Node.DBName
-                RecoveryModel = 'Full'
+            SqlDatabase 'SetRecoveryModel' {
+                Ensure               = 'Present'
+                ServerName           = $Node.NodeName
+                InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+                Name                 = $Node.DBName
+                RecoveryModel        = 'Full'
 
                 PsDscRunAsCredential = $SqlAdministratorCredential
-                DependsOn               = $nextDepend
+                DependsOn            = $nextDepend
             }
 
             SqlAGDatabase 'AddAGDatabaseMemberships' {
@@ -393,7 +398,7 @@ Configuration SQLAOConfiguration
         }
 
         WriteStatus JoinCluster {
-            Status    = "Joining Windows Cluster '$( $Node.ClusterName)'on '$node1'"
+            Status    = "Joining Windows Cluster '$( $Node.ClusterName)' on '$node1'"
             DependsOn = '[xWaitForCluster]WaitForCluster'
         }
 
@@ -426,7 +431,7 @@ Configuration SQLAOConfiguration
             IsSingleInstance     = 'Yes'
             Type                 = 'NodeAndFileShareMajority'
             Resource             = $Node.WitnessShare
-            DependsOn            = '[xClusterNetwork]ChangeNetwork-10','[xClusterNetwork]ChangeNetwork-192'
+            DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
             PsDscRunAsCredential = $SqlAdministratorCredential
         }
 
@@ -558,14 +563,14 @@ Configuration SQLAOConfiguration
         $nextDepend = '[SqlAGReplica]AddReplica'
         if ($Node.DBName) {
 
-            WaitForAll RecoveryModel  {
+            WaitForAll RecoveryModel {
                 ResourceName     = '[SqlDatabase]SetRecoveryModel'
                 NodeName         = $node1
                 RetryIntervalSec = 2
                 RetryCount       = 450
                 Dependson        = $nextDepend
             }
-            WaitForAll AddAGDatabaseMemberships  {
+            WaitForAll AddAGDatabaseMemberships {
                 ResourceName     = '[SqlAGDatabase]AddAGDatabaseMemberships'
                 NodeName         = $node1
                 RetryIntervalSec = 2
@@ -588,7 +593,7 @@ Configuration SQLAOConfiguration
             #$nextDepend = '[SqlAGDatabase]AddAGDatabaseMemberships'
         }
         WriteStatus Complete {
-            DependsOn =  $nextDepend
+            DependsOn = $nextDepend
             Status    = "Complete!"
         }
     }
