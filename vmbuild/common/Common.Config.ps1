@@ -524,7 +524,12 @@ function Add-PerVMSettings {
         if ($thisVM.role -eq "SQLAO") {
             $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2
             $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
-            $dns = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            if (-not $dc.subnet) {
+                $dns = $DeployConfig.vmOptions.network.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            }
+            else {
+                $dns = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            }
             if ($thisVM.OtherNode) {
                 $ip = $iprange[0]
             }
@@ -1535,56 +1540,80 @@ function Get-List {
 
         if ($SmartUpdate.IsPresent) {
             if ($global:vm_List) {
-                $virtualMachines = Get-VM
-                foreach ( $oldListVM in $global:vm_List) {
-                    if ($DomainName) {
-                        if ($oldListVM.domain -ne $DomainName) {
-                            continue
-                        }
-                    }
-                    #Remove Missing VM's
-                    if (-not ($virtualMachines.vmId -contains $oldListVM.vmID)) {
-                        #write-host "removing $($oldListVM.vmID)"
-                        $global:vm_List = $global:vm_List | Where-Object { $_.vmID -ne $oldListVM.vmID }
-                    }
-                }
-                foreach ($vm in $virtualMachines) {
-                    #if its missing, do a full add
-                    $vmFromGlobal = $global:vm_List | Where-Object { $_.vmId -eq $vm.vmID }
-                    if ($null -eq $vmFromGlobal) {
-                        #    if (-not $global:vm_List.vmID -contains $vmID){
-                        #write-host "adding missing vm $($vm.vmName)"
-                        $vmObject = Get-VMFromHyperV -vm $vm
-                        $global:vm_List += $vmObject
-                    }
-                    else {
+                $mtx = New-Object System.Threading.Mutex($false, "GetList")
+                write-log "Attempting to acquire GetList Mutex" -LogOnly
+                [void]$mtx.WaitOne()
+                write-log "acquired GetList Mutex" -LogOnly
+                try {
+                    $virtualMachines = Get-VM
+                    foreach ( $oldListVM in $global:vm_List) {
                         if ($DomainName) {
-                            if ($vmFromGlobal.domain -ne $DomainName) {
+                            if ($oldListVM.domain -ne $DomainName) {
                                 continue
                             }
                         }
-                        #else, update the existing entry.
-                        Update-VMFromHyperV -vm $vm -vmObject $vmFromGlobal
+                        #Remove Missing VM's
+                        if (-not ($virtualMachines.vmId -contains $oldListVM.vmID)) {
+                            #write-host "removing $($oldListVM.vmID)"
+                            $global:vm_List = $global:vm_List | Where-Object { $_.vmID -ne $oldListVM.vmID }
+                        }
                     }
+                    foreach ($vm in $virtualMachines) {
+                        #if its missing, do a full add
+                        $vmFromGlobal = $global:vm_List | Where-Object { $_.vmId -eq $vm.vmID }
+                        if ($null -eq $vmFromGlobal) {
+                            #    if (-not $global:vm_List.vmID -contains $vmID){
+                            #write-host "adding missing vm $($vm.vmName)"
+                            $vmObject = Get-VMFromHyperV -vm $vm
+                            $global:vm_List += $vmObject
+                        }
+                        else {
+                            if ($DomainName) {
+                                if ($vmFromGlobal.domain -ne $DomainName) {
+                                    continue
+                                }
+                            }
+                            #else, update the existing entry.
+                            Update-VMFromHyperV -vm $vm -vmObject $vmFromGlobal
+                        }
+                    }
+                }
+                finally {
+                    [void]$mtx.ReleaseMutex()
+                    [void]$mtx.Dispose()
                 }
             }
         }
 
         if (-not $global:vm_List) {
 
-            Write-Log "Obtaining '$Type' list and caching it." -Verbose
-            $return = @()
-            $virtualMachines = Get-VM
-            foreach ($vm in $virtualMachines) {
+            $mtx = New-Object System.Threading.Mutex($false, "GetList")
+            write-log "Attempting to acquire GetList Mutex" -LogOnly
+            [void]$mtx.WaitOne()
+            write-log "acquired GetList Mutex" -LogOnly
 
-                $vmObject = Get-VMFromHyperV -vm $vm
+            try {
+                #This may have been populated while waiting for mutex
+                if (-not $global:vm_List) {
+                    Write-Log "Obtaining '$Type' list and caching it." -Verbose
+                    $return = @()
+                    $virtualMachines = Get-VM
+                    foreach ($vm in $virtualMachines) {
 
-                $return += $vmObject
+                        $vmObject = Get-VMFromHyperV -vm $vm
+
+                        $return += $vmObject
+                    }
+
+                    $global:vm_List = $return
+                }
+            }
+            finally {
+                [void]$mtx.ReleaseMutex()
+                [void]$mtx.Dispose()
             }
 
-            $global:vm_List = $return
         }
-
         $return = $global:vm_List
 
         if ($null -ne $DeployConfigClone) {
@@ -2041,7 +2070,7 @@ Function Show-Summary {
     | Out-String
     Write-Host
     $outIndented = $out.Trim() -split "\r\n"
-    foreach($line in $outIndented) {
+    foreach ($line in $outIndented) {
         Write-Host "  $line"
     }
 

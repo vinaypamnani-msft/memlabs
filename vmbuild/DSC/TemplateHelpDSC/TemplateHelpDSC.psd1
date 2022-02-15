@@ -43,7 +43,8 @@ DscResourcesToExport = @(
     'FileACLPermission',
     'ModuleAdd',
     'ActiveDirectorySPN',
-    'ClusterRemoveUnwantedIPs'
+    'ClusterRemoveUnwantedIPs',
+    'ClusterSetOwnerNodes'
 )
 
 # Version number of this module.

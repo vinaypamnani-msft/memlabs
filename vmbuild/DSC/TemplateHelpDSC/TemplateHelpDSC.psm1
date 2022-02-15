@@ -2237,6 +2237,59 @@ class InstallCA {
 
 
 [DscResource()]
+class ClusterSetOwnerNodes {
+    [DscProperty(Key)]
+    [string] $ClusterName
+
+    [DscProperty()]
+    [string[]]$Nodes
+
+    [void] Set() {
+        try {
+            $_ClusterName = $this.ClusterName
+            $_Nodes = $this.Nodes
+            foreach ($c in Get-ClusterResource -Cluster $_ClusterName) {
+                $NeedsFixing = $c | Get-ClusterOwnerNode | Where-Object { $_.OwnerNodes.Count -ne 2 }
+                if ($NeedsFixing) {
+                    Write-Verbose "Setting owners $($_Nodes -Join ',') on $($c.Name)"
+                    $c | Set-ClusterOwnerNode -owners $_Nodes
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Failed to Set Owner Nodes"
+            Write-Verbose "$_"
+        }
+    }
+
+    [bool] Test() {
+
+        try {
+            $_ClusterName = $this.ClusterName
+            $badNodes = foreach ($c in Get-ClusterResource -Cluster $_ClusterName) {
+                $c | Get-ClusterOwnerNode | Where-Object { $_.OwnerNodes.Count -ne 2 }
+            }
+
+            if ($badNodes.Count -gt 0) {
+                return $false
+            }
+
+            return $true
+        }
+        catch {
+            Write-Verbose "Failed to Find Cluster Resources."
+            Write-Verbose "$_"
+            return $true
+        }
+    }
+
+    [ClusterSetOwnerNodes] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
 class ClusterRemoveUnwantedIPs {
     [DscProperty(Key)]
     [string] $ClusterName
@@ -2509,7 +2562,7 @@ class ActiveDirectorySPN {
         Foreach ($user in $this.UserName) {
             $_UserName = $user
 
-            write-verbose ('Adding Write Validated SPN permission to User ' + $user + ' on ' +$user + ' account')
+            write-verbose ('Adding Write Validated SPN permission to User ' + $user + ' on ' + $user + ' account')
             write-verbose ('Setting Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
             #Set SPN permissions to object to allow it to update SPN registrations.
 
@@ -2543,7 +2596,7 @@ class ActiveDirectorySPN {
 
         Foreach ($device in $this.ClusterDevice) {
             $_DeviceName = $device
-            write-verbose ('Adding Write Validated SPN permission to User ' + $_DeviceName + ' on ' +$_DeviceName + ' account')
+            write-verbose ('Adding Write Validated SPN permission to User ' + $_DeviceName + ' on ' + $_DeviceName + ' account')
             write-verbose ('Setting Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName)
 
             $oldSddl = "(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1145)"

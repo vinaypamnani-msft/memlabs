@@ -240,27 +240,32 @@ function Write-Exception {
     $msg = "`n=== Exception.ScriptStackTrace:`n"
     [void]$sb.AppendLine($msg)
     Write-Host $msg -ForegroundColor Red
+    Write-Log -LogOnly $msg -Failure
 
     $msg = $ExceptionInfo.ScriptStackTrace
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
+    Write-Log -LogOnly $msg -Failure
 
     $msg = "`n=== Get-PSCallStack:`n"
     [void]$sb.AppendLine($msg)
     Write-Host $msg -ForegroundColor Red
+ Write-Log -LogOnly $msg -Failure
 
     $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
-
+ Write-Log -LogOnly $msg -Failure
     if ($AdditionalInfo) {
         $msg = "`n=== Additional Information:`n"
         [void]$sb.AppendLine($msg)
         Write-Host "$msg" -ForegroundColor Red
         Write-Host "Dumped to $crashFile"
-
+        Write-Log -LogOnly $msg -Failure
+        Write-Log -LogOnly  "Dumped to $crashFile" -Failure
         $msg = ($AdditionalInfo | Out-String).Trim()
         [void]$sb.AppendLine($msg)
+        Write-Log -LogOnly $msg -Failure
     }
 
     $sb.ToString() | Out-File -FilePath $crashFile -Force

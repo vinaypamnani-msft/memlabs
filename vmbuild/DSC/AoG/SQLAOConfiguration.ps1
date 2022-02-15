@@ -136,8 +136,14 @@ Configuration SQLAOConfiguration
             PsDscRunAsCredential = $SqlAdministratorCredential
             DependsOn            = '[WaitForAny]WaitForClusterJoin'
         }
+        ClusterSetOwnerNodes ClusterSetOwnerNodes {
+            ClusterName          = $Node.ClusterName
+            Nodes                = ($AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName), ($AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName)
+            PsDscRunAsCredential = $SqlAdministratorCredential
+            DependsOn            = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
+        }
         WriteStatus SvcAccount {
-            DependsOn = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
+            DependsOn = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
             Status    = "Configuring SQL Service Accounts and SQL Logins"
         }
 
