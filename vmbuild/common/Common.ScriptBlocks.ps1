@@ -318,6 +318,21 @@ $global:VM_Config = {
         $domainName = "WORKGROUP"
     }
 
+    # Verify again that VM is connectable, in case DSC caused a reboot
+    $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
+    if (-not $connected) {
+        Write-Log "PSJOB: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
+        return
+    }
+
+    # Get VM Session
+    $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+
+    if (-not $ps) {
+        Write-Log "PSJOB: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
+        return
+    }
+
     $Stop_RunningDSC = {
         # Stop any existing DSC runs
         try {
@@ -334,14 +349,6 @@ $global:VM_Config = {
     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
-    }
-
-    # Get VM Session
-    $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
-
-    if (-not $ps) {
-        Write-Log "PSJOB: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
-        return
     }
 
     # Boot To OOBE?
