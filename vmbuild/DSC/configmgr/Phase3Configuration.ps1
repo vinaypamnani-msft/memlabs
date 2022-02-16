@@ -22,6 +22,8 @@ Configuration Phase3Configuration
     # Log share
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
+    $DomainName = $deployConfig.parameters.domainName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Domain Creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -633,10 +635,14 @@ Configuration Phase3Configuration
                     ResourceName     = '[WriteStatus]Complete'
                     NodeName         = $node1
                     RetryIntervalSec = 2
-                    RetryCount       = 450
+                    RetryCount       = 900
                     Dependson        = '[WriteStatus]SQLAO'
                 }
 
+                WriteStatus SQLAO {
+                    Status    = "Setting up ConfigMgr. SQLAO complete. Waiting on SCCM Install Task to Start"
+                    DependsOn = "[WaitForAll]SQLAG"
+                }
                 $nextDepend = "[WaitForAll]SQLAG"
             }
 
