@@ -1672,7 +1672,7 @@ function Get-List {
     }
     catch {
         Write-Log "Failed to get '$Type' list. $_" -Failure -LogOnly
-        write-Log "Trace $_.ScriptStackTrace" -Failure -LogOnly
+        write-Log "Trace $($_.ScriptStackTrace)" -Failure -LogOnly
         return $null
     }
     finally {
