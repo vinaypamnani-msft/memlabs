@@ -677,6 +677,14 @@ $global:VM_Config = {
             )
         }
 
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS") }){
+            $newItem = @{
+                NodeName = $vm.vmName
+                Role = $vm.Role
+            }
+            $cd.AllNodes += $newItem
+        }
+
         # Dump $cd, in case we need to review
         $cd | ConvertTo-Json -Depth 3 | Out-File "C:\staging\DSC\Phase3CD.json" -Force -Confirm:$false
 

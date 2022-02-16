@@ -614,7 +614,7 @@ Configuration Phase3Configuration
     {
         $node1 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
         $InstallConfigMgr = $deployConfig.cmOptions.install
-
+        $ThisMachineName = $Node.NodeName
         if ($InstallConfigMgr) {
 
             WriteStatus RunScriptWorkflow {
@@ -673,7 +673,6 @@ Configuration Phase3Configuration
         }
         else {
             WriteStatus Complete {
-                DependsOn = "[WaitForEvent]WorkflowComplete"
                 Status    = "Complete!"
             }
         }

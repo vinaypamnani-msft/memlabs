@@ -175,7 +175,7 @@ function Start-PhaseJobs {
         }
 
         # Skip Phase 3 for all machines, except SQLAO's
-        if ($Phase -eq 3 -and $currentItem.role -notin ("SQLAO", "DC")) {
+        if ($Phase -eq 3 -and $currentItem.role -notin ("SQLAO", "DC", "Primary", "CAS")) {
             continue
         }
 
