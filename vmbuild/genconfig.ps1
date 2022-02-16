@@ -3787,7 +3787,9 @@ function Add-NewVMForRole {
             $disk = [PSCustomObject]@{"E" = "500GB"; "F" = "200GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
         }
-        "DC" { }
+        "DC" {
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true
+         }
     }
 
     if ([string]::IsNullOrWhiteSpace($Name)) {

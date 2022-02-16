@@ -252,13 +252,17 @@
             }
         }
 
-        InstallCA InstallCA {
-            DependsOn     = "[WriteStatus]ADCS"
-            HashAlgorithm = "SHA256"
+        $nextDepend = "[WriteStatus]ADCS"
+        if ($ThisVM.InstallCA) {
+            InstallCA InstallCA {
+                DependsOn     = $nextDepend
+                HashAlgorithm = "SHA256"
+            }
+            $nextDepend = "[InstallCA]InstallCA"
         }
 
         WriteStatus InstallDotNet {
-            DependsOn = "[InstallCA]InstallCA"
+            DependsOn = $nextDepend
             Status    = "Installing .NET 4.8"
         }
 
