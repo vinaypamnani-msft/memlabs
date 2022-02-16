@@ -293,15 +293,16 @@ $global:VM_Config = {
     $deployConfig = $using:deployConfigCopy
     $currentItem = $using:currentItem
     $enableVerbose = $using:enableVerbose
+    $Phase = $using:Phase
 
     # Dot source common
     . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$enableVerbose
 
     # Params for child script blocks
     $DscFolder = "configmgr"
-    if ($currentItem.role -eq "SQLAO" -and $using:Phase -eq 3) {
-        $DscFolder = "AoG"
-    }
+    # if ($currentItem.role -eq "DC" -and $using:Phase -eq 3) {
+    #     $DscFolder = "AoG"
+    # }
 
     $createVM = $true
     if ($currentItem.hidden -eq $true) { $createVM = $false }
@@ -540,23 +541,25 @@ $global:VM_Config = {
         return
     }
 
-    $DSC_CreateSQLAOConfig = {
+    $DSC_CreatePhase3Config = {
 
         param($DscFolder)
 
         # Get required variables from parent scope
         $currentItem = $using:currentItem
         $deployConfig = $using:deployConfig
-        $dscRole = $currentItem.role
+        $dscRole = "Phase3"
+        $primaryNode = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
 
         # Define DSC variables
         $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
         $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+        $configFilePath = "C:\staging\DSC\deployConfig.json"
 
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_CreateSQLAOConfig: Started at $time`r`n=====" | Out-File $log -Append
+        "`r`n=====`r`nDSC_CreatePhase3Config: Started at $time`r`n=====" | Out-File $log -Append
         "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
         "Current Item = $currentItem" | Out-File $log -Append
         "Role Name = $dscRole" | Out-File $log -Append
@@ -581,8 +584,8 @@ $global:VM_Config = {
         }
         $SqlAgentServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlAgentServiceAccount
         $SqlServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlServiceAccount
-        if (-not $deployConfig.thisParams.thisVM.fileServerVM) {
-            $error_message = "Could not get fileServerVM name from deployConfig.thisParams.thisVM.fileServerVM"
+        if (-not $primaryNode.fileServerVM) {
+            $error_message = "Could not get fileServerVM name from primaryNode.fileServerVM"
             $error_message | Out-File $log -Append
             Write-Error $error_message
             return $error_message
@@ -597,14 +600,14 @@ $global:VM_Config = {
         $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
 
         $ADAccounts = @()
-        $ADAccounts += $deployConfig.thisParams.MachineName + "$"
-        $ADAccounts += $deployConfig.thisParams.thisVM.OtherNode + "$"
-        $ADAccounts += $deployConfig.thisParams.thisVM.ClusterName + "$"
+        $ADAccounts += $primaryNode.vmName + "$"
+        $ADAccounts += $primaryNode.OtherNode + "$"
+        $ADAccounts += $primaryNode.ClusterName + "$"
 
         $ADAccounts2 = @()
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.MachineName + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.thisVM.OtherNode + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.thisParams.thisVM.ClusterName + "$"
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.vmName + "$"
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.OtherNode + "$"
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.ClusterName + "$"
         $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
 
         if (-not $deployConfig.SQLAO.AlwaysOnName) {
@@ -614,7 +617,7 @@ $global:VM_Config = {
             return $error_message
         }
 
-        $siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $deployConfig.thisParams.MachineName }
+        $siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $primaryNode.vmName }
         $db_name = $null
         if ($siteServer -and ($deployConfig.cmOptions.install)) {
             $db_name = "CM_" + $siteServer.SiteCode
@@ -625,44 +628,49 @@ $global:VM_Config = {
                 # Node01 - First cluster node.
                 @{
                     # Replace with the name of the actual target node.
-                    NodeName        = $deployConfig.thisParams.MachineName
+                    NodeName        = $primaryNode.vmName
 
                     # This is used in the configuration to know which resource to compile.
                     Role            = 'ClusterNode1'
                     CheckModuleName = 'SqlServer'
-                    Address         = $deployConfig.thisParams.network
+                    Address         = $deployConfig.vmOptions.network
                     AddressMask     = '255.255.255.0'
                     Name            = 'Domain Network'
                     Address2        = '10.250.250.0'
                     AddressMask2    = '255.255.255.0'
                     Name2           = 'Cluster Network'
-                    InstanceName    = $deployConfig.thisParams.thisVM.sqlInstanceName
+                    InstanceName    = $primaryNode.sqlInstanceName
 
                 },
 
                 # Node02 - Second cluster node
                 @{
                     # Replace with the name of the actual target node.
-                    NodeName = $deployConfig.thisParams.thisVM.OtherNode
+                    NodeName = $primaryNode.OtherNode
 
                     # This is used in the configuration to know which resource to compile.
                     Role     = 'ClusterNode2'
+                },
+                # Node03 - DC
+                @{
+                    NodeName = $currentItem.vmName
+                    Role     = 'DC'
                 },
                 @{
                     NodeName                    = "*"
                     PSDscAllowDomainUser        = $true
                     PSDscAllowPlainTextPassword = $true
-                    ClusterName                 = $deployConfig.thisParams.thisVM.ClusterName
+                    ClusterName                 = $primaryNode.ClusterName
                     ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
                     AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
-                    PrimaryReplicaServerName    = $deployConfig.thisParams.MachineName + "." + $deployConfig.vmOptions.DomainName
-                    SecondaryReplicaServerName  = $deployConfig.thisParams.thisVM.OtherNode + "." + $deployConfig.vmOptions.DomainName
+                    PrimaryReplicaServerName    = $primaryNode.vmName + "." + $deployConfig.vmOptions.DomainName
+                    SecondaryReplicaServerName  = $primaryNode.OtherNode + "." + $deployConfig.vmOptions.DomainName
                     SqlAgentServiceAccount      = $SqlAgentServiceAccount
                     SqlServiceAccount           = $SqlServiceAccount
                     ClusterNameAoG              = $deployConfig.SQLAO.AlwaysOnName
                     ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
-                    WitnessShare                = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
-                    BackupShare                 = "\\" + $deployConfig.thisParams.thisVM.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
+                    WitnessShare                = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
+                    BackupShare                 = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
                     DBName                      = $db_name
                     #ClusterIPAddress            = '10.250.250.30/24'
                 }
@@ -670,21 +678,21 @@ $global:VM_Config = {
         }
 
         # Dump $cd, in case we need to review
-        $cd | ConvertTo-Json -Depth 3 | Out-File "C:\staging\DSC\SQLAOCD.json" -Force -Confirm:$false
+        $cd | ConvertTo-Json -Depth 3 | Out-File "C:\staging\DSC\Phase3CD.json" -Force -Confirm:$false
 
         # Compile config, to create MOF
         $user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
         "User = $user" | Out-File $log -Append
         "Password =  $($using:Common.LocalAdmin.Password)" | Out-File $log -Append
-        $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
-        if (-not $creds) {
-            $error_message = "Failed to create creds"
+        $adminCreds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
+        if (-not $adminCreds) {
+            $error_message = "Failed to create adminCreds"
             $error_message | Out-File $log -Append
             Write-Error $error_message
             return $error_message
         }
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append -ErrorAction SilentlyContinue
-        & "$($dscRole)Configuration" -GroupName $deployConfig.thisParams.thisVM.ClusterName -Description "Cluster Access Group" -SqlAdministratorCredential $creds -ConfigurationData $cd -OutputPath $dscConfigPath | Out-File $log -Append -ErrorAction SilentlyContinue
+        & "$($dscRole)Configuration" -ConfigFilePath $configFilePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath | Out-File $log -Append -ErrorAction SilentlyContinue
         "Finished Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append -ErrorAction SilentlyContinue
     }
 
@@ -709,6 +717,7 @@ $global:VM_Config = {
         # Define DSC variables
         $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
         $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+        $configFilePath = "C:\staging\DSC\deployConfig.json"
 
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
@@ -744,6 +753,7 @@ $global:VM_Config = {
 
         # Get required variables from parent scope
         $currentItem = $using:currentItem
+        $Phase  = $using:Phase
 
         # Define DSC variables
         $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
@@ -753,12 +763,12 @@ $global:VM_Config = {
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
         "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n=====" | Out-File $log -Append
 
-        if (-not ($DscFolder -eq "AoG")) {
+        if ($Phase -ne 3) {
             "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
             Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
         }
 
-        if ($currentItem.hidden -or $DscFolder -eq "AoG") {
+        if ($currentItem.hidden -or $Phase -eq 3) {
             $userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
             $user = "$userdomain\$($using:Common.LocalAdmin.UserName)"
             $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
@@ -773,9 +783,8 @@ $global:VM_Config = {
     }
 
     $ConfigToCreate = $DSC_CreateConfig
-    if ($currentItem.role -eq "SQLAO" -and $using:Phase -eq 3) {
-        $ConfigToCreate = $DSC_CreateSQLAOConfig
 
+    if ($currentItem.role -eq "SQLAO" -and $using:Phase -eq 3) {
         if ($currentItem.OtherNode) {
             #Add the note here, so the properties are set, even if we fail
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion -AddSQLAOSpecifics
@@ -790,8 +799,11 @@ $global:VM_Config = {
             if (-not $isAGExcluded) {
                 Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.SQLAO.AGIPAddress) -EndRange $($deployConfig.SQLAO.AGIPAddress) -ErrorAction SilentlyContinue
             }
-
         }
+    }
+
+    if ($currentItem.role -eq "DC" -and $using:Phase -eq 3) {
+        $ConfigToCreate = $DSC_CreatePhase3Config
     }
 
     if ($SkipStartDsc) {

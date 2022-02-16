@@ -457,6 +457,8 @@
             DependsOn     = "[WriteStatus]WaitDelegate"
         }
 
+        $nextDepend = "[WaitForEvent]DelegateControl"
+
         if ($InstallConfigMgr) {
 
             if ($waitonReadyForPSServers) {
@@ -464,7 +466,7 @@
                 $waitOnDependency = @()
 
                 WriteStatus WaitServerReady {
-                    DependsOn = "[WaitForEvent]DelegateControl"
+                    DependsOn = $nextDepend
                     Status    = "Waiting for $($waitonReadyForPSServers -join ',') to be ready."
                 }
 
@@ -482,59 +484,15 @@
                     $waitOnDependency += "[WaitForEvent]WaitFor$server"
                 }
 
-                WriteStatus RunScriptWorkflow {
-                    DependsOn = $waitOnDependency
-                    Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
-                }
-
-            }
-            else {
-
-                WriteStatus RunScriptWorkflow {
-                    DependsOn = "[WaitForEvent]DelegateControl"
-                    Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
+                if ($waitOnDependency) {
+                    $nextDepend = $waitOnDependency
                 }
             }
-
-            WriteFileOnce CMSvc {
-                FilePath  = "$LogPath\cm_svc.txt"
-                Content   = $Admincreds.GetNetworkCredential().Password
-                DependsOn = "[WriteStatus]RunScriptWorkflow"
-            }
-
-            RegisterTaskScheduler RunScriptWorkflow {
-                TaskName       = "ScriptWorkFlow"
-                ScriptName     = "ScriptWorkFlow.ps1"
-                ScriptPath     = $PSScriptRoot
-                ScriptArgument = "$ConfigFilePath $LogPath"
-                AdminCreds     = $CMAdmin
-                Ensure         = "Present"
-                DependsOn      = "[WriteFileOnce]CMSvc"
-            }
-
-            WaitForEvent WorkflowComplete {
-                MachineName   = $ThisMachineName
-                LogFolder     = $LogFolder
-                FileName      = "ScriptWorkflow"
-                ReadNode      = "ScriptWorkflow"
-                ReadNodeValue = "Completed"
-                Ensure        = "Present"
-                DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
-            }
-
-            WriteStatus Complete {
-                DependsOn = "[WaitForEvent]WorkflowComplete"
-                Status    = "Complete!"
-            }
-
         }
-        else {
 
-            WriteStatus Complete {
-                DependsOn = "[WaitForEvent]DelegateControl"
-                Status    = "Complete!"
-            }
-
+        WriteStatus Complete {
+            DependsOn = $nextDepend
+            Status    = "Complete!"
         }
 
         WriteEvent WriteConfigFinished {

@@ -175,7 +175,7 @@ function Start-PhaseJobs {
         }
 
         # Skip Phase 3 for all machines, except SQLAO's
-        if ($Phase -eq 3 -and $currentItem.role -ne "SQLAO") {
+        if ($Phase -eq 3 -and $currentItem.role -notin ("SQLAO", "DC")) {
             continue
         }
 
@@ -199,7 +199,7 @@ function Start-PhaseJobs {
         }
         else {
             $skipStartDsc = $false
-            if ($Phase -eq 3 -and $currentItem.role -eq "SQLAO" -and -not $currentItem.OtherNode) {
+            if ($Phase -eq 3 -and $currentItem.role -ne "DC") {
                 $skipStartDsc = $true
             }
             $job = Start-Job -ScriptBlock $global:VM_Config -ArgumentList $skipStartDsc -Name $jobName -ErrorAction Stop -ErrorVariable Err

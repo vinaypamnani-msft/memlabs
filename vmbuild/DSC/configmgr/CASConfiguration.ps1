@@ -74,6 +74,10 @@
         $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
     }
 
+    # Servers to wait before running Script Workflow (except Passive Site)
+    $waitonReadyForPSServers = @()
+    if ($ThisVM.remoteSQLVM -and -not $ThisVM.hidden) { $waitonReadyForPSServers += $ThisVM.remoteSQLVM }
+
     $CurrentRole = "CAS"
 
 
@@ -427,72 +431,42 @@
             DependsOn     = "[WriteStatus]WaitDelegate"
         }
 
+        $nextDepend = "[WaitForEvent]DelegateControl"
+
         if ($InstallConfigMgr) {
 
-            if ($installSQL) {
+            if ($waitonReadyForPSServers) {
 
-                WriteStatus RunScriptWorkflow {
-                    DependsOn = "[WaitForEvent]DelegateControl"
-                    Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
+                $waitOnDependency = @()
+
+                WriteStatus WaitServerReady {
+                    DependsOn = $nextDepend
+                    Status    = "Waiting for $($waitonReadyForPSServers -join ',') to be ready."
                 }
 
-            }
-            else {
+                foreach ($server in $waitonReadyForPSServers) {
 
-                # Wait for SQLVM
-                WriteStatus WaitSQL {
-                    DependsOn = "[WaitForEvent]DelegateControl"
-                    Status    = "Waiting for remote SQL VM $($ThisVM.remoteSQLVM) to finish configuration."
+                    WaitForEvent "WaitFor$server" {
+                        MachineName   = $server
+                        LogFolder     = $LogFolder
+                        ReadNode      = "ReadyForPrimary"
+                        ReadNodeValue = "Passed"
+                        Ensure        = "Present"
+                        DependsOn     = "[WriteStatus]WaitServerReady"
+                    }
+
+                    $waitOnDependency += "[WaitForEvent]WaitFor$server"
                 }
 
-                WaitForEvent WaitSQL {
-                    MachineName   = $ThisVM.remoteSQLVM
-                    LogFolder     = $LogFolder
-                    ReadNode      = "ConfigurationFinished"
-                    ReadNodeValue = "Passed"
-                    Ensure        = "Present"
-                    DependsOn     = "[WaitForEvent]DelegateControl"
+                if ($waitOnDependency) {
+                    $nextDepend = $waitOnDependency
                 }
-
-                WriteStatus RunScriptWorkflow {
-                    DependsOn = "[WaitForEvent]WaitSQL"
-                    Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
-                }
-
             }
-
-            RegisterTaskScheduler RunScriptWorkflow {
-                TaskName       = "ScriptWorkFlow"
-                ScriptName     = "ScriptWorkFlow.ps1"
-                ScriptPath     = $PSScriptRoot
-                ScriptArgument = "$ConfigFilePath $LogPath"
-                AdminCreds     = $CMAdmin
-                Ensure         = "Present"
-                DependsOn      = "[WriteStatus]RunScriptWorkflow"
-            }
-
-            WaitForEvent WorkflowComplete {
-                FileName      = "ScriptWorkflow"
-                MachineName   = $ThisMachineName
-                LogFolder     = $LogFolder
-                ReadNode      = "ScriptWorkflow"
-                ReadNodeValue = "Completed"
-                Ensure        = "Present"
-                DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
-            }
-
-            WriteStatus Complete {
-                DependsOn = "[WaitForEvent]WorkflowComplete"
-                Status    = "Complete!"
-            }
-
         }
 
-        else {
-            WriteStatus Complete {
-                DependsOn = "[ChangeSQLServicesAccount]ChangeToLocalSystem"
-                Status    = "Complete!"
-            }
+        WriteStatus Complete {
+            DependsOn = $nextDepend
+            Status    = "Complete!"
         }
 
         WriteEvent WriteConfigFinished {
