@@ -1516,6 +1516,11 @@ function Get-List {
         [object] $DeployConfig
     )
 
+    $mtx = New-Object System.Threading.Mutex($false, "GetList")
+    $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+    write-log "[$tid] Attempting to acquire 'GetList' Mutex" -LogOnly
+    [void]$mtx.WaitOne()
+    write-log "[$tid] acquired 'GetList' Mutex" -LogOnly
     try {
 
         if ($FlushCache.IsPresent) {
@@ -1540,11 +1545,6 @@ function Get-List {
 
         if ($SmartUpdate.IsPresent) {
             if ($global:vm_List) {
-                $mtx = New-Object System.Threading.Mutex($false, "GetList")
-                $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
-                write-log "[$tid] Attempting to acquire GetList Mutex" -LogOnly
-                [void]$mtx.WaitOne()
-                write-log "[$tid]acquired GetList Mutex" -LogOnly
                 try {
                     $virtualMachines = Get-VM
                     foreach ( $oldListVM in $global:vm_List) {
@@ -1580,19 +1580,11 @@ function Get-List {
                     }
                 }
                 finally {
-                    [void]$mtx.ReleaseMutex()
-                    [void]$mtx.Dispose()
                 }
             }
         }
 
         if (-not $global:vm_List) {
-
-            $mtx = New-Object System.Threading.Mutex($false, "GetList")
-            $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
-            write-log "[$tid] Attempting to acquire GetList Mutex" -LogOnly
-            [void]$mtx.WaitOne()
-            write-log "[$tid] acquired GetList Mutex" -LogOnly
 
             try {
                 #This may have been populated while waiting for mutex
@@ -1611,8 +1603,7 @@ function Get-List {
                 }
             }
             finally {
-                [void]$mtx.ReleaseMutex()
-                [void]$mtx.Dispose()
+
             }
 
         }
@@ -1683,6 +1674,10 @@ function Get-List {
         Write-Log "Failed to get '$Type' list. $_" -Failure -LogOnly
         write-Log "Trace $_.ScriptStackTrace" -Failure -LogOnly
         return $null
+    }
+    finally {
+        [void]$mtx.ReleaseMutex()
+        [void]$mtx.Dispose()
     }
 }
 
