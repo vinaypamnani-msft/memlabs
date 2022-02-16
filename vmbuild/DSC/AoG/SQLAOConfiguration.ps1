@@ -304,15 +304,19 @@ Configuration SQLAOConfiguration
             Dependson        = '[SqlAGListener]AvailabilityGroupListener'
         }
 
+        $dbName = "TESTDB"
+        if ($Node.DBName){
+            $dbName = $Node.DBName
+        }
 
         $nextDepend = '[WaitForAll]AddReplica'
-        if ($Node.DBName) {
+        if ($dbName) {
 
             SqlDatabase 'SetRecoveryModel' {
                 Ensure               = 'Present'
                 ServerName           = $Node.NodeName
                 InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-                Name                 = $Node.DBName
+                Name                 = $dbName
                 RecoveryModel        = 'Full'
 
                 PsDscRunAsCredential = $SqlAdministratorCredential
@@ -322,7 +326,7 @@ Configuration SQLAOConfiguration
             SqlAGDatabase 'AddAGDatabaseMemberships' {
                 AvailabilityGroupName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
                 BackupPath              = $Node.BackupShare
-                DatabaseName            = $Node.DBName
+                DatabaseName            = $dbName
                 InstanceName            = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
                 ServerName              = $Node.NodeName
                 Ensure                  = 'Present'
