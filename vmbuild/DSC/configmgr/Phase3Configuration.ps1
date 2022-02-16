@@ -639,7 +639,7 @@ Configuration Phase3Configuration
                     Dependson        = '[WriteStatus]SQLAO'
                 }
 
-                WriteStatus SQLAO {
+                WriteStatus SQLAODone {
                     Status    = "Setting up ConfigMgr. SQLAO complete. Waiting on SCCM Install Task to Start"
                     DependsOn = "[WaitForAll]SQLAG"
                 }
