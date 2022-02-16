@@ -1541,9 +1541,10 @@ function Get-List {
         if ($SmartUpdate.IsPresent) {
             if ($global:vm_List) {
                 $mtx = New-Object System.Threading.Mutex($false, "GetList")
-                write-log "Attempting to acquire GetList Mutex" -LogOnly
+                $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+                write-log "[$tid] Attempting to acquire GetList Mutex" -LogOnly
                 [void]$mtx.WaitOne()
-                write-log "acquired GetList Mutex" -LogOnly
+                write-log "[$tid]acquired GetList Mutex" -LogOnly
                 try {
                     $virtualMachines = Get-VM
                     foreach ( $oldListVM in $global:vm_List) {
@@ -1588,9 +1589,10 @@ function Get-List {
         if (-not $global:vm_List) {
 
             $mtx = New-Object System.Threading.Mutex($false, "GetList")
-            write-log "Attempting to acquire GetList Mutex" -LogOnly
+            $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+            write-log "[$tid] Attempting to acquire GetList Mutex" -LogOnly
             [void]$mtx.WaitOne()
-            write-log "acquired GetList Mutex" -LogOnly
+            write-log "[$tid] acquired GetList Mutex" -LogOnly
 
             try {
                 #This may have been populated while waiting for mutex
