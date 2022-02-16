@@ -616,7 +616,7 @@ $global:VM_Config = {
 
         $siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $deployConfig.thisParams.MachineName }
         $db_name = $null
-        if ($siteServer) {
+        if ($siteServer -and ($deployConfig.cmOptions.install)) {
             $db_name = "CM_" + $siteServer.SiteCode
         }
         # Configuration Data
