@@ -137,51 +137,19 @@ function Start-Phase {
 
     return $true
 }
-function Get-ConfigurationData {
+
+function Get-AOandSCCMConfigurationData {
     param (
-        [int]$Phase,
         [object]$deployConfig
     )
-
-
-    if ($Phase -ne 3) {
-        return
-    }
 
     $primaryNode = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
     $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     if (-not $netbiosName) {
-        $error_message = "Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
-        $error_message | Out-File $log -Append
-        Write-Error $error_message
-        return $error_message
-    }
-    $SqlAgentServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlAgentServiceAccount
-    $SqlServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlServiceAccount
-    if (-not $primaryNode.fileServerVM) {
-        $error_message = "Could not get fileServerVM name from primaryNode.fileServerVM"
-        $error_message | Out-File $log -Append
-        Write-Error $error_message
-        return $error_message
+        write-Log -Failure "Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
+        return
     }
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-
-    $ADAccounts = @()
-    $ADAccounts += $primaryNode.vmName + "$"
-    $ADAccounts += $primaryNode.OtherNode + "$"
-    $ADAccounts += $primaryNode.ClusterName + "$"
-
-    $ADAccounts2 = @()
-    $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.vmName + "$"
-    $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.OtherNode + "$"
-    $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.ClusterName + "$"
-    $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
-
-    $siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $primaryNode.vmName }
-    $db_name = $null
-    if ($siteServer -and ($deployConfig.cmOptions.install)) {
-        $db_name = "CM_" + $siteServer.SiteCode
-    }
 
     $NumberOfNodesAdded = 0
     # Configuration Data
@@ -195,6 +163,29 @@ function Get-ConfigurationData {
     }
 
     if ($primaryNode) {
+        $SqlAgentServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlAgentServiceAccount
+        $SqlServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlServiceAccount
+        if (-not $primaryNode.fileServerVM) {
+            write-Log -Failure "Could not get fileServerVM name from primaryNode.fileServerVM"
+            return
+        }
+
+        $ADAccounts = @()
+        $ADAccounts += $primaryNode.vmName + "$"
+        $ADAccounts += $primaryNode.OtherNode + "$"
+        $ADAccounts += $primaryNode.ClusterName + "$"
+
+        $ADAccounts2 = @()
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.vmName + "$"
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.OtherNode + "$"
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.ClusterName + "$"
+        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
+
+        #$siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $primaryNode.vmName }
+        #$db_name = $null
+        #if ($siteServer -and ($deployConfig.cmOptions.install)) {
+        #    $db_name = "CM_" + $siteServer.SiteCode
+        #}
         $primary = @{
             # Replace with the name of the actual target node.
             NodeName        = $primaryNode.vmName
@@ -223,7 +214,7 @@ function Get-ConfigurationData {
         }
         $cd.AllNodes += $secondary
         #added Primary And Secondary
-        $NumberOfNodesAdded = $NumberOfNodesAdded +2
+        $NumberOfNodesAdded = $NumberOfNodesAdded + 2
         $all = @{
             NodeName                    = "*"
             PSDscAllowDomainUser        = $true
@@ -247,13 +238,13 @@ function Get-ConfigurationData {
 
     }
 
-    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS") }) {
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary") }) {
         $newItem = @{
             NodeName = $vm.vmName
             Role     = $vm.Role
         }
         $cd.AllNodes += $newItem
-        $NumberOfNodesAdded = $NumberOfNodesAdded +1
+        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
     }
 
     if (-not $primaryNode) {
@@ -264,9 +255,21 @@ function Get-ConfigurationData {
         }
         $cd.AllNodes += $all
     }
-
     if ($NumberOfNodesAdded -eq 0) {
         return
+    }
+    return $cd
+}
+function Get-ConfigurationData {
+    param (
+        [int]$Phase,
+        [object]$deployConfig
+    )
+
+
+    switch ($Phase) {
+        "3" { $cd = Get-AOandSCCMConfigurationData -deployConfig $deployConfig}
+        Default { return }
     }
 
     return $cd
@@ -306,9 +309,16 @@ function Start-PhaseJobs {
         if ($Phase -eq 2 -and $currentItem.role -eq "OSDClient") {
             continue
         }
+        $ConfigurationData = $null
+        if ($Phase -gt 2) {
+            $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
+        }
+        #if ($Phase -eq 3 -and $currentItem.role -eq "DC") {
+        #    $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
+        #}
 
-        # Skip Phase 3 for all machines, except SQLAO's
-        if ($Phase -eq 3 -and $currentItem.role -notin ("SQLAO", "DC", "Primary", "CAS")) {
+        # Skip Phase 3 for all machines, not in phase 3 config
+        if ($Phase -eq 3 -and $currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) {
             continue
         }
 
@@ -324,8 +334,7 @@ function Start-PhaseJobs {
 
         if ($Phase -eq 0 -or $Phase -eq 1) {
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
-            if ($null -eq $job)
-            {
+            if ($null -eq $job) {
                 Write-Log "Failed to create job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
@@ -335,15 +344,12 @@ function Start-PhaseJobs {
             if ($Phase -eq 3 -and $currentItem.role -ne "DC") {
                 $skipStartDsc = $true
             }
-            if ($Phase -eq 3 -and $currentItem.role -eq "DC") {
-                $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
-            }
+
             if ($Phase -eq 3 -and $skipStartDsc -eq $false -and (-not $ConfigurationData)) {
                 Write-Log "No VMs need phase 3 configuration. Should Skip here."
             }
             $job = Start-Job -ScriptBlock $global:VM_Config -ArgumentList $skipStartDsc -Name $jobName -ErrorAction Stop -ErrorVariable Err
-            if ($null -eq $job)
-            {
+            if ($null -eq $job) {
                 Write-Log "Failed to create job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
@@ -703,7 +709,7 @@ try {
 
                 $configured = Start-Phase -Phase 2 -deployConfig $deployConfig
 
-                if ($configured -and $containsAO) {
+                if ($configured) {
                     if (-not $SkipPhase3.IsPresent) {
                         $configured = Start-Phase -Phase 3 -deployConfig $deployConfig
 
@@ -723,6 +729,8 @@ try {
     else {
         Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Activity
     }
+    $NewLabsuccess = $true
+
     $NewLabsuccess = $true
 }
 catch {
