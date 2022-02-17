@@ -632,14 +632,6 @@ $global:VM_Config = {
             )
         }
 
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS") }){
-            $newItem = @{
-                NodeName = $vm.vmName
-                Role = $vm.Role
-            }
-            $cd.AllNodes += $newItem
-        }
-
         if ($primaryNode) {
             $primary =  @{
                 # Replace with the name of the actual target node.
@@ -684,7 +676,8 @@ $global:VM_Config = {
                 ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
                 WitnessShare                = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
                 BackupShare                 = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
-                DBName                      = $db_name
+                #Dont pass DBName, or DSC will create the database and add it to Ao.. In this new method, we install SCCM direct to AO
+                #DBName                      = $db_name
                 #ClusterIPAddress            = '10.250.250.30/24'
             }
             $cd.AllNodes += $all
