@@ -625,54 +625,9 @@ $global:VM_Config = {
         # Configuration Data
         $cd = @{
             AllNodes = @(
-                # Node01 - First cluster node.
-                @{
-                    # Replace with the name of the actual target node.
-                    NodeName        = $primaryNode.vmName
-
-                    # This is used in the configuration to know which resource to compile.
-                    Role            = 'ClusterNode1'
-                    CheckModuleName = 'SqlServer'
-                    Address         = $deployConfig.vmOptions.network
-                    AddressMask     = '255.255.255.0'
-                    Name            = 'Domain Network'
-                    Address2        = '10.250.250.0'
-                    AddressMask2    = '255.255.255.0'
-                    Name2           = 'Cluster Network'
-                    InstanceName    = $primaryNode.sqlInstanceName
-
-                },
-
-                # Node02 - Second cluster node
-                @{
-                    # Replace with the name of the actual target node.
-                    NodeName = $primaryNode.OtherNode
-
-                    # This is used in the configuration to know which resource to compile.
-                    Role     = 'ClusterNode2'
-                },
-                # Node03 - DC
                 @{
                     NodeName = $currentItem.vmName
                     Role     = 'DC'
-                },
-                @{
-                    NodeName                    = "*"
-                    PSDscAllowDomainUser        = $true
-                    PSDscAllowPlainTextPassword = $true
-                    ClusterName                 = $primaryNode.ClusterName
-                    ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
-                    AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
-                    PrimaryReplicaServerName    = $primaryNode.vmName + "." + $deployConfig.vmOptions.DomainName
-                    SecondaryReplicaServerName  = $primaryNode.OtherNode + "." + $deployConfig.vmOptions.DomainName
-                    SqlAgentServiceAccount      = $SqlAgentServiceAccount
-                    SqlServiceAccount           = $SqlServiceAccount
-                    ClusterNameAoG              = $deployConfig.SQLAO.AlwaysOnName
-                    ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
-                    WitnessShare                = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
-                    BackupShare                 = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
-                    DBName                      = $db_name
-                    #ClusterIPAddress            = '10.250.250.30/24'
                 }
             )
         }
@@ -685,6 +640,73 @@ $global:VM_Config = {
             $cd.AllNodes += $newItem
         }
 
+        if ($primaryNode) {
+            $primary =  @{
+                # Replace with the name of the actual target node.
+                NodeName        = $primaryNode.vmName
+
+                # This is used in the configuration to know which resource to compile.
+                Role            = 'ClusterNode1'
+                CheckModuleName = 'SqlServer'
+                Address         = $deployConfig.vmOptions.network
+                AddressMask     = '255.255.255.0'
+                Name            = 'Domain Network'
+                Address2        = '10.250.250.0'
+                AddressMask2    = '255.255.255.0'
+                Name2           = 'Cluster Network'
+                InstanceName    = $primaryNode.sqlInstanceName
+
+            }
+
+            $cd.AllNodes += $primary
+
+            $secondary =   @{
+                # Replace with the name of the actual target node.
+                NodeName = $primaryNode.OtherNode
+
+                # This is used in the configuration to know which resource to compile.
+                Role     = 'ClusterNode2'
+            }
+            $cd.AllNodes += $secondary
+
+            $all =  @{
+                NodeName                    = "*"
+                PSDscAllowDomainUser        = $true
+                PSDscAllowPlainTextPassword = $true
+                ClusterName                 = $primaryNode.ClusterName
+                ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
+                AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
+                PrimaryReplicaServerName    = $primaryNode.vmName + "." + $deployConfig.vmOptions.DomainName
+                SecondaryReplicaServerName  = $primaryNode.OtherNode + "." + $deployConfig.vmOptions.DomainName
+                SqlAgentServiceAccount      = $SqlAgentServiceAccount
+                SqlServiceAccount           = $SqlServiceAccount
+                ClusterNameAoG              = $deployConfig.SQLAO.AlwaysOnName
+                ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
+                WitnessShare                = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
+                BackupShare                 = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
+                DBName                      = $db_name
+                #ClusterIPAddress            = '10.250.250.30/24'
+            }
+            $cd.AllNodes += $all
+
+        }
+
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS") }){
+            $newItem = @{
+                NodeName = $vm.vmName
+                Role = $vm.Role
+            }
+            $cd.AllNodes += $newItem
+        }
+
+        if (-not $primaryNode){
+            $all =  @{
+                NodeName                    = "*"
+                PSDscAllowDomainUser        = $true
+                PSDscAllowPlainTextPassword = $true
+            }
+            $cd.AllNodes += $all
+        }
         # Dump $cd, in case we need to review
         $cd | ConvertTo-Json -Depth 3 | Out-File "C:\staging\DSC\Phase3CD.json" -Force -Confirm:$false
 
