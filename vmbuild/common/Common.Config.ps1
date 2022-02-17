@@ -535,7 +535,7 @@ function Add-PerVMSettings {
             }
             else {
                 $ip = $iprange[1]
-                $thisParams | Add-Member -MemberType NoteProperty -Name "DscMachine" -Value $deployConfig.SQLAO.PrimaryNodeName -Force
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DscMachine" -Value $dc.vmName -Force
             }
             if (-not $thisParams.DNSServer) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force

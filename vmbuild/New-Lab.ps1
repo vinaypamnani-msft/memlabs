@@ -137,7 +137,140 @@ function Start-Phase {
 
     return $true
 }
+function Get-ConfigurationData {
+    param (
+        [int]$Phase,
+        [object]$deployConfig
+    )
 
+
+    if ($Phase -ne 3) {
+        return
+    }
+
+    $primaryNode = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
+    $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+    if (-not $netbiosName) {
+        $error_message = "Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
+        $error_message | Out-File $log -Append
+        Write-Error $error_message
+        return $error_message
+    }
+    $SqlAgentServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlAgentServiceAccount
+    $SqlServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlServiceAccount
+    if (-not $primaryNode.fileServerVM) {
+        $error_message = "Could not get fileServerVM name from primaryNode.fileServerVM"
+        $error_message | Out-File $log -Append
+        Write-Error $error_message
+        return $error_message
+    }
+    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
+
+    $ADAccounts = @()
+    $ADAccounts += $primaryNode.vmName + "$"
+    $ADAccounts += $primaryNode.OtherNode + "$"
+    $ADAccounts += $primaryNode.ClusterName + "$"
+
+    $ADAccounts2 = @()
+    $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.vmName + "$"
+    $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.OtherNode + "$"
+    $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.ClusterName + "$"
+    $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
+
+    $siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $primaryNode.vmName }
+    $db_name = $null
+    if ($siteServer -and ($deployConfig.cmOptions.install)) {
+        $db_name = "CM_" + $siteServer.SiteCode
+    }
+
+    $NumberOfNodesAdded = 0
+    # Configuration Data
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName = $currentItem.vmName
+                Role     = 'DC'
+            }
+        )
+    }
+
+    if ($primaryNode) {
+        $primary = @{
+            # Replace with the name of the actual target node.
+            NodeName        = $primaryNode.vmName
+
+            # This is used in the configuration to know which resource to compile.
+            Role            = 'ClusterNode1'
+            CheckModuleName = 'SqlServer'
+            Address         = $deployConfig.vmOptions.network
+            AddressMask     = '255.255.255.0'
+            Name            = 'Domain Network'
+            Address2        = '10.250.250.0'
+            AddressMask2    = '255.255.255.0'
+            Name2           = 'Cluster Network'
+            InstanceName    = $primaryNode.sqlInstanceName
+
+        }
+
+        $cd.AllNodes += $primary
+
+        $secondary = @{
+            # Replace with the name of the actual target node.
+            NodeName = $primaryNode.OtherNode
+
+            # This is used in the configuration to know which resource to compile.
+            Role     = 'ClusterNode2'
+        }
+        $cd.AllNodes += $secondary
+        #added Primary And Secondary
+        $NumberOfNodesAdded = $NumberOfNodesAdded +2
+        $all = @{
+            NodeName                    = "*"
+            PSDscAllowDomainUser        = $true
+            PSDscAllowPlainTextPassword = $true
+            ClusterName                 = $primaryNode.ClusterName
+            ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
+            AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
+            PrimaryReplicaServerName    = $primaryNode.vmName + "." + $deployConfig.vmOptions.DomainName
+            SecondaryReplicaServerName  = $primaryNode.OtherNode + "." + $deployConfig.vmOptions.DomainName
+            SqlAgentServiceAccount      = $SqlAgentServiceAccount
+            SqlServiceAccount           = $SqlServiceAccount
+            ClusterNameAoG              = $deployConfig.SQLAO.AlwaysOnName
+            ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
+            WitnessShare                = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
+            BackupShare                 = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
+            #Dont pass DBName, or DSC will create the database and add it to Ao.. In this new method, we install SCCM direct to AO
+            #DBName                      = $db_name
+            #ClusterIPAddress            = '10.250.250.30/24'
+        }
+        $cd.AllNodes += $all
+
+    }
+
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS") }) {
+        $newItem = @{
+            NodeName = $vm.vmName
+            Role     = $vm.Role
+        }
+        $cd.AllNodes += $newItem
+        $NumberOfNodesAdded = $NumberOfNodesAdded +1
+    }
+
+    if (-not $primaryNode) {
+        $all = @{
+            NodeName                    = "*"
+            PSDscAllowDomainUser        = $true
+            PSDscAllowPlainTextPassword = $true
+        }
+        $cd.AllNodes += $all
+    }
+
+    if ($NumberOfNodesAdded -eq 0) {
+        return
+    }
+
+    return $cd
+}
 function Start-PhaseJobs {
     param (
         [int]$Phase,
@@ -201,6 +334,12 @@ function Start-PhaseJobs {
             $skipStartDsc = $false
             if ($Phase -eq 3 -and $currentItem.role -ne "DC") {
                 $skipStartDsc = $true
+            }
+            if ($Phase -eq 3 -and $currentItem.role -eq "DC") {
+                $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
+            }
+            if ($Phase -eq 3 -and $skipStartDsc -eq $false -and (-not $ConfigurationData)) {
+                Write-Log "No VMs need phase 3 configuration. Should Skip here."
             }
             $job = Start-Job -ScriptBlock $global:VM_Config -ArgumentList $skipStartDsc -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if ($null -eq $job)

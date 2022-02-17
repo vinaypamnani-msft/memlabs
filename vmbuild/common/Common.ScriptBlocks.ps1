@@ -294,6 +294,7 @@ $global:VM_Config = {
     $currentItem = $using:currentItem
     $enableVerbose = $using:enableVerbose
     $Phase = $using:Phase
+    $ConfigurationData = $using:ConfigurationData
 
     # Dot source common
     . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$enableVerbose
@@ -548,8 +549,8 @@ $global:VM_Config = {
         # Get required variables from parent scope
         $currentItem = $using:currentItem
         $deployConfig = $using:deployConfig
+        $ConfigurationData = $using:ConfigurationData
         $dscRole = "Phase3"
-        $primaryNode = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
 
         # Define DSC variables
         $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
@@ -568,9 +569,9 @@ $global:VM_Config = {
 
         # Dot Source config script
         . "$dscConfigScript"
-        $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
-        if (-not $netbiosName) {
-            $error_message = "Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
+
+        if (-not $ConfigurationData){
+            $error_message = "No Configuration data was supplied. Please verify We should be running Phase 3 or check the logs for errors"
             $error_message | Out-File $log -Append
             Write-Error $error_message
             return $error_message
@@ -582,14 +583,7 @@ $global:VM_Config = {
             Write-Error $error_message
             return $error_message
         }
-        $SqlAgentServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlAgentServiceAccount
-        $SqlServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlServiceAccount
-        if (-not $primaryNode.fileServerVM) {
-            $error_message = "Could not get fileServerVM name from primaryNode.fileServerVM"
-            $error_message | Out-File $log -Append
-            Write-Error $error_message
-            return $error_message
-        }
+
 
         if (-not $deployConfig.vmOptions.domainName) {
             $error_message = "Could not get domainName name from deployConfig"
@@ -597,18 +591,7 @@ $global:VM_Config = {
             Write-Error $error_message
             return $error_message
         }
-        $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
 
-        $ADAccounts = @()
-        $ADAccounts += $primaryNode.vmName + "$"
-        $ADAccounts += $primaryNode.OtherNode + "$"
-        $ADAccounts += $primaryNode.ClusterName + "$"
-
-        $ADAccounts2 = @()
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.vmName + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.OtherNode + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.ClusterName + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
 
         if (-not $deployConfig.SQLAO.AlwaysOnName) {
             $error_message = "AlwaysOnName not defined in config"
@@ -617,92 +600,18 @@ $global:VM_Config = {
             return $error_message
         }
 
-        $siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $primaryNode.vmName }
-        $db_name = $null
-        if ($siteServer -and ($deployConfig.cmOptions.install)) {
-            $db_name = "CM_" + $siteServer.SiteCode
-        }
-        # Configuration Data
+
         $cd = @{
-            AllNodes = @(
-                @{
-                    NodeName = $currentItem.vmName
-                    Role     = 'DC'
-                }
-            )
+            AllNodes = @()
+        }
+        Foreach ($node in $ConfigurationData.AllNodes){
+            $cd.AllNodes+=$node
         }
 
-        if ($primaryNode) {
-            $primary =  @{
-                # Replace with the name of the actual target node.
-                NodeName        = $primaryNode.vmName
-
-                # This is used in the configuration to know which resource to compile.
-                Role            = 'ClusterNode1'
-                CheckModuleName = 'SqlServer'
-                Address         = $deployConfig.vmOptions.network
-                AddressMask     = '255.255.255.0'
-                Name            = 'Domain Network'
-                Address2        = '10.250.250.0'
-                AddressMask2    = '255.255.255.0'
-                Name2           = 'Cluster Network'
-                InstanceName    = $primaryNode.sqlInstanceName
-
-            }
-
-            $cd.AllNodes += $primary
-
-            $secondary =   @{
-                # Replace with the name of the actual target node.
-                NodeName = $primaryNode.OtherNode
-
-                # This is used in the configuration to know which resource to compile.
-                Role     = 'ClusterNode2'
-            }
-            $cd.AllNodes += $secondary
-
-            $all =  @{
-                NodeName                    = "*"
-                PSDscAllowDomainUser        = $true
-                PSDscAllowPlainTextPassword = $true
-                ClusterName                 = $primaryNode.ClusterName
-                ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
-                AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
-                PrimaryReplicaServerName    = $primaryNode.vmName + "." + $deployConfig.vmOptions.DomainName
-                SecondaryReplicaServerName  = $primaryNode.OtherNode + "." + $deployConfig.vmOptions.DomainName
-                SqlAgentServiceAccount      = $SqlAgentServiceAccount
-                SqlServiceAccount           = $SqlServiceAccount
-                ClusterNameAoG              = $deployConfig.SQLAO.AlwaysOnName
-                ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
-                WitnessShare                = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
-                BackupShare                 = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
-                #Dont pass DBName, or DSC will create the database and add it to Ao.. In this new method, we install SCCM direct to AO
-                #DBName                      = $db_name
-                #ClusterIPAddress            = '10.250.250.30/24'
-            }
-            $cd.AllNodes += $all
-
-        }
-
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS") }){
-            $newItem = @{
-                NodeName = $vm.vmName
-                Role = $vm.Role
-            }
-            $cd.AllNodes += $newItem
-        }
-
-        if (-not $primaryNode){
-            $all =  @{
-                NodeName                    = "*"
-                PSDscAllowDomainUser        = $true
-                PSDscAllowPlainTextPassword = $true
-            }
-            $cd.AllNodes += $all
-        }
         # Dump $cd, in case we need to review
         $cd | ConvertTo-Json -Depth 3 | Out-File "C:\staging\DSC\Phase3CD.json" -Force -Confirm:$false
 
+        $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
         # Compile config, to create MOF
         $user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
         "User = $user" | Out-File $log -Append
