@@ -50,7 +50,7 @@ function ConvertTo-DeployConfigEx {
             DomainAdmins        = @($deployConfig.vmOptions.adminName)
             SchemaAdmins        = @($deployConfig.vmOptions.adminName)
         }
-
+        $thisParams = [pscustomobject]@{}
         if ($thisVM.domainUser) {
             $accountLists.LocalAdminAccounts += $thisVM.domainUser
         }

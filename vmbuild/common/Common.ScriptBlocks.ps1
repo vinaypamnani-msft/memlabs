@@ -1,13 +1,17 @@
 
 # Create VM script block
 $global:VM_Create = {
-
+    $currentItem = $using:currentItem
     # Dot source common
     . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
-
+    if (-not ($Common.LogPath)) {
+        Write-Output "ERROR: $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized"
+        return
+    }
+    Write-Log "PSJOB: $($currentItem.vmName): Started VM_Create" -LogOnly
     # Get variables from parent scope
     $deployConfig = $using:deployConfigCopy
-    $currentItem = $using:currentItem
+
     $azureFileList = $using:Common.AzureFileList
 
     # Params for child script blocks
@@ -17,7 +21,7 @@ $global:VM_Create = {
     # Change log location
     $domainNameForLogging = $deployConfig.vmOptions.domainName
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
-
+    Write-Log "PSJOB: $($currentItem.vmName): Started VM_Create" -LogOnly
     # VM Network Switch
     $isInternet = ($currentItem.role -eq "InternetClient") -or ($currentItem.role -eq "AADClient")
     if ($isInternet) {
@@ -298,7 +302,11 @@ $global:VM_Config = {
 
     # Dot source common
     . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$enableVerbose
-
+    if (-not ($Common.LogPath)) {
+        Write-Output "ERROR: $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized"
+        return
+    }
+    Write-Log "PSJOB: $($currentItem.vmName): Started VM_Config" -LogOnly
     # Params for child script blocks
     $DscFolder = "configmgr"
     # if ($currentItem.role -eq "DC" -and $using:Phase -eq 3) {
@@ -309,9 +317,10 @@ $global:VM_Config = {
     if ($currentItem.hidden -eq $true) { $createVM = $false }
 
     # Change log location
-    $domainNameForLogging = $deployConfig.vmOptions.domainName
+
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
+    Write-Log "PSJOB: $($currentItem.vmName): Started VM_Config" -LogOnly
     # Set domain name, depending on whether we need to create new VM or use existing one
     if (-not $createVM -or ($currentItem.role -eq "DC") ) {
         $domainName = $deployConfig.parameters.DomainName
