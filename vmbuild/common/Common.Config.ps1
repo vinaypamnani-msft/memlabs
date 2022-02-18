@@ -783,8 +783,8 @@ function Add-PerVMSettings {
     if ($WaitOnDomainJoin.Count -gt 0) {
         $thisParams | Add-Member -MemberType NoteProperty -Name "WaitOnDomainJoin" -Value $WaitOnDomainJoin -Force
     }
-
-    $LocalAdminAccounts = $accountLists.LocalAdminAccounts | Sort-Object | Get-Unique
+    $LocalAdminAccounts = @()
+    $LocalAdminAccounts += $accountLists.LocalAdminAccounts | Sort-Object | Get-Unique
     if ($LocalAdminAccounts.Count -gt 0) {
         $thisParams | Add-Member -MemberType NoteProperty -Name "LocalAdminAccounts" -Value $LocalAdminAccounts -Force
     }
