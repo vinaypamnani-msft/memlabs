@@ -577,14 +577,6 @@ $global:VM_Config = {
             return $error_message
         }
 
-        if (-not $deployConfig.SQLAO.SqlAgentServiceAccount) {
-            $error_message = "Could not get SqlAgentServiceAccount name from deployConfig.SQLAO.SqlAgentServiceAccount"
-            $error_message | Out-File $log -Append
-            Write-Error $error_message
-            return $error_message
-        }
-
-
         if (-not $deployConfig.vmOptions.domainName) {
             $error_message = "Could not get domainName name from deployConfig"
             $error_message | Out-File $log -Append
@@ -592,16 +584,7 @@ $global:VM_Config = {
             return $error_message
         }
 
-
-        if (-not $deployConfig.SQLAO.AlwaysOnName) {
-            $error_message = "AlwaysOnName not defined in config"
-            $error_message | Out-File $log -Append
-            Write-Error $error_message
-            return $error_message
-        }
-
-
-        $cd = @{
+      $cd = @{
             AllNodes = @()
         }
         Foreach ($node in $ConfigurationData.AllNodes){
@@ -783,7 +766,7 @@ $global:VM_Config = {
     }
     catch {}
     $dscStatusPolls = 0
-
+    $failCount = 0
     do {
 
         #$bob =  (Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (get-job -Name AoG -IncludeChildJob).Progress | Select-Object -last 1 | select-object -ExpandProperty CurrentOperation }).ScriptBlockOutput
@@ -831,8 +814,24 @@ $global:VM_Config = {
                             #If we dont reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
                             continue
                         }
+                        if ($($dscStatus.ScriptBlockOutput.Error) -like "*Could not find mandatory property*") {
+                            Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                            $failure = $true
+                        }
+
+                        if ($($dscStatus.ScriptBlockOutput.Error) -like "*Compilation errors occurred*") {
+                            Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                            $failure = $true
+                        }
+
                         if ($($dscStatus.ScriptBlockOutput.Error) -ne $lasterror) {
+                            $failCount = 0
                             Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Warning -OutputStream
+                        }
+                        $failCount++
+                        if ($failCount -gt 100) {
+                            Write-Log "PSJOB: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                            $failure = $true
                         }
                         $lasterror = $($dscStatus.ScriptBlockOutput.Error)
                     }

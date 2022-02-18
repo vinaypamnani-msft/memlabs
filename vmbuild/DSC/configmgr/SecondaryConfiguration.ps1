@@ -344,32 +344,10 @@ configuration SecondaryConfiguration
             DependsOn = $addUserDependancy
         }
 
-        WriteStatus WaitPrimary {
-            DependsOn = "[WriteEvent]ReadyForPrimary"
-            Status    = "Waiting for Site Server $PSName to finish configuration."
-        }
-
-        WaitForEvent WaitPrimary {
-            MachineName   = $PSName
-            LogFolder     = $LogFolder
-            FileName      = "ScriptWorkflow"
-            ReadNode      = "ScriptWorkflow"
-            ReadNodeValue = "Completed"
-            Ensure        = "Present"
-            DependsOn     = "[WriteStatus]WaitPrimary"
-        }
 
         WriteStatus Complete {
-            DependsOn = "[WaitForEvent]WaitPrimary"
+            DependsOn = "[WriteEvent]ReadyForPrimary"
             Status    = "Complete!"
-        }
-
-        WriteEvent WriteConfigFinished {
-            LogPath   = $LogPath
-            WriteNode = "ConfigurationFinished"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
         }
 
     }

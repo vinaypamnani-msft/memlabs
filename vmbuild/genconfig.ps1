@@ -2001,7 +2001,7 @@ function Select-ExistingSubnets {
 
         $subnetListModified = @()
         foreach ($sb in $subnetListNew) {
-            if ($sb -eq "Internet") {
+            if ($sb -eq "Internet" -or ($sb -eq "cluster")) {
                 continue
             }
             $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode -and ($_.Role -eq "Primary" -or $_.Role -eq "CAS" -or $_.Role -eq "Secondary") } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
@@ -4461,6 +4461,7 @@ if ($InternalUseOnly.IsPresent) {
     $domainExists = Get-List -Type VM -DomainName $Global:Config.vmOptions.domainName
     if ($domainExists) {
         write-host -ForegroundColor Green "This configuration will make modifications to $($Global:Config.vmOptions.DomainName)"
+        Write-OrangePoint -NoIndent "Without a snapshot, if something fails it may not be possible to recover"
         $response = Read-Host2 -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (Y/n)" -HideHelp
         if ([String]::IsNullOrWhiteSpace($response) -or $response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes" ) {
             Select-StopDomain -domain $Global:Config.vmOptions.DomainName -response "C"
