@@ -1,9 +1,9 @@
-﻿configuration WorkgroupMemberConfiguration
+﻿configuration Phase2WorkgroupMember
 {
     param
     (
         [Parameter(Mandatory)]
-        [string]$ConfigFilePath,
+        [string]$DeployConfigPath,
         [Parameter(Mandatory)]
         [System.Management.Automation.PSCredential]$Admincreds
     )
@@ -13,7 +13,7 @@
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
 
     # Read config
-    $deployConfig = Get-Content -Path $ConfigFilePath | ConvertFrom-Json
+    $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $ThisMachineName = $deployConfig.thisParams.MachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 

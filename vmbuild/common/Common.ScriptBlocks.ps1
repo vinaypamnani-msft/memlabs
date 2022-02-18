@@ -567,17 +567,19 @@ $global:VM_Config = {
         $adminCreds = $using:Common.LocalAdmin
         $Phase = $using:Phase
 
+        $dscRole = "Phase$Phase"
+
         # Set current role
         switch (($currentItem.role)) {
-            "DC" { $dscRole = "DC" }
-            "WorkgroupMember" { $dscRole = "WorkgroupMember" }
-            "AADClient" { $dscRole = "WorkgroupMember" }
-            "InternetClient" { $dscRole = "WorkgroupMember" }
-            default { $dscRole = "DomainMember" }
+            "DC" { $dscRole += "DC" }
+            "WorkgroupMember" { $dscRole += "WorkgroupMember" }
+            "AADClient" { $dscRole += "WorkgroupMember" }
+            "InternetClient" { $dscRole += "WorkgroupMember" }
+            default { $dscRole += "DomainMember" }
         }
 
         # Define DSC variables
-        $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
+        $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole).ps1"
         $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
         $deployConfigPath = "C:\staging\DSC\deployConfig.json"
 
@@ -621,7 +623,7 @@ $global:VM_Config = {
 
         # Compile config, to create MOF
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
-        & "$($dscRole)Configuration" -DeployConfigPath $deployConfigPath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
+        & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
     }
 
     $DSC_CreateMultiConfig = {

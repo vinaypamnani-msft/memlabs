@@ -1,4 +1,4 @@
-﻿configuration DCConfiguration
+﻿configuration Phase2DC
 {
     param
     (
