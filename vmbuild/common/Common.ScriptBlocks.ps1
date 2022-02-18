@@ -1,7 +1,7 @@
 
 # Create VM script block
 $global:VM_Create = {
-
+    $currentItem = $using:currentItem
     # Dot source common
     $rootPath = Split-Path $using:PSScriptRoot -Parent
     . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
@@ -13,7 +13,7 @@ $global:VM_Create = {
 
     # Get variables from parent scope
     $deployConfig = $using:deployConfigCopy
-    $currentItem = $using:currentItem
+
     $azureFileList = $using:Common.AzureFileList
 
     # Params for child script blocks
@@ -23,7 +23,7 @@ $global:VM_Create = {
     # Change log location
     $domainNameForLogging = $deployConfig.vmOptions.domainName
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
-
+    Write-Log "PSJOB: $($currentItem.vmName): Started VM_Create" -LogOnly
     # VM Network Switch
     $isInternet = ($currentItem.role -eq "InternetClient") -or ($currentItem.role -eq "AADClient")
     if ($isInternet) {
@@ -324,9 +324,10 @@ $global:VM_Config = {
     if ($currentItem.hidden -eq $true) { $createVM = $false }
 
     # Change log location
-    $domainNameForLogging = $deployConfig.vmOptions.domainName
+
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
+    Write-Log "PSJOB: $($currentItem.vmName): Started VM_Config" -LogOnly
     # Set domain name, depending on whether we need to create new VM or use existing one
     if (-not $createVM -or ($currentItem.role -eq "DC") ) {
         $domainName = $deployConfig.parameters.DomainName

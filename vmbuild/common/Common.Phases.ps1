@@ -61,7 +61,6 @@ function Start-Phase {
     }
 
     # Start Phase
-    $deployConfigEx = Get-
     $start = Start-PhaseJobs -Phase $Phase -PhaseDescription $PhaseDescription -deployConfig $deployConfig
     if (-not $start.Applicable) {
         Write-Log "`n Phase $Phase was not found applicable. Skipping."
