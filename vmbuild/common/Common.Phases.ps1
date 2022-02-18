@@ -61,7 +61,13 @@ function Start-Phase {
     }
 
     # Start Phase
+    $deployConfigEx = Get-
     $start = Start-PhaseJobs -Phase $Phase -PhaseDescription $PhaseDescription -deployConfig $deployConfig
+    if (-not $start.Applicable) {
+        Write-Log "`n Phase $Phase was not found applicable. Skipping."
+        return $true
+    }
+
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs
     Write-Log "`n$($result.Success) jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
 
@@ -83,6 +89,29 @@ function Start-PhaseJobs {
     $job_created_yes = 0
     $job_created_no = 0
 
+    # Determine single vs. multi-DSC
+    $multiNodeDsc = $true
+    $ConfigurationData = $null
+    if ($Phase -gt 1) {
+        $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
+        if (-not $ConfigurationData) {
+            # Nothing applicable for this phase
+            return [PSCustomObject]@{
+                Failed     = 0
+                Success    = 0
+                Jobs       = 0
+                Applicable = $false
+            }
+        }
+
+        if ($ConfigurationData.AllNodes.NodeName -contains "LOCALHOST") {
+            $multiNodeDsc = $false
+        }
+    }
+    else {
+        $multiNodeDsc = $false
+    }
+
     # Track all VM's for removal, if failures encountered
     $global:vm_remove_list = @()
 
@@ -98,25 +127,18 @@ function Start-PhaseJobs {
             continue
         }
 
-        # Add non-hidden VM's to removal list, in case Phase 1 fails
+        # Add non-hidden VM's to removal list, in case Phase 1 fails. TODO: Re-evaluate phase
         if ($Phase -eq 1 -and -not $currentItem.hidden) {
             $global:vm_remove_list += $currentItem.vmName
         }
 
-        # Skip Phase 2 for OSDClient, nothing for us to do
-        if ($Phase -eq 2 -and $currentItem.role -eq "OSDClient") {
+        # Skip everything for OSDClient, nothing for us to do
+        if ($Phase -gt 1 -and $currentItem.role -eq "OSDClient") {
             continue
         }
-        $ConfigurationData = $null
-        if ($Phase -gt 2) {
-            $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
-        }
-        #if ($Phase -eq 3 -and $currentItem.role -eq "DC") {
-        #    $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
-        #}
 
-        # Skip Phase 3 for all machines, not in phase 3 config
-        if ($Phase -eq 3 -and $currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) {
+        # Skip multi-node DSC (& monitoring) for all machines except those in the ConfigurationData.AllNodes
+        if ($multiNodeDsc -and $currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) {
             continue
         }
 
@@ -131,23 +153,16 @@ function Start-PhaseJobs {
         $jobName = $currentItem.vmName
 
         if ($Phase -eq 0 -or $Phase -eq 1) {
+            # Create/Prepare VM
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
-            if ($null -eq $job) {
+            if (-not $job) {
                 Write-Log "Failed to create job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
         }
         else {
-            $skipStartDsc = $false
-            if ($Phase -eq 3 -and $currentItem.role -ne "DC") {
-                $skipStartDsc = $true
-            }
-
-            if ($Phase -eq 3 -and $skipStartDsc -eq $false -and (-not $ConfigurationData)) {
-                Write-Log "No VMs need phase 3 configuration. Should Skip here."
-            }
-            $job = Start-Job -ScriptBlock $global:VM_Config -ArgumentList $skipStartDsc -Name $jobName -ErrorAction Stop -ErrorVariable Err
-            if ($null -eq $job) {
+            $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
+            if (-not $job) {
                 Write-Log "Failed to create job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
@@ -166,9 +181,10 @@ function Start-PhaseJobs {
 
     # Create return object
     $return = [PSCustomObject]@{
-        Failed  = $job_created_no
-        Success = $job_created_yes
-        Jobs    = $jobs
+        Failed     = $job_created_no
+        Success    = $job_created_yes
+        Jobs       = $jobs
+        Applicable = $true
     }
 
     if ($job_created_no -eq 0) {
@@ -224,8 +240,13 @@ function Wait-Phase {
             Write-JobProgress($job)
 
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
-            $incrementCount = $true
+            if (-not $jobOutput) {
+                $jobName = $job | Select-Object -ExpandProperty Name
+                Write-RedX "Job $jobName completed with no output" -ForegroundColor Red
+                $return.Failed++
+            }
 
+            $incrementCount = $true
             foreach ($line in $jobOutput) {
                 $line = $line.ToString().Trim()
 
@@ -270,10 +291,67 @@ function Get-ConfigurationData {
         [object]$deployConfig
     )
 
+    $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+    if (-not $netbiosName) {
+        write-Log -Failure "Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
+        return
+    }
 
     switch ($Phase) {
-        "3" { $cd = Get-AOandSCCMConfigurationData -deployConfig $deployConfig}
+        "2" { $cd = Get-Phase2ConfigurationData -deployConfig $deployConfig }
+        "3" { $cd = Get-Phase3ConfigurationData -deployConfig $deployConfig }
+        "5" { $cd = Get-AOandSCCMConfigurationData -deployConfig $deployConfig }
         Default { return }
+    }
+
+    return $cd
+}
+
+function Get-Phase2ConfigurationData {
+    param (
+        [object]$deployConfig
+    )
+
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName                    = 'LOCALHOST'
+                PSDscAllowDomainUser        = $true
+                PSDscAllowPlainTextPassword = $true
+            }
+        )
+    }
+
+    return $cd
+}
+
+function Get-Phase3ConfigurationData {
+    param (
+        [object]$deployConfig
+    )
+
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName                    = '*'
+                PSDscAllowDomainUser        = $true
+                PSDscAllowPlainTextPassword = $true
+            }
+        )
+    }
+
+    $NumberOfNodesAdded = 0
+    foreach ($vm in $deployConfig.virtualMachines) {
+        $newItem = @{
+            NodeName = $vm.vmName
+            Role     = $vm.Role
+        }
+        $cd.AllNodes += $newItem
+        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+    }
+
+    if ($NumberOfNodesAdded -eq 0) {
+        return
     }
 
     return $cd
@@ -286,10 +364,6 @@ function Get-AOandSCCMConfigurationData {
 
     $primaryNode = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
     $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
-    if (-not $netbiosName) {
-        write-Log -Failure "Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
-        return
-    }
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
 
     $NumberOfNodesAdded = 0

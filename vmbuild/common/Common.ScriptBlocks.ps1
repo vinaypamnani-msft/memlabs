@@ -3,7 +3,13 @@
 $global:VM_Create = {
 
     # Dot source common
-    . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+    $rootPath = Split-Path $using:PSScriptRoot -Parent
+    . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+
+    if (-not ($Common.LogPath)) {
+        Write-Output "ERROR: $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
+        return
+    }
 
     # Get variables from parent scope
     $deployConfig = $using:deployConfigCopy
@@ -287,24 +293,33 @@ $global:VM_Create = {
 
 $global:VM_Config = {
 
-    param ([bool]$SkipStartDsc)
-
     # Get variables from parent scope
     $deployConfig = $using:deployConfigCopy
     $currentItem = $using:currentItem
     $enableVerbose = $using:enableVerbose
     $Phase = $using:Phase
     $ConfigurationData = $using:ConfigurationData
+    $multiNodeDsc = $using:multiNodeDsc
 
     # Dot source common
-    . $using:PSScriptRoot\Common.ps1 -InJob -VerboseEnabled:$enableVerbose
+    $rootPath = Split-Path $using:PSScriptRoot -Parent
+    . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+
+    if (-not ($Common.LogPath)) {
+        Write-Output "ERROR: $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
+        return
+    }
 
     # Params for child script blocks
-    $DscFolder = "configmgr"
-    # if ($currentItem.role -eq "DC" -and $using:Phase -eq 3) {
-    #     $DscFolder = "AoG"
-    # }
+    $DscFolder = "phases"
 
+    # Don't start DSC on any node except DC, for multi-DSC
+    $skipStartDsc = $false
+    if ($multiNodeDsc -and $currentItem.role -ne "DC") {
+        $skipStartDsc = $true
+    }
+
+    # Determine if new VM
     $createVM = $true
     if ($currentItem.hidden -eq $true) { $createVM = $false }
 
@@ -401,7 +416,7 @@ $global:VM_Config = {
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to copy required PS modules to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
     }
-    Copy-Item -ToSession $ps -Path "$using:PSScriptRoot\DSC" -Destination "C:\staging" -Recurse -Container -Force
+    Copy-Item -ToSession $ps -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
     $Expand_Archive = {
         $zipPath = "C:\staging\DSC\DSC.zip"
@@ -412,7 +427,7 @@ $global:VM_Config = {
         catch {
 
             if (Test-Path $extractPath) {
-                Start-Sleep -Seconds 120
+                Start-Sleep -Seconds 60
                 Remove-Item -Path $extractPath -Force -Recurse | Out-Null
             }
 
@@ -433,7 +448,7 @@ $global:VM_Config = {
 
     # Extract DSC modules
     Write-Log "PSJOB: $($currentItem.vmName): Expanding modules inside the VM."
-    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive
+    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -DisplayName "Expand_Archive ScriptBlock"
     if ($result.ScriptBlockFailed) {
         Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         return
@@ -542,7 +557,7 @@ $global:VM_Config = {
         return
     }
 
-    $DSC_CreatePhase3Config = {
+    $DSC_CreateSingleConfig = {
 
         param($DscFolder)
 
@@ -550,28 +565,95 @@ $global:VM_Config = {
         $currentItem = $using:currentItem
         $deployConfig = $using:deployConfig
         $ConfigurationData = $using:ConfigurationData
-        $dscRole = "Phase3"
+        $adminCreds = $using:Common.LocalAdmin
+        $Phase = $using:Phase
+
+        # Set current role
+        switch (($currentItem.role)) {
+            "DC" { $dscRole = "DC" }
+            "WorkgroupMember" { $dscRole = "WorkgroupMember" }
+            "AADClient" { $dscRole = "WorkgroupMember" }
+            "InternetClient" { $dscRole = "WorkgroupMember" }
+            default { $dscRole = "DomainMember" }
+        }
 
         # Define DSC variables
         $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
         $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
-        $configFilePath = "C:\staging\DSC\deployConfig.json"
+        $deployConfigPath = "C:\staging\DSC\deployConfig.json"
 
         # Update init log
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_CreatePhase3Config: Started at $time`r`n=====" | Out-File $log -Append
+        "`r`n=====`r`nDSC_CreateConfig: Started at $time`r`n=====" | Out-File $log -Append
         "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
         "Current Item = $currentItem" | Out-File $log -Append
         "Role Name = $dscRole" | Out-File $log -Append
         "Config Script = $dscConfigScript" | Out-File $log -Append
         "Config Path = $dscConfigPath" | Out-File $log -Append
 
+        if (-not $deployConfig.vmOptions.domainName) {
+            $error_message = "Could not get domainName name from deployConfig"
+            $error_message | Out-File $log -Append
+            Write-Error $error_message
+            return $error_message
+        }
+
         # Dot Source config script
         . "$dscConfigScript"
 
-        if (-not $ConfigurationData){
-            $error_message = "No Configuration data was supplied. Please verify We should be running Phase 3 or check the logs for errors"
+        # Configuration Data
+        $cd = @{
+            AllNodes = @(
+                @{
+                    NodeName                    = 'LOCALHOST'
+                    PSDscAllowDomainUser        = $true
+                    PSDscAllowPlainTextPassword = $true
+                }
+            )
+        }
+
+        if (-not $adminCreds) {
+            $error_message = "Failed to get local admin credentials for DSC."
+            $error_message | Out-File $log -Append
+            Write-Error $error_message
+            return $error_message
+        }
+
+        # Compile config, to create MOF
+        "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
+        & "$($dscRole)Configuration" -DeployConfigPath $deployConfigPath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
+    }
+
+    $DSC_CreateMultiConfig = {
+
+        param($DscFolder)
+
+        # Get required variables from parent scope
+        $currentItem = $using:currentItem
+        $deployConfig = $using:deployConfig
+        $ConfigurationData = $using:ConfigurationData
+        $adminCreds = $using:Common.LocalAdmin
+        $Phase = $using:Phase
+        $dscRole = "Phase$Phase"
+
+        # Define DSC variables
+        $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
+        $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+        $deployConfigPath = "C:\staging\DSC\deployConfig.json"
+
+        # Update init log
+        $log = "C:\staging\DSC\DSC_Init.txt"
+        $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
+        "`r`n=====`r`nDSC_CreateConfig: Started at $time`r`n=====" | Out-File $log -Append
+        "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
+        "Current Item = $currentItem" | Out-File $log -Append
+        "Role Name = $dscRole" | Out-File $log -Append
+        "Config Script = $dscConfigScript" | Out-File $log -Append
+        "Config Path = $dscConfigPath" | Out-File $log -Append
+
+        if (-not $ConfigurationData) {
+            $error_message = "No Configuration data was supplied."
             $error_message | Out-File $log -Append
             Write-Error $error_message
             return $error_message
@@ -584,82 +666,42 @@ $global:VM_Config = {
             return $error_message
         }
 
-      $cd = @{
-            AllNodes = @()
-        }
-        Foreach ($node in $ConfigurationData.AllNodes){
-            $cd.AllNodes+=$node
-        }
-
-        # Dump $cd, in case we need to review
-        $cd | ConvertTo-Json -Depth 3 | Out-File "C:\staging\DSC\Phase3CD.json" -Force -Confirm:$false
-
-        $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
-        # Compile config, to create MOF
-        $user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
-        "User = $user" | Out-File $log -Append
-        "Password =  $($using:Common.LocalAdmin.Password)" | Out-File $log -Append
-        $adminCreds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
-        if (-not $adminCreds) {
-            $error_message = "Failed to create adminCreds"
-            $error_message | Out-File $log -Append
-            Write-Error $error_message
-            return $error_message
-        }
-        "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append -ErrorAction SilentlyContinue
-        & "$($dscRole)Configuration" -ConfigFilePath $configFilePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath | Out-File $log -Append -ErrorAction SilentlyContinue
-        "Finished Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append -ErrorAction SilentlyContinue
-    }
-
-    $DSC_CreateConfig = {
-
-        param($DscFolder)
-
-        # Get required variables from parent scope
-        $currentItem = $using:currentItem
-        $adminCreds = $using:Common.LocalAdmin
-        $deployConfig = $using:deployConfig
-
-        # Set current role
-        switch (($currentItem.role)) {
-            "DPMP" { $dscRole = "DomainMember" }
-            "SQLAO" { $dscRole = "DomainMember" }
-            "AADClient" { $dscRole = "WorkgroupMember" }
-            "InternetClient" { $dscRole = "WorkgroupMember" }
-            Default { $dscRole = $currentItem.role }
-        }
-
-        # Define DSC variables
-        $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole)Configuration.ps1"
-        $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
-        $configFilePath = "C:\staging\DSC\deployConfig.json"
-
-        # Update init log
-        $log = "C:\staging\DSC\DSC_Init.txt"
-        $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-        "`r`n=====`r`nDSC_CreateConfig: Started at $time`r`n=====" | Out-File $log -Append
-        "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
-        "Current Item = $currentItem" | Out-File $log -Append
-        "Role Name = $dscRole" | Out-File $log -Append
-        "Config Script = $dscConfigScript" | Out-File $log -Append
-        "Config Path = $dscConfigPath" | Out-File $log -Append
-
         # Dot Source config script
         . "$dscConfigScript"
 
         # Configuration Data
         $cd = @{
-            AllNodes = @(
-                @{
-                    NodeName                    = 'LOCALHOST'
-                    PSDscAllowPlainTextPassword = $true
-                }
-            )
+            AllNodes = @()
+        }
+
+        foreach ($node in $ConfigurationData.AllNodes) {
+            $cd.AllNodes += $node
+        }
+
+        # Dump $cd, in case we need to review
+        $cd | ConvertTo-Json -Depth 4 | Out-File "C:\staging\DSC\Phase$($Phase)_CD.json" -Force -Confirm:$false
+
+        # Create domain creds
+        $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+        $user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
+        $domainCreds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
+
+        # Use localAdmin creds for Phase 1, domainCreds after that
+        $credsForDSC = $adminCreds
+        if ($Phase -gt 1) {
+            $credsForDSC = $domainCreds
+        }
+
+        if (-not $credsForDSC) {
+            $error_message = "Failed to create credentials for DSC."
+            $error_message | Out-File $log -Append
+            Write-Error $error_message
+            return $error_message
         }
 
         # Compile config, to create MOF
         "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
-        & "$($dscRole)Configuration" -ConfigFilePath $configFilePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
+        & "$($dscRole)Configuration" -DeployConfigPath $deployConfigPath -AdminCreds $credsForDSC -ConfigurationData $cd -OutputPath $dscConfigPath
     }
 
     $DSC_StartConfig = {
@@ -668,7 +710,8 @@ $global:VM_Config = {
 
         # Get required variables from parent scope
         $currentItem = $using:currentItem
-        $Phase  = $using:Phase
+        $ConfigurationData = $using:ConfigurationData
+        $Phase = $using:Phase
 
         # Define DSC variables
         $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
@@ -678,54 +721,35 @@ $global:VM_Config = {
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
         "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n=====" | Out-File $log -Append
 
-        if ($Phase -ne 3) {
+        # Run for single-node DSC, multi-node DSC fail with Set-DscLocalConfigurationManager
+        if ($ConfigurationData.AllNodes.NodeName -contains "LOCALHOST") {
             "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
             Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
-        }
 
-        if ($currentItem.hidden -or $Phase -eq 3) {
+            "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
+            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+        }
+        else {
+            # Use domainCreds instead of local Creds for multi-node DSC
             $userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
             $user = "$userdomain\$($using:Common.LocalAdmin.UserName)"
             $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
             "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
             Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
         }
-        else {
-            "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
-            Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
-        }
 
     }
 
-    $ConfigToCreate = $DSC_CreateConfig
-
-    if ($currentItem.role -eq "SQLAO" -and $using:Phase -eq 3) {
-        if ($currentItem.OtherNode) {
-            #Add the note here, so the properties are set, even if we fail
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion -AddSQLAOSpecifics
-            write-Log "$($currentItem.vmName): Adding SQLAO Data to VM Notes"
-
-            $isClusterExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object { $_.StartRange -eq $($deployConfig.SQLAO.ClusterIPAddress) }
-            $isAGExcluded = Get-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 | Where-Object { $_.StartRange -eq $($deployConfig.SQLAO.AGIPAddress) }
-
-            if (-not $isClusterExcluded) {
-                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.SQLAO.ClusterIPAddress) -EndRange $($deployConfig.SQLAO.ClusterIPAddress) -ErrorAction SilentlyContinue
-            }
-            if (-not $isAGExcluded) {
-                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $($deployConfig.SQLAO.AGIPAddress) -EndRange $($deployConfig.SQLAO.AGIPAddress) -ErrorAction SilentlyContinue
-            }
-        }
+    $DSC_CreateConfig = $DSC_CreateSingleConfig
+    if ($multiNodeDsc) {
+        $DSC_CreateConfig = $DSC_CreateMultiConfig
     }
 
-    if ($currentItem.role -eq "DC" -and $using:Phase -eq 3) {
-        $ConfigToCreate = $DSC_CreatePhase3Config
-    }
-
-    if ($SkipStartDsc) {
-        Write-Log "PSJOB: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on '$($deployConfig.thisParams.DscMachine)'."
+    if ($skipStartDsc) {
+        Write-Log "PSJOB: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on the DC."
     }
     else {
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $ConfigToCreate -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
         if ($result.ScriptBlockFailed) {
             Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
@@ -960,14 +984,8 @@ $global:VM_Config = {
         }
     }
 
-
     # Update VMNote and set new version, this code doesn't run when VM_Create failed
-    if ($using:Phase -eq 3 -and $currentItem.role -eq "SQLAO" -and $currentItem.OtherNode) {
-        #It worked.. Add the note again..
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion -AddSQLAOSpecifics
-        write-Log "Adding SQLAO Specifics to Note object on $($currentItem.vmName)"
-    }
-    elseif ($using:Phase -gt 1 -and -not $currentItem.hidden) {
+    if ($using:Phase -gt 1 -and -not $currentItem.hidden) {
         New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion
     }
 
