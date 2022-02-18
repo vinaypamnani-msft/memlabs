@@ -1996,6 +1996,7 @@ function Set-SupportedOptions {
 ####################
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
+. $PSScriptRoot\common\Common.Phases.ps1
 . $PSScriptRoot\common\Common.Validation.ps1
 . $PSScriptRoot\common\Common.RdcMan.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
