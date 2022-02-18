@@ -1,7 +1,7 @@
 
 # Create VM script block
 $global:VM_Create = {
-    $currentItem = $using:currentItem
+
     # Dot source common
     $rootPath = Split-Path $using:PSScriptRoot -Parent
     . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
@@ -13,7 +13,7 @@ $global:VM_Create = {
 
     # Get variables from parent scope
     $deployConfig = $using:deployConfigCopy
-
+    $currentItem = $using:currentItem
     $azureFileList = $using:Common.AzureFileList
 
     # Params for child script blocks
@@ -23,7 +23,7 @@ $global:VM_Create = {
     # Change log location
     $domainNameForLogging = $deployConfig.vmOptions.domainName
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
-    Write-Log "PSJOB: $($currentItem.vmName): Started VM_Create" -LogOnly
+
     # VM Network Switch
     $isInternet = ($currentItem.role -eq "InternetClient") -or ($currentItem.role -eq "AADClient")
     if ($isInternet) {
@@ -324,10 +324,8 @@ $global:VM_Config = {
     if ($currentItem.hidden -eq $true) { $createVM = $false }
 
     # Change log location
-
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
-    Write-Log "PSJOB: $($currentItem.vmName): Started VM_Config" -LogOnly
     # Set domain name, depending on whether we need to create new VM or use existing one
     if (-not $createVM -or ($currentItem.role -eq "DC") ) {
         $domainName = $deployConfig.parameters.DomainName
@@ -530,7 +528,7 @@ $global:VM_Config = {
             Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
         }
 
-        #
+        # Rename previous MOF path
         $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
         if (Test-Path $dscConfigPath) {
             $newName = $dscConfigPath -replace "DSCConfiguration", ("DSCConfiguration" + (get-date).ToString("_yyyyMMdd_HHmmss"))
@@ -540,15 +538,15 @@ $global:VM_Config = {
 
         # Write config to file
         $deployConfig = $using:deployConfig
-        $configFilePath = "C:\staging\DSC\deployConfig.json"
+        $deployConfigPath = "C:\staging\DSC\deployConfig.json"
 
-        "Writing DSC config to $configFilePath" | Out-File $log -Append
-        if (Test-Path $configFilePath) {
-            $newName = $configFilePath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
-            "Renaming $configFilePath to $newName" | Out-File $log -Append
-            Rename-Item -Path $configFilePath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+        "Writing DSC config to $deployConfigPath" | Out-File $log -Append
+        if (Test-Path $deployConfigPath) {
+            $newName = $deployConfigPath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
+            "Renaming $deployConfigPath to $newName" | Out-File $log -Append
+            Rename-Item -Path $deployConfigPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
         }
-        $deployConfig | ConvertTo-Json -Depth 3 | Out-File $configFilePath -Force -Confirm:$false
+        $deployConfig | ConvertTo-Json -Depth 5 | Out-File $deployConfigPath -Force -Confirm:$false
     }
 
     Write-Log "$jobName`: Clearing previous DSC status"
@@ -680,7 +678,7 @@ $global:VM_Config = {
         }
 
         # Dump $cd, in case we need to review
-        $cd | ConvertTo-Json -Depth 4 | Out-File "C:\staging\DSC\Phase$($Phase)_CD.json" -Force -Confirm:$false
+        $cd | ConvertTo-Json -Depth 5 | Out-File "C:\staging\DSC\Phase$($Phase)_CD.json" -Force -Confirm:$false
 
         # Create domain creds
         $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]

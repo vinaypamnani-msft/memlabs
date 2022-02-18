@@ -865,7 +865,7 @@ function Select-MainMenu {
         #$valid = Get-TestResult -SuccessOnError
         foreach ($virtualMachine in $global:config.virtualMachines) {
             if ($null -eq $virtualMachine) {
-                $global:config.virtualMachines | convertTo-Json -Depth 3 | out-host
+                $global:config.virtualMachines | convertTo-Json -Depth 5 | out-host
             }
             $i = $i + 1
             $name = Get-VMString $virtualMachine
@@ -906,7 +906,7 @@ function Select-MainMenu {
                 }
                 $config = Test-Configuration -InputObject $Global:Config
                 foreach ($currentItem in $config.deployConfig.virtualMachines) {
-                    $deployConfigCopy = $config.deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+                    $deployConfigCopy = $config.deployConfig | ConvertTo-Json -Depth 5 | ConvertFrom-Json
                     Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
                     $vm = $currentItem
                     $vm | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $deployConfigCopy.thisParams -Force
@@ -3620,7 +3620,7 @@ function Add-NewVMForRole {
     )
 
 
-    $oldConfig = $configToModify | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+    $oldConfig = $configToModify | ConvertTo-Json -Depth 5 | ConvertFrom-Json
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem"
 
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
@@ -4343,15 +4343,15 @@ function Save-Config {
         $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile).Name)
         $filename = Join-Path $configDir $filename
         $fullFilename = Join-Path $configDir (($Global:configfile).Name)
-        $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 3 -Compress) -eq
-                ($config | ConvertTo-Json -Depth 3 -Compress)
+        $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress) -eq
+                ($config | ConvertTo-Json -Depth 5 -Compress)
         if ($contentEqual) {
             return Split-Path -Path $fileName -Leaf
         }
         else {
             # Write-Host "Content Not Equal"
-            # (Get-Content $fullFilename | ConvertFrom-Json| ConvertTo-Json -Depth 3) | out-host
-            # ($config | ConvertTo-Json -Depth 3) | out-host
+            # (Get-Content $fullFilename | ConvertFrom-Json| ConvertTo-Json -Depth 5) | out-host
+            # ($config | ConvertTo-Json -Depth 5) | out-host
         }
     }
     $splitpath = Split-Path -Path $fileName -Leaf
@@ -4365,7 +4365,7 @@ function Save-Config {
         $filename += ".json"
     }
 
-    $config | ConvertTo-Json -Depth 3 | Out-File $filename
+    $config | ConvertTo-Json -Depth 5 | Out-File $filename
     #$return.ConfigFileName = Split-Path -Path $fileName -Leaf
     Write-Host "Saved to $filename"
     Write-Host

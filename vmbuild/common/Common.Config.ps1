@@ -185,10 +185,11 @@ function New-DeployConfig {
         }
 
         $params = [PSCustomObject]@{
-            DomainName     = $configObject.vmOptions.domainName
-            DCName         = $DCName
-            Scenario       = $scenario
-            ExistingDCName = $existingDCName
+            DomainName      = $configObject.vmOptions.domainName
+            DCName          = $DCName
+            Scenario        = $scenario
+            ExistingDCName  = $existingDCName
+            ThisMachineName = $null
         }
 
         $deploy = [PSCustomObject]@{
@@ -409,11 +410,26 @@ function Get-SQLAOConfig {
     $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
 
-    $SQLAOVM = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $PrimaryAO.vmName }
+    $SQLAOVM = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $PrimaryAO.vmName -and $_.vmID }
     if ($SQLAOVM -and $SQLAOVM.ClusterIPAddress -and $SQLAOVM.AGIPAddress) {
         $clusterIP = $SQLAOVM.ClusterIPAddress
         $AGIP = $SQLAOVM.AGIPAddress
         Write-Log "SQLAO: Setting Existing ClusterIPAddress and AG IPAddress from notes $clusterIP $AGIP" -LogOnly
+    }
+    else {
+        $clusterScope = Get-DhcpServerv4Scope | Where-Object { $_.ScopeID -eq "10.250.250.0" }
+        if ($clusterScope) {
+            $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
+            Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
+            $clusterIP = $IPs[0]
+            $AGIP = $IPs[1]
+        }
+        else {
+            #ClusterScope doesnt exist. We can use any IP we want.
+            $clusterIP = "10.250.250.224"
+            $AGIP = "10.250.250.225"
+        }
+        Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress $clusterIP $AGIP" -LogOnly
     }
 
     $config = [PSCustomObject]@{
@@ -458,10 +474,6 @@ function Add-PerVMSettings {
         SchemaAdmins        = @($deployConfig.vmOptions.adminName)
     }
 
-
-
-
-
     #Get the current Machine Name
     $thisParams = [pscustomobject]@{
         MachineName = $thisVM.vmName
@@ -505,6 +517,29 @@ function Add-PerVMSettings {
             $DomainComputers = @($ClusterName)
             $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccountsUPN" -Value $DomainAccountsUPN -Force
             $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
+        }
+        if ($thisVM.role -eq "SQLAO") {
+            $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2
+            $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
+            if (-not $dc.subnet) {
+                $dns = $DeployConfig.vmOptions.network.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            }
+            else {
+                $dns = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            }
+            if ($thisVM.OtherNode) {
+                $ip = $iprange[0]
+            }
+            else {
+                $ip = $iprange[1]
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DscMachine" -Value $dc.vmName -Force
+            }
+            if (-not $thisParams.DNSServer) {
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
+            }
+            if (-not $thisParams.ClusterNetworkIP) {
+                $thisParams | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value  $ip -Force
+            }
         }
 
     }
@@ -794,7 +829,7 @@ function Add-PerVMSettings {
         $thisParams | Add-Member -MemberType NoteProperty -Name "SchemaAdmins" -Value $accountLists.SchemaAdmins -Force
     }
 
-    #    $thisParams | ConvertTo-Json -Depth 4 | out-Host
+    #    $thisParams | ConvertTo-Json -Depth 5 | out-Host
     $deployConfig | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $thisParams -Force
 }
 
@@ -1492,7 +1527,7 @@ function Get-List {
 
         if ($DeployConfig) {
             try {
-                $DepoloyConfigJson = $DeployConfig | ConvertTo-Json -Depth 3
+                $DepoloyConfigJson = $DeployConfig | ConvertTo-Json -Depth 5
                 $DeployConfigClone = $DepoloyConfigJson | ConvertFrom-Json
             }
             catch {
@@ -1808,7 +1843,7 @@ Function Write-OrangePoint {
         [string] $ForegroundColor
     )
     $text = $text.Replace("WARNING: ", "")
-    if (-not $NoIndent){
+    if (-not $NoIndent) {
         Write-Host "  "
     }
     Write-Host "[" -NoNewLine
