@@ -193,6 +193,7 @@
             DependsOn        = $adObjectDependency
         }
 
+        $nextdepend = '[ADGroup]AddToSchemaAdmin'
         $adSiteDependency = @()
         $i = 0
         foreach ($site in $adsites) {
@@ -214,9 +215,12 @@
             $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
         }
 
+        if ($adSiteDependency) {
+            $nextdepend = $adSiteDependency
+        }
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = $adSiteDependency
+            DependsOn = $nextdepend
         }
 
         OpenFirewallPortForSCCM OpenFirewall {
