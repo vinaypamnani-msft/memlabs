@@ -782,7 +782,7 @@ function Test-Configuration {
 
     if ($InputObject) {
         # Convert to Json and back to make a copy of the object, so the original is not modified
-        $configObject = $InputObject | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+        $configObject = $InputObject | ConvertTo-Json -Depth 5 | ConvertFrom-Json
     }
 
     # InputObject could be blank

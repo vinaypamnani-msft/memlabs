@@ -374,7 +374,7 @@ function ConvertTo-DeployConfigEx {
             $thisParams | Add-Member -MemberType NoteProperty -Name "SchemaAdmins" -Value $accountLists.SchemaAdmins -Force
         }
 
-        #    $thisParams | ConvertTo-Json -Depth 4 | out-Host
+        #    $thisParams | ConvertTo-Json -Depth 5 | out-Host
 
         $thisVM | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $thisParams -Force
     }

@@ -141,7 +141,8 @@ function Start-PhaseJobs {
             continue
         }
 
-        $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+        $deployConfigCopy = ConvertTo-DeployConfigEx -deployConfig $deployConfig
+        $deployConfigCopy.parameters.ThisMachineName = $currentItem.vmName
         Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
 
         if ($WhatIf) {
@@ -224,7 +225,7 @@ function Wait-Phase {
             $FailRetry = $FailRetry + 1
             if ($FailRetry -gt 30) {
                 $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
-                $jobJson = $job | convertTo-Json -depth 4
+                $jobJson = $job | convertTo-Json -depth 5
                 Write-Log "Job failed: $jobJson" -LogOnly
                 Write-RedX "Job failed: $jobOutput" -ForegroundColor Red
                 Write-Progress -Id $job.Id -Activity $job.Name -Completed

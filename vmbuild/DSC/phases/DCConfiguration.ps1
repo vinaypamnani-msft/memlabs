@@ -11,6 +11,10 @@
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
 
+    # Define log share
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
+
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
@@ -32,12 +36,8 @@
     # AD Sites
     $adsites = $ThisVM.thisParams.sitesAndNetworks
 
-    # Define log share
-    $LogFolder = "DSC"
-    $LogPath = "c:\staging\$LogFolder"
-
     # Wait on machines to join domain
-    $waitOnDomainJoin = $deployConfig.thisParams.ServersToWaitOn
+    $waitOnDomainJoin = $ThisVM.thisParams.ServersToWaitOn
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -121,7 +121,8 @@
             Status    = "Creating user accounts and groups"
         }
 
-        $adObjectDependency = @()
+        $nextDepend = "[WriteStatus]CreateAccounts"
+        $adObjectDependency = @($nextDepend)
         $i = 0
         foreach ($user in $DomainAccounts) {
             $i++
@@ -133,7 +134,7 @@
                 PasswordNeverExpires = $true
                 CannotChangePassword = $true
                 DomainName           = $DomainName
-                DependsOn            = "[WriteStatus]CreateAccounts"
+                DependsOn            = $nextDepend
             }
             $adObjectDependency += "[ADUser]User$($i)"
         }
@@ -149,7 +150,7 @@
                 PasswordNeverExpires = $true
                 CannotChangePassword = $true
                 DomainName           = $DomainName
-                DependsOn            = "[WriteStatus]CreateAccounts"
+                DependsOn            = $nextDepend
             }
             $adObjectDependency += "[ADUser]User$($i)"
         }
@@ -160,7 +161,7 @@
             ADComputer "Computer$($i)" {
                 ComputerName      = $computer
                 EnabledOnCreation = $false
-                DependsOn         = "[WriteStatus]CreateAccounts"
+                DependsOn         = $nextDepend
             }
             $adObjectDependency += "[ADComputer]Computer$($i)"
         }
@@ -183,14 +184,15 @@
             DependsOn        = "[ADGroup]AddToDomainAdmin"
         }
 
-        $adSiteDependency = @()
+        $nextDepend = "[ADGroup]AddToSchemaAdmin"
+        $adSiteDependency = @($nextDepend)
         $i = 0
         foreach ($site in $adsites) {
             $i++
             ADReplicationSite "ADSite$($i)" {
                 Ensure    = 'Present'
                 Name      = $site.SiteCode
-                DependsOn = "[ADGroup]AddToSchemaAdmin"
+                DependsOn = $nextDepend
             }
 
             ADReplicationSubnet "ADSubnet$($i)" {
@@ -275,13 +277,14 @@
             Status    = "Waiting for $($waitOnDomainJoin -join ',') to join the domain"
         }
 
-        $waitOnDependency = @()
+        $nextDepend = "[WriteStatus]WaitDomainJoin"
+        $waitOnDependency = @($nextDepend)
         foreach ($server in $waitOnDomainJoin) {
 
             VerifyComputerJoinDomain "WaitFor$server" {
                 ComputerName = $server
                 Ensure       = "Present"
-                DependsOn    = "[WriteStatus]WaitDomainJoin"
+                DependsOn    = $nextDepend
             }
 
             DelegateControl "Add$server" {

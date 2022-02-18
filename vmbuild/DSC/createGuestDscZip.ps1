@@ -74,7 +74,7 @@ try {
     # Dump config to file, for debugging
     #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
     $filePath = "C:\temp\deployConfig.json"
-    $result.DeployConfig | ConvertTo-Json -Depth 3 | Out-File $filePath -Force
+    $result.DeployConfig | ConvertTo-Json -Depth 5 | Out-File $filePath -Force
 
     # Create local compressed file and inject appropriate appropriate TemplateHelpDSC
     Write-Host "Creating DSC.zip..."
