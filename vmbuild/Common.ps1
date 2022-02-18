@@ -250,12 +250,12 @@ function Write-Exception {
     $msg = "`n=== Get-PSCallStack:`n"
     [void]$sb.AppendLine($msg)
     Write-Host $msg -ForegroundColor Red
- Write-Log -LogOnly $msg -Failure
+    Write-Log -LogOnly $msg -Failure
 
     $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
- Write-Log -LogOnly $msg -Failure
+    Write-Log -LogOnly $msg -Failure
     if ($AdditionalInfo) {
         $msg = "`n=== Additional Information:`n"
         [void]$sb.AppendLine($msg)
@@ -838,9 +838,7 @@ function New-VmNote {
         [Parameter(Mandatory = $false)]
         [bool]$InProgress,
         [Parameter(Mandatory = $false)]
-        [switch]$UpdateVersion,
-        [Parameter(Mandatory = $false)]
-        [switch]$AddSQLAOSpecifics
+        [switch]$UpdateVersion
     )
 
     try {
@@ -860,10 +858,6 @@ function New-VmNote {
             memLabsDeployVersion = $Common.MemLabsVersion
         }
 
-        if ($AddSQLAOSpecifics) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $DeployConfig.SQLAO.ClusterIPAddress -Force
-            $vmNote | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $DeployConfig.SQLAO.AGIPAddress -Force
-        }
         if ($UpdateVersion.IsPresent) {
             $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $Common.MemLabsVersion -Force
         }
@@ -1073,7 +1067,7 @@ function New-VirtualMachine {
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
-        [Parameter()]
+        [Parameter(Mandatory = $true)]
         [PsCustomObject] $DeployConfig,
         [Parameter(Mandatory = $false)]
         [switch]$OSDClient,
@@ -1233,18 +1227,53 @@ function New-VirtualMachine {
     }
 
     if ($SwitchName2) {
+
+        if ($SwitchName2 -eq "cluster") {
+            $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
+            if (-not $dc.subnet) {
+                $dns = $DeployConfig.vmOptions.network.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            }
+            else {
+                $dns = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            }
+
+            $mtx = New-Object System.Threading.Mutex($false, "GetIP")
+            $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+            write-log "[$tid] Attempting to acquire 'GetIP' Mutex" -LogOnly
+            [void]$mtx.WaitOne()
+            write-log "[$tid] acquired 'GetIP' Mutex" -LogOnly
+            try {
+                $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0"
+                Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop
+                Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force
+                Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip
+                Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip
+                $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
+                #$currentItem | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value $ip -Force
+                #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
+                if ($currentItem.OtherNode) {
+                    $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
+                    Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
+                    $clusterIP = $IPs[0]
+                    $AGIP = $IPs[1]
+
+                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue
+                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue
+                    $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
+                    $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
+                }
+            }
+            finally {
+                [void]$mtx.ReleaseMutex()
+                [void]$mtx.Dispose()
+            }
+            New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+        }
+
         #Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2"
         $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
 
-        $dns = $deployConfig.thisParams.DNSServer
-        $ip = $deployConfig.thisParams.ClusterNetworkIP
-
-
-        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-        Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop
-        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force
-        Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip
-        Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip
     }
 
     return $true
