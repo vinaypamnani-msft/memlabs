@@ -270,11 +270,12 @@ try {
     # 0 - Prepare existing VMs
     # 1 - Create new VMs
     # 2 - Configure VMs (run DSC)
-    # 3 - Configure SQL AO
+    # 3 - Configure Other
+    # 4 - Configure SQL
 
     if ($Phase3.IsPresent) {
         $created = $true
-        $configured = Start-Phase -Phase 3 -deployConfig $deployConfig
+        $configured = Start-Phase -Phase 4 -deployConfig $deployConfig
     }
     else {
 
@@ -313,6 +314,9 @@ try {
                 if ($configured) {
                     if (-not $SkipPhase3.IsPresent) {
                         $configured = Start-Phase -Phase 3 -deployConfig $deployConfig
+                        if ($configured) {
+                            $configured = Start-Phase -Phase 4 -deployConfig $deployConfig
+                        }
 
                     }
                 }

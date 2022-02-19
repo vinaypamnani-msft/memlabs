@@ -10,7 +10,7 @@ configuration Phase4
 
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc', 'SqlServerDsc'
 
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -21,7 +21,14 @@ configuration Phase4
     $sqlUpdateEnabled = $false
 
 
-    Node $AllNodes.NodeName
+    Node $AllNodes.Where{ $_.Role -eq 'DC' }.NodeName
+    {
+        WriteStatus Complete {
+            Status    = "Complete!"
+        }
+    }
+
+    Node $AllNodes.Where{ $_.Role -ne 'DC' }.NodeName
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
 
@@ -36,6 +43,8 @@ configuration Phase4
             $sqlCUURL = $ThisVM.thisParams.sqlCUURL
             $sqlCuDownloadPath = Join-Path "C:\Temp\SQL_CU" (Split-Path -Path $sqlCUURL -Leaf)
         }
+
+        $SQLSysAdminAccounts = $ThisVM.thisParams.SQLSysAdminAccounts
         WriteStatus SQLInstallStarted {
             Status = "Preparing to Install SQL '$($ThisVM.sqlVersion)'"
         }
@@ -85,6 +94,9 @@ configuration Phase4
         $sqlDependency = @('[WriteStatus]AddSQLPermissions')
         $i = 0
         foreach ($account in $SQLSysAdminAccounts | Where-Object { $_ -notlike "BUILTIN*" } ) {
+            if (-not $account) {
+                continue
+            }
             $i++
 
             SqlLogin "AddSqlLogin$i" {
