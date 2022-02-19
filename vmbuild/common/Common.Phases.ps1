@@ -296,7 +296,7 @@ function Get-ConfigurationData {
         "3" { $cd = Get-Phase3ConfigurationData -deployConfig $deployConfig }
         "4" { $cd = Get-Phase4ConfigurationData -deployConfig $deployConfig }
         "5" { $cd = Get-Phase5ConfigurationData -deployConfig $deployConfig }
-        "6" { $cd = Get-AOandSCCMConfigurationData -deployConfig $deployConfig }
+        "6" { $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig }
         Default { return }
     }
 
@@ -406,7 +406,7 @@ function Get-Phase5ConfigurationData {
     $primaryNode = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
     $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-    $dcName = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+    $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
 
 
     $NumberOfNodesAdded = 0
@@ -414,7 +414,7 @@ function Get-Phase5ConfigurationData {
     $cd = @{
         AllNodes = @(
             @{
-                NodeName = $dcName
+                NodeName = $dc.vmName
                 Role     = 'DC'
             }
         )
@@ -499,120 +499,44 @@ function Get-Phase5ConfigurationData {
     if ($NumberOfNodesAdded -eq 0) {
         return
     }
+    $cd | ConvertTo-Json | out-host
     return $cd
 }
-function Get-AOandSCCMConfigurationData {
+function Get-Phase6ConfigurationData {
     param (
         [object]$deployConfig
     )
 
-    $primaryNode = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
-    $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
-    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-
+    $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
     $NumberOfNodesAdded = 0
     # Configuration Data
     $cd = @{
         AllNodes = @(
             @{
-                NodeName = $currentItem.vmName
+                NodeName = $dc.vmName
                 Role     = 'DC'
             }
         )
     }
 
-    if ($primaryNode) {
-        $SqlAgentServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlAgentServiceAccount
-        $SqlServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlServiceAccount
-        if (-not $primaryNode.fileServerVM) {
-            write-Log -Failure "Could not get fileServerVM name from primaryNode.fileServerVM"
-            return
+    if ($deployConfig.cmOptions.Install) {
+
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary") }) {
+            $newItem = @{
+                NodeName = $vm.vmName
+                Role     = $vm.Role
+            }
+            $cd.AllNodes += $newItem
+            $NumberOfNodesAdded = $NumberOfNodesAdded + 1
         }
 
-        $ADAccounts = @()
-        $ADAccounts += $primaryNode.vmName + "$"
-        $ADAccounts += $primaryNode.OtherNode + "$"
-        $ADAccounts += $primaryNode.ClusterName + "$"
-
-        $ADAccounts2 = @()
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.vmName + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.OtherNode + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.ClusterName + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
-
-        #$siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $primaryNode.vmName }
-        #$db_name = $null
-        #if ($siteServer -and ($deployConfig.cmOptions.install)) {
-        #    $db_name = "CM_" + $siteServer.SiteCode
-        #}
-        $primary = @{
-            # Replace with the name of the actual target node.
-            NodeName        = $primaryNode.vmName
-
-            # This is used in the configuration to know which resource to compile.
-            Role            = 'ClusterNode1'
-            CheckModuleName = 'SqlServer'
-            Address         = $deployConfig.vmOptions.network
-            AddressMask     = '255.255.255.0'
-            Name            = 'Domain Network'
-            Address2        = '10.250.250.0'
-            AddressMask2    = '255.255.255.0'
-            Name2           = 'Cluster Network'
-            InstanceName    = $primaryNode.sqlInstanceName
-
-        }
-
-        $cd.AllNodes += $primary
-
-        $secondary = @{
-            # Replace with the name of the actual target node.
-            NodeName = $primaryNode.OtherNode
-
-            # This is used in the configuration to know which resource to compile.
-            Role     = 'ClusterNode2'
-        }
-        $cd.AllNodes += $secondary
-        #added Primary And Secondary
-        $NumberOfNodesAdded = $NumberOfNodesAdded + 2
-        $all = @{
-            NodeName                    = "*"
-            PSDscAllowDomainUser        = $true
-            PSDscAllowPlainTextPassword = $true
-            ClusterName                 = $primaryNode.ClusterName
-            ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
-            AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
-            PrimaryReplicaServerName    = $primaryNode.vmName + "." + $deployConfig.vmOptions.DomainName
-            SecondaryReplicaServerName  = $primaryNode.OtherNode + "." + $deployConfig.vmOptions.DomainName
-            SqlAgentServiceAccount      = $SqlAgentServiceAccount
-            SqlServiceAccount           = $SqlServiceAccount
-            ClusterNameAoG              = $deployConfig.SQLAO.AlwaysOnName
-            ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
-            WitnessShare                = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
-            BackupShare                 = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
-            #Dont pass DBName, or DSC will create the database and add it to Ao.. In this new method, we install SCCM direct to AO
-            #DBName                      = $db_name
-            #ClusterIPAddress            = '10.250.250.30/24'
-        }
-        $cd.AllNodes += $all
-
-    }
-
-    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary") }) {
-        $newItem = @{
-            NodeName = $vm.vmName
-            Role     = $vm.Role
-        }
-        $cd.AllNodes += $newItem
-        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
-    }
-
-    if (-not $primaryNode) {
         $all = @{
             NodeName                    = "*"
             PSDscAllowDomainUser        = $true
             PSDscAllowPlainTextPassword = $true
         }
         $cd.AllNodes += $all
+
     }
     if ($NumberOfNodesAdded -eq 0) {
         return

@@ -15,6 +15,7 @@ configuration Phase4
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
+    $NetBiosDomainName = $DomainName.Split(".")[0]
 
     $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
     $SQLInstanceName = "MSSQLSERVER"
@@ -139,7 +140,7 @@ configuration Phase4
 
             WriteStatus SetSQLSPN {
                 DependsOn = $nextDepend
-                Status    = "SQL setting new startup user to ${DName}\$($ThisVM.SqlServiceAccount)"
+                Status    = "SQL setting new startup user to $($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)"
             }
 
             $SPNs = @()
@@ -173,8 +174,8 @@ configuration Phase4
                 $spnDependency += "[ADServicePrincipalName]spn$i"
             }
 
-            [System.Management.Automation.PSCredential]$sqlUser = New-Object System.Management.Automation.PSCredential ("${DName}\$($ThisVM.SqlServiceAccount)", $Admincreds.Password)
-            [System.Management.Automation.PSCredential]$sqlAgentUser = New-Object System.Management.Automation.PSCredential ("${DName}\$($ThisVM.SqlAgentAccount)", $Admincreds.Password)
+            [System.Management.Automation.PSCredential]$sqlUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)", $Admincreds.Password)
+            [System.Management.Automation.PSCredential]$sqlAgentUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)", $Admincreds.Password)
 
             #Change SQL Service Account
             SqlServiceAccount 'SetServiceAccountSQL_User' {
