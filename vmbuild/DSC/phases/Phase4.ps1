@@ -10,7 +10,7 @@ configuration Phase4
 
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc', 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc', 'SqlServerDsc', 'ActiveDirectoryDsc'
 
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
