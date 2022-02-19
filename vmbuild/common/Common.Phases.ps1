@@ -387,7 +387,7 @@ function Get-Phase4ConfigurationData {
     }
 
     $NumberOfNodesAdded = 0
-    foreach ($vm in $deployConfig.virtualMachines | Where-Object {$_.SqlVersion}) {
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.SqlVersion -or $_.Role -eq "DC" }) {
 
         # Filter out workgroup machines
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
@@ -399,7 +399,9 @@ function Get-Phase4ConfigurationData {
             Role     = $vm.Role
         }
         $cd.AllNodes += $newItem
-        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+        if ($vm.Role -ne "DC") {
+            $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+        }
     }
 
     if ($NumberOfNodesAdded -eq 0) {
