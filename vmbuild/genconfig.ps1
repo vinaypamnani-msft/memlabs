@@ -3640,11 +3640,11 @@ function Add-NewVMForRole {
     $memory = "2GB"
     $vprocs = 2
 
-    $installSSRS = $false
+    $installSSMS = $false
     if ($OperatingSystem.Contains("Server")) {
         $memory = "4GB"
         $vprocs = 4
-        $installSSRS = $true
+        $installSSMS = $true
     }
     $virtualMachine = [PSCustomObject]@{
         vmName          = $null
@@ -3655,7 +3655,7 @@ function Add-NewVMForRole {
     }
 
     if ($role -notin ("OSDCLient", "AADJoined")){
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSRS' -Value $installSSRS
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
     }
     $existingPrimary = $null
     $existingDPMP = $null
