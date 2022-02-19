@@ -1944,7 +1944,10 @@ class InstallFeatureForSCCM {
         Write-Verbose "Current Role is : $_Role"
 
         # Install on all devices
-        Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
+        try{
+            dism /online /Enable-Feature /FeatureName:TelnetClient
+        } catch {}
+        #Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
 
         # Server OS?
         $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
