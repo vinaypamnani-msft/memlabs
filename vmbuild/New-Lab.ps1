@@ -286,7 +286,12 @@ try {
         }
         else {
 
-            $created = Start-Phase -Phase 1 -deployConfig $deployConfig
+            if ($SkipPhase) {
+                $created = $true
+            }
+            else{
+                $created = Start-Phase -Phase 1 -deployConfig $deployConfig
+            }
 
             if (-not $created) {
                 Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
