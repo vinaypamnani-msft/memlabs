@@ -40,35 +40,43 @@ function Start-Phase {
 
     switch ($Phase) {
         0 {
-            $PhaseDescription = "Preparation"
             Write-Log "Phase $Phase - Preparing existing Virtual Machines" -Activity
         }
 
         1 {
-            $PhaseDescription = "Creation"
             Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
         }
 
         2 {
-            $PhaseDescription = "Configuration"
-            Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
+            Write-Log "Phase $Phase - Setup and Join Domain" -Activity
         }
 
         3 {
-            $PhaseDescription = "Configuration"
+            Write-Log "Phase $Phase - Configure Virtual Machine" -Activity
+        }
+
+        4 {
+            Write-Log "Phase $Phase - Install SQL" -Activity
+        }
+
+        5 {
             Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
+        }
+
+        6 {
+            Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
         }
     }
 
     # Start Phase
-    $start = Start-PhaseJobs -Phase $Phase -PhaseDescription $PhaseDescription -deployConfig $deployConfig
+    $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
         Write-Log "`n Phase $Phase was not found applicable. Skipping."
         return $true
     }
 
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs
-    Write-Log "`n$($result.Success) jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
+    Write-Log "`n$($result.Success) Phase $Phase jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
 
     if ($result.Failed -gt 0) {
         return $false
@@ -80,7 +88,6 @@ function Start-Phase {
 function Start-PhaseJobs {
     param (
         [int]$Phase,
-        [string]$PhaseDescription,
         [object]$deployConfig
     )
 
@@ -146,7 +153,7 @@ function Start-PhaseJobs {
         Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
 
         if ($WhatIf) {
-            Write-Log "Will start a job for VM $PhaseDescription $($currentItem.vmName)"
+            Write-Log "Will start a Phase $Phase job for VM $($currentItem.vmName)"
             continue
         }
 
@@ -156,24 +163,24 @@ function Start-PhaseJobs {
             # Create/Prepare VM
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
-                Write-Log "Failed to create job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
+                Write-Log "Failed to create Phase $Phase job for VM $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
         }
         else {
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
-                Write-Log "Failed to create job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
+                Write-Log "Failed to create Phase $Phase job for VM $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
         }
 
         if ($Err.Count -ne 0) {
-            Write-Log "Failed to start job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
+            Write-Log "Failed to start Phase $Phase job for VM $($currentItem.vmName). $Err" -Failure
             $job_created_no++
         }
         else {
-            Write-Log "Created job $($job.Id) for VM $PhaseDescription $($currentItem.vmName)" -LogOnly
+            Write-Log "Created Phase $Phase job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
             $jobs += $job
             $job_created_yes++
         }
@@ -188,10 +195,10 @@ function Start-PhaseJobs {
     }
 
     if ($job_created_no -eq 0) {
-        Write-Log "Created $job_created_yes jobs for VM $PhaseDescription. Waiting for jobs."
+        Write-Log "Created $job_created_yes jobs for Phase $Phase. Waiting for jobs."
     }
     else {
-        Write-Log "Created $job_created_yes jobs for VM $PhaseDescription. Failed to create $job_created_no jobs."
+        Write-Log "Created $job_created_yes jobs for Phase $Phase. Failed to create $job_created_no jobs."
     }
 
     return $return
