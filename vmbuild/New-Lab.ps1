@@ -14,11 +14,11 @@ param (
     [switch]$NoWindowResize,
     [Parameter(Mandatory = $false, HelpMessage = "Use Azure CDN for download.")]
     [switch]$UseCDN,
-    [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase only.")]
-    [int]$Phase,
-    [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase!")]
+    [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase only. Applies to Phase > 1.")]
+    [int[]]$Phase,
+    [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
-    [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above")]
+    [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
     [int]$StopPhase,
@@ -69,10 +69,45 @@ if ($Common.FatalError) {
     return
 }
 
-
-
 if (-not $Common.DevBranch) {
     Clear-Host
+}
+
+function Write-Phase {
+
+    param(
+        [int]$Phase
+    )
+
+    switch ($Phase) {
+        0 {
+            Write-Log "Phase $Phase - Preparing existing Virtual Machines" -Activity
+        }
+
+        1 {
+            Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
+        }
+
+        2 {
+            Write-Log "Phase $Phase - Setup and Join Domain" -Activity
+        }
+
+        3 {
+            Write-Log "Phase $Phase - Configure Virtual Machine" -Activity
+        }
+
+        4 {
+            Write-Log "Phase $Phase - Install SQL" -Activity
+        }
+
+        5 {
+            Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
+        }
+
+        6 {
+            Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
+        }
+    }
 }
 
 # Main script starts here
@@ -261,80 +296,135 @@ try {
         return $deployConfig
     }
 
-    # Phases:
-    # 0 - Prepare existing VMs
-    # 1 - Create new VMs
-    # 2 - Configure VMs (run DSC)
-    # 3 - Configure Other
-    # 4 - Configure SQL
-
-    if ($Phase) {
-        $created = $true
-        $configured = Start-Phase -Phase $Phase -deployConfig $deployConfig
+    # Prepare existing VM
+    $prepared = $true
+    $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
+    if ($containsHidden) {
+        $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig
     }
-    else {
 
-        $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
-        if ($containsHidden) {
-            $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig
-        }
-        else {
-            $prepared = $true
-        }
+    # Define phases
+    $start = 1
+    $maxPhase = 6
+    $runPhase1 = $true
+    if (-not $StopPhase -and ($Phase -or $SkipPhase -or $StartPhase)) {
+        $runPhase1 = $false
+    }
+    if ($StopPhase -and ($Phase -or $SkipPhase -or $StartPhase)) {
+        $runPhase1 = $false
+    }
 
-        if (-not $prepared) {
-            Write-Log "Phase 1 - Skipped Virtual Machine Creation and Configuration because errors were encountered in Phase 0." -Activity
-            $created = $configured = $false
-        }
-        else {
+    #
+    if ($prepared) {
 
-            if ($SkipPhase) {
-                $created = $true
+        for ($i = $start; $i -le $maxPhase; $i++) {
+            Write-Phase -Phase $i
+
+            if ($i -eq 1 -and -not $runPhase1) {
+                Write-OrangePoint "Skipped Phase $i because Phase options were specified." -ForegroundColor Yellow
+                continue
+            }
+
+            if ($Phase -and $i -notin $Phase) {
+                Write-OrangePoint "Skipped Phase $i because -Phase is $Phase." -ForegroundColor Yellow
+                continue
+            }
+
+            if ($SkipPhase -and $i -in $SkipPhase) {
+                Write-OrangePoint "Skipped Phase $i because -SkipPhase is $SkipPhase." -ForegroundColor Yellow
+                continue
+            }
+
+            if ($StartPhase -and $i -lt $StartPhase) {
+                Write-OrangePoint "Skipped Phase $i because -StartPhase is $StartPhase." -ForegroundColor Yellow
+                continue
+            }
+
+            if ($StopPhase -and $i -gt $StopPhase) {
+                Write-OrangePoint "Skipped Phase $i because -StopPhase is $StopPhase." -ForegroundColor Yellow
+                continue
+            }
+
+            $configured = Start-Phase -Phase $i -deployConfig $deployConfig -WhatIf:$WhatIf
+            if (-not $configured) {
+                break
             }
             else {
-                $created = Start-Phase -Phase 1 -deployConfig $deployConfig
-            }
-
-            if (-not $created) {
-                Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
-            }
-            else {
-
-                # Clear out vm remove list
-                $global:vm_remove_list = @()
-
-                # Create/Updated RDCMan file
-                Start-Sleep -Seconds 5
-                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
-
-                $start = 2
-                if ($StartPhase) {
-                    $start = $StartPhase
-                }
-
-                $maxPhase = 6
-                if ($StopPhase) {
-                    $maxPhase = $StopPhase
-                }
-
-                for ($i = $start; $i -le $maxPhase; $i++) {
-
-                    if ($SkipPhase -and $i -in $SkipPhase) {
-                        continue
-                    }
-
-                    $configured = Start-Phase -Phase $i -deployConfig $deployConfig
-                    if (-not $configured) {
-                        break
-                    }
+                if ($i -eq 1) {
+                    # Clear out vm remove list
+                    $global:vm_remove_list = @()
                 }
             }
         }
     }
+
+    # if ($Phase) {
+    #     $created = $true
+    #     $configured = Start-Phase -Phase $Phase -deployConfig $deployConfig
+    # }
+    # else {
+
+    #     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
+    #     if ($containsHidden) {
+    #         $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig
+    #     }
+    #     else {
+    #         $prepared = $true
+    #     }
+
+    #     if (-not $prepared) {
+    #         Write-Log "Phase 1 - Skipped Virtual Machine Creation and Configuration because errors were encountered in Phase 0." -Activity
+    #         $created = $configured = $false
+    #     }
+    #     else {
+
+    #         if ($SkipPhase) {
+    #             $created = $true
+    #         }
+    #         else {
+    #             $created = Start-Phase -Phase 1 -deployConfig $deployConfig
+    #         }
+
+    #         if (-not $created) {
+    #             Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
+    #         }
+    #         else {
+
+    #             # Clear out vm remove list
+    #             $global:vm_remove_list = @()
+
+    #             # Create/Updated RDCMan file
+    #             Start-Sleep -Seconds 5
+    #             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+
+    #             $start = 2
+    #             if ($StartPhase) {
+    #                 $start = $StartPhase
+    #             }
+
+    #             $maxPhase = 6
+    #             if ($StopPhase) {
+    #                 $maxPhase = $StopPhase
+    #             }
+
+    #             for ($i = $start; $i -le $maxPhase; $i++) {
+
+    #                 if ($SkipPhase -and $i -in $SkipPhase) {
+    #                     continue
+    #                 }
+
+    #                 $configured = Start-Phase -Phase $i -deployConfig $deployConfig
+    #                 if (-not $configured) {
+    #                     break
+    #                 }
+    #             }
+    #         }
+    #     }
+    # }
 
     $timer.Stop()
 
-    if (-not $created -or -not $configured) {
+    if (-not $prepared -or -not $configured) {
         Write-Host
         Write-Log "### SCRIPT FINISHED WITH FAILURES. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Failure -NoIndent
         Write-Host

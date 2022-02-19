@@ -35,38 +35,15 @@ function Start-Phase {
 
     param(
         [int]$Phase,
-        [object]$deployConfig
+        [object]$deployConfig,
+        [switch]$WhatIf
     )
 
-    switch ($Phase) {
-        0 {
-            Write-Log "Phase $Phase - Preparing existing Virtual Machines" -Activity
-        }
-
-        1 {
-            Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
-        }
-
-        2 {
-            Write-Log "Phase $Phase - Setup and Join Domain" -Activity
-        }
-
-        3 {
-            Write-Log "Phase $Phase - Configure Virtual Machine" -Activity
-        }
-
-        4 {
-            Write-Log "Phase $Phase - Install SQL" -Activity
-        }
-
-        5 {
-            Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
-        }
-
-        6 {
-            Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
-        }
+    if ($WhatIf) {
+        Write-Log "[WhatIf] Will Start Phase $Phase"
+        return $true
     }
+
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
