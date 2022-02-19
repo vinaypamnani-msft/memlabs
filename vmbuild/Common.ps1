@@ -1228,13 +1228,21 @@ function New-VirtualMachine {
 
     if ($SwitchName2) {
 
+        $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
+
         if ($SwitchName2 -eq "cluster") {
             $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
-            if (-not $dc.subnet) {
+            if (-not ($dc.subnet)) {
                 $dns = $DeployConfig.vmOptions.network.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
             }
             else {
                 $dns = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            }
+
+
+            if (-not $dns) {
+                write-Log -Failure "Could not determine DNS for cluster network"
+                return $false
             }
 
             $mtx = New-Object System.Threading.Mutex($false, "GetIP")
@@ -1270,9 +1278,6 @@ function New-VirtualMachine {
             }
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
-
-        #Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2"
-        $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
 
     }
 

@@ -472,7 +472,16 @@ function Get-Phase5ConfigurationData {
         }
         $cd.AllNodes += $secondary
         #added Primary And Secondary
-        $NumberOfNodesAdded = $NumberOfNodesAdded + 2
+
+        $fileServer = @{
+            # Replace with the name of the actual target node.
+            NodeName = $primaryNode.fileServerVM
+            # This is used in the configuration to know which resource to compile.
+            Role     = 'FileServer'
+        }
+        $cd.AllNodes += $fileServer
+        $NumberOfNodesAdded = $NumberOfNodesAdded + 3
+
         $all = @{
             NodeName                    = "*"
             PSDscAllowDomainUser        = $true

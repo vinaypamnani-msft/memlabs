@@ -23,6 +23,165 @@ Configuration Phase5
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
+
+    Node $AllNodes.Where{ $_.Role -eq 'FileServer' }.NodeName
+    {
+
+        WriteStatus ClusterShare {
+            Status    = "Configuring Cluster Share"
+        }
+
+        File ClusterBackup {
+            DestinationPath = $deployConfig.SQLAO.BackupLocalPath
+            Type            = 'Directory'
+            Ensure          = "Present"
+            DependsOn       = '[WriteStatus]ClusterShare'
+        }
+
+        File ClusterWitness {
+            DestinationPath = $deployConfig.SQLAO.WitnessLocalPath
+            Type            = 'Directory'
+            Ensure          = "Present"
+            DependsOn       = '[WriteStatus]ClusterShare'
+        }
+
+        NTFSAccessEntry ClusterWitnessPermissions {
+            Path              = $deployConfig.SQLAO.WitnessLocalPath
+            AccessControlList = @(
+                NTFSAccessControlList {
+                    Principal          = "$DomainName\$($deployConfig.SQLAO.GroupMembers[0])"
+                    ForcePrincipal     = $true
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry {
+                            AccessControlType = 'Allow'
+                            FileSystemRights  = 'FullControl'
+                            Inheritance       = 'This folder subfolders and files'
+                            Ensure            = 'Present'
+                        }
+                    )
+                }
+                NTFSAccessControlList {
+                    Principal          = "$DomainName\$($deployConfig.SQLAO.GroupMembers[1])"
+                    ForcePrincipal     = $false
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry {
+                            AccessControlType = 'Allow'
+                            FileSystemRights  = 'FullControl'
+                            Inheritance       = 'This folder subfolders and files'
+                            Ensure            = 'Present'
+                        }
+                    )
+                }
+                NTFSAccessControlList {
+                    Principal          = "$DomainName\$($deployConfig.SQLAO.GroupMembers[2])"
+                    ForcePrincipal     = $false
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry {
+                            AccessControlType = 'Allow'
+                            FileSystemRights  = 'FullControl'
+                            Inheritance       = 'This folder subfolders and files'
+                            Ensure            = 'Present'
+                        }
+                    )
+                }
+                NTFSAccessControlList {
+                    Principal          = "$DomainName\$DomainAdminName"
+                    ForcePrincipal     = $false
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry {
+                            AccessControlType = 'Allow'
+                            FileSystemRights  = 'FullControl'
+                            Inheritance       = 'This folder subfolders and files'
+                            Ensure            = 'Present'
+                        }
+                    )
+                }
+            )
+            Dependson         = '[File]ClusterWitness'
+        }
+
+
+        NTFSAccessEntry ClusterBackupPermissions {
+            Path              = $deployConfig.SQLAO.BackupLocalPath
+            AccessControlList = @(
+                NTFSAccessControlList {
+                    Principal          = "$DomainName\$($deployConfig.SQLAO.SqlServiceAccount)"
+                    ForcePrincipal     = $true
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry {
+                            AccessControlType = 'Allow'
+                            FileSystemRights  = 'FullControl'
+                            Inheritance       = 'This folder subfolders and files'
+                            Ensure            = 'Present'
+                        }
+                    )
+                }
+                NTFSAccessControlList {
+                    Principal          = "$DomainName\$($deployConfig.SQLAO.SqlAgentServiceAccount)"
+                    ForcePrincipal     = $false
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry {
+                            AccessControlType = 'Allow'
+                            FileSystemRights  = 'FullControl'
+                            Inheritance       = 'This folder subfolders and files'
+                            Ensure            = 'Present'
+                        }
+                    )
+                }
+                NTFSAccessControlList {
+                    Principal          = "$DomainName\$DomainAdminName"
+                    ForcePrincipal     = $false
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry {
+                            AccessControlType = 'Allow'
+                            FileSystemRights  = 'FullControl'
+                            Inheritance       = 'This folder subfolders and files'
+                            Ensure            = 'Present'
+                        }
+                    )
+                }
+                NTFSAccessControlList {
+                    Principal          = "$DomainName\vmbuildadmin"
+                    ForcePrincipal     = $false
+                    AccessControlEntry = @(
+                        NTFSAccessControlEntry {
+                            AccessControlType = 'Allow'
+                            FileSystemRights  = 'FullControl'
+                            Inheritance       = 'This folder subfolders and files'
+                            Ensure            = 'Present'
+                        }
+                    )
+                }
+            )
+            Dependson         = '[File]ClusterBackup'
+        }
+
+        SmbShare ClusterShare {
+            Name                  = $deployConfig.SQLAO.WitnessShare
+            Path                  = $deployConfig.SQLAO.WitnessLocalPath
+            Description           = $deployConfig.SQLAO.WithessShare
+            FolderEnumerationMode = 'AccessBased'
+            FullAccess            = $deployConfig.SQLAO.GroupMembers
+            ReadAccess            = "Everyone"
+            DependsOn             = '[NTFSAccessEntry]ClusterWitnessPermissions'
+        }
+
+         SmbShare BackupShare {
+            Name                  = $deployConfig.SQLAO.BackupShare
+            Path                  = $deployConfig.SQLAO.BackupLocalPath
+            Description           = $deployConfig.SQLAO.BackupShare
+            FolderEnumerationMode = 'AccessBased'
+            FullAccess            = "$DomainName\$($deployConfig.SQLAO.SqlServiceAccount)", "$DomainName\$($deployConfig.SQLAO.SqlAgentServiceAccount)", "$DomainName\$DomainAdminName", "$DomainName\vmbuildadmin"
+            ReadAccess            = "Everyone"
+            DependsOn             = '[NTFSAccessEntry]ClusterBackupPermissions'
+        }
+
+        WriteStatus Complete {
+            Dependson = '[SmbShare]BackupShare', '[SmbShare]ClusterShare'
+            Status    = "Complete!"
+        }
+
+    }
     Node $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
     {
 
@@ -108,8 +267,17 @@ Configuration Phase5
         #    DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
         #}
 
+        WaitForAny FileShareComplete {
+            NodeName             = $AllNodes.Where{ $_.Role -eq 'FileServer' }.NodeName
+            ResourceName         = '[SmbShare]ClusterShare'
+            RetryIntervalSec     = 10
+            RetryCount           = 180
+            PsDscRunAsCredential = $Admincreds
+            DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+        }
+
         WriteStatus ClusterJoin {
-            DependsOn = "[xClusterNetwork]ChangeNetwork-10"
+            DependsOn = "[WaitForAny]FileShareComplete"
             Status    = "Waiting for '$node2' to join Cluster"
         }
 
@@ -442,11 +610,20 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
 
+        WaitForAny FileShareComplete {
+            NodeName             = $AllNodes.Where{ $_.Role -eq 'FileServer' }.NodeName
+            ResourceName         = '[SmbShare]ClusterShare'
+            RetryIntervalSec     = 10
+            RetryCount           = 180
+            PsDscRunAsCredential = $Admincreds
+            DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+        }
+
         xClusterQuorum 'ClusterWitness' {
             IsSingleInstance     = 'Yes'
             Type                 = 'NodeAndFileShareMajority'
             Resource             = $Node.WitnessShare
-            DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+            DependsOn            = '[WaitForAny]FileShareComplete'
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -658,6 +835,8 @@ Configuration Phase5
             Dependson = '[ActiveDirectorySPN]SQLAOSPN'
             Status    = "Complete!"
         }
+
+
     }
 
 
