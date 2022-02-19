@@ -71,7 +71,7 @@ function Start-Phase {
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
-        Write-Log "`n Phase $Phase was not found applicable. Skipping."
+        Write-Log "`n Phase $Phase Not Applicable. Skipping."
         return $true
     }
 
@@ -349,6 +349,12 @@ function Get-Phase3ConfigurationData {
 
     $NumberOfNodesAdded = 0
     foreach ($vm in $deployConfig.virtualMachines) {
+
+        # Filter out workgroup machines
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
+            continue
+        }
+
         $newItem = @{
             NodeName = $vm.vmName
             Role     = $vm.Role

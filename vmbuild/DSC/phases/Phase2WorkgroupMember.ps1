@@ -12,9 +12,13 @@
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc'
 
+    # Log share
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
+
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.thisParams.MachineName
+    $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
     # Server OS?
@@ -31,10 +35,6 @@
 
     # Admin Name
     $AdminName = $deployConfig.vmOptions.adminName
-
-    # Log share
-    $LogFolder = "DSC"
-    $LogPath = "c:\staging\$LogFolder"
 
     Node localhost
     {
@@ -62,49 +62,9 @@
             VM        = $ThisVM | ConvertTo-Json
         }
 
-        WriteStatus InstallDotNet {
+        WriteStatus AddLocalUser {
             DependsOn = "[InitializeDisks]InitDisks"
-            Status    = "Installing .NET 4.8"
-        }
-
-        InstallDotNet4 DotNet {
-            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
-            FileName    = "ndp48-x86-x64-allos-enu.exe"
-            NetVersion  = "528040"
-            Ensure      = "Present"
-            DependsOn   = "[WriteStatus]InstallDotNet"
-        }
-
-        SetCustomPagingFile PagingSettings {
-            DependsOn   = "[InstallDotNet4]DotNet"
-            Drive       = 'C:'
-            InitialSize = '8192'
-            MaximumSize = '8192'
-        }
-
-        if ($IsServerOS) {
-
-            WriteStatus InstallFeature {
-                DependsOn = "[SetCustomPagingFile]PagingSettings"
-                Status    = "Installing required windows features"
-            }
-
-            InstallFeatureForSCCM InstallFeature {
-                Name      = "DPMP"
-                Role      = "Distribution Point", "Management Point"
-                DependsOn = "[SetCustomPagingFile]PagingSettings"
-            }
-
-            WriteStatus AddLocalUser {
-                DependsOn = "[InstallFeatureForSCCM]InstallFeature"
-                Status    = "Adding $AdminName as a local Administrator"
-            }
-        }
-        else {
-            WriteStatus AddLocalUser {
-                DependsOn = "[SetCustomPagingFile]PagingSettings"
-                Status    = "Adding $AdminName as a local Administrator"
-            }
+            Status    = "Adding $AdminName as a local Administrator"
         }
 
         User vmbuildadmin {
@@ -143,33 +103,63 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        WriteStatus OpenPorts {
-            DependsOn = "[FileReadAccessShare]SMBShare"
-            Status    = "Open required firewall ports"
-        }
-
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
             DependsOn = "[FileReadAccessShare]SMBShare"
         }
 
+        WriteStatus OpenPorts {
+            DependsOn = "[FileReadAccessShare]SMBShare"
+            Status    = "Open required firewall ports"
+        }
+
         OpenFirewallPortForSCCM OpenFirewall {
-            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
+            DependsOn = "[WriteStatus]OpenPorts"
             Name      = "WorkgroupMember"
             Role      = "WorkgroupMember"
         }
 
-        WriteStatus Complete {
+        WriteStatus InstallDotNet {
             DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            Status    = "Installing .NET 4.8"
+        }
+
+        InstallDotNet4 DotNet {
+            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
+            FileName    = "ndp48-x86-x64-allos-enu.exe"
+            NetVersion  = "528040"
+            Ensure      = "Present"
+            DependsOn   = "[WriteStatus]InstallDotNet"
+        }
+
+        SetCustomPagingFile PagingSettings {
+            DependsOn   = "[InstallDotNet4]DotNet"
+            Drive       = 'C:'
+            InitialSize = '8192'
+            MaximumSize = '8192'
+        }
+
+        $nextDepend = "[SetCustomPagingFile]PagingSettings"
+        if ($IsServerOS) {
+
+            WriteStatus InstallFeature {
+                DependsOn = $nextDepend
+                Status    = "Installing required windows features"
+            }
+
+            InstallFeatureForSCCM InstallFeature {
+                Name      = "DPMP"
+                Role      = "Distribution Point", "Management Point"
+                DependsOn = "[SetCustomPagingFile]PagingSettings"
+            }
+
+            $nextDepend = "[InstallFeatureForSCCM]InstallFeature"
+        }
+
+        WriteStatus Complete {
+            DependsOn = $nextDepend
             Status    = "Complete!"
         }
 
-        WriteEvent WriteConfigFinished {
-            LogPath   = $LogPath
-            WriteNode = "ConfigurationFinished"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
-        }
     }
 }

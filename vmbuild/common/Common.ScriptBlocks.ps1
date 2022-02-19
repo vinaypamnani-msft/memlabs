@@ -319,16 +319,12 @@ $global:VM_Config = {
         $skipStartDsc = $true
     }
 
-    # Determine if new VM
-    $createVM = $true
-    if ($currentItem.hidden -eq $true) { $createVM = $false }
-
     # Change log location
     $domainNameForLogging = $deployConfig.vmOptions.domainName
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
     # Set domain name, depending on whether we need to create new VM or use existing one
-    if (-not $createVM -or ($currentItem.role -eq "DC") ) {
+    if ($currentItem.hidden -or ($currentItem.role -eq "DC") -or $Phase -gt 2) {
         $domainName = $deployConfig.parameters.DomainName
     }
     else {
