@@ -1822,9 +1822,9 @@ Function Write-OrangePoint {
     )
     $text = $text.Replace("WARNING: ", "")
     if (-not $NoIndent) {
-        Write-Host "  "
+        Write-Host "  " -NoNewline
     }
-    Write-Host "  [" -NoNewLine
+    Write-Host "[" -NoNewLine
     Write-Host -ForeGroundColor Yellow "!" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {
