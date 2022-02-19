@@ -14,10 +14,14 @@ param (
     [switch]$NoWindowResize,
     [Parameter(Mandatory = $false, HelpMessage = "Use Azure CDN for download.")]
     [switch]$UseCDN,
-    [Parameter(Mandatory = $false, HelpMessage = "Skip to Phase 3!")]
-    [switch]$Phase3,
-    [Parameter(Mandatory = $false, HelpMessage = "Skip Phase 3!")]
-    [switch]$SkipPhase3,
+    [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase only.")]
+    [int]$Phase,
+    [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase!")]
+    [int[]]$SkipPhase,
+    [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above")]
+    [int]$StartPhase,
+    [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
+    [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf
 )
@@ -139,7 +143,7 @@ try {
     # Load configuration
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
-        if ($testConfigResult.Valid -or $Phase3.IsPresent) {
+        if ($testConfigResult.Valid -or ($Phase -or $SkipPhase -or $StopPhase -or $StartPhase)) {
             $deployConfig = $testConfigResult.DeployConfig
             Add-ExistingVMsToDeployConfig -config $deployConfig
             $InProgessVMs = @()
@@ -247,17 +251,6 @@ try {
     # Generate RDCMan file
     #New-RDCManFile $deployConfig $global:Common.RdcManFilePath
 
-    # Existing DC scenario
-    $existingDC = $deployConfig.parameters.ExistingDCName
-
-    # Remove DNS records for VM's in this config, if existing DC
-    if ($existingDC -and -not $Phase3.IsPresent) {
-        Write-Log "Attempting to remove existing DNS Records" -Activity -HostOnly
-        foreach ($item in $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) } ) {
-            Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
-        }
-    }
-
     Write-Log "Deployment Summary" -Activity -HostOnly
     Show-Summary -deployConfig $deployConfig
 
@@ -273,9 +266,9 @@ try {
     # 3 - Configure Other
     # 4 - Configure SQL
 
-    if ($Phase3.IsPresent) {
+    if ($Phase) {
         $created = $true
-        $configured = Start-Phase -Phase 4 -deployConfig $deployConfig
+        $configured = Start-Phase -Phase $Phase -deployConfig $deployConfig
     }
     else {
 
@@ -304,20 +297,28 @@ try {
                 $global:vm_remove_list = @()
 
                 # Create/Updated RDCMan file
-
                 Start-Sleep -Seconds 5
                 New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
 
+                $start = 2
+                if ($StartPhase) {
+                    $start = $StartPhase
+                }
 
-                $configured = Start-Phase -Phase 2 -deployConfig $deployConfig
+                $maxPhase = 6
+                if ($StopPhase) {
+                    $maxPhase = $StopPhase
+                }
 
-                if ($configured) {
-                    if (-not $SkipPhase3.IsPresent) {
-                        $configured = Start-Phase -Phase 3 -deployConfig $deployConfig
-                        if ($configured) {
-                            $configured = Start-Phase -Phase 4 -deployConfig $deployConfig
-                        }
+                for ($i=$start; $i -le $maxPhase; $i++) {
 
+                    if ($SkipPhase -and $i -in $SkipPhase) {
+                        continue
+                    }
+
+                    $configured = Start-Phase -Phase $i -deployConfig $deployConfig
+                    if (-not $configured) {
+                        break
                     }
                 }
             }

@@ -68,6 +68,14 @@ function Start-Phase {
         }
     }
 
+    # Remove DNS records for VM's in this config, if existing DC
+    if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
+        Write-Log "Attempting to remove existing DNS Records"
+        foreach ($item in $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) } ) {
+            Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
+        }
+    }
+
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
