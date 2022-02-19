@@ -307,6 +307,7 @@ function Get-ConfigurationData {
     switch ($Phase) {
         "2" { $cd = Get-Phase2ConfigurationData -deployConfig $deployConfig }
         "3" { $cd = Get-Phase3ConfigurationData -deployConfig $deployConfig }
+        "4" { $cd = Get-Phase4ConfigurationData -deployConfig $deployConfig }
         "5" { $cd = Get-AOandSCCMConfigurationData -deployConfig $deployConfig }
         Default { return }
     }
@@ -349,6 +350,44 @@ function Get-Phase3ConfigurationData {
 
     $NumberOfNodesAdded = 0
     foreach ($vm in $deployConfig.virtualMachines) {
+
+        # Filter out workgroup machines
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
+            continue
+        }
+
+        $newItem = @{
+            NodeName = $vm.vmName
+            Role     = $vm.Role
+        }
+        $cd.AllNodes += $newItem
+        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+    }
+
+    if ($NumberOfNodesAdded -eq 0) {
+        return
+    }
+
+    return $cd
+}
+
+function Get-Phase4ConfigurationData {
+    param (
+        [object]$deployConfig
+    )
+
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName                    = '*'
+                PSDscAllowDomainUser        = $true
+                PSDscAllowPlainTextPassword = $true
+            }
+        )
+    }
+
+    $NumberOfNodesAdded = 0
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object {$_.SqlVersion}) {
 
         # Filter out workgroup machines
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
