@@ -324,6 +324,7 @@ $global:VM_Config = {
     if ($currentItem.hidden -eq $true) { $createVM = $false }
 
     # Change log location
+    $domainNameForLogging = $deployConfig.vmOptions.domainName
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
     # Set domain name, depending on whether we need to create new VM or use existing one
