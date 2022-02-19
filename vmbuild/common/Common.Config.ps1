@@ -1846,7 +1846,7 @@ Function Write-OrangePoint {
     if (-not $NoIndent) {
         Write-Host "  "
     }
-    Write-Host "[" -NoNewLine
+    Write-Host "  [" -NoNewLine
     Write-Host -ForeGroundColor Yellow "!" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {

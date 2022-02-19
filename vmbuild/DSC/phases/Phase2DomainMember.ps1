@@ -10,32 +10,15 @@
 
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'ComputerManagementDsc', 'SqlServerDsc', 'ActiveDirectoryDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
-    $ThisMachineName = $deployConfig.thisParams.MachineName
-    $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
     $DomainName = $deployConfig.parameters.domainName
-    $DName = $DomainName.Split(".")[0]
     $DCName = $deployConfig.parameters.DCName
-    $DomainAdminName = $deployConfig.vmOptions.adminName
 
-    # Server OS?
-    $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-    if ($os) {
-        $IsServerOS = $true
-        if ($os.ProductType -eq 1) {
-            $IsServerOS = $false
-        }
-    }
-    else {
-        $IsServerOS = $false
-    }
-
-    # SQL Sysadmin accounts
-    $waitOnDomainJoin = $deployconfig.thisParams.WaitOnDomainJoin
-    $SQLSysAdminAccounts = $deployConfig.thisParams.SQLSysAdminAccounts
+    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
     # Log share
     $LogFolder = "DSC"
@@ -56,7 +39,8 @@
         }
 
         Computer NewName {
-            Name = $ThisMachineName
+            Name      = $ThisMachineName
+            DependsOn = "[WriteStatus]Rename"
         }
 
         WriteStatus InitDisks {
@@ -65,7 +49,7 @@
         }
 
         InitializeDisks InitDisks {
-            DependsOn = "[Computer]NewName"
+            DependsOn = "[WriteStatus]InitDisks"
             DummyKey  = "Dummy"
             VM        = $ThisVM | ConvertTo-Json
         }
@@ -75,6 +59,11 @@
             Drive       = 'C:'
             InitialSize = '8192'
             MaximumSize = '8192'
+        }
+
+        WriteStatus WaitDomain {
+            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            Status    = "Waiting for domain to be ready"
         }
 
         WaitForDomainReady WaitForDomain {
@@ -92,7 +81,7 @@
         JoinDomain JoinDomain {
             DomainName = $DomainName
             Credential = $DomainCreds
-            DependsOn  = "[WaitForDomainReady]WaitForDomain"
+            DependsOn  = "[WriteStatus]DomainJoin"
         }
 
         AddNtfsPermissions AddNtfsPerms {
@@ -104,7 +93,7 @@
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = '[InstallDotNet4]DotNet'
+            DependsOn       = '[AddNtfsPermissions]AddNtfsPerms'
         }
 
         FileReadAccessShare DomainSMBShare {
@@ -113,25 +102,9 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        WriteEvent WriteJoinDomain {
-            LogPath   = $LogPath
-            WriteNode = "MachineJoinDomain"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
-        }
-
         WriteStatus Complete {
-            DependsOn = $addUserDependancy
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
             Status    = "Complete!"
-        }
-
-        WriteEvent WriteConfigFinished {
-            LogPath   = $LogPath
-            WriteNode = "ConfigurationFinished"
-            Status    = "Passed"
-            Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
         }
     }
 }
