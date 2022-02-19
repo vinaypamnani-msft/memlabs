@@ -21,18 +21,6 @@
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
-    # Server OS?
-    $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-    if ($os) {
-        $IsServerOS = $true
-        if ($os.ProductType -eq 1) {
-            $IsServerOS = $false
-        }
-    }
-    else {
-        $IsServerOS = $false
-    }
-
     # Admin Name
     $AdminName = $deployConfig.vmOptions.adminName
 
@@ -68,19 +56,19 @@
         }
 
         User vmbuildadmin {
-            Ensure                   = "Present"
-            UserName                 = "vmbuildadmin"
-            Password                 = $Admincreds
-            PasswordNeverExpires     = $true
-            DependsOn                = "[WriteStatus]AddLocalUser"
+            Ensure               = "Present"
+            UserName             = "vmbuildadmin"
+            Password             = $Admincreds
+            PasswordNeverExpires = $true
+            DependsOn            = "[WriteStatus]AddLocalUser"
         }
 
         User adminUser {
-            Ensure                   = "Present"
-            UserName                 = $AdminName
-            Password                 = $Admincreds
-            PasswordNeverExpires     = $true
-            DependsOn        = "[User]vmbuildadmin"
+            Ensure               = "Present"
+            UserName             = $AdminName
+            Password             = $Admincreds
+            PasswordNeverExpires = $true
+            DependsOn            = "[User]vmbuildadmin"
         }
 
         Group AddUserToLocalAdminGroup {
@@ -139,25 +127,19 @@
             MaximumSize = '8192'
         }
 
-        $nextDepend = "[SetCustomPagingFile]PagingSettings"
-        if ($IsServerOS) {
+        WriteStatus InstallFeature {
+            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            Status    = "Installing required windows features"
+        }
 
-            WriteStatus InstallFeature {
-                DependsOn = $nextDepend
-                Status    = "Installing required windows features"
-            }
-
-            InstallFeatureForSCCM InstallFeature {
-                Name      = "DPMP"
-                Role      = "Distribution Point", "Management Point"
-                DependsOn = "[SetCustomPagingFile]PagingSettings"
-            }
-
-            $nextDepend = "[InstallFeatureForSCCM]InstallFeature"
+        InstallFeatureForSCCM InstallFeature {
+            Name      = "WorkgroupMember"
+            Role      = "WorkgroupMember"
+            DependsOn = "[SetCustomPagingFile]PagingSettings"
         }
 
         WriteStatus Complete {
-            DependsOn = $nextDepend
+            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
             Status    = "Complete!"
         }
 

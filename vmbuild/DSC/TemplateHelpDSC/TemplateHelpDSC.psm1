@@ -1946,79 +1946,100 @@ class InstallFeatureForSCCM {
         # Install on all devices
         Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
 
-        if ($_Role -notcontains "DomainMember") {
-            Install-WindowsFeature -Name "Rdc"
+        # Server OS?
+        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) {
+            $IsServerOS = $true
+            if ($os.ProductType -eq 1) {
+                $IsServerOS = $false
+            }
+        }
+        else {
+            $IsServerOS = $false
         }
 
-        if ($_Role -contains "DC") {
-            Install-WindowsFeature RSAT-AD-PowerShell
-        }
-        if ($_Role -contains "SQLAO") {
-            Install-WindowsFeature Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell
-        }
-        if ($_Role -contains "Site Server") {
-            Install-WindowsFeature Net-Framework-Core
-            Install-WindowsFeature NET-Framework-45-Core
-            Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
-            Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
+        if ($IsServerOS) {
+
+            # Always install BITS
             Install-WindowsFeature BITS, BITS-IIS-Ext
-        }
-        if ($_Role -contains "Application Catalog website point") {
-            #IIS
-            Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-        }
-        if ($_Role -contains "Application Catalog web service point") {
-            #IIS
-            Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-        }
-        if ($_Role -contains "Asset Intelligence synchronization point") {
-            #installed .net 4.5 or later
-        }
-        if ($_Role -contains "Certificate registration point") {
-            #IIS
-            Install-WindowsFeature Web-Asp-Net, Web-Asp-Net45, Web-Metabase, Web-WMI
-        }
-        if ($_Role -contains "Distribution point") {
-            #IIS
+            # Always install IIS
             Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
             Install-WindowsFeature Web-WMI, Web-Metabase
-        }
 
-        if ($_Role -contains "Endpoint Protection point") {
-            #.NET 3.5 SP1 is intalled
-        }
+            if ($_Role -notcontains "DomainMember") {
+                Install-WindowsFeature -Name "Rdc"
+            }
 
-        if ($_Role -contains "Enrollment point") {
-            #iis
-            Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-        }
-        if ($_Role -contains "Enrollment proxy point") {
-            #iis
-            Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-        }
-        if ($_Role -contains "Fallback status point") {
-            Install-WindowsFeature Web-Metabase
-        }
-        if ($_Role -contains "Management point") {
-            #BITS
-            Install-WindowsFeature BITS, BITS-IIS-Ext
-            #IIS
-            Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
-            Install-WindowsFeature Web-WMI, Web-Metabase
-        }
-        if ($_Role -contains "Reporting services point") {
-            #installed .net 4.5 or later
-        }
-        if ($_Role -contains "Service connection point") {
-            #installed .net 4.5 or later
-        }
-        if ($_Role -contains "Software update point") {
-            #default iis configuration
-            Install-WindowsFeature web-server
-        }
-        if ($_Role -contains "State migration point") {
-            #iis
-            Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            if ($_Role -contains "DC") {
+                Install-WindowsFeature RSAT-AD-PowerShell
+            }
+            if ($_Role -contains "SQLAO") {
+                Install-WindowsFeature Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell
+            }
+            if ($_Role -contains "Site Server") {
+                Install-WindowsFeature Net-Framework-Core
+                Install-WindowsFeature NET-Framework-45-Core
+                Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
+                Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
+                Install-WindowsFeature BITS, BITS-IIS-Ext
+            }
+            if ($_Role -contains "Application Catalog website point") {
+                #IIS
+                Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
+            if ($_Role -contains "Application Catalog web service point") {
+                #IIS
+                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
+            if ($_Role -contains "Asset Intelligence synchronization point") {
+                #installed .net 4.5 or later
+            }
+            if ($_Role -contains "Certificate registration point") {
+                #IIS
+                Install-WindowsFeature Web-Asp-Net, Web-Asp-Net45, Web-Metabase, Web-WMI
+            }
+            if ($_Role -contains "Distribution point") {
+                #IIS
+                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
+                Install-WindowsFeature Web-WMI, Web-Metabase
+            }
+
+            if ($_Role -contains "Endpoint Protection point") {
+                #.NET 3.5 SP1 is intalled
+            }
+
+            if ($_Role -contains "Enrollment point") {
+                #iis
+                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
+            if ($_Role -contains "Enrollment proxy point") {
+                #iis
+                Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
+            if ($_Role -contains "Fallback status point") {
+                Install-WindowsFeature Web-Metabase
+            }
+            if ($_Role -contains "Management point") {
+                #BITS
+                Install-WindowsFeature BITS, BITS-IIS-Ext
+                #IIS
+                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
+                Install-WindowsFeature Web-WMI, Web-Metabase
+            }
+            if ($_Role -contains "Reporting services point") {
+                #installed .net 4.5 or later
+            }
+            if ($_Role -contains "Service connection point") {
+                #installed .net 4.5 or later
+            }
+            if ($_Role -contains "Software update point") {
+                #default iis configuration
+                Install-WindowsFeature web-server
+            }
+            if ($_Role -contains "State migration point") {
+                #iis
+                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
         }
 
         $StatusPath = "$env:windir\temp\InstallFeatureStatus.txt"

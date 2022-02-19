@@ -367,8 +367,6 @@ function Get-Phase3ConfigurationData {
         return
     }
 
-    #TODO: Fix this after implementing Phase 3
-    return $null
     return $cd
 }
 
