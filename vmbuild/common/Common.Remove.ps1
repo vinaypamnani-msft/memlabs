@@ -7,13 +7,17 @@ function Remove-VirtualMachine {
         [Parameter(Mandatory = $true)]
         [string] $VmName,
         [Parameter()]
-        [switch] $WhatIf
+        [switch] $WhatIf,
+        [Parameter()]
+        [switch] $Force
     )
     #{ "network": "10.0.1.0", "ClusterIPAddress": "10.250.250.135", "AGIPAddress": "10.250.250.136",
-    $vmFromList = Get-List -Type VM | Where-Object { $_.vmName -eq $VmName }
+    $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
     if ($vmFromList.vmBuild -eq $false) {
-        Write-Log "VM '$VmName' exists, but it was not deployed via MemLabs. Skipping." -SubActivity
-        return
+        if (-not ($Force.IsPresent)) {
+            Write-Log "VM '$VmName' exists, but it was not deployed via MemLabs. Skipping." -SubActivity
+            return
+        }
     }
 
     $vmTest = Get-VM2 -Name $VmName -Fallback

@@ -2,6 +2,7 @@
 # Create VM script block
 $global:VM_Create = {
 
+    $global:ScriptBlockName = "VM_Create"
     # Dot source common
     $rootPath = Split-Path $using:PSScriptRoot -Parent
     . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
@@ -292,7 +293,7 @@ $global:VM_Create = {
 }
 
 $global:VM_Config = {
-
+    $global:ScriptBlockName = "VM_Config"
     # Get variables from parent scope
     $deployConfig = $using:deployConfigCopy
     $currentItem = $using:currentItem
@@ -485,8 +486,8 @@ $global:VM_Config = {
     }
 
     $DSC_ClearStatus = {
-
         param($DscFolder)
+        $global:ScriptBlockName = "DSC_ClearStatus"
 
         $log = "C:\staging\DSC\DSC_Init.txt"
         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
@@ -554,9 +555,8 @@ $global:VM_Config = {
     }
 
     $DSC_CreateSingleConfig = {
-
         param($DscFolder)
-
+        $global:ScriptBlockName = "DSC_CreateSingleConfig"
         # Get required variables from parent scope
         $currentItem = $using:currentItem
         $deployConfig = $using:deployConfig
@@ -624,9 +624,8 @@ $global:VM_Config = {
     }
 
     $DSC_CreateMultiConfig = {
-
         param($DscFolder)
-
+        $global:ScriptBlockName = "DSC_CreateMultiConfig"
         # Get required variables from parent scope
         $currentItem = $using:currentItem
         $deployConfig = $using:deployConfig
@@ -703,9 +702,8 @@ $global:VM_Config = {
     }
 
     $DSC_StartConfig = {
-
         param($DscFolder)
-
+        $global:ScriptBlockName = "DSC_StartConfig"
         # Get required variables from parent scope
         $currentItem = $using:currentItem
         $ConfigurationData = $using:ConfigurationData

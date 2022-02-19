@@ -462,7 +462,8 @@ finally {
             Write-Log "Script exited before Phase 1 completion. Removing all VM's created in Phase 1." -Warning
         }
         foreach ($vmname in $global:vm_remove_list) {
-            Remove-VirtualMachine -VmName $vmname
+            Write-Log "Removing $vmName"
+            Remove-VirtualMachine -VmName $vmname -Force
         }
     }
 

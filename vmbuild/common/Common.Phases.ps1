@@ -105,9 +105,6 @@ function Start-PhaseJobs {
         $multiNodeDsc = $false
     }
 
-    # Track all VM's for removal, if failures encountered
-    $global:vm_remove_list = @()
-
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
         # Don't touch non-hidden VM's in Phase 0
@@ -118,11 +115,6 @@ function Start-PhaseJobs {
         # Don't touch hidden VM's in Phase 1
         if ($Phase -eq 1 -and $currentItem.hidden) {
             continue
-        }
-
-        # Add non-hidden VM's to removal list, in case Phase 1 fails. TODO: Re-evaluate phase
-        if ($Phase -eq 1 -and -not $currentItem.hidden) {
-            $global:vm_remove_list += $currentItem.vmName
         }
 
         # Skip everything for OSDClient, nothing for us to do
@@ -140,7 +132,7 @@ function Start-PhaseJobs {
         Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
 
         if ($WhatIf) {
-            Write-Log "Will start a Phase $Phase job for VM $($currentItem.vmName)"
+            Write-Log "Will start a [Phase $Phase] job for VM $($currentItem.vmName)"
             continue
         }
 
@@ -150,24 +142,24 @@ function Start-PhaseJobs {
             # Create/Prepare VM
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
-                Write-Log "Failed to create Phase $Phase job for VM $($currentItem.vmName). $Err" -Failure
+                Write-Log "Failed to create [Phase $Phase] job for VM $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
         }
         else {
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
-                Write-Log "Failed to create Phase $Phase job for VM $($currentItem.vmName). $Err" -Failure
+                Write-Log "Failed to create [Phase $Phase] job for VM $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
         }
 
         if ($Err.Count -ne 0) {
-            Write-Log "Failed to start Phase $Phase job for VM $($currentItem.vmName). $Err" -Failure
+            Write-Log "Failed to start [Phase $Phase] job for VM $($currentItem.vmName). $Err" -Failure
             $job_created_no++
         }
         else {
-            Write-Log "Created Phase $Phase job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
+            Write-Log "Created [Phase $Phase] job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
             $jobs += $job
             $job_created_yes++
         }
@@ -182,10 +174,10 @@ function Start-PhaseJobs {
     }
 
     if ($job_created_no -eq 0) {
-        Write-Log "Created $job_created_yes jobs for Phase $Phase. Waiting for jobs."
+        Write-Log "Created [$job_created_yes jobs] for [Phase $Phase]. Waiting for jobs."
     }
     else {
-        Write-Log "Created $job_created_yes jobs for Phase $Phase. Failed to create $job_created_no jobs."
+        Write-Log "Created [$job_created_yes jobs] for [Phase $Phase]. Failed to create $job_created_no jobs."
     }
 
     return $return
@@ -204,6 +196,16 @@ function Wait-Phase {
         Failed  = 0
         Success = 0
         Warning = 0
+    }
+
+
+    # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
+    $global:vm_remove_list = @()
+    if ($Phase -eq 1) {
+        foreach ($job in $jobs) {
+            $jobName = $job | Select-Object -ExpandProperty Name
+            $global:vm_remove_list += $jobName
+        }
     }
 
     $FailRetry = 0
@@ -299,7 +301,9 @@ function Get-ConfigurationData {
         "6" { $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig }
         Default { return }
     }
-
+    if ($global:Common.VerboseEnabled) {
+        $cd | ConvertTo-Json | out-host
+    }
     return $cd
 }
 
@@ -508,7 +512,6 @@ function Get-Phase5ConfigurationData {
     if ($NumberOfNodesAdded -eq 0) {
         return
     }
-    $cd | ConvertTo-Json | out-host
     return $cd
 }
 function Get-Phase6ConfigurationData {

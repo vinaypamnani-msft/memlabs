@@ -1493,9 +1493,9 @@ function Get-List {
 
     $mtx = New-Object System.Threading.Mutex($false, "GetList")
     $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
-    write-log "[$tid] Attempting to acquire 'GetList' Mutex" -LogOnly
+    write-log "[$tid] Attempting to acquire 'GetList' Mutex" -LogOnly -Verbose
     [void]$mtx.WaitOne()
-    write-log "[$tid] acquired 'GetList' Mutex" -LogOnly
+    write-log "[$tid] acquired 'GetList' Mutex" -LogOnly -Verbose
     try {
 
         if ($FlushCache.IsPresent) {
