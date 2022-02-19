@@ -518,29 +518,7 @@ function Add-PerVMSettings {
             $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccountsUPN" -Value $DomainAccountsUPN -Force
             $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
         }
-        if ($thisVM.role -eq "SQLAO") {
-            $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2
-            $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
-            if (-not $dc.subnet) {
-                $dns = $DeployConfig.vmOptions.network.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
-            }
-            else {
-                $dns = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
-            }
-            if ($thisVM.OtherNode) {
-                $ip = $iprange[0]
-            }
-            else {
-                $ip = $iprange[1]
-                $thisParams | Add-Member -MemberType NoteProperty -Name "DscMachine" -Value $dc.vmName -Force
-            }
-            if (-not $thisParams.DNSServer) {
-                $thisParams | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
-            }
-            if (-not $thisParams.ClusterNetworkIP) {
-                $thisParams | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value  $ip -Force
-            }
-        }
+
 
     }
 
@@ -1331,7 +1309,7 @@ function Update-VMInformation {
         $vmNoteObject = $vm.Notes | convertFrom-Json
     }
     catch {
-        Write-Log "Could not convert notes $($vm.Notes) from vm $($vm.Name)" -LogOnly -Failure
+        Write-Log "Could not convert notes $($vm.Notes) from vm $($vm.Name)" -LogOnly -Failure5
         return
     }
 

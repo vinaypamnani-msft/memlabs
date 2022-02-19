@@ -156,16 +156,18 @@ try {
 
             }
 
-            if ($InProgessVMs.Count -gt 0) {
-                Write-Host
-                write-host -ForegroundColor Blue "*************************************************************************************************************************************"
-                write-host -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
-                write-log "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
-                write-host
-                write-host -ForegroundColor White "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
-                write-host -ForegroundColor Blue "*************************************************************************************************************************************"
+            if (-not ($Phase -or $SkipPhase -or $StopPhase -or $StartPhase)) {
+                if ($InProgessVMs.Count -gt 0) {
+                    Write-Host
+                    write-host -ForegroundColor Blue "*************************************************************************************************************************************"
+                    write-host -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
+                    write-log "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
+                    write-host
+                    write-host -ForegroundColor White "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
+                    write-host -ForegroundColor Blue "*************************************************************************************************************************************"
 
-                return
+                    return
+                }
             }
 
             Write-Log "Configuration validated successfully." -Success
@@ -289,7 +291,7 @@ try {
             if ($SkipPhase) {
                 $created = $true
             }
-            else{
+            else {
                 $created = Start-Phase -Phase 1 -deployConfig $deployConfig
             }
 
@@ -315,7 +317,7 @@ try {
                     $maxPhase = $StopPhase
                 }
 
-                for ($i=$start; $i -le $maxPhase; $i++) {
+                for ($i = $start; $i -le $maxPhase; $i++) {
 
                     if ($SkipPhase -and $i -in $SkipPhase) {
                         continue

@@ -1,4 +1,4 @@
-Configuration Phase5
+Configuration Phase5Configuration
 {
     param
     (
@@ -661,4 +661,110 @@ Configuration Phase5
     }
 
 
+    Node $AllNodes.Where{ $_.Role -eq "Secondary" }.NodeName
+    {
+        #$PSName = $deployConfig.thisParams.PrimarySiteServer.vmName
+
+        $ParentSiteCode = ($deployConfig.virtualMachines | where-object { $_.vmName -eq ($Node.NodeName) }).ParentSiteCode
+        $PSName = ($deployConfig.virtualMachines | where-object { $_.Role -eq "Primary" -and $_.SiteCode -eq $ParentSiteCode }).vmName
+        WriteStatus WaitPrimary {
+            Status = "Waiting for Site Server $PSName to finish configuration."
+        }
+
+        WaitForEvent WaitPrimary {
+            MachineName   = $PSName
+            LogFolder     = $LogFolder
+            FileName      = "ScriptWorkflow"
+            ReadNode      = "ScriptWorkflow"
+            ReadNodeValue = "Completed"
+            Ensure        = "Present"
+            DependsOn     = "[WriteStatus]WaitPrimary"
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WaitForEvent]WaitPrimary"
+            Status    = "Complete!"
+        }
+
+        WriteEvent WriteConfigFinished {
+            LogPath   = $LogPath
+            WriteNode = "ConfigurationFinished"
+            Status    = "Passed"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]Complete"
+        }
+    }
+
+    Node $AllNodes.Where{ $_.Role -eq 'CAS' -or $_.Role -eq "Primary" }.NodeName
+    {
+        $node1 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
+        $InstallConfigMgr = $deployConfig.cmOptions.install
+        $ThisMachineName = $Node.NodeName
+        if ($InstallConfigMgr) {
+
+            WriteStatus RunScriptWorkflow {
+                Status = "Setting up ConfigMgr. Waiting for workflow to begin."
+            }
+
+            $nextDepend = "[WriteStatus]RunScriptWorkflow"
+
+            if ($node1) {
+                WriteStatus SQLAO {
+                    Status    = "Setting up ConfigMgr. Waiting for SQL Always-On Configuration to finish."
+                    DependsOn = $nextDepend
+                }
+
+                WaitForAll SQLAG {
+                    ResourceName     = '[WriteStatus]Complete'
+                    NodeName         = $node1
+                    RetryIntervalSec = 2
+                    RetryCount       = 900
+                    Dependson        = '[WriteStatus]SQLAO'
+                }
+
+                WriteStatus SQLAODone {
+                    Status    = "Setting up ConfigMgr. SQLAO complete. Waiting on SCCM Install Task to Start"
+                    DependsOn = "[WaitForAll]SQLAG"
+                }
+                $nextDepend = "[WaitForAll]SQLAG"
+            }
+
+            WriteFileOnce CMSvc {
+                FilePath  = "$LogPath\cm_svc.txt"
+                Content   = $Admincreds.GetNetworkCredential().Password
+                DependsOn = $nextDepend
+            }
+
+            RegisterTaskScheduler RunScriptWorkflow {
+                TaskName       = "ScriptWorkFlow"
+                ScriptName     = "ScriptWorkFlow.ps1"
+                ScriptPath     = $PSScriptRoot
+                ScriptArgument = "$DeployConfigPath $LogPath"
+                AdminCreds     = $CMAdmin
+                Ensure         = "Present"
+                DependsOn      = "[WriteFileOnce]CMSvc"
+            }
+
+            WaitForEvent WorkflowComplete {
+                MachineName   = $ThisMachineName
+                LogFolder     = $LogFolder
+                FileName      = "ScriptWorkflow"
+                ReadNode      = "ScriptWorkflow"
+                ReadNodeValue = "Completed"
+                Ensure        = "Present"
+                DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
+            }
+
+            WriteStatus Complete {
+                DependsOn = "[WaitForEvent]WorkflowComplete"
+                Status    = "Complete!"
+            }
+        }
+        else {
+            WriteStatus Complete {
+                Status = "Complete!"
+            }
+        }
+
+    }
 }
