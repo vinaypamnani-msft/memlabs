@@ -21,19 +21,19 @@ configuration Phase3
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
 
         WriteStatus AddLocalAdmin {
-            Status    = "Adding required accounts to Local Administrators group"
+            Status = "Adding required accounts to Local Administrators group"
         }
 
         $addUserDependancy = @('[WriteStatus]AddLocalAdmin')
         $i = 0
         foreach ($user in $ThisVM.thisParams.LocalAdminAccounts) {
             $i++
-            $NodeName = "AddADUserToLocalAdminGroup$($i)"
-            AddUserToLocalAdminGroup "$NodeName" {
+            $DscNodeName = "AddADUserToLocalAdminGroup$($i)"
+            AddUserToLocalAdminGroup "$DscNodeName" {
                 Name       = $user
                 DomainName = $DomainName
             }
-            $addUserDependancy += "[AddUserToLocalAdminGroup]$NodeName"
+            $addUserDependancy += "[AddUserToLocalAdminGroup]$DscNodeName"
         }
 
         WriteStatus InstallFeature {
@@ -71,8 +71,23 @@ configuration Phase3
             DependsOn   = "[WriteStatus]InstallDotNet"
         }
 
+        $nextDepend = "[InstallDotNet4]DotNet"
+        if ($ThisVM.installSSMS) {
+
+            WriteStatus SSMS {
+                DependsOn = $nextDepend
+                Status    = "Downloading and installing SQL Management Studio"
+            }
+
+            InstallSSMS SSMS {
+                DownloadUrl = "https://aka.ms/ssmsfullsetup"
+                Ensure      = "Present"
+                DependsOn   = "[WriteStatus]SSMS"
+            }
+        }
+
         WriteStatus Complete {
-            DependsOn = "[InstallDotNet4]DotNet"
+            DependsOn = $nextDepend
             Status    = "Complete!"
         }
 
