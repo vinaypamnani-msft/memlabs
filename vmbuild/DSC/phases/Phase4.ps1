@@ -25,11 +25,6 @@ configuration Phase4
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
 
-
-        # SQL Setup
-
-
-
         if ($ThisVM.sqlInstanceDir) {
             $SQLInstanceDir = $ThisVM.sqlInstanceDir
         }
@@ -61,7 +56,6 @@ configuration Phase4
             }
             $nextDepend = '[DownloadFile]DownloadSQLCU'
         }
-
 
         WriteStatus InstallSQL {
             DependsOn = $nextDepend
@@ -99,10 +93,8 @@ configuration Phase4
                 LoginType               = 'WindowsUser'
                 InstanceName            = $SQLInstanceName
                 LoginMustChangePassword = $false
-                PsDscRunAsCredential    = $CMAdmin
                 DependsOn               = '[WriteStatus]AddSQLPermissions'
             }
-
             $sqlDependency += "[SqlLogin]AddSqlLogin$i"
         }
 
@@ -111,7 +103,6 @@ configuration Phase4
             ServerRoleName       = 'sysadmin'
             MembersToInclude     = $SQLSysAdminAccounts
             InstanceName         = $SQLInstanceName
-            PsDscRunAsCredential = $CMAdmin
             DependsOn            = $sqlDependency
         }
 
@@ -139,7 +130,6 @@ configuration Phase4
                 Status    = "SQL setting new startup user to ${DName}\$($ThisVM.SqlServiceAccount)"
             }
 
-
             $SPNs = @()
             $SPNs += "MSSQLSvc/" + $thisvm.VmName
             $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName
@@ -155,8 +145,6 @@ configuration Phase4
             $SPNs += "MSSQLSvc/" + $thisvm.VmName + ":" + $port
             $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName + ":" + $port
 
-
-
             # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
             $spnDependency = @($nextDepend)
             $i = 0
@@ -168,12 +156,10 @@ configuration Phase4
                     ServicePrincipalName = $spn
                     Account              = $thisvm.VmName + "$"
                     Dependson            = $nextDepend
-                    PsDscRunAsCredential = $CMAdmin
                 }
 
                 $spnDependency += "[ADServicePrincipalName]spn$i"
             }
-
 
             [System.Management.Automation.PSCredential]$sqlUser = New-Object System.Management.Automation.PSCredential ("${DName}\$($ThisVM.SqlServiceAccount)", $Admincreds.Password)
             [System.Management.Automation.PSCredential]$sqlAgentUser = New-Object System.Management.Automation.PSCredential ("${DName}\$($ThisVM.SqlAgentAccount)", $Admincreds.Password)
@@ -186,7 +172,6 @@ configuration Phase4
                 ServiceAccount       = $sqlUser
                 RestartService       = $true
                 DependsOn            = $spnDependency
-                PsDscRunAsCredential = $CMAdmin
                 Force                = $true
             }
 
@@ -197,7 +182,6 @@ configuration Phase4
                 ServiceType          = 'SQLServerAgent'
                 ServiceAccount       = $sqlAgentUser
                 RestartService       = $true
-                PsDscRunAsCredential = $CMAdmin
                 DependsOn            = '[SqlServiceAccount]SetServiceAccountSQL_User'
             }
 
@@ -207,13 +191,11 @@ configuration Phase4
                 StartupType          = "Automatic"
                 State                = "Running"
                 DependsOn            = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
-                PsDscRunAsCredential = $CMAdmin
             }
             $nextDepend = "[Service]ChangeStartupAgent"
 
         }
         else {
-
             WriteStatus ChangeToLocalSystem {
                 DependsOn = $nextDepend
                 Status    = "Configuring SQL services to use LocalSystem"
@@ -227,17 +209,10 @@ configuration Phase4
             $nextDepend = '[ChangeSQLServicesAccount]ChangeToLocalSystem'
         }
 
-        WriteStatus AddLocalAdmin {
-            DependsOn = $nextDepend
-            Status    = "Adding cm_svc domain account to Local Administrators group"
-        }
-
         WriteStatus Complete {
-            DependsOn = "[WriteStatus]AddLocalAdmin"
+            DependsOn = $nextDepend
             Status    = "Complete!"
         }
 
     }
 }
-
-
