@@ -99,6 +99,7 @@ function Import-WimFromIso {
     }
     catch {
         Write-Log "Could not mount the ISO!"
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 
@@ -113,6 +114,7 @@ function Import-WimFromIso {
         }
         catch {
             Write-Log "Attempted to dismount iso - might have failed..." -Failure
+            Write-Log "$($_.ScriptStackTrace)" -LogOnly
         }
         return $null
     }
@@ -133,6 +135,7 @@ function Import-WimFromIso {
     }
     catch {
         Write-Log "Couldn't copy from the source" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         invoke-removeISOmount -inputObject $isomount
         return $null
     }
@@ -144,6 +147,7 @@ function Import-WimFromIso {
     }
     catch {
         Write-Log "Couldn't move the new WIM to the staging folder." -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         invoke-removeISOmount -inputObject $isomount
         return $null
     }
@@ -204,6 +208,7 @@ function New-VhdxFile {
     }
     catch {
         Write-Log "Failed to get windows image. $($Failed.Message)" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $false
     }
 
@@ -278,6 +283,7 @@ function New-VhdxFile {
     }
     catch {
         Write-Log "Failed to Convert WIM to VHDX. $($_)" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $false
     }
     finally {

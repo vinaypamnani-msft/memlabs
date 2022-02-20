@@ -161,6 +161,7 @@ $global:VM_Create = {
             }
             catch {
                 Write-Log "PSJOB: $($currentItem.vmName): Could not assign DHCP Reservation for $($currentItem.role). $_" -Warning
+                Write-Log "$($_.ScriptStackTrace)" -LogOnly
             }
         }
 
@@ -485,7 +486,7 @@ $global:VM_Config = {
                 }
             }
             catch {
-                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_"
+                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message
@@ -566,7 +567,7 @@ $global:VM_Config = {
                 $deployConfig | ConvertTo-Json -Depth 5 | Out-File $deployConfigPath -Force -Confirm:$false
             }
             catch {
-                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_"
+                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message
@@ -651,7 +652,7 @@ $global:VM_Config = {
                 & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
             }
             catch {
-                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_"
+                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message
@@ -737,7 +738,7 @@ $global:VM_Config = {
                 & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $credsForDSC -ConfigurationData $cd -OutputPath $dscConfigPath
             }
             catch {
-                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_"
+                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message
@@ -779,7 +780,7 @@ $global:VM_Config = {
                 }
             }
             catch {
-                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_"
+                $error_message = "PSJOB: $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message

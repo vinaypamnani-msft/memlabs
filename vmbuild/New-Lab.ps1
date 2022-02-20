@@ -60,6 +60,7 @@ if (-not $NoWindowResize.IsPresent) {
     }
     catch {
         Write-Log "Failed to set window size. $_" -LogOnly -Warning
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
     }
 }
 
@@ -218,6 +219,7 @@ try {
     }
     catch {
         Write-Log "Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         Write-Host
         return
     }
@@ -227,26 +229,36 @@ try {
     Write-Log "Starting deployment. Review VMBuild.$domainName.log"
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
 
-    # Download required files
-    $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
-    if (-not $success) {
-        Write-Host
-        Write-Log "Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
-        Start-Sleep -Seconds 120
+    $runPhase1 = $true
+    if (-not $StopPhase -and ($Phase -or $SkipPhase -or $StartPhase)) {
+        $runPhase1 = $false
+    }
+    if ($StopPhase -and ($Phase -or $SkipPhase -or $StartPhase)) {
+        $runPhase1 = $false
+    }
+    if ($runPhase1) {
+        # Download required files
         $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
         if (-not $success) {
+            Write-Host
+            Write-Log "Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
+            Start-Sleep -Seconds 120
+            $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
+            if (-not $success) {
+                $timer.Stop()
+                Write-Log "Failed to download all required files. Exiting." -Failure
+                return
+            }
+        }
+
+
+        if ($DownloadFilesOnly.IsPresent) {
             $timer.Stop()
-            Write-Log "Failed to download all required files. Exiting." -Failure
+            Write-Host
+            Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
+            Write-Host
             return
         }
-    }
-
-    if ($DownloadFilesOnly.IsPresent) {
-        $timer.Stop()
-        Write-Host
-        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
-        Write-Host
-        return
     }
 
     # Test if hyper-v switch exists, if not create it

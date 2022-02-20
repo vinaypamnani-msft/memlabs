@@ -39,6 +39,7 @@ function Get-UserConfiguration {
     }
     catch {
         $return.Message = "Get-UserConfiguration: Failed to load $configPath. $_"
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $return
     }
 
@@ -102,6 +103,7 @@ function Get-FilesForConfiguration {
             $allSuccess = $false
         }
     }
+
 
     return $allSuccess
 }
@@ -884,6 +886,7 @@ function Get-ExistingForDomain {
     }
     catch {
         Write-Log "Failed to get existing $Role from $DomainName. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 }
@@ -949,6 +952,7 @@ function Get-ExistingSiteServer {
     }
     catch {
         Write-Log "Failed to get existing site servers. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 }
@@ -979,6 +983,7 @@ function Get-ExistingForSubnet {
     }
     catch {
         Write-Log "Failed to get existing $Role from $Subnet. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 }
@@ -1184,6 +1189,7 @@ function Get-SubnetList {
     }
     catch {
         Write-Log "Failed to get subnet list. $_" -Failure -LogOnly
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 }
@@ -1195,6 +1201,7 @@ function Get-DomainList {
     }
     catch {
         Write-Log "Failed to get domain list. $_" -Failure -LogOnly
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 }
@@ -1353,6 +1360,7 @@ function Update-VMInformation {
                     }
                     catch {
                         Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                        Write-Log "$($_.ScriptStackTrace)" -LogOnly
                     }
                 }
                 else {
@@ -1380,6 +1388,7 @@ function Update-VMInformation {
                     }
                     catch {
                         Write-Log "Failed to obtain siteCode from registry from $vmName" -Warning -LogOnly
+                        Write-Log "$($_.ScriptStackTrace)" -LogOnly
                     }
                 }
                 else {
@@ -1511,6 +1520,7 @@ function Get-List {
             catch {
                 write-log "Failed to convert DeployConfig: $DeployConfig" -Failure
                 write-log "Failed to convert DeployConfig: $DepoloyConfigJson" -Failure
+                Write-Log "$($_.ScriptStackTrace)" -LogOnly
             }
 
         }

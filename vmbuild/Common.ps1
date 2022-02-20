@@ -410,6 +410,7 @@ function Get-File {
     }
     catch {
         Write-Log "$Action $sourceDisplay failed. Error: $($_.ToString().Trim())" -Failure
+        Write-Log "$Action $sourceDisplay failed. Error: $($_.ScriptStackTrace)" -LogOnly
         return $false
     }
 }
@@ -788,50 +789,52 @@ function Test-DHCPScope {
             Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
             return $false
         }
-    }
 
-    try {
-        if (-not $DomainScope) {
-            if ($ScopeName -eq "cluster") {
-                $HashArguments = @{
-                    ScopeId = $ScopeID
-                    Router  = $DHCPDefaultGateway
+
+        try {
+            if (-not $DomainScope) {
+                if ($ScopeName -eq "cluster") {
+                    $HashArguments = @{
+                        ScopeId = $ScopeID
+                        Router  = $DHCPDefaultGateway
+                    }
+                }
+                else {
+                    $HashArguments = @{
+                        ScopeId   = $ScopeID
+                        Router    = $DHCPDefaultGateway
+                        DnsServer = @("4.4.4.4", "8.8.8.8")
+                    }
                 }
             }
             else {
+                $DC = get-list -type VM -domain $DomainName | Where-Object { $_.Role -eq "DC" }
+                if ($DC) {
+                    $DHCPDNSAddress = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+                }
+                if ($DNSServer) {
+                    $DHCPDNSAddress = $DNSServer
+                }
                 $HashArguments = @{
-                    ScopeId   = $ScopeID
-                    Router    = $DHCPDefaultGateway
-                    DnsServer = @("4.4.4.4", "8.8.8.8")
+                    ScopeId    = $ScopeID
+                    Router     = $DHCPDefaultGateway
+                    DnsDomain  = $DomainName
+                    WinsServer = $DHCPDNSAddress
+                    DnsServer  = $DHCPDNSAddress
                 }
             }
-        }
-        else {
-            $DC = get-list -type VM -domain $DomainName | Where-Object { $_.Role -eq "DC" }
-            if ($DC) {
-                $DHCPDNSAddress = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
-            }
-            if ($DNSServer) {
-                $DHCPDNSAddress = $DNSServer
-            }
-            $HashArguments = @{
-                ScopeId    = $ScopeID
-                Router     = $DHCPDefaultGateway
-                DnsDomain  = $DomainName
-                WinsServer = $DHCPDNSAddress
-                DnsServer  = $DHCPDNSAddress
-            }
-        }
 
-        Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
-        Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
-        return $true
+            Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
+            Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
+            return $true
+        }
+        catch {
+            Write-Log "Failed to add/update scope options for '$ScopeID ($ScopeName)' scope in DHCP. $_" -Failure
+            Write-Log "$($_.ScriptStackTrace)" -LogOnly
+            return $false
+        }
     }
-    catch {
-        Write-Log "Failed to add/update scope options for '$ScopeID ($ScopeName)' scope in DHCP. $_" -Failure
-        return $false
-    }
-
+    return $true
 }
 
 function New-VmNote {
@@ -878,6 +881,7 @@ function New-VmNote {
     }
     catch {
         Write-Log "Failed to add a note to the VM '$VmName' in Hyper-V. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
     }
     finally {
         $ProgressPreference = 'Continue'
@@ -917,6 +921,7 @@ function Get-VMNote {
     }
     catch {
         Write-Log "Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 }
@@ -1048,6 +1053,7 @@ function Get-DhcpScopeDescription {
     }
     catch {
         Write-Log "Failed to get description for '$ScopeId' scope in DHCP. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 }
@@ -1130,6 +1136,7 @@ function New-VirtualMachine {
     }
     catch {
         Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $false
     }
 
@@ -1267,7 +1274,8 @@ function New-VirtualMachine {
                 Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -ErrorAction Stop
             }
             catch {
-                write-log -failure "Failed to reserver IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
+                write-log -failure "Failed to reserve IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
+                Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
                 return $false
             }
             $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
@@ -1576,6 +1584,7 @@ function Invoke-VmCommand {
             $failed = $true
             if (-not $SuppressLog) {
                 Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $_" -Failure
+                Write-Log "$($_.ScriptStackTrace)" -LogOnly
             }
         }
         if ($CommandReturnsBool) {
