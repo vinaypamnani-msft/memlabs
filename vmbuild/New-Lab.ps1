@@ -355,7 +355,7 @@ try {
                     $global:vm_remove_list = @()
 
                     Start-Sleep -Seconds 5
-                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false -NoActivity
                 }
             }
         }
