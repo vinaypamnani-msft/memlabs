@@ -353,6 +353,9 @@ try {
                 if ($i -eq 1) {
                     # Clear out vm remove list
                     $global:vm_remove_list = @()
+
+                    Start-Sleep -Seconds 5
+                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
                 }
             }
         }

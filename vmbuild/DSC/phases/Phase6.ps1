@@ -26,7 +26,34 @@ Configuration Phase6
 
     Node $AllNodes.Where{ $_.Role -eq 'DC' }.NodeName
     {
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+
+        WriteStatus DelegateControl {
+            Status = "Assigning permissions to Systems Management container"
+        }
+
+        $nextDepend = "[WriteStatus]DelegateControl"
+        $waitOnDependency = @($nextDepend)
+        foreach ($server in $ThisVM.thisParams.ServersToWaitOn) {
+
+            VerifyComputerJoinDomain "WaitFor$server" {
+                ComputerName = $server
+                Ensure       = "Present"
+                DependsOn    = $nextDepend
+            }
+
+            DelegateControl "Add$server" {
+                Machine        = $server
+                DomainFullName = $DomainName
+                Ensure         = "Present"
+                DependsOn      = "[VerifyComputerJoinDomain]WaitFor$server"
+            }
+
+            $waitOnDependency += "[DelegateControl]Add$server"
+        }
+
         WriteStatus Complete {
+            DependsOn = $waitOnDependency
             Status    = "Complete!"
         }
     }
@@ -38,6 +65,7 @@ Configuration Phase6
 
         $ParentSiteCode = ($deployConfig.virtualMachines | where-object { $_.vmName -eq ($Node.NodeName) }).ParentSiteCode
         $PSName = ($deployConfig.virtualMachines | where-object { $_.Role -eq "Primary" -and $_.SiteCode -eq $ParentSiteCode }).vmName
+
         WriteStatus WaitPrimary {
             Status = "Waiting for Site Server $PSName to finish configuration."
         }
@@ -69,42 +97,67 @@ Configuration Phase6
     Node $AllNodes.Where{ $_.Role -eq 'CAS' -or $_.Role -eq "Primary" }.NodeName
     {
         $ThisMachineName = $Node.NodeName
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
 
-            WriteStatus RunScriptWorkflow {
-                Status = "Setting up ConfigMgr. Waiting for workflow to begin."
+        WriteStatus Setup {
+            Status = "Setting up Configuration Manager."
+        }
+
+        $nextDepend = "[WriteStatus]Setup"
+        if (-not $ThisVM.thisParams.ParentSiteServer) {
+
+            $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+            $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
+            if ($CM -eq "CMTP") {
+                $CMDownloadStatus = "Downloading Configuration Manager technical preview"
             }
 
-            $nextDepend = "[WriteStatus]RunScriptWorkflow"
-
-            WriteFileOnce CMSvc {
-                FilePath  = "$LogPath\cm_svc.txt"
-                Content   = $Admincreds.GetNetworkCredential().Password
+            WriteStatus DownLoadSCCM {
                 DependsOn = $nextDepend
+                Status    = $CMDownloadStatus
             }
 
-            RegisterTaskScheduler RunScriptWorkflow {
-                TaskName       = "ScriptWorkFlow"
-                ScriptName     = "ScriptWorkFlow.ps1"
-                ScriptPath     = $PSScriptRoot
-                ScriptArgument = "$DeployConfigPath $LogPath"
-                AdminCreds     = $CMAdmin
-                Ensure         = "Present"
-                DependsOn      = "[WriteFileOnce]CMSvc"
+            DownloadSCCM DownLoadSCCM {
+                CM        = $CM
+                Ensure    = "Present"
+                DependsOn = "[WriteStatus]DownLoadSCCM"
             }
+        }
 
-            WaitForEvent WorkflowComplete {
-                MachineName   = $ThisMachineName
-                LogFolder     = $LogFolder
-                FileName      = "ScriptWorkflow"
-                ReadNode      = "ScriptWorkflow"
-                ReadNodeValue = "Completed"
-                Ensure        = "Present"
-                DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
-            }
+        WriteStatus RunScriptWorkflow {
+            DependsOn = $nextDepend
+            Status    = "Setting up ConfigMgr. Waiting for workflow to begin."
+        }
 
-            WriteStatus Complete {
-                DependsOn = "[WaitForEvent]WorkflowComplete"
-                Status    = "Complete!"
-            }
+        WriteFileOnce CMSvc {
+            FilePath  = "$LogPath\cm_svc.txt"
+            Content   = $Admincreds.GetNetworkCredential().Password
+            DependsOn = "[WriteStatus]RunScriptWorkflow"
+        }
+
+        RegisterTaskScheduler RunScriptWorkflow {
+            TaskName       = "ScriptWorkFlow"
+            ScriptName     = "ScriptWorkFlow.ps1"
+            ScriptPath     = $PSScriptRoot
+            ScriptArgument = "$DeployConfigPath $LogPath"
+            AdminCreds     = $CMAdmin
+            Ensure         = "Present"
+            DependsOn      = "[WriteFileOnce]CMSvc"
+        }
+
+        WaitForEvent WorkflowComplete {
+            MachineName   = $ThisMachineName
+            LogFolder     = $LogFolder
+            FileName      = "ScriptWorkflow"
+            ReadNode      = "ScriptWorkflow"
+            ReadNodeValue = "Completed"
+            Ensure        = "Present"
+            DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WaitForEvent]WorkflowComplete"
+            Status    = "Complete!"
+        }
     }
 }

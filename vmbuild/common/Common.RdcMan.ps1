@@ -259,10 +259,11 @@ function New-RDCManFileFromHyperV {
     [CmdletBinding()]
     param(
         [string]$rdcmanfile,
-        [bool]$OverWrite = $false
+        [bool]$OverWrite = $false,
+        [switch]$Activity
     )
 
-    Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity
+    Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity:$Activity
 
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
@@ -457,7 +458,7 @@ function New-RDCManFileFromHyperV {
             [void]$findGroup.AppendChild($clonedItem)
         }
         $roles = $vmListFull | Select-Object -ExpandProperty role
-        $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | where-object {$_.properties.name -eq "Servers" } | Select-Object -First 1
+        $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | where-object { $_.properties.name -eq "Servers" } | Select-Object -First 1
         #write-host $SmartGroupToClone.properties.name
         #$ruleToClone = $SmartGroupToClone.ruleGroup.rule
         $clonedSG = $SmartGroupToClone.clone()
@@ -498,7 +499,7 @@ function New-RDCManFileFromHyperV {
         $shouldSave = $true
     }
     $unknownVMs = @()
-    $unknownVMs += get-list -type vm  | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
+    $unknownVMs += get-list -type vm | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
         Write-Verbose "New-RDCManFileFromHyperV: Adding Unknown VMs"
         $findGroup = $null

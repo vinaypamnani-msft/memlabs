@@ -102,8 +102,14 @@
             DependsOn = "[File]ShareFolder"
         }
 
-        WriteStatus Complete {
+        OpenFirewallPortForSCCM OpenFirewall {
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            Name      = "DomainMember"
+            Role      = "DomainMember"
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
             Status    = "Complete!"
         }
     }

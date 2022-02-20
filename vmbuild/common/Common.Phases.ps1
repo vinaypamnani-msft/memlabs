@@ -44,7 +44,6 @@ function Start-Phase {
         return $true
     }
 
-
     # Remove DNS records for VM's in this config, if existing DC
     if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
         Write-Log "Attempting to remove existing DNS Records"
@@ -197,7 +196,6 @@ function Wait-Phase {
         Success = 0
         Warning = 0
     }
-
 
     # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
     $global:vm_remove_list = @()
