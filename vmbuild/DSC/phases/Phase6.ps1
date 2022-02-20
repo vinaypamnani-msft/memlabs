@@ -19,14 +19,18 @@ Configuration Phase6
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
 
+    # CM Share Folder
+    $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+
     # Domain Creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
-
     Node $AllNodes.Where{ $_.Role -eq 'DC' }.NodeName
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+        $PSName = $ThisVM.thisParams.PSName
+        $CSName = $ThisVM.thisParams.CSName
 
         WriteStatus DelegateControl {
             Status = "Assigning permissions to Systems Management container"
@@ -52,8 +56,20 @@ Configuration Phase6
             $waitOnDependency += "[DelegateControl]Add$server"
         }
 
-        WriteStatus Complete {
+        WriteStatus WaitExtSchema {
             DependsOn = $waitOnDependency
+            Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
+        }
+
+        WaitForExtendSchemaFile WaitForExtendSchemaFile {
+            MachineName = if ($CSName) { $CSName } else { $PSName }
+            ExtFolder   = $CM
+            Ensure      = "Present"
+            DependsOn   = "[WriteStatus]WaitExtSchema"
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
             Status    = "Complete!"
         }
     }
@@ -106,7 +122,6 @@ Configuration Phase6
         $nextDepend = "[WriteStatus]Setup"
         if (-not $ThisVM.thisParams.ParentSiteServer) {
 
-            $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
             $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
             if ($CM -eq "CMTP") {
                 $CMDownloadStatus = "Downloading Configuration Manager technical preview"

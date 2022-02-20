@@ -711,6 +711,10 @@ class DownloadSCCM {
         }
 
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
+        if (Test-Path $cmsourcepath) {
+            Remove-Item -Path $cmsourcepath -Recurse -Force | Out-Null
+        }
+
         if (!(Test-Path $cmsourcepath)) {
             Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -Wait
         }
@@ -1944,9 +1948,10 @@ class InstallFeatureForSCCM {
         Write-Verbose "Current Role is : $_Role"
 
         # Install on all devices
-        try{
+        try {
             dism /online /Enable-Feature /FeatureName:TelnetClient
-        } catch {}
+        }
+        catch {}
         #Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
 
         # Server OS?
