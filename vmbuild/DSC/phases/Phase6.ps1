@@ -115,11 +115,25 @@ Configuration Phase6
         $ThisMachineName = $Node.NodeName
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
 
-        WriteStatus Setup {
-            Status = "Setting up Configuration Manager."
+        WriteStatus ADKInstall {
+            Status    = "Downloading and installing ADK"
         }
 
-        $nextDepend = "[WriteStatus]Setup"
+        InstallADK ADKInstall {
+            ADKPath      = "C:\temp\adksetup.exe"
+            ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
+            Ensure       = "Present"
+            DependsOn    = "[WriteStatus]ADKInstall"
+        }
+
+        # TODO: Fix the Get logic for re-runs with different Role
+        OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = "[InstallADK]ADKInstall"
+            Name      = $ThisVM.role
+            Role      = "Site Server"
+        }
+
+        $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall"
         if (-not $ThisVM.thisParams.ParentSiteServer) {
 
             $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
