@@ -257,7 +257,7 @@ $global:VM_Create = {
         if ($currentItem.sqlVersion -and $createVM) {
 
             Write-Log "PSJOB: $($currentItem.vmName): Copying SQL installation files to the VM."
-            Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Activity "Working" -Completed
+            Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed
 
             # Determine which SQL version files should be used
             $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
@@ -292,7 +292,8 @@ $global:VM_Create = {
         }
     }
     catch {
-        Write-Log "PSJOB: Exception: $_" -OutputStream -Failure
+        Write-Log "PSJOB: $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log -LogOnly "Trace: $($_.ScriptStackTrace)"
     }
 }
 

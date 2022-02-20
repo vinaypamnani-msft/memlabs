@@ -1240,7 +1240,7 @@ function New-VirtualMachine {
 
         $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
         if (-not ($dc.subnet)) {
-            $dns = $DeployConfig.vmOptions.network.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            $dns = $DeployConfig.vmOptions.network.Substring(0, $DeployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
         }
         else {
             $dns = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
