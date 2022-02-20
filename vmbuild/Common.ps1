@@ -848,7 +848,9 @@ function New-VmNote {
         [Parameter(Mandatory = $false)]
         [bool]$InProgress,
         [Parameter(Mandatory = $false)]
-        [switch]$UpdateVersion
+        [switch]$UpdateVersion,
+        [Parameter(Mandatory = $false)]
+        [bool]$Force = $false
     )
 
     try {
@@ -873,10 +875,13 @@ function New-VmNote {
         }
 
         foreach ($prop in $ThisVM.PSObject.Properties) {
+            if ($prop.Name -eq "thisParams") {
+                continue
+            }
             $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
         }
 
-        Set-VMNote -vmName $vmName -vmNote $vmNote
+        Set-VMNote -vmName $vmName -vmNote $vmNote -force:$Force
 
     }
     catch {
@@ -905,7 +910,12 @@ function Get-VMNote {
     $vmNoteObject = $null
     try {
         if ($vm.Notes -like "*lastUpdate*") {
-            $vmNoteObject = $vm.Notes | ConvertFrom-Json
+            try {
+                $vmNoteObject = $vm.Notes | ConvertFrom-Json
+            }
+            catch {
+                return $null
+            }
 
             if (-not $vmNoteObject.adminName) {
                 # we renamed this property, read as "adminName" if it exists
@@ -939,11 +949,24 @@ function Set-VMNote {
         [Parameter(Mandatory = $true, ParameterSetName = "VMVersion")]
         [string]$vmVersion,
         [Parameter(Mandatory = $false)]
-        [switch]$forceVersionUpdate
+        [switch]$forceVersionUpdate,
+        [Parameter(Mandatory = $false)]
+        [bool]$force
     )
 
     if (-not $vmNote) {
         $vmNote = Get-VMNote -VMName $vmName
+    }
+    if ($force -eq $false) {
+        #If we are not forcing an overwrite, use the new note to update the contents of the old note.
+        #Old Note may have more properties than the new note, and we dont want to lose those.
+        $oldvmNote = Get-VMNote -VMName $vmName
+        if ($oldvmNote) {
+            foreach ($note in $vmNote.PSObject.Properties) {
+                $oldvmNote | Add-Member -MemberType NoteProperty -Name $note.Name -Value $note.Value -Force
+            }
+            $vmNote = $oldvmNote
+        }
     }
 
     $vmVersionUpdated = $false

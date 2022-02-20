@@ -357,6 +357,7 @@ $global:VM_Config = {
         $Stop_RunningDSC = {
             # Stop any existing DSC runs
             try {
+                Disable-DscDebug
                 Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
                 Stop-DscConfiguration -Verbose -Force
             }
@@ -796,14 +797,16 @@ $global:VM_Config = {
             Write-Log "PSJOB: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on the DC."
         }
         else {
+            start-sleep -seconds 15
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
-
+            start-sleep -seconds 30
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
+                start-sleep -seconds 60
                 Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
                 # Retry once before exiting
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"

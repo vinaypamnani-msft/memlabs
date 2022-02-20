@@ -89,8 +89,8 @@ do {
     Start-Sleep 30
     $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
     $enabled = ($prop.Value -band 1024) -eq 1024
-    Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled" -RetrySeconds 30
-} until ($attempts -ge 10)
+    Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled" -RetrySeconds 10
+} until ($attempts -ge 30)
 
 if (-not $enabled) {
     Write-DscStatus "e-HTTP not enabled after trying $attempts times, skip."
