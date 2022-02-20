@@ -1267,7 +1267,7 @@ function New-VirtualMachine {
                 Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -ErrorAction Stop
             }
             catch {
-                write-log -failue "Failed to reserver IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
+                write-log -failure "Failed to reserver IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
                 return $false
             }
             $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }

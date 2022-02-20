@@ -1360,7 +1360,7 @@ class RegisterTaskScheduler {
 
         $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
 
-        $TaskStartTime = [datetime]::Now.AddMinutes(2)
+        $TaskStartTime = [datetime]::Now.AddMinutes(1)
         $Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
 
         $Principal = New-ScheduledTaskPrincipal -UserId $_AdminCreds.UserName -RunLevel Highest

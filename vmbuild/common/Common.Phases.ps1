@@ -237,6 +237,8 @@ function Wait-Phase {
             if (-not $jobOutput) {
                 $jobName = $job | Select-Object -ExpandProperty Name
                 Write-RedX "Job $jobName completed with no output" -ForegroundColor Red
+                $jobJson = $job | ConvertTo-Json -Depth 5
+                write-log -LogOnly $jobJson
                 $return.Failed++
             }
 

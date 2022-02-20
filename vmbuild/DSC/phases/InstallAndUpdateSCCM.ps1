@@ -246,7 +246,13 @@ if ($null -eq (Get-Module ConfigurationManager)) {
 Write-DscStatus "Setting PS Drive"
 New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
 
+$psDriveFailcount = 0
 while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+    $psDriveFailcount++
+    if ($psDriveFailcount -gt 20) {
+        Write-DscStatus "Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log"
+        return
+    }
     Write-DscStatus "Retry in 10s to Set PS Drive for site $SiteCode on $ProviderMachineName"
     Start-Sleep -Seconds 10
     New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
