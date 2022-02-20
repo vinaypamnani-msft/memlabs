@@ -151,6 +151,14 @@ Configuration Phase6
                 Ensure    = "Present"
                 DependsOn = "[WriteStatus]DownLoadSCCM"
             }
+
+            FileReadAccessShare CMSourceSMBShare {
+                Name      = $CM
+                Path      = "c:\$CM"
+                DependsOn = "[DownLoadSCCM]DownLoadSCCM"
+            }
+
+            $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
         }
 
         WriteStatus RunScriptWorkflow {
