@@ -1321,7 +1321,7 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false)]
         [int]$TimeoutMinutes = 10,
         [Parameter(Mandatory = $false)]
-        [int]$WaitSeconds = 15,
+        [int]$WaitSeconds = 10,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false)]
@@ -1569,7 +1569,15 @@ function Invoke-VmCommand {
 
     # Run script block inside VM
     if (-not $failed) {
-        $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+        try {
+            $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+        }
+        catch {
+            $failed = $true
+            if (-not $SuppressLog) {
+                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $_" -Failure
+            }
+        }
         if ($CommandReturnsBool) {
             if ($($return.ScriptBlockOutput) -ne $true) {
                 Write-Log "Output was: $($return.ScriptBlockOutput)" -Warning
