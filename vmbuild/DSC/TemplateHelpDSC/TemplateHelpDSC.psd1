@@ -44,7 +44,9 @@ DscResourcesToExport = @(
     'ModuleAdd',
     'ActiveDirectorySPN',
     'ClusterRemoveUnwantedIPs',
-    'ClusterSetOwnerNodes'
+    'ClusterSetOwnerNodes',
+    'ADServicePrincipalName2'
+
 )
 
 # Version number of this module.

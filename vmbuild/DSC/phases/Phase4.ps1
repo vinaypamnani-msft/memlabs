@@ -25,7 +25,7 @@ configuration Phase4
     Node $AllNodes.Where{ $_.Role -eq 'DC' }.NodeName
     {
         WriteStatus Complete {
-            Status    = "Complete!"
+            Status = "Complete!"
         }
     }
 
@@ -45,6 +45,8 @@ configuration Phase4
             $sqlCuDownloadPath = Join-Path "C:\Temp\SQL_CU" (Split-Path -Path $sqlCUURL -Leaf)
         }
 
+
+        $backupSolutionURL  = $ThisVM.thisParams.backupSolutionURL
         $SQLSysAdminAccounts = $ThisVM.thisParams.SQLSysAdminAccounts
         WriteStatus SQLInstallStarted {
             Status = "Preparing to Install SQL '$($ThisVM.sqlVersion)'"
@@ -112,11 +114,11 @@ configuration Phase4
         }
 
         SqlRole SqlRole {
-            Ensure               = 'Present'
-            ServerRoleName       = 'sysadmin'
-            MembersToInclude     = $SQLSysAdminAccounts
-            InstanceName         = $SQLInstanceName
-            DependsOn            = $sqlDependency
+            Ensure           = 'Present'
+            ServerRoleName   = 'sysadmin'
+            MembersToInclude = $SQLSysAdminAccounts
+            InstanceName     = $SQLInstanceName
+            DependsOn        = $sqlDependency
         }
 
         SqlMemory SetSqlMemory {
@@ -140,7 +142,7 @@ configuration Phase4
 
             WriteStatus SetSQLSPN {
                 DependsOn = $nextDepend
-                Status    = "SQL setting new startup user to $($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)"
+                Status    = "Removing SQL SPNs for $($thisvm.VmName + "$")"
             }
 
             $SPNs = @()
@@ -164,46 +166,59 @@ configuration Phase4
             foreach ($spn in $SPNs ) {
                 $i++
 
-                ADServicePrincipalName "spn$i" {
+                ADServicePrincipalName2 "spn$i" {
                     Ensure               = 'Absent'
                     ServicePrincipalName = $spn
                     Account              = $thisvm.VmName + "$"
                     Dependson            = $nextDepend
                 }
 
-                $spnDependency += "[ADServicePrincipalName]spn$i"
+                $spnDependency += "[ADServicePrincipalName2]spn$i"
             }
 
             [System.Management.Automation.PSCredential]$sqlUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)", $Admincreds.Password)
             [System.Management.Automation.PSCredential]$sqlAgentUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)", $Admincreds.Password)
 
+
+            WriteStatus SetSQLUser {
+                DependsOn =  $spnDependency
+                Status    = "SQL setting new startup user to $sqlUser"
+            }
             #Change SQL Service Account
             SqlServiceAccount 'SetServiceAccountSQL_User' {
-                ServerName           = $thisvm.VmName
-                InstanceName         = $SQLInstanceName
-                ServiceType          = 'DatabaseEngine'
-                ServiceAccount       = $sqlUser
-                RestartService       = $true
-                DependsOn            = $spnDependency
-                Force                = $true
+                ServerName     = $thisvm.VmName
+                InstanceName   = $SQLInstanceName
+                ServiceType    = 'DatabaseEngine'
+                ServiceAccount = $sqlUser
+                RestartService = $true
+                DependsOn      = $spnDependency
+                Force          = $false
             }
-
+            WriteStatus SetSQLAgentUser {
+                DependsOn =  '[SqlServiceAccount]SetServiceAccountSQL_User'
+                Status    = "SQL setting new agent user to $sqlAgentUser"
+            }
             #Change SQL Service Account
             SqlServiceAccount 'SetServiceAccountAgent_User' {
-                ServerName           = $thisvm.VmName
-                InstanceName         = $SQLInstanceName
-                ServiceType          = 'SQLServerAgent'
-                ServiceAccount       = $sqlAgentUser
-                RestartService       = $true
-                DependsOn            = '[SqlServiceAccount]SetServiceAccountSQL_User'
+                ServerName     = $thisvm.VmName
+                InstanceName   = $SQLInstanceName
+                ServiceType    = 'SQLServerAgent'
+                ServiceAccount = $sqlAgentUser
+                RestartService = $true
+                DependsOn      = '[SqlServiceAccount]SetServiceAccountSQL_User'
             }
 
             $agentName = if ($SQLInstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + $SQLInstanceName }
+
+            WriteStatus SetSQLAgentStartup {
+                DependsOn =  '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
+                Status    = "Setting $agentName Service to Automatic Start"
+            }
             Service 'ChangeStartupAgent' {
-                Name                 = $agentName
-                StartupType          = "Automatic"
-                State                = "Running"
-                DependsOn            = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
+                Name        = $agentName
+                StartupType = "Automatic"
+                State       = "Running"
+                DependsOn   = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
             }
             $nextDepend = "[Service]ChangeStartupAgent"
 
@@ -222,6 +237,39 @@ configuration Phase4
             $nextDepend = '[ChangeSQLServicesAccount]ChangeToLocalSystem'
         }
 
+
+        WriteStatus DownloadBackupSolution {
+            DependsOn = $nextDepend
+            Status    = "Downloading '$($backupSolutionURL)'"
+        }
+        $sqlBackupPath = Join-Path "C:\staging\DSC\SQLScripts" (Split-Path -Path $backupSolutionURL -Leaf)
+        $sqlBackupTest = "C:\staging\DSC\SQLScripts\MaintenanceSolution-Test.sql"
+        $sqlBackupGet = "C:\staging\DSC\SQLScripts\MaintenanceSolution-Get.sql"
+
+        DownloadFile DownloadBackupSolution {
+            DownloadUrl = $backupSolutionURL
+            FilePath    = $sqlBackupPath
+            Ensure      = "Present"
+            DependsOn   = $nextDepend
+        }
+
+        WriteStatus InstallBackupSolution {
+            DependsOn = '[DownloadFile]DownloadBackupSolution'
+            Status    = "Installing '$($backupSolutionURL)'"
+        }
+
+        SqlScript 'InstallBackupSolution' {
+            ServerName       = $thisvm.VmName
+            InstanceName     = $SQLInstanceName
+            Credential       = $SqlCredential
+            SetFilePath      = $sqlBackupPath
+            TestFilePath     = $sqlBackupTest
+            GetFilePath      = $sqlBackupGet
+            DisableVariables = $true
+            DependsOn        = '[DownloadFile]DownloadBackupSolution'
+        }
+
+        $nextDepend = '[SqlScript]InstallBackupSolution'
         WriteStatus Complete {
             DependsOn = $nextDepend
             Status    = "Complete!"

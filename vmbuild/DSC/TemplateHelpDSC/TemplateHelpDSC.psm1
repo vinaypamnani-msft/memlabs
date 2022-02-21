@@ -2553,6 +2553,147 @@ class ModuleAdd {
 
 }
 
+
+[DscResource()]
+class ADServicePrincipalName2 {
+    [DscProperty(key)]
+    [string] $ServicePrincipalName
+
+    [DscProperty(Mandatory)]
+    [String] $Ensure = 'Present'
+
+    [DscProperty()]
+    [String] $Account
+
+    [void] Set() {
+        # Get all Active Directory object having the target SPN configured.
+        $spnAccounts = Get-ADObject -Filter { ServicePrincipalName -eq $this.ServicePrincipalName } -Properties 'SamAccountName', 'DistinguishedName'
+
+        if ($this.Ensure -eq 'Present') {
+            <#
+            Throw an exception, if no account was specified or the account does
+            not exist.
+        #>
+            if ([System.String]::IsNullOrEmpty($this.Account) -or ($null -eq (Get-ADObject -Filter { SamAccountName -eq $Account }))) {
+                throw ("Active Directory object with SamAccountName '{0}' not found. (ADSPN0004)" -f $this.Account)
+            }
+
+            # Remove the SPN(s) from any extra account.
+            foreach ($spnAccount in $spnAccounts) {
+                if ($spnAccount.SamAccountName -ne $this.Account) {
+                    Write-Verbose -Message ("Removing service principal name '{0}' from account '{1}'. (ADSPN0005)" -f $this.ServicePrincipalName, $spnAccount.SamAccountName)
+
+                    Set-ADObject -Identity $spnAccount.DistinguishedName -Remove @{
+                        ServicePrincipalName = $this.ServicePrincipalName
+                    }
+                }
+            }
+
+            <#
+            Add the SPN to the target account. Use Get-ADObject to get the target
+            object filtered by SamAccountName. Set-ADObject does not support the
+            field SamAccountName as Identifier.
+        #>
+            if ($spnAccounts.SamAccountName -notcontains $this.Account) {
+                Write-Verbose -Message ("Adding service principal name '{0}' to account '{1}. (ADSPN0006)" -f $this.ServicePrincipalName, $this.Account)
+
+                Get-ADObject -Filter { SamAccountName -eq $Account } |
+                Set-ADObject -Add @{
+                    ServicePrincipalName = $this.ServicePrincipalName
+                }
+            }
+        }
+
+        # Remove the SPN from any account
+        if ($this.Ensure -eq 'Absent') {
+            foreach ($spnAccount in $spnAccounts) {
+                Write-Verbose -Message ("Removing service principal name '{0}' from account '{1}'. (ADSPN0005)" -f $this.ServicePrincipalName, $spnAccount.SamAccountName)
+
+                if (-not ($this.Account) -or ($spnAccount.SamAccountName -eq $this.Account)) {
+                    Set-ADObject -Identity $spnAccount.DistinguishedName -Remove @{
+                        ServicePrincipalName = $this.ServicePrincipalName
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    [bool] Test() {
+        $spnAccounts = Get-ADObject -Filter { ServicePrincipalName -eq $this.ServicePrincipalName } -Properties 'SamAccountName' |
+        Select-Object -ExpandProperty 'SamAccountName'
+
+        if ($spnAccounts.Count -eq 0) {
+
+            $currentConfiguration = @{
+                Ensure               = 'Absent'
+                ServicePrincipalName = $this.ServicePrincipalName
+                Account              = ''
+            }
+        }
+        else {
+            $currentConfiguration = @{
+                Ensure               = 'Present'
+                ServicePrincipalName = $this.ServicePrincipalName
+                Account              = $spnAccounts -join ';'
+            }
+        }
+
+
+        $desiredConfigurationMatch = $currentConfiguration.Ensure -eq $this.Ensure
+
+        if ($this.Ensure -eq 'Present') {
+            $desiredConfigurationMatch = $desiredConfigurationMatch -and
+            $currentConfiguration.Account -eq $this.Account
+        }
+        else {
+            if ($this.Account) {
+                $desiredConfigurationMatch = $currentConfiguration.Account -ne $this.Account
+            }
+        }
+
+        if ($desiredConfigurationMatch) {
+            Write-Verbose -Message ("Service principal name '{0}' is in the desired state. (ADSPN0007)" -f $this.ServicePrincipalName)
+        }
+        else {
+            Write-Verbose -Message ("Service principal name '{0}' is not in the desired state. (ADSPN0008)" -f $this.ServicePrincipalName)
+        }
+
+        return $desiredConfigurationMatch
+    }
+
+
+    [ADServicePrincipalName2] Get() {
+        Write-Verbose -Message ("Getting service principal name '{0}'. (ADSPN0001)" -f $this.ServicePrincipalName)
+
+        $spnAccounts = Get-ADObject -Filter { ServicePrincipalName -eq $ServicePrincipalName } -Properties 'SamAccountName' |
+        Select-Object -ExpandProperty 'SamAccountName'
+
+        if ($spnAccounts.Count -eq 0) {
+            # No SPN found
+            Write-Verbose -Message ("Service principal name '{0}' is absent. (ADSPN0002)" -f $this.ServicePrincipalName)
+
+            $returnValue = @{
+                Ensure               = 'Absent'
+                ServicePrincipalName = $this.ServicePrincipalName
+                Account              = ''
+            }
+        }
+        else {
+            # One or more SPN(s) found, return the account name(s)
+            Write-Verbose -Message ("Service principal name '{0}' is present on account(s) '{1}'. (ADSPN0003)" -f $this.ServicePrincipalName, ($spnAccounts -join ';'))
+
+            $returnValue = @{
+                Ensure               = 'Present'
+                ServicePrincipalName = $this.ServicePrincipalName
+                Account              = $spnAccounts -join ';'
+            }
+        }
+
+        return $returnValue
+    }
+}
+
 [DscResource()]
 class ActiveDirectorySPN {
     [DscProperty(Key)]

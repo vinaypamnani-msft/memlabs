@@ -257,7 +257,8 @@ function ConvertTo-DeployConfigEx {
             $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $thisVM.sqlVersion }
             $sqlCUUrl = $sqlFile.cuURL
             $thisParams | Add-Member -MemberType NoteProperty -Name "sqlCUURL" -Value $sqlCUUrl -Force
-
+            $backupSolutionURL = "https://ola.hallengren.com/scripts/MaintenanceSolution.sql"
+            $thisParams | Add-Member -MemberType NoteProperty -Name "backupSolutionURL" -Value $backupSolutionURL -Force
 
             $DomainAdminName = $deployConfig.vmOptions.adminName
             $DomainName = $deployConfig.parameters.domainName

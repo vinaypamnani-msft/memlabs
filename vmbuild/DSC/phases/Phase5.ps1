@@ -446,7 +446,7 @@ Configuration Phase5
         $lspn4 = $lspn2 + ":1500"
         $account = $thisVM.thisParams.SQLAO.SqlServiceAccount
 
-        ADServicePrincipalName 'lspn1' {
+        ADServicePrincipalName2 'lspn1' {
             Ensure               = 'Present'
             ServicePrincipalName = $lspn1
             Account              = $account
@@ -454,7 +454,7 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
 
-        ADServicePrincipalName 'lspn2' {
+        ADServicePrincipalName2 'lspn2' {
             Ensure               = 'Present'
             ServicePrincipalName = $lspn2
             Account              = $account
@@ -462,7 +462,7 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
 
-        ADServicePrincipalName 'lspn3' {
+        ADServicePrincipalName2 'lspn3' {
             Ensure               = 'Present'
             ServicePrincipalName = $lspn3
             Account              = $account
@@ -470,7 +470,7 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
 
-        ADServicePrincipalName 'lspn4' {
+        ADServicePrincipalName2 'lspn4' {
             Ensure               = 'Present'
             ServicePrincipalName = $lspn4
             Account              = $account
@@ -480,7 +480,7 @@ Configuration Phase5
 
 
         WriteStatus AgListen {
-            DependsOn = '[ADServicePrincipalName]lspn4'
+            DependsOn = '[ADServicePrincipalName2]lspn4'
             Status    = "Waiting on $node2 to Join the Sql Availability Group Listener"
         }
 
