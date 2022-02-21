@@ -12,6 +12,7 @@ $global:VM_Create = {
         $deployConfig = $using:deployConfigCopy
         $currentItem = $using:currentItem
         $azureFileList = $using:Common.AzureFileList
+        $Phase = $using:Phase
 
         if (-not ($Common.LogPath)) {
             Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
