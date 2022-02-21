@@ -20,6 +20,12 @@ configuration Phase3
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
 
+        # Install feature roles
+        $featureRoles = @($ThisVM.role)
+        if ($ThisVM.role -eq "SQLAO") {
+            $featureRoles += "SQLAO"
+        }
+
         WriteStatus AddLocalAdmin {
             Status = "Adding required accounts to Local Administrators group"
         }
@@ -43,23 +49,12 @@ configuration Phase3
 
         InstallFeatureForSCCM InstallFeature {
             Name      = "DummyName"
-            Role      = $ThisVM.role
+            Role      = $featureRoles
             DependsOn = "[WriteStatus]InstallFeature"
         }
 
-        WriteStatus OpenPorts {
-            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
-            Status    = "Open required firewall ports"
-        }
-
-        OpenFirewallPortForSCCM OpenFirewall {
-            DependsOn = "[WriteStatus]OpenPorts"
-            Name      = "DomainMember"
-            Role      = "DomainMember"
-        }
-
         WriteStatus InstallDotNet {
-            DependsOn = '[OpenFirewallPortForSCCM]OpenFirewall'
+            DependsOn = '[InstallFeatureForSCCM]InstallFeature'
             Status    = "Installing .NET 4.8"
         }
 
@@ -102,14 +97,7 @@ configuration Phase3
                 DependsOn    = "[WriteStatus]ADKInstall"
             }
 
-            # TODO: Fix the Get logic for re-runs with different Role
-            OpenFirewallPortForSCCM OpenFirewall2 {
-                DependsOn = "[InstallADK]ADKInstall"
-                Name      = $ThisVM.role
-                Role      = "Site Server"
-            }
-
-            $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall2"
+            $nextDepend = "[InstallADK]ADKInstall"
             if (-not $ThisVM.thisParams.ParentSiteServer) {
 
                 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
