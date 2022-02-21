@@ -407,7 +407,7 @@ function Get-Phase5ConfigurationData {
         [object]$deployConfig
     )
 
-    $primaryNode = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
+    $primaryNodes = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
     $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
@@ -424,86 +424,46 @@ function Get-Phase5ConfigurationData {
         )
     }
 
-    if ($primaryNode) {
-        $SqlAgentServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlAgentServiceAccount
-        $SqlServiceAccount = $netbiosName + "\" + $deployConfig.SQLAO.SqlServiceAccount
-        if (-not $primaryNode.fileServerVM) {
-            write-Log -Failure "Could not get fileServerVM name from primaryNode.fileServerVM"
-            return
+    $fileServersAdded = @()
+    if ($primaryNodes) {
+
+        foreach ($primaryNode in $primaryNodes) {
+
+            $primary = @{
+                # Replace with the name of the actual target node.
+                NodeName = $primaryNode.vmName
+                # This is used in the configuration to know which resource to compile.
+                Role     = 'ClusterNode1'
+            }
+
+            $cd.AllNodes += $primary
+            $secondary = @{
+                # Replace with the name of the actual target node.
+                NodeName = $primaryNode.OtherNode
+                # This is used in the configuration to know which resource to compile.
+                Role     = 'ClusterNode2'
+            }
+            $cd.AllNodes += $secondary
+            #added Primary And Secondary
+
+            if ($fileServersAdded -notcontains ( $primaryNode.fileServerVM)) {
+                $fileServer = @{
+                    # Replace with the name of the actual target node.
+                    NodeName = $primaryNode.fileServerVM
+                    # This is used in the configuration to know which resource to compile.
+                    Role     = 'FileServer'
+                }
+                $cd.AllNodes += $fileServer
+                $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                $fileServersAdded += $primaryNode.fileServerVM
+            }
+            $NumberOfNodesAdded = $NumberOfNodesAdded + 2
         }
-
-        $ADAccounts = @()
-        $ADAccounts += $primaryNode.vmName + "$"
-        $ADAccounts += $primaryNode.OtherNode + "$"
-        $ADAccounts += $primaryNode.ClusterName + "$"
-
-        $ADAccounts2 = @()
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.vmName + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.OtherNode + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $primaryNode.ClusterName + "$"
-        $ADAccounts2 += $($domainNameSplit[0]) + "\" + $deployConfig.vmOptions.adminName
-
-        #$siteServer = $deployConfig.virtualMachines | Where-Object { $_.remoteSQLVM -eq $primaryNode.vmName }
-        #$db_name = $null
-        #if ($siteServer -and ($deployConfig.cmOptions.install)) {
-        #    $db_name = "CM_" + $siteServer.SiteCode
-        #}
-        $primary = @{
-            # Replace with the name of the actual target node.
-            NodeName        = $primaryNode.vmName
-
-            # This is used in the configuration to know which resource to compile.
-            Role            = 'ClusterNode1'
-            CheckModuleName = 'SqlServer'
-            Address         = $deployConfig.vmOptions.network
-            AddressMask     = '255.255.255.0'
-            Name            = 'Domain Network'
-            Address2        = '10.250.250.0'
-            AddressMask2    = '255.255.255.0'
-            Name2           = 'Cluster Network'
-            InstanceName    = $primaryNode.sqlInstanceName
-
-        }
-
-        $cd.AllNodes += $primary
-
-        $secondary = @{
-            # Replace with the name of the actual target node.
-            NodeName = $primaryNode.OtherNode
-
-            # This is used in the configuration to know which resource to compile.
-            Role     = 'ClusterNode2'
-        }
-        $cd.AllNodes += $secondary
-        #added Primary And Secondary
-
-        $fileServer = @{
-            # Replace with the name of the actual target node.
-            NodeName = $primaryNode.fileServerVM
-            # This is used in the configuration to know which resource to compile.
-            Role     = 'FileServer'
-        }
-        $cd.AllNodes += $fileServer
-        $NumberOfNodesAdded = $NumberOfNodesAdded + 3
 
         $all = @{
             NodeName                    = "*"
             PSDscAllowDomainUser        = $true
             PSDscAllowPlainTextPassword = $true
-            ClusterName                 = $primaryNode.ClusterName
-            ClusterIPAddress            = $deployConfig.SQLAO.ClusterIPAddress + "/24"
-            AGIPAddress                 = $deployConfig.SQLAO.AGIPAddress + "/255.255.255.0"
-            PrimaryReplicaServerName    = $primaryNode.vmName + "." + $deployConfig.vmOptions.DomainName
-            SecondaryReplicaServerName  = $primaryNode.OtherNode + "." + $deployConfig.vmOptions.DomainName
-            SqlAgentServiceAccount      = $SqlAgentServiceAccount
-            SqlServiceAccount           = $SqlServiceAccount
-            ClusterNameAoG              = $deployConfig.SQLAO.AlwaysOnName
-            ClusterNameAoGFQDN          = $deployConfig.SQLAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
-            WitnessShare                = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.WitnessShare
-            BackupShare                 = "\\" + $primaryNode.fileServerVM + "\" + $deployConfig.SQLAO.BackupShare
-            #Dont pass DBName, or DSC will create the database and add it to Ao.. In this new method, we install SCCM direct to AO
-            #DBName                      = $db_name
-            #ClusterIPAddress            = '10.250.250.30/24'
         }
         $cd.AllNodes += $all
 

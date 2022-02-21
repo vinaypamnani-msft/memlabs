@@ -27,165 +27,177 @@ Configuration Phase5
     Node $AllNodes.Where{ $_.Role -eq 'FileServer' }.NodeName
     {
 
+        $thisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $node.NodeName }
+        $primaryVMs = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.FileServerVM -eq $node.NodeName }
+
         WriteStatus ClusterShare {
-            Status    = "Configuring Cluster Share"
+            Status = "Configuring Cluster Share"
         }
 
-        File ClusterBackup {
-            DestinationPath = $deployConfig.SQLAO.BackupLocalPath
-            Type            = 'Directory'
-            Ensure          = "Present"
-            DependsOn       = '[WriteStatus]ClusterShare'
-        }
+        $i = 0
+        $WaitDepend = @('[WriteStatus]ClusterShare')
+        foreach ($primaryVM in $primaryVMs) {
+            $i++
+            File "ClusterBackup$i" {
+                DestinationPath = $primaryVM.thisParams.SQLAO.BackupLocalPath
+                Type            = 'Directory'
+                Ensure          = "Present"
+                DependsOn       = "[WriteStatus]ClusterShare"
+            }
 
-        File ClusterWitness {
-            DestinationPath = $deployConfig.SQLAO.WitnessLocalPath
-            Type            = 'Directory'
-            Ensure          = "Present"
-            DependsOn       = '[WriteStatus]ClusterShare'
-        }
+            File "ClusterWitness$i" {
+                DestinationPath = $primaryVM.thisParams.SQLAO.WitnessLocalPath
+                Type            = 'Directory'
+                Ensure          = "Present"
+                DependsOn       = "[WriteStatus]ClusterShare"
+            }
 
-        NTFSAccessEntry ClusterWitnessPermissions {
-            Path              = $deployConfig.SQLAO.WitnessLocalPath
-            AccessControlList = @(
-                NTFSAccessControlList {
-                    Principal          = "$DomainName\$($deployConfig.SQLAO.GroupMembers[0])"
-                    ForcePrincipal     = $true
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
-                    )
-                }
-                NTFSAccessControlList {
-                    Principal          = "$DomainName\$($deployConfig.SQLAO.GroupMembers[1])"
-                    ForcePrincipal     = $false
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
-                    )
-                }
-                NTFSAccessControlList {
-                    Principal          = "$DomainName\$($deployConfig.SQLAO.GroupMembers[2])"
-                    ForcePrincipal     = $false
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
-                    )
-                }
-                NTFSAccessControlList {
-                    Principal          = "$DomainName\$DomainAdminName"
-                    ForcePrincipal     = $false
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
-                    )
-                }
-            )
-            Dependson         = '[File]ClusterWitness'
-        }
+            NTFSAccessEntry "ClusterWitnessPermissions$i" {
+                Path              = $primaryVM.thisParams.SQLAO.WitnessLocalPath
+                AccessControlList = @(
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupMembers[0])"
+                        ForcePrincipal     = $true
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupMembers[1])"
+                        ForcePrincipal     = $false
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupMembers[2])"
+                        ForcePrincipal     = $false
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\$DomainAdminName"
+                        ForcePrincipal     = $false
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                )
+                Dependson         = "[File]ClusterWitness$i"
+            }
 
 
-        NTFSAccessEntry ClusterBackupPermissions {
-            Path              = $deployConfig.SQLAO.BackupLocalPath
-            AccessControlList = @(
-                NTFSAccessControlList {
-                    Principal          = "$DomainName\$($deployConfig.SQLAO.SqlServiceAccount)"
-                    ForcePrincipal     = $true
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
-                    )
-                }
-                NTFSAccessControlList {
-                    Principal          = "$DomainName\$($deployConfig.SQLAO.SqlAgentServiceAccount)"
-                    ForcePrincipal     = $false
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
-                    )
-                }
-                NTFSAccessControlList {
-                    Principal          = "$DomainName\$DomainAdminName"
-                    ForcePrincipal     = $false
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
-                    )
-                }
-                NTFSAccessControlList {
-                    Principal          = "$DomainName\vmbuildadmin"
-                    ForcePrincipal     = $false
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
-                    )
-                }
-            )
-            Dependson         = '[File]ClusterBackup'
-        }
+            NTFSAccessEntry "ClusterBackupPermissions$i" {
+                Path              = $primaryVM.thisParams.SQLAO.BackupLocalPath
+                AccessControlList = @(
+                    NTFSAccessControlList {
+                        Principal          = $primaryVM.thisParams.SQLAO.SqlServiceAccountFQ
+                        ForcePrincipal     = $true
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                    NTFSAccessControlList {
+                        Principal          = $primaryVM.thisParams.SQLAO.SqlAgentServiceAccountFQ
+                        ForcePrincipal     = $false
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\$DomainAdminName"
+                        ForcePrincipal     = $false
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                    NTFSAccessControlList {
+                        Principal          = "$DomainName\vmbuildadmin"
+                        ForcePrincipal     = $false
+                        AccessControlEntry = @(
+                            NTFSAccessControlEntry {
+                                AccessControlType = 'Allow'
+                                FileSystemRights  = 'FullControl'
+                                Inheritance       = 'This folder subfolders and files'
+                                Ensure            = 'Present'
+                            }
+                        )
+                    }
+                )
+                Dependson         = "[File]ClusterBackup$i"
+            }
 
-        SmbShare ClusterShare {
-            Name                  = $deployConfig.SQLAO.WitnessShare
-            Path                  = $deployConfig.SQLAO.WitnessLocalPath
-            Description           = $deployConfig.SQLAO.WithessShare
-            FolderEnumerationMode = 'AccessBased'
-            FullAccess            = $deployConfig.SQLAO.GroupMembers
-            ReadAccess            = "Everyone"
-            DependsOn             = '[NTFSAccessEntry]ClusterWitnessPermissions'
-        }
+            SmbShare "ClusterShare$i" {
+                Name                  = $primaryVM.thisParams.SQLAO.WitnessShare
+                Path                  = $primaryVM.thisParams.SQLAO.WitnessLocalPath
+                Description           = $primaryVM.thisParams.SQLAO.WitnessShare
+                FolderEnumerationMode = 'AccessBased'
+                FullAccess            = $primaryVM.thisParams.SQLAO.GroupMembers
+                ReadAccess            = "Everyone"
+                DependsOn             = "[NTFSAccessEntry]ClusterWitnessPermissions$i"
+            }
 
-         SmbShare BackupShare {
-            Name                  = $deployConfig.SQLAO.BackupShare
-            Path                  = $deployConfig.SQLAO.BackupLocalPath
-            Description           = $deployConfig.SQLAO.BackupShare
-            FolderEnumerationMode = 'AccessBased'
-            FullAccess            = "$DomainName\$($deployConfig.SQLAO.SqlServiceAccount)", "$DomainName\$($deployConfig.SQLAO.SqlAgentServiceAccount)", "$DomainName\$DomainAdminName", "$DomainName\vmbuildadmin"
-            ReadAccess            = "Everyone"
-            DependsOn             = '[NTFSAccessEntry]ClusterBackupPermissions'
+            SmbShare "BackupShare$i" {
+                Name                  = $primaryVM.thisParams.SQLAO.BackupShare
+                Path                  = $primaryVM.thisParams.SQLAO.BackupLocalPath
+                Description           = $primaryVM.thisParams.SQLAO.BackupShare
+                FolderEnumerationMode = 'AccessBased'
+                FullAccess            = $primaryVM.thisParams.SQLAO.SqlServiceAccountFQ, $primaryVM.thisParams.SQLAO.SqlAgentServiceAccountFQ, "$DomainName\$DomainAdminName", "$DomainName\vmbuildadmin"
+                ReadAccess            = "Everyone"
+                DependsOn             = "[NTFSAccessEntry]ClusterBackupPermissions$i"
+            }
+            $WaitDepend += "[SmbShare]BackupShare$i"
+            $WaitDepend += "[SmbShare]ClusterShare$i"
         }
 
         WriteStatus Complete {
-            Dependson = '[SmbShare]BackupShare', '[SmbShare]ClusterShare'
+            Dependson = $WaitDepend
             Status    = "Complete!"
         }
 
     }
     Node $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
     {
+        $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
+        $node2 = ($deployConfig.VirtualMachines | Where-Object { $_.vmName -eq $thisVM.OtherNode }).vmName
 
-        $node2 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
+        #$node2 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
 
         WriteStatus WindowsFeature {
             Status = "Adding Windows Features"
@@ -199,7 +211,7 @@ Configuration Phase5
 
         ModuleAdd SQLServerModule {
             Key             = 'Always'
-            CheckModuleName = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.CheckModuleName
+            CheckModuleName = 'SqlServer'
             DependsOn       = "[WriteStatus]WindowsFeature"
         }
 
@@ -233,26 +245,26 @@ Configuration Phase5
         }
 
         xCluster CreateCluster {
-            Name                          = $Node.ClusterName
-            StaticIPAddress               = $Node.ClusterIPAddress
+            Name                          = $thisVM.ClusterName
+            StaticIPAddress               = $thisVM.thisParams.SQLAO.ClusterIPAddress
             # This user must have the permission to create the CNO (Cluster Name Object) in Active Directory, unless it is prestaged.
             DomainAdministratorCredential = $Admincreds
             DependsOn                     = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
         }
 
         xClusterNetwork 'ChangeNetwork-192' {
-            Address              = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Address
-            AddressMask          = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.AddressMask
-            Name                 = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Name
+            Address              = $deployConfig.vmOptions.network
+            AddressMask          = '255.255.255.0'
+            Name                 = 'Domain Network'
             Role                 = '0'
             DependsOn            = '[xCluster]CreateCluster'
             PsDscRunAsCredential = $Admincreds
         }
 
         xClusterNetwork 'ChangeNetwork-10' {
-            Address              = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Address2
-            AddressMask          = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.AddressMask2
-            Name                 = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Name2
+            Address              = '10.250.250.0'
+            AddressMask          = '255.255.255.0'
+            Name                 = 'Cluster Network'
             Role                 = '3'
             DependsOn            = '[xCluster]CreateCluster'
             PsDscRunAsCredential = $Admincreds
@@ -266,10 +278,13 @@ Configuration Phase5
         #    PsDscRunAsCredential = $Admincreds
         #    DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
         #}
-
+        WriteStatus WaitForFS {
+            Status    = "Waiting for '$($thisVM.fileServerVM)' to Complete"
+            DependsOn = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+        }
         WaitForAny FileShareComplete {
-            NodeName             = $AllNodes.Where{ $_.Role -eq 'FileServer' }.NodeName
-            ResourceName         = '[SmbShare]ClusterShare'
+            NodeName             = $thisVM.fileServerVM
+            ResourceName         = "[WriteStatus]Complete"
             RetryIntervalSec     = 10
             RetryCount           = 180
             PsDscRunAsCredential = $Admincreds
@@ -282,7 +297,7 @@ Configuration Phase5
         }
 
         WaitForAny WaitForClusterJoin {
-            NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName
+            NodeName             = $node2
             ResourceName         = '[xClusterQuorum]ClusterWitness'
             RetryIntervalSec     = 10
             RetryCount           = 90
@@ -291,14 +306,15 @@ Configuration Phase5
         }
 
         ClusterRemoveUnwantedIPs ClusterRemoveUnwantedIPs {
-            ClusterName          = $Node.ClusterName
+            ClusterName          = $thisVM.ClusterName
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[WaitForAny]WaitForClusterJoin'
         }
 
         ClusterSetOwnerNodes ClusterSetOwnerNodes {
-            ClusterName          = $Node.ClusterName
-            Nodes                = ($AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName), ($AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName)
+            ClusterName          = $thisVM.ClusterName
+            #Nodes                = ($AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName), ($AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName)
+            Nodes                = $thisVM.thisParams.SQLAO.ClusterNodes
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
         }
@@ -319,20 +335,20 @@ Configuration Phase5
         #Change SQL Service Account
         SqlLogin 'Add_WindowsUserAgent' {
             Ensure               = 'Present'
-            Name                 = $node.SqlAgentServiceAccount
+            Name                 = $thisVM.thisParams.SQLAO.SqlAgentServiceAccountFQ
             LoginType            = 'WindowsUser'
-            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            ServerName           = $thisVM.vmName
+            InstanceName         = $thisVM.sqlInstanceName
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[WriteStatus]SvcAccount'
         }
 
         SqlLogin 'Add_WindowsUser' {
             Ensure               = 'Present'
-            Name                 = $node.SqlServiceAccount
+            Name                 = $thisVM.thisParams.SQLAO.SqlServiceAccountFQ
             LoginType            = 'WindowsUser'
-            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            ServerName           = $thisVM.vmName
+            InstanceName         = $thisVM.sqlInstanceName
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[WriteStatus]SvcAccount'
         }
@@ -341,9 +357,9 @@ Configuration Phase5
         SqlRole 'Add_ServerRole' {
             Ensure               = 'Present'
             ServerRoleName       = 'SysAdmin'
-            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            MembersToInclude     = $node.SqlServiceAccount, $node.SqlAgentServiceAccount, 'BUILTIN\Administrators'
+            ServerName           = $thisVM.vmName
+            InstanceName         = $thisVM.sqlInstanceName
+            MembersToInclude     = $thisVM.thisParams.SQLAO.SqlAgentServiceAccountFQ, $thisVM.thisParams.SQLAO.SqlServiceAccountFQ, 'BUILTIN\Administrators'
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[SqlLogin]Add_WindowsUser'
         }
@@ -355,7 +371,7 @@ Configuration Phase5
             Name                 = 'NT SERVICE\ClusSvc'
             LoginType            = 'WindowsUser'
             ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            InstanceName         = $thisVM.sqlInstanceName
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[SqlLogin]Add_WindowsUser'
         }
@@ -365,7 +381,7 @@ Configuration Phase5
             DependsOn            = '[SqlLogin]AddNTServiceClusSvc'
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            InstanceName         = $thisVM.sqlInstanceName
             Principal            = 'NT SERVICE\ClusSvc'
             Permission           = 'AlterAnyAvailabilityGroup', 'ViewServerState'
             PsDscRunAsCredential = $Admincreds
@@ -378,14 +394,14 @@ Configuration Phase5
             Ensure               = 'Present'
             Port                 = 5022
             ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            InstanceName         = $thisVM.sqlInstanceName
             PsDscRunAsCredential = $Admincreds
         }
 
         # Ensure the HADR option is enabled for the instance
         SqlAlwaysOnService 'EnableHADR' {
             Ensure               = 'Present'
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            InstanceName         = $thisVM.sqlInstanceName
             ServerName           = $Node.NodeName
             PsDscRunAsCredential = $Admincreds
         }
@@ -398,8 +414,8 @@ Configuration Phase5
         # Create the availability group on the instance tagged as the primary replica
         SqlAG 'CMCASAG' {
             Ensure                        = 'Present'
-            Name                          = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-            InstanceName                  = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            Name                          = $thisVM.thisParams.SQLAO.ClusterNameAoG
+            InstanceName                  = $thisVM.sqlInstanceName
             ServerName                    = $Node.NodeName
             AvailabilityMode              = 'SynchronousCommit'
             BackupPriority                = 50
@@ -414,21 +430,21 @@ Configuration Phase5
         SqlAGListener 'AvailabilityGroupListener' {
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            AvailabilityGroup    = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
+            InstanceName         = $thisVM.sqlInstanceName
+            AvailabilityGroup    = $thisVM.thisParams.SQLAO.ClusterNameAoG
             DHCP                 = $false
-            Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-            IpAddress            = $Node.AGIPAddress
+            Name                 = $thisVM.thisParams.SQLAO.ClusterNameAoG
+            IpAddress            = $thisVM.thisParams.SQLAO.AGIPAddress
             Port                 = 1500
             DependsOn            = '[SqlAG]CMCASAG'
             PsDscRunAsCredential = $Admincreds
         }
 
-        $lspn1 = "MSSQLSvc/" + $Node.ClusterNameAoG
-        $lspn2 = "MSSQLSvc/" + $Node.ClusterNameAoGFQDN
+        $lspn1 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.ClusterNameAoG
+        $lspn2 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.ClusterNameAoGFQDN
         $lspn3 = $lspn1 + ":1500"
         $lspn4 = $lspn2 + ":1500"
-        $account = ($Node.SqlServiceAccount -Split "\\")[1]
+        $account = $thisVM.thisParams.SQLAO.SqlServiceAccount
 
         ADServicePrincipalName 'lspn1' {
             Ensure               = 'Present'
@@ -477,9 +493,6 @@ Configuration Phase5
         }
 
         $dbName = "TESTDB"
-        if ($Node.DBName) {
-            $dbName = $Node.DBName
-        }
 
         $nextDepend = '[WaitForAll]AddReplica'
         if ($dbName) {
@@ -487,7 +500,7 @@ Configuration Phase5
             SqlDatabase 'SetRecoveryModel' {
                 Ensure               = 'Present'
                 ServerName           = $Node.NodeName
-                InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+                InstanceName         = $thisVM.sqlInstanceName
                 Name                 = $dbName
                 RecoveryModel        = 'Full'
 
@@ -496,10 +509,10 @@ Configuration Phase5
             }
 
             SqlAGDatabase 'AddAGDatabaseMemberships' {
-                AvailabilityGroupName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-                BackupPath              = $Node.BackupShare
+                AvailabilityGroupName   = $thisVM.thisParams.SQLAO.ClusterNameAoG
+                BackupPath              = $thisVM.thisParams.SQLAO.BackupShareFQ
                 DatabaseName            = $dbName
-                InstanceName            = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+                InstanceName            = $thisVM.sqlInstanceName
                 ServerName              = $Node.NodeName
                 Ensure                  = 'Present'
                 ProcessOnlyOnActiveNode = $true
@@ -518,8 +531,11 @@ Configuration Phase5
 
     Node $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName
     {
+        $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
+        $node1VM = $deployConfig.VirtualMachines | Where-Object { $_.OtherNode -eq $node.NodeName }
+        $node1 = $node1VM.vmName
 
-        $node1 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
+        #$node1 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
 
         WriteStatus WindowsFeature {
             Status = "Adding Windows Features"
@@ -555,12 +571,12 @@ Configuration Phase5
         }
 
         WriteStatus WaitCluster {
-            Status    = "Waiting for Cluster '$($Node.ClusterName)' to become active"
+            Status    = "Waiting for Cluster '$($Node1VM.ClusterName)' to become active"
             DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
         }
 
         xWaitForCluster WaitForCluster {
-            Name                 = $Node.ClusterName
+            Name                 = $Node1VM.ClusterName
             RetryIntervalSec     = 15
             RetryCount           = 60
             DependsOn            = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
@@ -573,7 +589,7 @@ Configuration Phase5
         }
 
         WaitForAny WaitForClusteringNetworking {
-            NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
+            NodeName             = $node1
             ResourceName         = '[xClusterNetwork]ChangeNetwork-10'
             RetryIntervalSec     = 10
             RetryCount           = 90
@@ -581,50 +597,67 @@ Configuration Phase5
         }
 
         WriteStatus JoinCluster {
-            Status    = "Joining Windows Cluster '$( $Node.ClusterName)' on '$node1'"
+            Status    = "Joining Windows Cluster '$($Node1VM.ClusterName)' on '$node1'"
             DependsOn = '[xWaitForCluster]WaitForCluster'
         }
 
         xCluster JoinSecondNodeToCluster {
-            Name                 = $Node.ClusterName
-            StaticIPAddress      = $Node.ClusterIPAddress
+            Name                 = $Node1VM.ClusterName
+            StaticIPAddress      = $Node1VM.thisParams.SQLAO.ClusterIPAddress
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[xWaitForCluster]WaitForCluster', '[WaitForAny]WaitForClusteringNetworking'
         }
 
         xClusterNetwork 'ChangeNetwork-192' {
-            Address              = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Address
-            AddressMask          = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.AddressMask
-            Name                 = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Name
+            Address              = $deployConfig.vmOptions.network
+            AddressMask          = '255.255.255.0'
+            Name                 = 'Domain Network'
             Role                 = '0'
             DependsOn            = '[xCluster]JoinSecondNodeToCluster'
             PsDscRunAsCredential = $Admincreds
         }
 
         xClusterNetwork 'ChangeNetwork-10' {
-            Address              = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Address2
-            AddressMask          = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.AddressMask2
-            Name                 = $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.Name2
+            Address              = '10.250.250.0'
+            AddressMask          = '255.255.255.0'
+            Name                 = 'Cluster Network'
             Role                 = '3'
             DependsOn            = '[xCluster]JoinSecondNodeToCluster'
             PsDscRunAsCredential = $Admincreds
         }
 
+        WriteStatus WaitForFS {
+            Status    = "Waiting for '$($Node1VM.fileServerVM)' to Complete"
+            DependsOn = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+        }
+
         WaitForAny FileShareComplete {
-            NodeName             = $AllNodes.Where{ $_.Role -eq 'FileServer' }.NodeName
-            ResourceName         = '[SmbShare]ClusterShare'
+            NodeName             = $node1VM.fileServerVM
+            ResourceName         = "[WriteStatus]Complete"
             RetryIntervalSec     = 10
             RetryCount           = 180
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
         }
 
+
+        WriteStatus WaitForQuorum {
+            Status    = "Joining Quorum on '$($node1VM.thisParams.SQLAO.WitnessShareFQ)'"
+            DependsOn = '[WaitForAny]FileShareComplete'
+        }
+
+
         xClusterQuorum 'ClusterWitness' {
             IsSingleInstance     = 'Yes'
             Type                 = 'NodeAndFileShareMajority'
-            Resource             = $Node.WitnessShare
+            Resource             = $node1VM.thisParams.SQLAO.WitnessShareFQ
             DependsOn            = '[WaitForAny]FileShareComplete'
             PsDscRunAsCredential = $Admincreds
+        }
+
+        WriteStatus WaitForDC {
+            Status    = "Waiting for DC to Complete"
+            DependsOn = '[xClusterQuorum]ClusterWitness'
         }
 
         WaitForAll DCComplete {
@@ -635,22 +668,27 @@ Configuration Phase5
             Dependson        = '[xClusterQuorum]ClusterWitness'
         }
 
+        WriteStatus SqlLogins {
+            Status    = "Adding SQL Logins"
+            DependsOn = '[WaitForAll]DCComplete'
+        }
+
         SqlLogin 'Add_WindowsUserAgent' {
             Ensure               = 'Present'
-            Name                 = $node.SqlAgentServiceAccount
+            Name                 = $node1vm.thisParams.SQLAO.SqlAgentServiceAccountFQ
             LoginType            = 'WindowsUser'
-            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            ServerName           = $node.NodeName
+            InstanceName         = $node1vm.sqlInstanceName
             Dependson            = '[WaitForAll]DCComplete'
             PsDscRunAsCredential = $Admincreds
         }
 
         SqlLogin 'Add_WindowsUser' {
             Ensure               = 'Present'
-            Name                 = $node.SqlServiceAccount
+            Name                 = $node1vm.thisParams.SQLAO.SqlServiceAccountFQ
             LoginType            = 'WindowsUser'
-            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            ServerName           = $node.NodeName
+            InstanceName         = $node1vm.sqlInstanceName
             Dependson            = '[WaitForAll]DCComplete'
             PsDscRunAsCredential = $Admincreds
         }
@@ -658,9 +696,9 @@ Configuration Phase5
         SqlRole 'Add_ServerRole' {
             Ensure               = 'Present'
             ServerRoleName       = 'SysAdmin'
-            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            MembersToInclude     = $node.SqlAgentServiceAccount, $node.SqlServiceAccount, 'BUILTIN\Administrators'
+            ServerName           = $node.NodeName
+            InstanceName         = $node1vm.sqlInstanceName
+            MembersToInclude     = $node1vm.thisParams.SQLAO.SqlAgentServiceAccountFQ, $node1vm.thisParams.SQLAO.SqlServiceAccountFQ, 'BUILTIN\Administrators'
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[SqlLogin]Add_WindowsUser'
         }
@@ -671,7 +709,7 @@ Configuration Phase5
             Name                 = 'NT SERVICE\ClusSvc'
             LoginType            = 'WindowsUser'
             ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            InstanceName         = $node1vm.sqlInstanceName
             Dependson            = '[WaitForAll]DCComplete'
             PsDscRunAsCredential = $Admincreds
         }
@@ -681,7 +719,7 @@ Configuration Phase5
             DependsOn            = '[SqlLogin]AddNTServiceClusSvc'
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            InstanceName         = $node1vm.sqlInstanceName
             Principal            = 'NT SERVICE\ClusSvc'
             Permission           = 'AlterAnyAvailabilityGroup', 'ViewServerState'
             PsDscRunAsCredential = $Admincreds
@@ -694,14 +732,14 @@ Configuration Phase5
             Ensure               = 'Present'
             Port                 = 5022
             ServerName           = $Node.NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            InstanceName         = $node1vm.sqlInstanceName
             DependsOn            = "[SqlPermission]AddNTServiceClusSvcPermissions"
             PsDscRunAsCredential = $Admincreds
         }
 
         SqlAlwaysOnService EnableHADR {
             Ensure               = 'Present'
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            InstanceName         = $node1vm.sqlInstanceName
             ServerName           = $Node.NodeName
             PsDscRunAsCredential = $Admincreds
         }
@@ -712,11 +750,11 @@ Configuration Phase5
         }
 
         SqlWaitForAG 'SQLConfigureAG-WaitAG' {
-            Name                 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
+            Name                 = $node1VM.thisParams.SQLAO.ClusterNameAoG
             RetryIntervalSec     = 10
             RetryCount           = 90
-            ServerName           = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
-            InstanceName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            ServerName           = $node1
+            InstanceName         = $node1vm.sqlInstanceName
             Dependson            = '[SqlEndpoint]HADREndpoint'
             PsDscRunAsCredential = $Admincreds
         }
@@ -740,24 +778,24 @@ Configuration Phase5
         }
 
         # Add the availability group replica to the availability group
-        $nodename = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName) + '\' + ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-        if (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName -eq "MSSQLSERVER") {
-            $nodename = (($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName)
+        $nodename = ($node.NodeName) + '\' + $node1vm.sqlInstanceName
+        if ($node1vm.sqlInstanceName -eq "MSSQLSERVER") {
+            $nodename = $node.NodeName
         }
 
         SqlAGReplica 'AddReplica' {
             Ensure                        = 'Present'
             Name                          = $nodename
-            AvailabilityGroupName         = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-            ServerName                    = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
-            InstanceName                  = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            AvailabilityGroupName         = $node1VM.thisParams.SQLAO.ClusterNameAoG
+            ServerName                    = $node.NodeName
+            InstanceName                  = $node1vm.sqlInstanceName
             AvailabilityMode              = 'SynchronousCommit'
             BackupPriority                = 50
             ConnectionModeInPrimaryRole   = 'AllowAllConnections'
             ConnectionModeInSecondaryRole = 'AllowAllConnections'
             FailoverMode                  = 'Manual'
-            PrimaryReplicaServerName      = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).PrimaryReplicaServerName
-            PrimaryReplicaInstanceName    = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
+            PrimaryReplicaServerName      = $node1VM.thisParams.SQLAO.PrimaryReplicaServerName
+            PrimaryReplicaInstanceName    = $node1vm.sqlInstanceName
             ProcessOnlyOnActiveNode       = $true
             DependsOn                     = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
             PsDscRunAsCredential          = $Admincreds
@@ -810,29 +848,37 @@ Configuration Phase5
             Status = "Creating AD Group and assigning SPN for SQL Availability Group"
         }
 
-        ADGroup SQLAOGroup {
-            Ensure      = 'Present'
-            GroupName   = $deployConfig.SQLAO.GroupName
-            GroupScope  = "Global"
-            Category    = "Security"
-            Description = "$($deployConfig.SQLAO.GroupName) Group for SQL Always On"
-            Members     = $deployConfig.SQLAO.GroupMembers
-            DependsOn   = '[WriteStatus]SQLAOGroup'
-        }
+        $adGroupDependancy = @('[WriteStatus]SQLAOGroup')
+        $sqlAOPrimaryNodes = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
 
-        ActiveDirectorySPN SQLAOSPN {
-            Key              = 'Always'
-            UserName         = $deployConfig.SQLAO.SqlServiceAccount
-            FQDNDomainName   = $DomainName
-            OULocationUser   = $deployConfig.SQLAO.OULocationUser
-            OULocationDevice = $deployConfig.SQLAO.OULocationDevice
-            ClusterDevice    = $deployConfig.SQLAO.ClusterNodes
-            UserNameCluster  = $deployConfig.SQLAO.SqlServiceAccount
-            Dependson        = '[ADGroup]SQLAOGroup'
+        $i = 0
+        foreach ($pNode in $sqlAOPrimaryNodes) {
+            $i++
+            ADGroup "SQLAOGroup$i" {
+                Ensure      = 'Present'
+                GroupName   = $pNode.thisParams.SQLAO.GroupName
+                GroupScope  = "Global"
+                Category    = "Security"
+                Description = "$($pNode.thisParams.SQLAO.GroupName) Group for SQL Always On"
+                Members     = $pNode.thisParams.SQLAO.GroupMembers
+                DependsOn   = '[WriteStatus]SQLAOGroup'
+            }
+
+            ActiveDirectorySPN "SQLAOSPN$i" {
+                Key              = "SQLAOSPN$i"
+                UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount
+                FQDNDomainName   = $DomainName
+                OULocationUser   = $pNode.thisParams.SQLAO.OULocationUser
+                OULocationDevice = $pNode.thisParams.SQLAO.OULocationDevice
+                ClusterDevice    = $pNode.thisParams.SQLAO.ClusterNodes
+                UserNameCluster  = $pNode.thisParams.SQLAO.SqlServiceAccount
+                Dependson        = "[ADGroup]SQLAOGroup$i"
+            }
+            $adGroupDependancy += "[ActiveDirectorySPN]SQLAOSPN$i"
         }
 
         WriteStatus Complete {
-            Dependson = '[ActiveDirectorySPN]SQLAOSPN'
+            Dependson = $adGroupDependancy
             Status    = "Complete!"
         }
 

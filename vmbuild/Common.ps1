@@ -875,7 +875,7 @@ function New-VmNote {
         }
 
         foreach ($prop in $ThisVM.PSObject.Properties) {
-            if ($prop.Name -eq "thisParams") {
+            if ($prop.Name -eq "thisParams" -or $prop.Name -eq "SQLAO") {
                 continue
             }
             $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
@@ -1328,7 +1328,7 @@ function New-VirtualMachine {
 
 function Get-AvailableMemoryGB {
     $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-    $availableMemory = ($availableMemory - ("4GB" / 1kB)) * 1KB / 1GB
+    $availableMemory = ($availableMemory - ("5GB" / 1kB)) * 1KB / 1GB
     $availableMemory = [Math]::Round($availableMemory, 2)
     if ($availableMemory -lt 0) {
         $availableMemory = 0

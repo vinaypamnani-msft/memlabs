@@ -79,12 +79,20 @@ function ConvertTo-DeployConfigEx {
             "DC" {
                 if ($SQLAO) {
                     $DomainAccountsUPN = @()
-                    $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
-                    $ClusterName = $PrimaryAO.ClusterName
+                    $DomainComputers = @()
+                    foreach ($sql in $SQLAO) {
+                        if ($sql.OtherNode){
 
-                    $DomainAccountsUPN = @($deployConfig.SQLAO.SqlServiceAccount, $deployConfig.SQLAO.SqlAgentServiceAccount)
+                        $ClusterName = $sql.ClusterName
 
-                    $DomainComputers = @($ClusterName)
+                        $DomainAccountsUPN += @($sql.SqlServiceAccount, $sql.SqlAgentAccount)
+
+                        $DomainComputers += @($ClusterName)
+                        }
+                    }
+
+                    $DomainAccountsUPN = $DomainAccountsUPN | Select-Object -Unique
+                    $DomainComputers = $DomainComputers | Select-Object -Unique
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccountsUPN" -Value $DomainAccountsUPN -Force
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
                 }
@@ -132,9 +140,11 @@ function ConvertTo-DeployConfigEx {
 
             }
             "SQLAO" {
-                if ($SQLAO) {
-
+                $AlwaysOn = Get-SQLAOConfig -deployConfig $deployConfig -vmName $thisVM.vmName
+                if ($AlwaysOn) {
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "SQLAO" -Value $AlwaysOn -Force
                 }
+
 
             }
             "PassiveSite" {

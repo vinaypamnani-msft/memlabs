@@ -206,7 +206,7 @@ try {
                 }
             }
 
-            Write-Log "Configuration validated successfully." -Success
+            Write-GreenCheck "Configuration validated successfully." -ForeGroundColor Green
         }
         else {
             Write-Host

@@ -1176,7 +1176,7 @@ function Get-NewMachineName {
             write-log "Config is NULL..  Machine names will not be checked. Please notify someone of this bug."
             #break
         }
-        if (($ConfigToCheck.virtualMachines | Where-Object { $_.vmName -eq $NewName -and $NewName -ne $CurrentName } | Measure-Object).Count -eq 0) {
+        if (($ConfigToCheck.virtualMachines | Where-Object { ($_.vmName -eq $NewName -or $_.AlwaysOnName -eq $NewName -or $_.ClusterName -eq $NewName) -and $NewName -ne $CurrentName } | Measure-Object).Count -eq 0) {
 
             $newNameWithPrefix = ($ConfigToCheck.vmOptions.prefix) + $NewName
             if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix -or $_.ClusterName -eq $newNameWithPrefix -or $_.AlwaysOnName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {
@@ -3616,7 +3616,9 @@ function Add-NewVMForRole {
         [Parameter(Mandatory = $false, HelpMessage = "Quiet Mode")]
         [bool] $Quiet = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Test Mode")]
-        [bool] $test = $false
+        [bool] $test = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "True if this is the Secondary SQLAO Node")]
+        [bool] $secondSQLAO = $false
     )
 
 
@@ -3660,7 +3662,6 @@ function Add-NewVMForRole {
     $existingPrimary = $null
     $existingDPMP = $null
     $NewFSServer = $null
-    $firstSQLAO = $null
     switch ($Role) {
         "SqlServer" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -3682,9 +3683,6 @@ function Add-NewVMForRole {
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
 
-            if ((($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "SQLAO" } | Measure-Object).Count) -eq 0) {
-                $firstSQLAO = $true
-            }
         }
         "CAS" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -3848,9 +3846,9 @@ function Add-NewVMForRole {
         }
         Add-NewVMForRole -Role DPMP -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -SiteCode $newSiteCode -Quiet:$Quiet
     }
-    if ($firstSQLAO) {
+    if ($Role -eq "SQLAO" -and (-not $secondSQLAO)) {
         write-host "$($virtualMachine.VmName) is the 1st SQLAO"
-        $SQLAONode = Add-NewVMForRole -Role SQLAO -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Name $Name2  -Quiet:$Quiet -ReturnMachineName:$true
+        $SQLAONode = Add-NewVMForRole -Role SQLAO -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Name $Name2 -secondSQLAO:$true -Quiet:$Quiet -ReturnMachineName:$true
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'OtherNode' -Value $SQLAONode
         if ($test -eq $false ) {
             $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$false
@@ -4055,7 +4053,7 @@ function Select-VirtualMachines {
                                 $customOptions += [ordered]@{"R" = "Remove Last Additional Disk" }
                             }
                             if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
-                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr%cyan"; "S" = "Configure SQL (Set local or remote SQL)" }
+                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr%cyan"; "S" = "Configure SQL (Set local or remote [Standalone or Always-On] SQL)" }
                                 $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
                                 if ($PassiveNode) {
                                     $customOptions += [ordered]@{"H" = "Remove High Availibility (HA) - Removes the Passive Site Server" }
