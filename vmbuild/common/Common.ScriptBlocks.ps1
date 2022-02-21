@@ -464,7 +464,7 @@ $global:VM_Config = {
 
                 $zipPath = "C:\staging\DSC\DSC.zip"
                 $dscHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
-                if ($dscHash -eq $zipHash) {
+                if ($dscHash -eq $zipHash -and (Test-Path "C:\Program Files\WindowsPowerShell\Modules\TemplateHelpDSC")) {
                     "Skipped installing modules. DSC.zip hasn't changed." | Out-File $log -Append
                     return
                 }

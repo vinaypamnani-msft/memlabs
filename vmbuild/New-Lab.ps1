@@ -333,27 +333,27 @@ try {
             Write-Phase -Phase $i
 
             if ($i -eq 1 -and -not $runPhase1) {
-                Write-OrangePoint "Skipped Phase $i because Phase options were specified." -ForegroundColor Yellow
+                Write-OrangePoint "Skipped Phase $i because Phase options were specified." -ForegroundColor Yellow -WriteLog
                 continue
             }
 
             if ($Phase -and $i -notin $Phase) {
-                Write-OrangePoint "Skipped Phase $i because -Phase is $Phase." -ForegroundColor Yellow
+                Write-OrangePoint "Skipped Phase $i because -Phase is $Phase." -ForegroundColor Yellow -WriteLog
                 continue
             }
 
             if ($SkipPhase -and $i -in $SkipPhase) {
-                Write-OrangePoint "Skipped Phase $i because -SkipPhase is $SkipPhase." -ForegroundColor Yellow
+                Write-OrangePoint "Skipped Phase $i because -SkipPhase is $SkipPhase." -ForegroundColor Yellow -WriteLog
                 continue
             }
 
             if ($StartPhase -and $i -lt $StartPhase) {
-                Write-OrangePoint "Skipped Phase $i because -StartPhase is $StartPhase." -ForegroundColor Yellow
+                Write-OrangePoint "Skipped Phase $i because -StartPhase is $StartPhase." -ForegroundColor Yellow -WriteLog
                 continue
             }
 
             if ($StopPhase -and $i -gt $StopPhase) {
-                Write-OrangePoint "Skipped Phase $i because -StopPhase is $StopPhase." -ForegroundColor Yellow
+                Write-OrangePoint "Skipped Phase $i because -StopPhase is $StopPhase." -ForegroundColor Yellow -WriteLog
                 continue
             }
 

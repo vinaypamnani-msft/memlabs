@@ -1486,6 +1486,8 @@ Function Write-OrangePoint {
         [Parameter()]
         [switch] $NoIndent,
         [Parameter()]
+        [switch] $WriteLog,
+        [Parameter()]
         [string] $ForegroundColor
     )
     $text = $text.Replace("WARNING: ", "")
@@ -1537,6 +1539,9 @@ Function Write-OrangePoint {
     }
     if (!$NoNewLine) {
         Write-Host
+    }
+    if ($WriteLog.IsPresent) {
+        Write-Log $text -Warning -LogOnly
     }
 }
 
