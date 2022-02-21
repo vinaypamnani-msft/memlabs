@@ -126,14 +126,7 @@ Configuration Phase6
             DependsOn    = "[WriteStatus]ADKInstall"
         }
 
-        # TODO: Fix the Get logic for re-runs with different Role
-        OpenFirewallPortForSCCM OpenFirewall {
-            DependsOn = "[InstallADK]ADKInstall"
-            Name      = $ThisVM.role
-            Role      = "Site Server"
-        }
-
-        $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall"
+        $nextDepend = "[InstallADK]ADKInstall"
         if (-not $ThisVM.thisParams.ParentSiteServer) {
 
             $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"

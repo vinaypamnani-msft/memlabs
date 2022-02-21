@@ -84,6 +84,59 @@ configuration Phase3
                 Ensure      = "Present"
                 DependsOn   = "[WriteStatus]SSMS"
             }
+
+            $nextDepend = "[InstallSSMS]SSMS"
+        }
+
+        if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary") {
+
+            WriteStatus ADKInstall {
+                DependsOn = $nextDepend
+                Status    = "Downloading and installing ADK"
+            }
+
+            InstallADK ADKInstall {
+                ADKPath      = "C:\temp\adksetup.exe"
+                ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
+                Ensure       = "Present"
+                DependsOn    = "[WriteStatus]ADKInstall"
+            }
+
+            # TODO: Fix the Get logic for re-runs with different Role
+            OpenFirewallPortForSCCM OpenFirewall2 {
+                DependsOn = "[InstallADK]ADKInstall"
+                Name      = $ThisVM.role
+                Role      = "Site Server"
+            }
+
+            $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall2"
+            if (-not $ThisVM.thisParams.ParentSiteServer) {
+
+                $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+                $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
+                if ($CM -eq "CMTP") {
+                    $CMDownloadStatus = "Downloading Configuration Manager technical preview"
+                }
+
+                WriteStatus DownLoadSCCM {
+                    DependsOn = $nextDepend
+                    Status    = $CMDownloadStatus
+                }
+
+                DownloadSCCM DownLoadSCCM {
+                    CM        = $CM
+                    Ensure    = "Present"
+                    DependsOn = "[WriteStatus]DownLoadSCCM"
+                }
+
+                FileReadAccessShare CMSourceSMBShare {
+                    Name      = $CM
+                    Path      = "c:\$CM"
+                    DependsOn = "[DownLoadSCCM]DownLoadSCCM"
+                }
+
+                $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
+            }
         }
 
         WriteStatus Complete {
