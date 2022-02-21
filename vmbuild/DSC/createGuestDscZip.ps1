@@ -70,11 +70,12 @@ try {
     Add-ExistingVMsToDeployConfig -config $result.DeployConfig
     $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
     Add-PerVMSettings -deployConfig $result.DeployConfig -thisVM $ThisVM
+    $deployConfigCopy = ConvertTo-DeployConfigEx -deployConfig $result.DeployConfig
 
     # Dump config to file, for debugging
     #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
     $filePath = "C:\temp\deployConfig.json"
-    $result.DeployConfig | ConvertTo-Json -Depth 5 | Out-File $filePath -Force
+    $deployConfigCopy | ConvertTo-Json -Depth 5 | Out-File $filePath -Force
 
     # Create local compressed file and inject appropriate appropriate TemplateHelpDSC
     Write-Host "Creating DSC.zip..."
@@ -88,21 +89,22 @@ try {
 
     # Create test config, for testing if the config definition is good.
     $role = $ThisVM.role
+    # Set current role
+    $dscRole = "Phase2"
     switch (($role)) {
-        "DPMP" { $role = "DomainMember" }
-        "FileServer" { $role = "DomainMember" }
-        "AADClient" { $role = "WorkgroupMember" }
-        "InternetClient" { $role = "WorkgroupMember" }
-        "SQLAO" { $role = "DomainMember" }
-        Default { $role = $role }
+        "DC" { $dscRole += "DC" }
+        "WorkgroupMember" { $dscRole += "WorkgroupMember" }
+        "AADClient" { $dscRole += "WorkgroupMember" }
+        "InternetClient" { $dscRole += "WorkgroupMember" }
+        default { $dscRole += "DomainMember" }
     }
     Write-Host "Creating a test config for $role in C:\Temp"
 
     if ($Common.LocalAdmin) { $adminCreds = $Common.LocalAdmin }
     else { $adminCreds = Get-Credential }
 
-    $dscFolder = "configmgr"
-    . ".\$dscFolder\$($role)Configuration.ps1"
+    $dscFolder = "phases"
+    . ".\$dscFolder\$($dscRole).ps1"
 
     # Configuration Data
     $cd = @{
@@ -115,7 +117,7 @@ try {
         )
     }
 
-    & "$($role)Configuration" -ConfigFilePath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config" | out-host
+    & "$($dscRole)" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config" | out-host
 }
 finally {
     $parentDir = Split-Path -Path $PSScriptRoot -Parent
