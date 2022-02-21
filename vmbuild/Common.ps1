@@ -1377,6 +1377,11 @@ function Wait-ForVm {
         do {
             try {
                 $vmTest = Get-VM2 -Name $VmName
+                if (-not $vmTest){
+                    Write-Progress -Activity  "$VmName`: Cound not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+                    Write-Log -Failure "Cound not find VM $VMName"
+                    return
+                }
                 Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                 $ready = $vmTest.State -eq $VmState
                 Start-Sleep -Seconds 5
@@ -1491,6 +1496,12 @@ function Wait-ForVm {
             $msg = "Waiting for $PathToVerify to exist"
         }
 
+        $vmTest = Get-VM2 -Name $VmName
+        if (-not $vmTest){
+            Write-Progress -Activity  "$VmName`: Cound not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+            Write-Log -Failure "Cound not find VM $VMName"
+            return
+        }
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
         do {
             try {
@@ -1711,6 +1722,10 @@ function Get-VmSession {
 
     $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
     $vm = get-vm2 -Name $VmName
+    if (-not $vm) {
+        Write-Log "$VmName`: Failed to find VM named $VmName" -Failure -OutputStream
+        return
+    }
     $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
         if ($VmDomainName -ne $VmName) {

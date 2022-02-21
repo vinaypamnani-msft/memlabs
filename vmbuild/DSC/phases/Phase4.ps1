@@ -182,7 +182,7 @@ configuration Phase4
 
             WriteStatus SetSQLUser {
                 DependsOn =  $spnDependency
-                Status    = "SQL setting new startup user to $sqlUser"
+                Status    = "SQL setting new startup user to $($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)"
             }
             #Change SQL Service Account
             SqlServiceAccount 'SetServiceAccountSQL_User' {
@@ -196,7 +196,7 @@ configuration Phase4
             }
             WriteStatus SetSQLAgentUser {
                 DependsOn =  '[SqlServiceAccount]SetServiceAccountSQL_User'
-                Status    = "SQL setting new agent user to $sqlAgentUser"
+                Status    = "SQL setting new agent user to $($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)"
             }
             #Change SQL Service Account
             SqlServiceAccount 'SetServiceAccountAgent_User' {

@@ -62,7 +62,7 @@ function Start-Phase {
     }
 
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs
-    Write-Log "`n$($result.Success) Phase $Phase jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
+    Write-Log "`n$($result.Success) [Phase $Phase] jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
 
     if ($result.Failed -gt 0) {
         return $false
