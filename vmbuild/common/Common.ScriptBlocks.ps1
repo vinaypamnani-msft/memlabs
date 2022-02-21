@@ -540,19 +540,19 @@ $global:VM_Config = {
                     Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
                 }
 
-                # Remove DSC_Status file, if exists
-                $dscStatus = "C:\staging\DSC\DSC_Status.txt"
-                if (Test-Path $dscStatus) {
-                    "Removing $dscStatus" | Out-File $log -Append
-                    Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
-                }
-
                 # Rename previous MOF path
                 $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
                 if (Test-Path $dscConfigPath) {
                     $newName = $dscConfigPath -replace "DSCConfiguration", ("DSCConfiguration" + (get-date).ToString("_yyyyMMdd_HHmmss"))
                     "Renaming $dscConfigPath to $newName" | Out-File $log -Append
                     Rename-Item -Path $dscConfigPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+                }
+
+                # Remove DSC_Status file, if exists
+                $dscStatus = "C:\staging\DSC\DSC_Status.txt"
+                if (Test-Path $dscStatus) {
+                    "Removing $dscStatus" | Out-File $log -Append
+                    Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
                 }
 
                 # Write config to file
@@ -797,16 +797,44 @@ $global:VM_Config = {
             Write-Log "PSJOB: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on the DC."
         }
         else {
-            start-sleep -seconds 15
+
+            if ($multiNodeDsc) {
+                # Check if DSC_Status.txt file has been removed on all nodes before continuing. This is to ensure that Stop-Dsc doesn't run after DC has started DSC.
+                $nodeList = New-Object System.Collections.ArrayList
+                $nonReadyNodes = New-Object System.Collections.ArrayList
+                foreach ($node in ($ConfigurationData.AllNodes.NodeName | Where-Object { $_ -ne "*" })) {
+                    $nodeList.Add($node) | Out-Null
+                }
+                $attempts = 0
+                do {
+                    $attempts++
+                    $allNodesReady = $true
+                    $nonReadyNodes = $nodeList.Clone()
+                    Write-Progress "Waiting for all nodes. Attempt #$attempts/30" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready."
+                    foreach ($node in $nonReadyNodes) {
+                        $result = Invoke-VmCommand -VmName $node -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
+                        if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
+                            Write-Log "Node $node is NOT ready"
+                            $allNodesReady = $false
+                        }
+                        else {
+                            $nodeList.Remove($node) | Out-Null
+                        }
+                    }
+
+                    Start-Sleep -Seconds 5
+                } until ($allNodesReady -or $attempts -gt 30)
+            }
+
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
-            start-sleep -seconds 30
+
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
-                start-sleep -seconds 60
+                Start-Sleep -Seconds 15
                 Write-Log "PSJOB: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
                 # Retry once before exiting
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
@@ -1016,18 +1044,18 @@ $global:VM_Config = {
                     # Check if complete
                     $complete = $status.ScriptBlockOutput -eq "Complete!"
                     if ($complete) {
-                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10  | Select-String "=== Failed Configuration Manager Server Setup ===" -Context 0, 0 } -SuppressLog
+                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "=== Failed Configuration Manager Server Setup ===" -Context 0, 0 } -SuppressLog
                         if ($result.ScriptBlockOutput.Line) {
                             Write-Log "PSJOB: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
                             return
                         }
                     }
                     # ~Setup has encountered fatal errors
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10  | Select-String "~Setup has encountered fatal errors" -Context 0, 0 } -SuppressLog
-                        if ($result.ScriptBlockOutput.Line) {
-                            Write-Log "PSJOB: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
-                            return
-                        }
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "~Setup has encountered fatal errors" -Context 0, 0 } -SuppressLog
+                    if ($result.ScriptBlockOutput.Line) {
+                        Write-Log "PSJOB: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
+                        return
+                    }
                 }
                 else {
                     if ($noStatus) {

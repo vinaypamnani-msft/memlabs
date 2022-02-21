@@ -24,6 +24,15 @@
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
 
+    # Firewall Roles
+    $firewallRoles = @("DomainMember")
+    if ($ThisVM.role -in "CAS", "Primary", "PassiveSite", "Secondary") {
+        $firewallRoles += @("Site Server", "Provider", "CM Console", "Management Point", "Distribution Point", "Software Update Point")
+    }
+    if ($ThisVM.role -eq "DPMP") {
+        $firewallRoles += @("Management Point", "Distribution Point", "Software Update Point")
+    }
+
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
@@ -105,7 +114,7 @@
         OpenFirewallPortForSCCM OpenFirewall {
             DependsOn = "[FileReadAccessShare]DomainSMBShare"
             Name      = "DomainMember"
-            Role      = "DomainMember"
+            Role      = $firewallRoles
         }
 
         WriteStatus Complete {

@@ -1745,7 +1745,7 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'HTTP(S) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For SCCM SUP"
             New-NetFirewallRule -DisplayName 'HTTP(S) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For SCCM SUP"
         }
-        if ($_Role -ccontains "State Migration Point") {
+        if ($_Role -contains "State Migration Point") {
             #SMB,RPC Endpoint Mapper
             New-NetFirewallRule -DisplayName 'SMB SMP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM SMP"
             New-NetFirewallRule -DisplayName 'SMB SMP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM SMP"
@@ -1990,6 +1990,7 @@ class InstallFeatureForSCCM {
                 Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
                 Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
                 Install-WindowsFeature BITS, BITS-IIS-Ext
+                Install-WindowsFeature -Name "Rdc"
             }
             if ($_Role -contains "Application Catalog website point") {
                 #IIS

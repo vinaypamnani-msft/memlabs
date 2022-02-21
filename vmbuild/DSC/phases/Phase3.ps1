@@ -20,6 +20,12 @@ configuration Phase3
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
 
+        # Install feature roles
+        $featureRoles = @($ThisVM.role)
+        if ($ThisVM.role -eq "SQLAO") {
+            $featureRoles += "SQLAO"
+        }
+
         WriteStatus AddLocalAdmin {
             Status = "Adding required accounts to Local Administrators group"
         }
@@ -43,23 +49,12 @@ configuration Phase3
 
         InstallFeatureForSCCM InstallFeature {
             Name      = "DummyName"
-            Role      = $ThisVM.role
+            Role      = $featureRoles
             DependsOn = "[WriteStatus]InstallFeature"
         }
 
-        WriteStatus OpenPorts {
-            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
-            Status    = "Open required firewall ports"
-        }
-
-        OpenFirewallPortForSCCM OpenFirewall {
-            DependsOn = "[WriteStatus]OpenPorts"
-            Name      = "DomainMember"
-            Role      = "DomainMember"
-        }
-
         WriteStatus InstallDotNet {
-            DependsOn = '[OpenFirewallPortForSCCM]OpenFirewall'
+            DependsOn = '[InstallFeatureForSCCM]InstallFeature'
             Status    = "Installing .NET 4.8"
         }
 
@@ -83,6 +78,52 @@ configuration Phase3
                 DownloadUrl = "https://aka.ms/ssmsfullsetup"
                 Ensure      = "Present"
                 DependsOn   = "[WriteStatus]SSMS"
+            }
+
+            $nextDepend = "[InstallSSMS]SSMS"
+        }
+
+        if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary") {
+
+            WriteStatus ADKInstall {
+                DependsOn = $nextDepend
+                Status    = "Downloading and installing ADK"
+            }
+
+            InstallADK ADKInstall {
+                ADKPath      = "C:\temp\adksetup.exe"
+                ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
+                Ensure       = "Present"
+                DependsOn    = "[WriteStatus]ADKInstall"
+            }
+
+            $nextDepend = "[InstallADK]ADKInstall"
+            if (-not $ThisVM.thisParams.ParentSiteServer) {
+
+                $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+                $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
+                if ($CM -eq "CMTP") {
+                    $CMDownloadStatus = "Downloading Configuration Manager technical preview"
+                }
+
+                WriteStatus DownLoadSCCM {
+                    DependsOn = $nextDepend
+                    Status    = $CMDownloadStatus
+                }
+
+                DownloadSCCM DownLoadSCCM {
+                    CM        = $CM
+                    Ensure    = "Present"
+                    DependsOn = "[WriteStatus]DownLoadSCCM"
+                }
+
+                FileReadAccessShare CMSourceSMBShare {
+                    Name      = $CM
+                    Path      = "c:\$CM"
+                    DependsOn = "[DownLoadSCCM]DownLoadSCCM"
+                }
+
+                $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
             }
         }
 
