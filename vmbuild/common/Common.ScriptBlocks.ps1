@@ -432,9 +432,11 @@ $global:VM_Config = {
             $extractPath = "C:\staging\DSC\modules"
             try {
                 $dscHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
-                if ($dscHash -ne $zipHash) {
-                    Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
+                if ($dscHash -eq $zipHash  -and (Test-Path $extractPath)) {
+                    return
                 }
+
+                Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
             }
             catch {
 
