@@ -41,6 +41,17 @@
       "metadata": {
         "description": "Time Zone for the Operating System."
       }
+    },
+    "branchName": {
+      "type": "string",
+      "defaultValue": "main",
+      "allowedValues": [
+        "main",
+        "develop"
+      ],
+      "metadata": {
+        "description": "ARM Template Version. Use main unless otherwise instructed."
+      }
     }
   },
   "variables": {
@@ -63,9 +74,9 @@
     "aadLoginExtensionName": "AADLoginForWindows",
     "windowsAdminCenterPort": "6516",
     "dscFunction": "Host.ps1\\Host",
-    "dscScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/develop/configmgr-lab-vmhost/DSC/Host.zip",
-    "hostScript": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/develop/configmgr-lab-vmhost/scripts/configureHostTask.ps1",
-    "hostScriptParam": "https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/develop/configmgr-lab-vmhost/scripts/configureHost.ps1"
+    "dscScript": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/DSC/Host.zip')]",
+    "hostScript": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/scripts/configureHostTask.ps1')]",
+    "hostScriptParam": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/scripts/configureHost.ps1')]"
   },
   "resources": [
     {
