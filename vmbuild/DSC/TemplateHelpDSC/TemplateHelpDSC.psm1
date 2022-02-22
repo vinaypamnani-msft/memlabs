@@ -1392,19 +1392,27 @@ class RegisterTaskScheduler {
 
     [bool] Test() {
 
-        $ConfigurationFile = Join-Path -Path "C:\Staging\DSC" -ChildPath "ScriptWorkflow.json"
-        if (-not (Test-Path $ConfigurationFile)) {
+        try {
+            $ConfigurationFile = Join-Path -Path "C:\Staging\DSC" -ChildPath "ScriptWorkflow.json"
+            if (-not (Test-Path $ConfigurationFile)) {
+                return $false
+            }
+
+            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            if (-not ($Configuration.ScriptWorkFlow)) {
+                return $false
+            }
+            if ($Configuration.ScriptWorkflow.Status -eq 'NotStart') {
+                $Configuration.ScriptWorkflow.Status = 'Scheduled'
+                $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+                return $false
+            }
+
+            return $true
+        }
+        catch {
             return $false
         }
-
-        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-        if ($Configuration.ScriptWorkflow.Status -eq 'NotStart') {
-            $Configuration.ScriptWorkflow.Status = 'Scheduled'
-            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-            return $false
-        }
-
-        return $true
     }
 
     [RegisterTaskScheduler] Get() {
