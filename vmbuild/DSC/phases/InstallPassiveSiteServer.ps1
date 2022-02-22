@@ -55,8 +55,8 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 Set-Location "$($SiteCode):\" @initParams
 
 # Get info for Passive Site Server
-$ThisMachineName = $deployConfig.thisParams.MachineName
-$ThisVM = $deployConfig.thisParams.thisVM
+$ThisMachineName = $deployconfig.Parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $deployconfig.Parameters.ThisMachineName}
 $SSVM = $deployConfig.virtualMachines | Where-Object { $_.siteCode -eq $ThisVM.siteCode -and $_.role -eq "PassiveSite" }
 $shareName = $SiteCode
 $sharePath = "E:\$shareName"

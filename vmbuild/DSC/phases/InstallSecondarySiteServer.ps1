@@ -99,8 +99,8 @@ function Install-MP {
 }
 
 # Get info for Passive Site Server
-$ThisMachineName = $deployConfig.thisParams.MachineName
-$ThisVM = $deployConfig.thisParams.thisVM
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
 $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
 
 # Add Passive site

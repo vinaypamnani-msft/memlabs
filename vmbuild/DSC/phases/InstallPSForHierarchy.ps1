@@ -7,9 +7,10 @@ param(
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-$ThisVM = $deployConfig.thisParams.thisVM
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
-$CSName = $deployConfig.thisParams.CSName
+$CSName = $ThisVM.thisParams.ParentSiteServer
 
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"

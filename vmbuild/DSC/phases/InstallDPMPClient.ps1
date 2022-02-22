@@ -9,8 +9,8 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $DomainName = $DomainFullName.Split(".")[0]
-$ThisMachineName = $deployConfig.thisParams.MachineName
-$ThisVM = $deployConfig.thisParams.thisVM
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
 
 #bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
 $ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
@@ -272,12 +272,14 @@ if ($mpCount -eq 0) {
 }
 
 # exit if rerunning DSC to add passive site
-if ($null -ne $deployConfig.thisParams.PassiveVM) {
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
+if ($null -ne "$($ThisVm.thisParams.PassiveNode)") {
     Write-DscStatus "Skip Client Push since we're adding Passive site server"
     return
 }
 
-$bgs = $deployConfig.thisParams.sitesAndNetworks
+$bgs = $ThisVM.thisParams.sitesAndNetworks
 
 # Create BGs
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {

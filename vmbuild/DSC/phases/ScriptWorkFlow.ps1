@@ -48,7 +48,8 @@ if (!(Test-Path $ProvisionToolPath)) {
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $scenario = $deployConfig.parameters.Scenario
-$ThisVM = $deployConfig.thisParams.thisVM
+
+$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $deployconfig.Parameters.ThisMachineName}
 $CurrentRole = $ThisVM.role
 
 # contains passive?

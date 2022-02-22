@@ -2108,7 +2108,7 @@ function Get-ExistingConfig {
         [string] $Subnet,
         [Parameter(Mandatory = $true, HelpMessage = "Role")]
         [String] $Role,
-        [Parameter(Mandatory = $false, HelpMessage = "Parent Site code, if we are deploying a primary in a heirarchy")]
+        [Parameter(Mandatory = $false, HelpMessage = "Parent Site code, if we are deploying a primary in a Hierarchy")]
         [string] $parentSiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site code, if we are deploying PassiveSite")]
         [string] $SiteCode = $null,
@@ -3605,7 +3605,7 @@ function Add-NewVMForRole {
         [string] $Name = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Force VM Name for 2nd Node. Otherwise auto-generated")]
         [string] $Name2 = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary or Secondary in a Heirarchy")]
+        [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary or Secondary in a Hierarchy")]
         [string] $parentSiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite or a DPMP")]
         [string] $SiteCode = $null,

@@ -322,11 +322,11 @@ function ConvertTo-DeployConfigEx {
         #Get the SiteServer this VM's SiteCode reports to.  If it has a passive node, get that as -P
         if ($thisVM.siteCode) {
             $SiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
-            $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer" -Value $SiteServerVM -Force
+            $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer" -Value $SiteServerVM.vmName -Force
             Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
             $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
             if ($passiveSiteServerVM) {
-                $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer-P" -Value $passiveSiteServerVM.vmName -Force
+                $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServerPassive" -Value $passiveSiteServerVM.vmName -Force
                 Add-VMToAccountLists -thisVM $thisVM -VM $passiveSiteServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
             }
             #If we report to a Secondary, get the Primary as well, and passive as -P
@@ -337,7 +337,7 @@ function ConvertTo-DeployConfigEx {
                     Add-VMToAccountLists -thisVM $thisVM -VM $PrimaryServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
                     $PassivePrimaryVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -siteCode $PrimaryServerVM.SiteCode -type VM
                     if ($PassivePrimaryVM) {
-                        $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServer-P" -Value $PassivePrimaryVM.vmName -Force
+                        $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServerPassive" -Value $PassivePrimaryVM.vmName -Force
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassivePrimaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                     }
 
@@ -350,7 +350,7 @@ function ConvertTo-DeployConfigEx {
             $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServer" -Value $parentSiteServerVM.vmName -Force
             $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
             if ($passiveSiteServerVM) {
-                $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServer-P" -Value $passiveSiteServerVM.vmName -Force
+                $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServerPassive" -Value $passiveSiteServerVM.vmName -Force
             }
         }
 
