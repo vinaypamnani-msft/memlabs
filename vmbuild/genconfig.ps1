@@ -1226,9 +1226,11 @@ function Get-ValidDomainNames {
     $usedPrefixes = Get-List -Type UniquePrefix
     foreach ($dname in $ValidDomainNames.Keys) {
         foreach ($usedPrefix in $usedPrefixes) {
-            if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $usedPrefix.ToLowerInvariant()) {
-                Write-Verbose ("Removing $dname")
-                $ValidDomainNames.Remove($dname)
+            if ($usedPrefix -and $ValidDomainNames[$dname]) {
+                if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $usedPrefix.ToLowerInvariant()) {
+                    Write-Verbose ("Removing $dname")
+                    $ValidDomainNames.Remove($dname)
+                }
             }
         }
     }
@@ -1467,7 +1469,7 @@ function Select-Config {
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property CreationTime
     write-host $ConfigPath
-    if ($ConfigPath.EndsWith("tests")){
+    if ($ConfigPath.EndsWith("tests")) {
         $files = $files | sort-Object -Property Name
     }
     $responseValid = $false
@@ -2351,10 +2353,10 @@ Function Get-SupportedOperatingSystemsForRole {
         "FileServer" { return $ServerList }
         "DPMP" { return $ServerList }
         "DomainMember" {
-            if ($vm.SqlVersion){
-            return $ServerList
+            if ($vm.SqlVersion) {
+                return $ServerList
             }
-            else{
+            else {
                 return $AllList
             }
         }
@@ -3249,19 +3251,19 @@ function Select-Options {
                     Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
                     if ($property.role -eq "DomainMember") {
                         #if (-not $property.SqlVersion) {
-                            $newName = Get-NewMachineName -vm $property
-                            if ($($property.vmName) -ne $newName) {
-                                $rename = $true
-                                $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
-                                if (-not [String]::IsNullOrWhiteSpace($response)) {
-                                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                                        $rename = $false
-                                    }
-                                }
-                                if ($rename -eq $true) {
-                                    $property.vmName = $newName
+                        $newName = Get-NewMachineName -vm $property
+                        if ($($property.vmName) -ne $newName) {
+                            $rename = $true
+                            $response = Read-Host2 -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                            if (-not [String]::IsNullOrWhiteSpace($response)) {
+                                if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                                    $rename = $false
                                 }
                             }
+                            if ($rename -eq $true) {
+                                $property.vmName = $newName
+                            }
+                        }
                         #}
                     }
                     continue MainLoop
