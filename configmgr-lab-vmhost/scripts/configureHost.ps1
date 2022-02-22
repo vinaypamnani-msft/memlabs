@@ -8,6 +8,10 @@ function Write-HostLog {
 
 Write-HostLog "START"
 
+Write-HostLog "Installing required roles"
+Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
+Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
+
 # Change CD-ROM Drive Letter
 $cd = Get-WmiObject -Class Win32_volume -Filter 'DriveType=5'
 if ($cd) {
