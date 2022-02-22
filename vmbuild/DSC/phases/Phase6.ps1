@@ -116,7 +116,7 @@ Configuration Phase6
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
 
         WriteStatus ADKInstall {
-            Status    = "Downloading and installing ADK"
+            Status = "Downloading and installing ADK"
         }
 
         InstallADK ADKInstall {
@@ -189,5 +189,41 @@ Configuration Phase6
             DependsOn = "[WaitForEvent]WorkflowComplete"
             Status    = "Complete!"
         }
+    }
+
+    Node $AllNodes.Where{ $_.Role -eq 'PassiveSite' }.NodeName
+    {
+        $ThisMachineName = $Node.NodeName
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+
+        WriteStatus ADKInstall {
+            Status = "Downloading and installing ADK"
+        }
+
+        InstallADK ADKInstall {
+            ADKPath      = "C:\temp\adksetup.exe"
+            ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
+            Ensure       = "Present"
+            DependsOn    = "[WriteStatus]ADKInstall"
+        }
+
+        WriteStatus WaitActive {
+            Status    = "Waiting for $($ThisVM.thisParams.ActiveNode) to finish adding passive site server role"
+            Dependson = '[InstallADK]ADKInstall'
+        }
+
+        WaitForAll ActiveNode {
+            ResourceName     = '[WriteStatus]Complete'
+            NodeName         = $ThisVM.thisParams.ActiveNode
+            RetryIntervalSec = 15
+            RetryCount       = 1200
+            Dependson        = '[WriteStatus]WaitActive'
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WaitForAll]ActiveNode"
+            Status    = "Complete!"
+        }
+
     }
 }

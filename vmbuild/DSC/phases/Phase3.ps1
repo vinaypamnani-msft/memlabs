@@ -22,12 +22,15 @@ configuration Phase3
 
         # Install feature roles
         $featureRoles = @($ThisVM.role)
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") {
+            $featureRoles += "Site Server"
+        }
         if ($ThisVM.role -eq "SQLAO") {
             $featureRoles += "SQLAO"
         }
 
         WriteStatus AddLocalAdmin {
-            Status = "Adding required accounts to Local Administrators group"
+            Status = "Adding required accounts to Administrators group"
         }
 
         $addUserDependancy = @('[WriteStatus]AddLocalAdmin')
@@ -83,7 +86,7 @@ configuration Phase3
             $nextDepend = "[InstallSSMS]SSMS"
         }
 
-        if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary") {
+        if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "PassiveSite") {
 
             WriteStatus ADKInstall {
                 DependsOn = $nextDepend
@@ -98,7 +101,7 @@ configuration Phase3
             }
 
             $nextDepend = "[InstallADK]ADKInstall"
-            if (-not $ThisVM.thisParams.ParentSiteServer) {
+            if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite") {
 
                 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
                 $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
