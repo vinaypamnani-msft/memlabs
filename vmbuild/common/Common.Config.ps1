@@ -162,11 +162,13 @@ function New-DeployConfig {
             }
         }
 
-        $PassiveVM = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-        if ($PassiveVM) {
-            # Add prefix to FS
-            if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
-                $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
+        $PassiveVMs = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+        if ($PassiveVMs) {
+            foreach ($PassiveVM in $PassiveVMs) {
+                # Add prefix to FS
+                if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
+                    $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
+                }
             }
         }
 
@@ -448,8 +450,8 @@ function Get-SQLAOConfig {
         SecondaryReplicaServerName = $PrimaryAO.OtherNode + "." + $deployConfig.vmOptions.DomainName
         ClusterNameAoG             = $PrimaryAO.AlwaysOnName
         ClusterNameAoGFQDN         = $PrimaryAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
-        WitnessShareFQ               = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Witness"
-        BackupShareFQ                = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Backup"
+        WitnessShareFQ             = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Witness"
+        BackupShareFQ              = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Backup"
         WitnessShare               = "$($ClusterNameNoPrefix)-Witness"
         BackupShare                = "$($ClusterNameNoPrefix)-Backup"
 
@@ -466,7 +468,7 @@ function Add-PerVMSettings {
         [Parameter(Mandatory = $true, HelpMessage = "Current Item")]
         [object] $thisVM
     )
-# This function is defunct. Please remove.
+    # This function is defunct. Please remove.
     return
 
 }

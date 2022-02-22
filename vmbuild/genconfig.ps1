@@ -2957,8 +2957,8 @@ function Get-AdditionalValidations {
             $CASVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
             $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
 
-            $Passive = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
-            $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
+            $Passives = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+            $SQLAOs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
             #This is a SQL Server being renamed.  Lets check if we need to update CAS or PRI
             if (($Property.Role -eq "DomainMember") -and ($null -ne $Property.sqlVersion)) {
                 if (($null -ne $PRIVM.remoteSQLVM) -and $PRIVM.remoteSQLVM -eq $CurrentValue) {
@@ -2970,13 +2970,17 @@ function Get-AdditionalValidations {
             }
 
             if ($Property.Role -eq "FileServer" -and $null -ne $SQLAO) {
-                if ($SQLAO.FileServerVM -eq $CurrentValue) {
-                    $SQLAO.FileServerVM = $value
+                foreach ($SQLAO in $SQAOs) {
+                    if ($SQLAO.FileServerVM -eq $CurrentValue) {
+                        $SQLAO.FileServerVM = $value
+                    }
                 }
             }
             if ($Property.Role -eq "FileServer" -and $null -ne $Passive) {
-                if ($Passive.remoteContentLibVM -eq $CurrentValue) {
-                    $Passive.remoteContentLibVM = $value
+                foreach ($Passive in $Passives) {
+                    if ($Passive.remoteContentLibVM -eq $CurrentValue) {
+                        $Passive.remoteContentLibVM = $value
+                    }
                 }
             }
         }
@@ -3656,7 +3660,7 @@ function Add-NewVMForRole {
         virtualProcs    = $vprocs
     }
 
-    if ($role -notin ("OSDCLient", "AADJoined")){
+    if ($role -notin ("OSDCLient", "AADJoined")) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
     }
     $existingPrimary = $null
@@ -3794,7 +3798,7 @@ function Add-NewVMForRole {
         }
         "DC" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true
-         }
+        }
     }
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
