@@ -4247,27 +4247,34 @@ function Select-VirtualMachines {
                         }
                         else {
                             if ($virtualMachine.role -eq "FileServer") {
-                                $passiveVM = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-                                if ($passiveVM) {
-                                    if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
-                                        Write-Host
-                                        write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
-                                        $removeVM = $false
+                                $passiveVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+                                if ($passiveVMs) {
+                                    foreach ($passiveVM in $PassiveVMs) {
+                                        if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
+                                            Write-Host
+                                            write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
+                                            $removeVM = $false
+                                        }
                                     }
                                 }
-                                $SQLAOVM = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.fileServerVM }
-                                if ($SQLAOVM) {
-                                    if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
-                                        Write-Host
-                                        write-host -ForegroundColor Yellow "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
-                                        $removeVM = $false
+                                $SQLAOVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.fileServerVM }
+                                if ($SQLAOVMs) {
+                                    foreach ($SQLAOVM in $SQLAOVMs) {
+                                        if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
+                                            Write-Host
+                                            write-host -ForegroundColor Yellow "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
+                                            $removeVM = $false
+                                        }
                                     }
                                 }
                             }
                             if ($virtualMachine.role -eq "SQLAO") {
-                                $SQLAOVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" }
-                                foreach ($svm in $SQLAOVMs) {
-                                    Remove-VMFromConfig -vmName $svm.vmName -ConfigToModify $global:config
+                                if (-not ($virtualMachine.OtherNode)) {
+                                    Write-Host
+                                    write-host -ForegroundColor Yellow "This VM is Secondary node in a SQLAO cluster. Please delete the Primary node to remove both VMs"
+                                    $removeVM = $false
+                                }else{
+                                    Remove-VMFromConfig -vmName $virtualMachine.OtherNode -ConfigToModify $global:config
                                 }
                             }
                             if ($removeVM -eq $true) {
