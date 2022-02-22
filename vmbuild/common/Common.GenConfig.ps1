@@ -264,7 +264,8 @@ function ConvertTo-DeployConfigEx {
             $DomainName = $deployConfig.parameters.domainName
             $DName = $DomainName.Split(".")[0]
             $cm_admin = "$DNAME\$DomainAdminName"
-            $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, 'BUILTIN\Administrators')
+            $vm_admin = "$DNAME\vmbuildadmin"
+            $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, $vm_admin, 'BUILTIN\Administrators')
             $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
 
             if (-not $SiteServerVM) {

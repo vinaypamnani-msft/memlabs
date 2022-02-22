@@ -261,7 +261,7 @@ configuration Phase4
         SqlScript 'InstallBackupSolution' {
             ServerName       = $thisvm.VmName
             InstanceName     = $SQLInstanceName
-            Credential       = $Admincreds
+            #Credential       = $Admincreds
             SetFilePath      = $sqlBackupPath
             TestFilePath     = $sqlBackupTest
             GetFilePath      = $sqlBackupGet

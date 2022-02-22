@@ -537,7 +537,7 @@ Configuration Phase5
         SqlScript 'InstallAgentJob' {
             ServerName       = $thisvm.VmName
             InstanceName     = $thisVM.sqlInstanceName
-            Credential       = $Admincreds
+            #Credential       = $Admincreds
             SetFilePath      = $AgentJobSet
             TestFilePath     = $AgentJobTest
             GetFilePath      = $AgentJobGet
@@ -871,7 +871,7 @@ Configuration Phase5
         SqlScript 'InstallAgentJob' {
             ServerName       = $nodename
             InstanceName     = $node1vm.sqlInstanceName
-            Credential       = $Admincreds
+            #Credential       = $Admincreds
             SetFilePath      = $AgentJobSet
             TestFilePath     = $AgentJobTest
             GetFilePath      = $AgentJobGet
