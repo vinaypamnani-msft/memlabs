@@ -523,6 +523,29 @@ Configuration Phase5
             $nextDepend = '[SqlAGDatabase]AddAGDatabaseMemberships'
         }
 
+
+        $AgentJobSet = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Set.sql"
+        $AgentJobTest = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Test.sql"
+        $AgentJobGet = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Get.sql"
+
+
+        WriteStatus InstallAgentJob {
+            DependsOn = $nextDepend
+            Status    = "Installing Log Backup Agent Job"
+        }
+
+        SqlScript 'InstallAgentJob' {
+            ServerName       = $thisvm.VmName
+            InstanceName     = $thisVM.sqlInstanceName
+            Credential       = $Admincreds
+            SetFilePath      = $AgentJobSet
+            TestFilePath     = $AgentJobTest
+            GetFilePath      = $AgentJobGet
+            DisableVariables = $true
+            DependsOn        =  $nextDepend
+        }
+        $nextDepend = '[SqlScript]InstallAgentJob'
+
         WriteStatus Complete {
             DependsOn = $nextDepend
             Status    = "Complete!"
@@ -835,6 +858,27 @@ Configuration Phase5
             #}
             #$nextDepend = '[SqlAGDatabase]AddAGDatabaseMemberships'
         }
+        $AgentJobSet = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Set.sql"
+        $AgentJobTest = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Test.sql"
+        $AgentJobGet = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Get.sql"
+
+
+        WriteStatus InstallAgentJob {
+            DependsOn = $nextDepend
+            Status    = "Installing Log Backup Agent Job"
+        }
+
+        SqlScript 'InstallAgentJob' {
+            ServerName       = $nodename
+            InstanceName     = $node1vm.sqlInstanceName
+            Credential       = $Admincreds
+            SetFilePath      = $AgentJobSet
+            TestFilePath     = $AgentJobTest
+            GetFilePath      = $AgentJobGet
+            DisableVariables = $true
+            DependsOn        =  $nextDepend
+        }
+        $nextDepend = '[SqlScript]InstallAgentJob'
 
         WriteStatus Complete {
             DependsOn = $nextDepend
