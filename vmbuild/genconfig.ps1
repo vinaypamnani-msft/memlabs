@@ -1242,7 +1242,8 @@ function Get-ValidDomainNames {
     }
 
     $usedPrefixes = Get-List -Type UniquePrefix
-    foreach ($dname in $ValidDomainNames.Keys) {
+    $ValidDomainNamesClone = $ValidDomainNames.Clone()
+    foreach ($dname in $ValidDomainNamesClone.Keys) {
         foreach ($usedPrefix in $usedPrefixes) {
             if ($usedPrefix -and $ValidDomainNames[$dname]) {
                 if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $usedPrefix.ToLowerInvariant()) {
