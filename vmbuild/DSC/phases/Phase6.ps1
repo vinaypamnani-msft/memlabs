@@ -77,10 +77,14 @@ Configuration Phase6
 
     Node $AllNodes.Where{ $_.Role -eq "Secondary" }.NodeName
     {
-        #$PSName = $deployConfig.thisParams.PrimarySiteServer.vmName
 
-        $ParentSiteCode = ($deployConfig.virtualMachines | where-object { $_.vmName -eq ($Node.NodeName) }).ParentSiteCode
-        $PSName = ($deployConfig.virtualMachines | where-object { $_.Role -eq "Primary" -and $_.SiteCode -eq $ParentSiteCode }).vmName
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+        $PSName = $ThisVM.thisParams.ParentSiteServer
+
+
+
+        #$ParentSiteCode = ($deployConfig.virtualMachines | where-object { $_.vmName -eq ($Node.NodeName) }).ParentSiteCode
+        #$PSName = ($deployConfig.virtualMachines | where-object { $_.Role -eq "Primary" -and $_.SiteCode -eq $ParentSiteCode }).vmName
 
         WriteStatus WaitPrimary {
             Status = "Waiting for Site Server $PSName to finish configuration."
