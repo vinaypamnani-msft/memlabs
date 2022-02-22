@@ -67,7 +67,7 @@ if (Test-Path -Path $ConfigurationFile) {
 if (-not ($configuration.ScriptWorkflow)){
     $Configuration = $null
 }
-if ($Configuration) {
+if (-not $Configuration) {
     if ($scenario -eq "Standalone") {
         [hashtable]$Actions = @{
             InstallSCCM    = @{

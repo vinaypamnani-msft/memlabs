@@ -548,6 +548,9 @@ $global:VM_Config = {
                         $Configuration.ScriptWorkFlow.StartTime = ''
                         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
                     }
+                    else{
+                        Remove-Item $ConfigurationFile -Force -Confirm:$false -ErrorAction Stop
+                    }
                 }
 
                 # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
