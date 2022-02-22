@@ -59,10 +59,15 @@ $containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq 
 # Script Workflow json file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 
+
+
 if (Test-Path -Path $ConfigurationFile) {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 }
-else {
+if (-not ($configuration.ScriptWorkflow)){
+    $Configuration = $null
+}
+if ($Configuration) {
     if ($scenario -eq "Standalone") {
         [hashtable]$Actions = @{
             InstallSCCM    = @{
