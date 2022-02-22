@@ -1591,7 +1591,7 @@ Function Show-Summary {
             if ($containsPS) {
                 if ($containsPassive) {
                     $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-                    Write-GreenCheck "(High Availability) ConfigMgr site server in passive mode will be installed for SiteCode $($PassiveVM.SiteCode)"
+                    Write-GreenCheck "(High Availability) ConfigMgr site server in passive mode will be installed for SiteCode(s) $($PassiveVM.SiteCode -Join ',')"
                 }
                 else {
                     Write-RedX "(High Availability) No ConfigMgr site server in passive mode will be installed"

@@ -4273,7 +4273,8 @@ function Select-VirtualMachines {
                                     Write-Host
                                     write-host -ForegroundColor Yellow "This VM is Secondary node in a SQLAO cluster. Please delete the Primary node to remove both VMs"
                                     $removeVM = $false
-                                }else{
+                                }
+                                else {
                                     Remove-VMFromConfig -vmName $virtualMachine.OtherNode -ConfigToModify $global:config
                                 }
                             }
