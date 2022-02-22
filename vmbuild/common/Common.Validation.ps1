@@ -981,10 +981,10 @@ function Test-Configuration {
     if ($containsPassive) {
         $passiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
 
-        # PassiveSite VM count -eq 1
-        if (Test-SingleRole -VM $passiveVM -ReturnObject $return) {
-            Test-ValidRolePassiveSite -VM $passiveVM -ConfigObject $deployConfig -ReturnObject $return
+        foreach ($VM in $passiveVM) {
+            Test-ValidRolePassiveSite -VM $VM -ConfigObject $deployConfig -ReturnObject $return
         }
+
     }
 
     # FileServer Validations
