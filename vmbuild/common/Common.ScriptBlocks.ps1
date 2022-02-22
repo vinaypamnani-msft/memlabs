@@ -432,7 +432,7 @@ $global:VM_Config = {
             $extractPath = "C:\staging\DSC\modules"
             try {
                 $dscHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
-                if ($dscHash -eq $zipHash  -and (Test-Path $extractPath)) {
+                if ($dscHash -eq $zipHash -and (Test-Path $extractPath)) {
                     return
                 }
 
@@ -543,9 +543,11 @@ $global:VM_Config = {
                 if (Test-Path $ConfigurationFile) {
                     "Resetting $ConfigurationFile" | Out-File $log -Append
                     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-                    $Configuration.ScriptWorkFlow.Status = 'NotStart'
-                    $Configuration.ScriptWorkFlow.StartTime = ''
-                    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+                    if ($Configuration.ScriptWorkFlow) {
+                        $Configuration.ScriptWorkFlow.Status = 'NotStart'
+                        $Configuration.ScriptWorkFlow.StartTime = ''
+                        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+                    }
                 }
 
                 # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
@@ -838,7 +840,7 @@ $global:VM_Config = {
                     $attempts++
                     $allNodesReady = $true
                     $nonReadyNodes = $nodeList.Clone()
-                    Write-Progress "Waiting for all nodes. Attempt #$attempts/30" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready."
+                    Write-Progress "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $attempts
                     foreach ($node in $nonReadyNodes) {
                         $result = Invoke-VmCommand -VmName $node -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
                         if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
@@ -850,8 +852,8 @@ $global:VM_Config = {
                         }
                     }
 
-                    Start-Sleep -Seconds 5
-                } until ($allNodesReady -or $attempts -gt 30)
+                    Start-Sleep -Seconds 3
+                } until ($allNodesReady -or $attempts -gt 100)
             }
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
