@@ -616,9 +616,17 @@ function Add-SwitchAndDhcp {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name.")]
         [string]$DomainName,
         [Parameter(Mandatory = $false, HelpMessage = "Override DNS.")]
-        [string]$DNSServer
+        [string]$DNSServer,
+        [Parameter(Mandatory = $false, HelpMessage = "What If?")]
+        [switch]$WhatIf
     )
+
     Write-Log "Creating/verifying whether a Hyper-V switch and DHCP Scopes for '$NetworkName' network exists." -Activity
+
+    if ($WhatIf.IsPresent) {
+        Write-Log "[What-If] Will create/verify Hyper-V switch and DHCP scopes."
+        return $true
+    }
 
     $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName
     if (-not $switch) {

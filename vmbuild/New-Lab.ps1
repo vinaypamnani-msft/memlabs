@@ -264,7 +264,7 @@ try {
     }
 
     # Test if hyper-v switch exists, if not create it
-    $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
+    $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
     if (-not $worked) {
         return
     }
@@ -273,7 +273,7 @@ try {
         if ($virtualMachine.network -and $virtualMachine.network -ne $deployConfig.vmoptions.network) {
             $DC = get-list2 -deployConfig $deployConfig | where-object {$_.role -eq "DC"}
             $DNSServer = ($DC.subnet.Substring(0, $DC.subnet.LastIndexOf(".")) + ".1")
-            $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer
+            $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
             if (-not $worked) {
                 return
             }
@@ -283,7 +283,7 @@ try {
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
     #if ($containsIN) {
-    $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0"
+    $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -WhatIf:$WhatIf
     if ($containsIN -and (-not $worked)) {
         return
     }
@@ -293,7 +293,7 @@ try {
     if ($containsAO) {
         #$network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
         #$DNS = $network + ".1"
-        $worked = Add-SwitchAndDhcp -NetworkName "cluster" -NetworkSubnet "10.250.250.0"
+        $worked = Add-SwitchAndDhcp -NetworkName "cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
         if (-not $worked) {
             return
         }
@@ -325,7 +325,8 @@ try {
     $prepared = $true
     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
     if ($containsHidden) {
-        $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig
+        Write-Phase -Phase 0
+        $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf
     }
 
     # Define phases
