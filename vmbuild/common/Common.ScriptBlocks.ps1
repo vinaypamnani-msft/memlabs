@@ -865,7 +865,7 @@ $global:VM_Config = {
                     }
 
                     Start-Sleep -Seconds 3
-                } until ($allNodesReady -or $attempts -gt 100)
+                } until ($allNodesReady -or $attempts -ge 100)
             }
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
@@ -1160,7 +1160,7 @@ $global:VM_Config = {
         }
     }
     catch {
-        Write-Log "PSJOB [Phase $Phase]: $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
         Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
     }
 }

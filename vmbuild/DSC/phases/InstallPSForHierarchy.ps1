@@ -23,6 +23,11 @@ if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
     $sqlInstanceName = $SQLVM.sqlInstanceName
+    if ($SQLVM.AlwaysOnName) {
+        $installToAO = $true
+        $sqlServerName = $SQLVM.AlwaysOnName
+        $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
+    }
 }
 else {
     $sqlServerName = $env:COMPUTERNAME
@@ -120,6 +125,7 @@ JoinCEIP=0
 SQLServerName=%SQLMachineFQDN%
 DatabaseName=%SQLInstance%CM_%SiteCode%
 SQLSSBPort=4022
+AGBackupShare=
 
 [CloudConnectorOptions]
 CloudConnector=0
@@ -155,6 +161,14 @@ CCARSiteServer=%CASMachineFQDN%
     # $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CASMachineFQDN%', "$CSName.$DomainFullName")
     $cmini = $cmini.Replace('%REdistPath%', "$cmsourcepath\REdist")
+
+    if ($installToAO) {
+        $cmini = $cmini.Replace('AGBackupShare=', "AGBackupShare=$agBackupShare")
+    }
+
+    if ($deployConfig.parameters.SysCenterId) {
+        $cmini = $cmini.Replace('SysCenterId=', "SysCenterId=$($deployConfig.parameters.SysCenterId)")
+    }
 
     if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
         $cmini = $cmini.Replace('%SQLInstance%', "")

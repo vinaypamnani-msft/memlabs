@@ -198,6 +198,15 @@ function New-DeployConfig {
             ThisMachineName = $null
         }
 
+        $sysCenterId = "SysCenterId"
+        $sysCenterIdPath = "E:\$sysCenterId.txt"
+        if (Test-Path $sysCenterIdPath) {
+            $id = Get-Content $sysCenterIdPath -ErrorAction SilentlyContinue
+            if ($id) {
+                $params | Add-Member -MemberType NoteProperty -Name $sysCenterId -Value $id.Trim() -Force
+            }
+        }
+
         $deploy = [PSCustomObject]@{
             cmOptions       = $configObject.cmOptions
             vmOptions       = $configObject.vmOptions
@@ -281,6 +290,13 @@ function Add-ExistingVMsToDeployConfig {
             Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
             if ($primary.RemoteSQLVM) {
                 Add-ExistingVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
+                $remoteSQLVM = Get-VMObjectFromConfigOrExisting -deployConfig $config -vmName $primary.RemoteSQLVM
+                if ($remoteSQLVM.OtherNode) {
+                    Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.OtherNode -configToModify $config
+                }
+                if ($remoteSQLVM.fileServerVM) {
+                    Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.fileServerVM -configToModify $config
+                }
             }
         }
     }
@@ -314,29 +330,30 @@ function Add-ExistingVMToDeployConfig {
     }
 
     $newVMObject = [PSCustomObject]@{
-        vmName = $vmName
-        role   = $existingVM.role
         hidden = $hidden
     }
 
-    if ($existingVM.siteCode) {
-        $newVMObject | Add-Member -MemberType NoteProperty -Name "siteCode" -Value $existingVM.siteCode -Force
+    $vmNote = Get-VMNote -VMName $vmName
+    $propsToExclude = @(
+        "LastKnownIP",
+        "inProgress",
+        "success",
+        "deployedOS",
+        "domain",
+        "network",
+        "prefix",
+        "memLabsDeployVersion",
+        "memLabsVersion",
+        "adminName",
+        "lastUpdate"
+    )
+    foreach ($prop in $vmNote.PSObject.Properties) {
+        if ($prop.Name -in $propsToExclude) {
+            continue
+        }
+        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
     }
-    if ($existingVM.parentSiteCode) {
-        $newVMObject | Add-Member -MemberType NoteProperty -Name "parentSiteCode" -Value $existingVM.parentSiteCode -Force
-    }
-    if ($existingVM.SQLInstanceName) {
-        $newVMObject | Add-Member -MemberType NoteProperty -Name "SQLInstanceName" -Value $existingVM.SQLInstanceName -Force
-    }
-    if ($existingVM.SQLVersion) {
-        $newVMObject | Add-Member -MemberType NoteProperty -Name "SQLVersion" -Value $existingVM.SQLVersion -Force
-    }
-    if ($existingVM.SQLInstanceDir) {
-        $newVMObject | Add-Member -MemberType NoteProperty -Name "SQLInstanceDir" -Value $existingVM.SQLInstanceDir -Force
-    }
-    if ($existingVM.RemoteSQLVM) {
-        $newVMObject | Add-Member -MemberType NoteProperty -Name "RemoteSQLVM" -Value $existingVM.RemoteSQLVM -Force
-    }
+
     $configToModify.virtualMachines += $newVMObject
 }
 

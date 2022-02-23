@@ -46,7 +46,7 @@ function Start-Phase {
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
-        Write-Log "Attempting to remove existing DNS Records"
+        Write-Log "[Phase $Phase] Attempting to remove existing DNS Records"
         foreach ($item in $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) } ) {
             if ($existingDC) {
                 Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
@@ -57,12 +57,12 @@ function Start-Phase {
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
-        Write-Log "`n Phase $Phase Not Applicable. Skipping."
+        Write-Log "`n [Phase $Phase] Not Applicable. Skipping."
         return $true
     }
 
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs
-    Write-Log "`n$($result.Success) [Phase $Phase] jobs completed successfully; $($result.Warning) warnings, $($result.Failed) failures."
+    Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures."
 
     if ($result.Failed -gt 0) {
         return $false
@@ -131,7 +131,7 @@ function Start-PhaseJobs {
         Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
 
         if ($WhatIf) {
-            Write-Log "Will start a [Phase $Phase] job for VM $($currentItem.vmName)"
+            Write-Log "[Phase $Phase] Will start a job for VM $($currentItem.vmName)"
             continue
         }
 
@@ -141,24 +141,24 @@ function Start-PhaseJobs {
             # Create/Prepare VM
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
-                Write-Log "Failed to create [Phase $Phase] job for VM $($currentItem.vmName). $Err" -Failure
+                Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
         }
         else {
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
-                Write-Log "Failed to create [Phase $Phase] job for VM $($currentItem.vmName). $Err" -Failure
+                Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
             }
         }
 
         if ($Err.Count -ne 0) {
-            Write-Log "Failed to start [Phase $Phase] job for VM $($currentItem.vmName). $Err" -Failure
+            Write-Log "[Phase $Phase] Failed to start job for VM $($currentItem.vmName). $Err" -Failure
             $job_created_no++
         }
         else {
-            Write-Log "Created [Phase $Phase] job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
+            Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
             $jobs += $job
             $job_created_yes++
         }
@@ -173,10 +173,10 @@ function Start-PhaseJobs {
     }
 
     if ($job_created_no -eq 0) {
-        Write-Log "Created [$job_created_yes jobs] for [Phase $Phase]. Waiting for jobs."
+        Write-Log "[Phase $Phase] Created $job_created_yes jobs. Waiting for jobs."
     }
     else {
-        Write-Log "Created [$job_created_yes jobs] for [Phase $Phase]. Failed to create $job_created_no jobs."
+        Write-Log "[Phase $Phase] Created $job_created_yes jobs. Failed to create $job_created_no jobs."
     }
 
     return $return
@@ -220,8 +220,8 @@ function Wait-Phase {
             if ($FailRetry -gt 30) {
                 $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
                 $jobJson = $job | convertTo-Json -depth 5
-                Write-Log "Job failed: $jobJson" -LogOnly
-                Write-RedX "Job failed: $jobOutput" -ForegroundColor Red
+                Write-Log "[Phase $Phase] Job failed: $jobJson" -LogOnly
+                Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red
                 Write-Progress -Id $job.Id -Activity $job.Name -Completed
                 $jobs.Remove($job)
 
@@ -236,7 +236,7 @@ function Wait-Phase {
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
             if (-not $jobOutput) {
                 $jobName = $job | Select-Object -ExpandProperty Name
-                Write-RedX "Job $jobName completed with no output" -ForegroundColor Red
+                Write-RedX "[Phase $Phase] Job $jobName completed with no output" -ForegroundColor Red
                 $jobJson = $job | ConvertTo-Json -Depth 5
                 write-log -LogOnly $jobJson
                 $return.Failed++
@@ -289,7 +289,7 @@ function Get-ConfigurationData {
 
     $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     if (-not $netbiosName) {
-        write-Log -Failure "Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
+        write-Log -Failure "[Phase $Phase] Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
         return
     }
 
