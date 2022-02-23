@@ -3688,6 +3688,26 @@ function Get-NetworkForVM {
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
         }
+        "Primary" {
+            if ($currentNetwork -in $SiteServers.network) {
+                Write-host "$CurrentNetwork is in $($SiteServers.network)"
+
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
+            }
+        }
+        "CAS" {
+            if ($currentNetwork -in $SiteServers.network) {
+                Write-host "$CurrentNetwork is in $($SiteServers.network)"
+
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
+            }
+        }
+        "PassiveSite"{
+            $SS = Get-SiteServerForSiteCode -siteCode $vm.SiteCode -deployConfig $ConfigToModify -type VM
+            if ($ss.network -ne $currentNetwork) {
+                return $ss.Network
+            }
+        }
     }
 
     return $null
@@ -3802,6 +3822,10 @@ function Add-NewVMForRole {
             if ($existingPrimaryVM) {
                 $existingPrimaryVM | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $newSiteCode -Force
             }
+            $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+            if ($network) {
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+            }
         }
         "Primary" {
             $existingCAS = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
@@ -3826,6 +3850,10 @@ function Add-NewVMForRole {
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
+            $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+            if ($network) {
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+            }
 
         }
         "Secondary" {
@@ -3851,6 +3879,10 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+            if ($network) {
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+            }
         }
         "WorkgroupMember" {}
         "InternetClient" {}
@@ -4105,8 +4137,8 @@ function Select-VirtualMachines {
                     $existingPassive = @()
                     $existingSS = @()
 
-                    $existingPassive = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
-                    $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+                    $existingPassive += Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
+                    $existingSS += Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
 
                     $exisitingPassive += $global:config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
                     $existingSS += $global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
