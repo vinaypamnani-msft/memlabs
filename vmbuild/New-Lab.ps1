@@ -291,8 +291,6 @@ try {
 
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
     if ($containsAO) {
-        #$network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
-        #$DNS = $network + ".1"
         $worked = Add-SwitchAndDhcp -NetworkName "cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
         if (-not $worked) {
             return

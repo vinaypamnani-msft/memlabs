@@ -1218,7 +1218,7 @@ function Get-NewSiteCode {
     $usedSiteCodes = @()
     $usedSiteCodes += (get-list -type VM -domain $Domain | Where-Object { $_.SiteCode }).SiteCode
     if ($ConfigToCheck.VirtualMachines) {
-        $usedSiteCodes += ($ConfigToCheck.VirtualMachines | Where-Object {$_.SiteCode}).Sitecode
+        $usedSiteCodes += ($ConfigToCheck.VirtualMachines | Where-Object { $_.SiteCode }).Sitecode
     }
 
     if ($Role -eq "CAS") {

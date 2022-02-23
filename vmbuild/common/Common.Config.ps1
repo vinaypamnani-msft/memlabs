@@ -1738,6 +1738,7 @@ Function Show-Summary {
         }
     },
     @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
+    @{Label = "Network"; Expression = { $_.Network } },
     @{Label = "SQL"; Expression = {
             if ($null -ne $_.SqlVersion) {
                 $_.SqlVersion
