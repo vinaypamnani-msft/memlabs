@@ -246,14 +246,12 @@ if ($mpCount -eq 0) {
 # exit if rerunning DSC to add passive site
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
-if ($null -ne "$($ThisVm.thisParams.PassiveNode)") {
-    Write-DscStatus "Skip Client Push since we're adding Passive site server"
-    return
-}
+
 
 $bgs = $ThisVM.thisParams.sitesAndNetworks
-
+$bgsCount = $bgs.count
 # Create BGs
+Write-DscStatus "Create $bgsCount Boundary Groups"
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     $siteStatus = Get-CMSite -SiteCode $bgsitecode
     if ($siteStatus.Status -eq 1) {
@@ -273,7 +271,7 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
             }
         }
         catch {
-            Write-DscStatus "Failed to create BG '$bgsitecode'. Error: $_"
+            Write-DscStatus "Failed to create Boundary Group '$bgsitecode'. Error: $_"
         }
     }
     else {
@@ -283,6 +281,7 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
 }
 
 # Create Boundaries for each subnet and add to BG
+Write-DscStatus "Create Boundaries for each subnet and add to BG"
 foreach ($bg in $bgs) {
     $exists = Get-CMBoundary -BoundaryName $bg.Subnet
     if ($exists) {
@@ -291,7 +290,7 @@ foreach ($bg in $bgs) {
             Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
         }
         catch {
-            Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to BG '$($bg.SiteCode)'. Error: $_"
+            Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
         }
     }
     else {
@@ -303,7 +302,7 @@ foreach ($bg in $bgs) {
                 Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
             }
             catch {
-                Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to BG '$($bg.SiteCode)'. Error: $_"
+                Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
             }
         }
         catch {
@@ -335,6 +334,12 @@ Write-DscStatus "Invoking AD system discovery"
 Start-Sleep -Seconds 5
 Invoke-CMSystemDiscovery
 Start-Sleep -Seconds 5
+
+if ($ThisVm.thisParams.PassiveNode) {
+    Write-DscStatus "Skip Client Push since we're adding Passive site server"
+    $pushClients = $false
+    #return
+}
 
 # Push Clients
 #==============
