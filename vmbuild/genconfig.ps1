@@ -2034,9 +2034,9 @@ function Select-ExistingSubnets {
             $SiteServerRole = $true
             foreach ($subnet in $subnetList) {
                 # If a subnet has a Primary or a CAS in it.. we can not add either.
-                $existingRolePri = Get-ExistingForSubnet -Subnet $subnet -Role Primary
-                $existingRoleCAS = Get-ExistingForSubnet -Subnet $subnet -Role CAS
-                $existingRoleSec = Get-ExistingForSubnet -Subnet $subnet -Role Secondary
+                $existingRolePri = Get-ExistingForNetwork -Network $subnet -Role Primary
+                $existingRoleCAS = Get-ExistingForNetwork -Network $subnet -Role CAS
+                $existingRoleSec = Get-ExistingForNetwork -Network $subnet -Role Secondary
                 if ($null -eq $existingRolePri -and $null -eq $existingRoleCAS -and $null -eq $existingRoleSec) {
                     $subnetListNew += $subnet
                 }

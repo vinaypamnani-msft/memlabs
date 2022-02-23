@@ -647,10 +647,10 @@ function Get-ExistingSiteServer {
     }
 }
 
-function Get-ExistingForSubnet {
+function Get-ExistingForNetwork {
     param(
-        [Parameter(Mandatory = $true, HelpMessage = "Subnet")]
-        [string]$Subnet,
+        [Parameter(Mandatory = $true, HelpMessage = "Network")]
+        [string]$Network,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
         [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember", "Secondary")]
         [string]$Role
@@ -659,7 +659,7 @@ function Get-ExistingForSubnet {
     try {
 
         $existingValue = @()
-        $vmList = Get-List -Type VM | Where-Object { $_.Subnet -eq $Subnet }
+        $vmList = Get-List -Type VM | Where-Object { $_.network -eq $Network }
         foreach ($vm in $vmList) {
             if ($vm.role) {
                 if ($vm.Role.ToLowerInvariant() -eq $Role.ToLowerInvariant()) {
