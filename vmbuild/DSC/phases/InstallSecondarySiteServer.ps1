@@ -89,6 +89,7 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
     $psDriveFailcount++
     if ($psDriveFailcount -gt 20) {
         Write-DscStatus "Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log"
+        $installFailure = $true
         return
     }
     Write-DscStatus "Retry in 10s to Set PS Drive" -NoLog
@@ -113,7 +114,8 @@ foreach ($SecondaryVM in $SecondaryVMs) {
     if ($exists) {
         Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName). Exiting."
         Start-Sleep -Seconds 5 # Force sleep for status to update on host.
-        return
+        $installFailure = $true
+        continue
     }
 
     $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
@@ -158,7 +160,8 @@ foreach ($SecondaryVM in $SecondaryVMs) {
         catch {
             $_ | Out-File $global:StatusLog -Append
             Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_" -Failure
-            return
+            $installFailure = $true
+            continue
         }
     }
 
