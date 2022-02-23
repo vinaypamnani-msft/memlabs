@@ -959,18 +959,32 @@ function Get-ValidSubnets {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
-        [object] $configToCheck = $global:config
+        [object] $configToCheck = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [bool] $AllowExisting = $true
+
     )
+
+
+    $usedSubnets = @()
+    $usedSubnets += (Get-SubnetList).subnet
+
+    if (-not $AllowExisting) {
+        $usedSubnets += $configToCheck.vmOptions.network
+        foreach ($vm in $configToCheck.VirtualMachines) {
+            if ($vm.network) {
+                $usedSubnets += $vm.network
+            }
+        }
+    }
 
     $subnetlist = @()
     for ($i = 1; $i -lt 254; $i++) {
         $newSubnet = "192.168." + $i + ".0"
         $found = $false
-        foreach ($subnet in (Get-SubnetList)) {
-            if ($subnet.Subnet -eq $newSubnet) {
-                $found = $true
-                break
-            }
+        if ($usedSubnets -contains $newSubnet) {
+            $found = $true
+            continue
         }
         if (-not $found) {
             $subnetlist += $newSubnet
@@ -985,11 +999,9 @@ function Get-ValidSubnets {
     for ($i = 1; $i -lt 254; $i++) {
         $newSubnet = "172.16." + $i + ".0"
         $found = $false
-        foreach ($subnet in (Get-SubnetList)) {
-            if ($subnet.Subnet -eq $newSubnet) {
-                $found = $true
-                break
-            }
+        if ($usedSubnets -contains $newSubnet) {
+            $found = $true
+            continue
         }
         if (-not $found) {
             $subnetlist += $newSubnet
@@ -1003,11 +1015,9 @@ function Get-ValidSubnets {
     for ($i = 1; $i -lt 254; $i++) {
         $newSubnet = "10.0." + $i + ".0"
         $found = $false
-        foreach ($subnet in (Get-SubnetList)) {
-            if ($subnet.Subnet -eq $newSubnet) {
-                $found = $true
-                break
-            }
+        if ($usedSubnets -contains $newSubnet) {
+            $found = $true
+            continue
         }
         if (-not $found) {
             $subnetlist += $newSubnet
@@ -1123,7 +1133,7 @@ function Get-NewMachineName {
 
     if (($role -eq "Primary") -or ($role -eq "CAS") -or ($role -eq "PassiveSite") -or ($role -eq "Secondary")) {
         if ([String]::IsNullOrWhiteSpace($SiteCode)) {
-            $newSiteCode = Get-NewSiteCode $Domain -Role $Role
+            $newSiteCode = Get-NewSiteCode $Domain -Role $Role -ConfigToCheck $ConfigToCheck
         }
         else {
             $newSiteCode = $SiteCode
@@ -1200,31 +1210,44 @@ function Get-NewSiteCode {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [String] $Domain,
         [Parameter(Mandatory = $true, HelpMessage = "Role of the machine CAS/Primary")]
-        [String] $Role
+        [String] $Role,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
+        [Object] $ConfigToCheck = $global:config
     )
 
+    $usedSiteCodes = @()
+    $usedSiteCodes += (get-list -type VM -domain $Domain | Where-Object { $_.SiteCode }).SiteCode
+    if ($ConfigToCheck.VirtualMachines) {
+        $usedSiteCodes += ($ConfigToCheck.VirtualMachines | Where-Object {$_.SiteCode}).Sitecode
+    }
+
     if ($Role -eq "CAS") {
-        $NumberOfCAS = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
-        #     if ($NumberOfCAS -eq 0) {
-        #         return "CAS"
-        #     }
-        #else {
-        return "CS" + ($NumberOfCAS + 1)
-        #}
+        $siteCodePrefix = "CS"
+        $siteCodePrefix2 = "C"
     }
     if ($role -eq "Primary") {
-        $NumberOfPrimaries = (Get-ExistingForDomain -DomainName $Domain -Role Primary | Measure-Object).Count
-        #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
-
-        return "PS" + ($NumberOfPrimaries + 1)
+        $siteCodePrefix = "PS"
+        $siteCodePrefix2 = "P"
     }
 
     if ($role -eq "Secondary") {
-        $NumberOfSecondaries = (Get-ExistingForDomain -DomainName $Domain -Role Secondary | Measure-Object).Count
-        #$NumberOfCas = (Get-ExistingForDomain -DomainName $Domain -Role CAS | Measure-Object).Count
-
-        return "SS" + ($NumberOfSecondaries + 1)
+        $siteCodePrefix = "SS"
+        $siteCodePrefix2 = "S"
     }
+
+    for ($i = 1; $i -lt 10; $i++) {
+        if ($i -ge 10) {
+            $desiredSiteCode = $siteCodePrefix2 + $i
+        }
+        else {
+            $desiredSiteCode = $siteCodePrefix + $i
+        }
+        if ($desiredSiteCode -in $usedSiteCodes) {
+            continue
+        }
+        return $desiredSiteCode
+    }
+
 }
 
 function Get-ValidDomainNames {
@@ -1923,15 +1946,20 @@ function Select-Subnet {
     Show-SubnetNote
 
     if ($configToCheck.virtualMachines.role -contains "DC") {
-        $subnetlist = Get-ValidSubnets
+        if ($CurrentNetworkIsValid) {
+            $subnetlist = Get-ValidSubnets
+        }
+        else {
+            $subnetlist = Get-ValidSubnets -ConfigToCheck $configToCheck -AllowExisting:$false
+        }
         $customOptions = @{ "C" = "Custom Subnet" }
         $network = $null
         if ($CurrentNetworkIsValid) {
             $current = $configToCheck.vmOptions.network
         }
-        else{
-            $subnetList = $subnetList | where-object {$_ -ne $configToCheck.vmOptions.network}
-            $current =  $subnetlist[0]
+        else {
+            $subnetList = $subnetList | where-object { $_ -ne $configToCheck.vmOptions.network }
+            $current = $subnetlist[0]
         }
         while (-not $network) {
             $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue $current
@@ -3712,7 +3740,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
             $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
+            $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine.Memory = "12GB"
             $virtualMachine.virtualProcs = 8
@@ -3740,7 +3768,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
             $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
+            $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine.Memory = "12GB"
             $virtualMachine.virtualProcs = 8
@@ -3752,13 +3780,13 @@ function Add-NewVMForRole {
             $virtualMachine.memory = "4GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
             $virtualMachine.operatingSystem = $OperatingSystem
-            $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName
+            $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            if ($configToModify.virtualMachines.role -contains "CAS" -or $configToModify.virtualMachines.role -contains "Primary" -or $configToModify.virtualMachines.role -contains "Secondary"){
-                $network  = Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
+            if ($configToModify.virtualMachines.role -contains "CAS" -or $configToModify.virtualMachines.role -contains "Primary" -or $configToModify.virtualMachines.role -contains "Secondary") {
+                $network = Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
             }
         }

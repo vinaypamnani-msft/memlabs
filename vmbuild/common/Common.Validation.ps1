@@ -965,14 +965,14 @@ function Test-Configuration {
 
         $SecondaryVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
 
-        if (Test-SingleRole -VM $SecondaryVMs -ReturnObject $return) {
+       #if (Test-SingleRole -VM $SecondaryVMs -ReturnObject $return) {
 
             # Prep for multi-subnet, but blocked right now by Test-SingleRole
             foreach ($SECVM in $SecondaryVMs) {
                 Test-ValidRoleSiteServer -VM $SECVM -ConfigObject $deployConfig -ReturnObject $return
             }
 
-        }
+        #}
 
     }
 
