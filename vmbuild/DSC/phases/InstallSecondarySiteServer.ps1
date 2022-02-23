@@ -3,6 +3,51 @@ param(
     [string]$LogPath
 )
 
+
+function Install-MP {
+    param (
+        [string]
+        $ServerFQDN,
+        [string]
+        $ServerSiteCode
+    )
+
+    $i = 0
+    $installFailure = $false
+    $MPFQDN = $ServerFQDN
+
+    do {
+
+        $i++
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
+        if (-not $SystemServer) {
+            Write-DscStatus "Creating new CM Site System server on $MPFQDN"
+            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 15
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
+        }
+
+        $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
+        if (-not $mpinstalled) {
+            Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
+            Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-DscStatus "MP Role detected on $MPFQDN"
+            $mpinstalled = $true
+        }
+
+        if ($i -gt 10) {
+            Write-DscStatus "No Progress after $i tries, Giving up."
+            $installFailure = $true
+        }
+
+        Start-Sleep -Seconds 10
+
+    } until ($mpinstalled -or $installFailure)
+}
+
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
@@ -56,166 +101,123 @@ Set-Location "$($SiteCode):\" @initParams
 
 # Get info for Secondary Site Server
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
-$SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
-$secondaryFQDN = $SecondaryVM.vmName + "." + $DomainFullName
-$secondarySiteCode = $SecondaryVM.siteCode
-$parentSiteCode = $SecondaryVM.parentSiteCode
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$SecondaryVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
+foreach ($SecondaryVM in $SecondaryVMs) {
+    $secondaryFQDN = $SecondaryVM.vmName + "." + $DomainFullName
+    $secondarySiteCode = $SecondaryVM.siteCode
+    $parentSiteCode = $SecondaryVM.parentSiteCode
 
-# Check if Passive already exists
-$exists = Get-CMSiteRole -SiteSystemServerName $secondaryFQDN -RoleName "SMS Site Server"
-if ($exists) {
-    Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName). Exiting."
-    Start-Sleep -Seconds 5 # Force sleep for status to update on host.
-    return
-}
+    # Check if Passive already exists
+    $exists = Get-CMSiteRole -SiteSystemServerName $secondaryFQDN -RoleName "SMS Site Server"
+    if ($exists) {
+        Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName). Exiting."
+        Start-Sleep -Seconds 5 # Force sleep for status to update on host.
+        return
+    }
 
-function Install-MP {
-    param (
-        [string]
-        $ServerFQDN,
-        [string]
-        $ServerSiteCode
-    )
+    $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
+    if ($SecondaryVM.cmInstallDir) {
+        $SMSInstallDir = $SecondaryVM.cmInstallDir
+    }
+
+    $mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
+    if ($mpCount -eq 0) {
+        Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName"
+        Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
+    }
+
+    Write-DscStatus "Adding secondary site server on $secondaryFQDN with Site Code $secondarySiteCode, attached to $parentSiteCode"
+    try {
+
+        $Date = [DateTime]::Now.AddYears(30)
+        $FileSetting = New-CMInstallationSourceFile -CopyFromParentSiteServer
+        $SQLSetting = New-CMSqlServerSetting -CopySqlServerExpressOnSecondarySite -SqlServerServiceBrokerPort 4022 -SqlServerServicePort 1433
+        if ($SecondaryVM.sqlVersion) {
+            if ($SecondaryVM.sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
+                $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -SqlServerServiceBrokerPort 4022
+            }
+            else {
+                $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -InstanceName $SecondaryVM.sqlInstanceName -SqlServerServiceBrokerPort 4022
+            }
+        }
+
+        New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
+            -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
+            -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
+    }
+    catch {
+        try {
+            $_ | Out-File $global:StatusLog -Append
+            Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_. Retrying once."
+            Start-Sleep -Seconds 30
+            New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
+                -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
+                -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
+        }
+        catch {
+            $_ | Out-File $global:StatusLog -Append
+            Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_" -Failure
+            return
+        }
+    }
 
     $i = 0
-    $installFailure = $false
-    $MPFQDN = $ServerFQDN
+    $installed = $false
 
     do {
 
         $i++
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
-        if (-not $SystemServer) {
-            Write-DscStatus "Creating new CM Site System server on $MPFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
+        $siteStatus = Get-CMSite -SiteCode $secondarySiteCode
+
+        if ($siteStatus -and $siteStatus.Status -eq 1) {
+            $installed = $true
         }
 
-        $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
-        if (-not $mpinstalled) {
-            Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
-            Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 60
-        }
-        else {
-            Write-DscStatus "MP Role detected on $MPFQDN"
-            $mpinstalled = $true
-        }
-
-        if ($i -gt 10) {
-            Write-DscStatus "No Progress after $i tries, Giving up."
+        if ($siteStatus -and $siteStatus.Status -eq 3) {
+            Write-DscStatus "Adding secondary site server failed. Review details in ConfigMgr Console." -Failure
             $installFailure = $true
         }
 
-        Start-Sleep -Seconds 10
+        if ($siteStatus -and $siteStatus.Status -eq 2) {
+            $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
 
-    } until ($mpinstalled -or $installFailure)
-}
+            if ($state) {
+                Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds 30
+            }
 
-$SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
-if ($SecondaryVM.cmInstallDir) {
-    $SMSInstallDir = $SecondaryVM.cmInstallDir
-}
+            if (-not $state) {
+                if (0 -eq $i % 20) {
+                    Write-DscStatus "No Progress reported after $($i * 30) seconds, restarting SMS_Executive"
+                    Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 60
+                }
 
-$mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
-if ($mpCount -eq 0) {
-    Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName"
-    Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
-}
-
-Write-DscStatus "Adding secondary site server on $secondaryFQDN with Site Code $secondarySiteCode, attached to $parentSiteCode"
-try {
-
-    $Date = [DateTime]::Now.AddYears(30)
-    $FileSetting = New-CMInstallationSourceFile -CopyFromParentSiteServer
-    $SQLSetting = New-CMSqlServerSetting -CopySqlServerExpressOnSecondarySite -SqlServerServiceBrokerPort 4022 -SqlServerServicePort 1433
-    if ($SecondaryVM.sqlVersion) {
-        if ($SecondaryVM.sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
-            $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -SqlServerServiceBrokerPort 4022
+                if ($i -gt 61) {
+                    Write-DscStatus "No Progress for adding secondary site reported after $($i * 30) seconds, giving up." -Failure
+                    $installFailure = $true
+                }
+            }
         }
-        else {
-            $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -InstanceName $SecondaryVM.sqlInstanceName -SqlServerServiceBrokerPort 4022
-        }
-    }
 
-    New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
-        -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-        -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
-}
-catch {
-    try {
-        $_ | Out-File $global:StatusLog -Append
-        Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_. Retrying once."
         Start-Sleep -Seconds 30
-        New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
-        -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-        -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
-    }
-    catch {
-        $_ | Out-File $global:StatusLog -Append
-        Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_" -Failure
-        return
-    }
-}
 
-$i = 0
-$installed = $false
+    } until ($installed -or $installFailure)
 
-do {
-
-    $i++
-    $siteStatus = Get-CMSite -SiteCode $secondarySiteCode
-
-    if ($siteStatus -and $siteStatus.Status -eq 1) {
-        $installed = $true
-    }
-
-    if ($siteStatus -and $siteStatus.Status -eq 3) {
-        Write-DscStatus "Adding secondary site server failed. Review details in ConfigMgr Console." -Failure
-        $installFailure = $true
-    }
-
-    if ($siteStatus -and $siteStatus.Status -eq 2) {
-        $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
-
-        if ($state) {
-            Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds 30
-        }
-
-        if (-not $state) {
-            if (0 -eq $i % 20) {
-                Write-DscStatus "No Progress reported after $($i * 30) seconds, restarting SMS_Executive"
-                Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 60
-            }
-
-            if ($i -gt 61) {
-                Write-DscStatus "No Progress for adding secondary site reported after $($i * 30) seconds, giving up." -Failure
-                $installFailure = $true
-            }
-        }
-    }
-
-    Start-Sleep -Seconds 30
-
-} until ($installed -or $installFailure)
-
-if ($installed) {
-    # Wait for replication ready
-    $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
-    Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'"
-    Start-Sleep -Seconds 30
-    while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 ) {
-        Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 60
-        Start-Sleep -Seconds 60
+    if ($installed) {
+        # Wait for replication ready
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
+        Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'"
+        Start-Sleep -Seconds 30
+        while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 ) {
+            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 60
+            Start-Sleep -Seconds 60
+            $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
+        }
+
+        Write-DscStatus "Secondary installation complete. Replication link is 'Active'."
     }
-
-    Write-DscStatus "Secondary installation complete. Replication link is 'Active'."
 }
-
 # Update actions file
 $Configuration.InstallSecondary.Status = 'Completed'
 $Configuration.InstallSecondary.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
