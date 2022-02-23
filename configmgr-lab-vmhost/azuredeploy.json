@@ -73,8 +73,6 @@
     "location": "[resourceGroup().location]",
     "aadLoginExtensionName": "AADLoginForWindows",
     "windowsAdminCenterPort": "6516",
-    "dscFunction": "Host.ps1\\Host",
-    "dscScript": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/DSC/Host.zip')]",
     "hostScript": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/scripts/configureHostTask.ps1')]",
     "hostScriptParam": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/scripts/configureHost.ps1')]"
   },
@@ -382,30 +380,13 @@
     },
     {
       "type": "Microsoft.Compute/virtualMachines/extensions",
-      "apiVersion": "2019-12-01",
-      "name": "[concat( parameters('virtualMachineName'), '/configureHyperV' )]",
-      "location": "[variables('location')]",
-      "dependsOn": [
-        "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
-      ],
-      "properties": {
-        "publisher": "Microsoft.Powershell",
-        "type": "DSC",
-        "typeHandlerVersion": "2.21",
-        "autoUpgradeMinorVersion": true,
-        "settings": {
-          "modulesUrl": "[variables('dscScript')]",
-          "configurationFunction": "[variables('dscFunction')]"
-        }
-      }
-    },
-    {
-      "type": "Microsoft.Compute/virtualMachines/extensions",
       "apiVersion": "2020-12-01",
       "name": "[concat( parameters('virtualMachineName'), '/configureHost' )]",
       "location": "[variables('location')]",
       "dependsOn": [
-          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/configureHyperV' )]"
+          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AdminCenter' )]",
+          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AzurePolicyforWindows' )]",
+          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AADLoginForWindows' )]"
       ],
       "properties": {
           "publisher": "Microsoft.Compute",
