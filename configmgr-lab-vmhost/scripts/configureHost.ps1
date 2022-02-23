@@ -6,11 +6,23 @@ function Write-HostLog {
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $Text" | Out-File -Append $logFile
 }
 
-Write-HostLog "START"
+# Define vars
+$poolName = "StoragePool1"
+$virtualdiskName = "VirtualDisk1"
+$repoName = "memlabs"
+$repoUrl = "https://github.com/vinaypamnani-msft/$repoName"
 
-Write-HostLog "Installing required roles"
-Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
-Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
+# # Check if repository has already been cloned, if so, script has run before and there's no need to re-run
+# $vol = Get-Volume -ErrorAction SilentlyContinue -filesystemlabel $virtualdiskName
+# if ($vol) {
+#     $repoDestination = "$($vol.DriveLetter):\$repoName"
+#     if (Test-Path $repoDestination) {
+#         Write-HostLog "SKIPPED. Running at startup, but repo already cloned at $repoDestination."
+#         return
+#     }
+# }
+
+Write-HostLog "START"
 
 # Change CD-ROM Drive Letter
 $cd = Get-WmiObject -Class Win32_volume -Filter 'DriveType=5'
@@ -34,7 +46,6 @@ if ($cd) {
 }
 
 # Create Storage Pool
-$poolName = "StoragePool1"
 Write-HostLog "Creating Storage Pool named $poolName"
 $pool = Get-StoragePool -ErrorAction SilentlyContinue -FriendlyName $poolName
 if (-not $pool) {
@@ -54,7 +65,6 @@ else {
 
 
 # Create Virtual Disks
-$virtualdiskName = "VirtualDisk1"
 Write-HostLog "Creating Virtual Disk named $virtualDiskName"
 $vdisk = Get-VirtualDisk -ErrorAction SilentlyContinue -friendlyName $virtualdiskName
 if (-not $vdisk) {
@@ -114,30 +124,27 @@ $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";
 
 # Clone the repo
 Write-HostLog "Cloning the repository"
-$repoName = "memlabs"
-$repoUrl = "https://github.com/vinaypamnani-msft/$repoName"
-$destination = "$($vol.DriveLetter):\$repoName"
-if (-not (Test-Path $destination)) {
-    git clone $repoUrl $destination --quiet
+if (-not (Test-Path $repoDestination)) {
+    git clone $repoUrl $repoDestination --quiet
 }
 else {
-    Write-HostLog "$repoName already cloned to $destination. Run git pull instead of trying to clone again."
+    Write-HostLog "$repoName already cloned to $repoDestination. Run git pull instead of trying to clone again."
 }
 
 # Run Customize-WindowsSettings.ps1 on host VM
-$scriptPath = Join-Path $destination "vmbuild\baseimagestaging\filesToInject\staging\Customize-WindowsSettings.ps1"
-if (Test-Path $scriptPath) {
-    if (Test-Path "C:\staging\Customization.txt") {
-        Write-HostLog "SKIPPED executing $scriptPath since it's been executed before. See C:\staging\Customization.txt"
-    }
-    else {
-        Write-HostLog "Executing $scriptPath. See C:\staging\Customization.txt"
-        & $scriptPath
-    }
-}
-else {
-    Write-HostLog "SKIPPED executing $scriptPath since it was not found."
-}
+# $scriptPath = Join-Path $repoDestination "vmbuild\baseimagestaging\filesToInject\staging\Customize-WindowsSettings.ps1"
+# if (Test-Path $scriptPath) {
+#     if (Test-Path "C:\staging\Customization.txt") {
+#         Write-HostLog "SKIPPED executing $scriptPath since it's been executed before. See C:\staging\Customization.txt"
+#     }
+#     else {
+#         Write-HostLog "Executing $scriptPath. See C:\staging\Customization.txt"
+#         & $scriptPath
+#     }
+# }
+# else {
+#     Write-HostLog "SKIPPED executing $scriptPath since it was not found."
+# }
 
 # Create External Hyper-V Switch
 $Network = "External"
