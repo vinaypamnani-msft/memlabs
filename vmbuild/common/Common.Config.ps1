@@ -220,7 +220,26 @@ function New-DeployConfig {
         Write-Exception -ExceptionInfo $_ -AdditionalInfo ($configObject | ConvertTo-Json)
     }
 }
-
+#Add-ExistingVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
+function Add-RemoteSQLVMToDeployConfig{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Existing VM Name")]
+        [string] $vmName,
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $configToModify,
+        [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
+        [bool] $hidden = $true
+    )
+    Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
+    $remoteSQLVM = Get-VMObjectFromConfigOrExisting -deployConfig $configToModify -vmName $vmName
+    if ($remoteSQLVM.OtherNode) {
+        Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.OtherNode -configToModify $configToModify -hidden:$hidden
+    }
+    if ($remoteSQLVM.fileServerVM) {
+        Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.fileServerVM -configToModify $configToModify -hidden:$hidden
+    }
+}
 function Add-ExistingVMsToDeployConfig {
     [CmdletBinding()]
     param (
@@ -243,7 +262,7 @@ function Add-ExistingVMsToDeployConfig {
             if ($CAS) {
                 Add-ExistingVMToDeployConfig -vmName $CAS.vmName -configToModify $config
                 if ($CAS.RemoteSQLVM) {
-                    Add-ExistingVMToDeployConfig -vmName $CAS.RemoteSQLVM -configToModify $config
+                    Add-RemoteSQLVMToDeployConfig -vmName $CAS.RemoteSQLVM -configToModify $config
                 }
             }
         }
@@ -264,6 +283,7 @@ function Add-ExistingVMsToDeployConfig {
         if ($SQLAOVM.FileServerVM) {
             Add-ExistingVMToDeployConfig -vmName $SQLAOVM.FileServerVM -configToModify $config
         }
+        Add-ExistingVMsToDeployConfig -vmName $SQLAOVM.OtherNode -configToModify $config
     }
 
 
@@ -275,7 +295,7 @@ function Add-ExistingVMsToDeployConfig {
             $ActiveNodeVM = Get-VMObjectFromConfigOrExisting -deployConfig $config -vmName $ActiveNode
             if ($ActiveNodeVM) {
                 if ($ActiveNodeVM.remoteSQLVM) {
-                    Add-ExistingVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
+                    Add-RemoteSQLVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
                 }
                 Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $config
             }
@@ -289,14 +309,7 @@ function Add-ExistingVMsToDeployConfig {
         if ($primary) {
             Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
             if ($primary.RemoteSQLVM) {
-                Add-ExistingVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
-                $remoteSQLVM = Get-VMObjectFromConfigOrExisting -deployConfig $config -vmName $primary.RemoteSQLVM
-                if ($remoteSQLVM.OtherNode) {
-                    Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.OtherNode -configToModify $config
-                }
-                if ($remoteSQLVM.fileServerVM) {
-                    Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.fileServerVM -configToModify $config
-                }
+                Add-RemoteSQLVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
             }
         }
     }
