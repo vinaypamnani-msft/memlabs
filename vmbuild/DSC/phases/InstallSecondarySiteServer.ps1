@@ -54,6 +54,22 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 # Set the current location to be the site code.
 Set-Location "$($SiteCode):\" @initParams
 
+# Get info for Secondary Site Server
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
+$SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
+$secondaryFQDN = $SecondaryVM.vmName + "." + $DomainFullName
+$secondarySiteCode = $SecondaryVM.siteCode
+$parentSiteCode = $SecondaryVM.parentSiteCode
+
+# Check if Passive already exists
+$exists = Get-CMSiteRole -SiteSystemServerName $secondaryFQDN -RoleName "SMS Site Server"
+if ($exists) {
+    Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName). Exiting."
+    Start-Sleep -Seconds 5 # Force sleep for status to update on host.
+    return
+}
+
 function Install-MP {
     param (
         [string]
@@ -97,16 +113,6 @@ function Install-MP {
 
     } until ($mpinstalled -or $installFailure)
 }
-
-# Get info for Passive Site Server
-$ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
-$SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
-
-# Add Passive site
-$secondaryFQDN = $SecondaryVM.vmName + "." + $DomainFullName
-$secondarySiteCode = $SecondaryVM.siteCode
-$parentSiteCode = $SecondaryVM.parentSiteCode
 
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
 if ($SecondaryVM.cmInstallDir) {

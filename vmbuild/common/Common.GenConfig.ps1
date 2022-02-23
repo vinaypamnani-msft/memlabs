@@ -64,7 +64,7 @@ function ConvertTo-DeployConfigEx {
             $thisParams | Add-Member -MemberType NoteProperty -Name "vmNetwork" -Value $deployConfig.vmOptions.network -Force
         }
 
-        $SQLAO = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and -not $_.hidden }
+        $SQLAO = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" }
 
 
         switch ($thisVM.role) {
