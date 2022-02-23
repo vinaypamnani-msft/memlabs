@@ -2,6 +2,14 @@ param(
     $ScriptUrl
 )
 
+# Logging
+$logFile = "$env:windir\temp\configureHost.log"
+
+function Write-HostLog {
+    param ($Text)
+    "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $Text" | Out-File -Append $logFile
+}
+
 function Register-ConfigureHostTask
 {
     $taskName = "configureHost"
@@ -18,8 +26,9 @@ function Register-ConfigureHostTask
     $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
 
     # Trigger
-    $taskStartTime = [datetime]::Now.AddMinutes(1)
-    $trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $triggerExpireTime = [datetime]::Now.AddMinutes(60)
+    $trigger.EndBoundary = $triggerExpireTime.ToString('s')
 
     # Principal
     $principal = New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
@@ -32,17 +41,30 @@ function Register-ConfigureHostTask
 
     if ($null -ne $task)
     {
-        Write-Output "Created scheduled task: '$($task.ToString())'."
+        Write-HostLog "Created scheduled task: '$($task.ToString())'."
     }
     else
     {
-        Write-Output "Failed to create scheduled task."
+        Write-HostLog "Failed to create scheduled task."
     }
 }
 
+Write-HostLog "[ConfigureHostTask] START"
+
 # Download script
 $filePath = "$env:windir\temp\configureHost.ps1"
+Write-HostLog "Downloading configureHost.ps1 to $filePath"
 Start-BitsTransfer -Source $ScriptUrl -Destination $filePath -Priority Foreground -ErrorAction Stop
 
+Write-HostLog "Installing required roles"
+Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
+Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
+
 # Register scheduled task
+Write-HostLog "Registering scheduled task"
 Register-ConfigureHostTask
+
+Write-HostLog "Restarting the machine."
+& shutdown /r /t 30 /c "MEMLABS needs to restart the Azure Host VM. The machine will restart in less than a minute."
+
+Write-HostLog "[ConfigureHostTask] END"
