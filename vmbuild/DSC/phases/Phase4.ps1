@@ -270,6 +270,30 @@ configuration Phase4
         }
 
         $nextDepend = '[SqlScript]InstallBackupSolution'
+
+
+        $AgentJobSet = "C:\staging\DSC\SQLScripts\Index-AgentJob-Set.sql"
+        $AgentJobTest = "C:\staging\DSC\SQLScripts\Index-AgentJob-Test.sql"
+        $AgentJobGet = "C:\staging\DSC\SQLScripts\Index-AgentJob-Get.sql"
+
+
+        WriteStatus InstallAgentJob {
+            DependsOn = $nextDepend
+            Status    = "Installing Index Agent Job"
+        }
+
+        SqlScript 'InstallAgentJob' {
+            ServerName       = $thisvm.VmName
+            InstanceName     = $thisVM.sqlInstanceName
+            #Credential       = $Admincreds
+            SetFilePath      = $AgentJobSet
+            TestFilePath     = $AgentJobTest
+            GetFilePath      = $AgentJobGet
+            DisableVariables = $true
+            DependsOn        =  $nextDepend
+        }
+        $nextDepend = '[SqlScript]InstallAgentJob'
+
         WriteStatus Complete {
             DependsOn = $nextDepend
             Status    = "Complete!"
