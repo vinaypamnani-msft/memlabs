@@ -125,8 +125,8 @@ function ConvertTo-DeployConfigEx {
                 }
                 if ($thisVM.hidden) {
                     $DC = get-list -type VM -DomainName $deployConfig.vmOptions.DomainName | Where-Object { $_.Role -eq "DC" }
-                    $addr = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
-                    $gateway = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".200"
+                    $addr = $dc.Network.Substring(0, $dc.Network.LastIndexOf(".")) + ".1"
+                    $gateway = $dc.Network.Substring(0, $dc.Network.LastIndexOf(".")) + ".200"
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DCDefaultGateway" -Value $gateway  -Force
                 }

@@ -272,7 +272,7 @@ try {
     foreach ($virtualMachine in $deployConfig.VirtualMachines) {
         if ($virtualMachine.network -and $virtualMachine.network -ne $deployConfig.vmoptions.network) {
             $DC = get-list2 -deployConfig $deployConfig | where-object {$_.role -eq "DC"}
-            $DNSServer = ($DC.subnet.Substring(0, $DC.subnet.LastIndexOf(".")) + ".1")
+            $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
             $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
             if (-not $worked) {
                 return
