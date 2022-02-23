@@ -123,12 +123,18 @@ Write-HostLog "Reloading PATH"
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
 # Clone the repo
-Write-HostLog "Cloning the repository"
-if (-not (Test-Path $repoDestination)) {
-    git clone $repoUrl $repoDestination --quiet
+if ($vol) {
+    $repoDestination = "$($vol.DriveLetter):\$repoName"
+    Write-HostLog "Cloning the repository"
+    if (-not (Test-Path $repoDestination)) {
+        git clone $repoUrl $repoDestination --quiet
+    }
+    else {
+        Write-HostLog "$repoName already cloned to $repoDestination. Run git pull instead of trying to clone again."
+    }
 }
 else {
-    Write-HostLog "$repoName already cloned to $repoDestination. Run git pull instead of trying to clone again."
+    Write-HostLog "SKIPPED cloning the repository, volume not found."
 }
 
 # Run Customize-WindowsSettings.ps1 on host VM
