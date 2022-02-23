@@ -1943,7 +1943,6 @@ function Select-Subnet {
         [Parameter(Mandatory = $false, HelpMessage = "CurrentNetworkIsValid")]
         [bool] $CurrentNetworkIsValid = $true
     )
-    Show-SubnetNote
 
     if ($configToCheck.virtualMachines.role -contains "DC") {
         if ($CurrentNetworkIsValid) {
@@ -1983,6 +1982,7 @@ function Show-SubnetNote {
     $noteColor = "cyan"
     $textColor = "gray"
     $highlightColor = "darkyellow"
+    #Get-PSCallStack | out-host
     Write-Host
     write-host -ForegroundColor $noteColor "Note: " -NoNewline
     write-host -foregroundcolor $textColor "You can only have 1 " -NoNewLine
@@ -2024,13 +2024,14 @@ function Select-ExistingSubnets {
         }
     }
     while ($valid -eq $false) {
-
+        $validEntryFound = $false
         $customOptions = @{ "N" = "add New Subnet to domain" }
         $subnetList = @()
         $subnetList += Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Sort-Object | Get-Unique
 
         $subnetListNew = @()
         if ($Role -eq "Primary" -or $Role -eq "CAS" -or $Role -eq "Secondary") {
+            $SiteServerRole = $true
             foreach ($subnet in $subnetList) {
                 # If a subnet has a Primary or a CAS in it.. we can not add either.
                 $existingRolePri = Get-ExistingForSubnet -Subnet $subnet -Role Primary
@@ -2043,20 +2044,31 @@ function Select-ExistingSubnets {
         }
         else {
             $subnetListNew = $subnetList
+            $validEntryFound = $true
         }
 
         $subnetListModified = @()
+
         foreach ($sb in $subnetListNew) {
             if ($sb -eq "Internet" -or ($sb -eq "cluster")) {
                 continue
             }
-            $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode -and ($_.Role -eq "Primary" -or $_.Role -eq "CAS" -or $_.Role -eq "Secondary") } | Group-Object -Property Subnet | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
-            if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
-                $subnetListModified += "$sb"
+            if ($configToCheck) {
+                $SiteCodes = get-list2 -deployConfig $ConfigToCheck | Where-Object { $null -ne $_.SiteCode -and ($_.Role -eq "Primary" -or $_.Role -eq "CAS" -or $_.Role -eq "Secondary") } | Group-Object -Property network | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
             }
             else {
-                $subnetListModified += "$sb ($SiteCodes)"
+                $SiteCodes = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode -and ($_.Role -eq "Primary" -or $_.Role -eq "CAS" -or $_.Role -eq "Secondary") } | Group-Object -Property network | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } } | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
             }
+            if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
+                $subnetListModified += "$sb"
+                $validEntryFound = $true
+            }
+            else {
+                $subnetListModified += "$sb $($SiteCodes -join ",")"
+            }
+        }
+        if (-not $validEntryFound) {
+            $subnetListModified = @()
         }
         Show-SubnetNote
 
@@ -2085,8 +2097,12 @@ function Select-ExistingSubnets {
             write-Verbose "Sanitized response '$response'"
 
             if ($response.ToLowerInvariant() -eq "n") {
-
-                $subnetlist = Get-ValidSubnets
+                if ($SiteServerRole -and $ConfigToCheck) {
+                    $subnetList = Get-ValidSubnets -configToCheck $ConfigToCheck -AllowExisting:$false
+                }
+                else {
+                    $subnetlist = Get-ValidSubnets
+                }
                 $customOptions = @{ "C" = "Custom Subnet" }
                 $network = $null
                 while (-not $network) {
@@ -2109,6 +2125,7 @@ function Select-ExistingSubnets {
     Write-Verbose "[Select-ExistingSubnets] Subnet response = $response"
     return [string]$response
 }
+
 
 function New-UserConfig {
     [CmdletBinding()]
@@ -3641,6 +3658,41 @@ function get-VMString {
     return "$name"
 }
 
+
+
+function Get-NetworkForVM {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "VM Object")]
+        [object] $vm,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config
+    )
+
+
+
+
+    $currentNetwork = $ConfigToModify.vmOptions.Network
+    if ($vm.Network) {
+        $currentNetwork = $vm.Network
+    }
+    $SiteServers = get-list2 -deployConfig $ConfigToModify  | Where-Object { ($_.Role -eq "Primary" -or $_.Role -eq "Secondary") -and $_.vmName -ne $vm.vmName }
+    #$SiteServers | convertto-Json | Out-Host
+    #$ConfigToModify  |convertto-Json | Out-Host
+    #$Secondaries = get-list2 -deployConfig $ConfigToModify  | Where-Object {$_.Role -eq "Secondary"}
+    switch ($vm.role) {
+        "Secondary" {
+            if ($currentNetwork -in $SiteServers.network) {
+                Write-host "$CurrentNetwork is in $($SiteServers.network)"
+
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
+            }
+        }
+    }
+
+    return $null
+}
+
 function Add-NewVMForRole {
     [CmdletBinding()]
     param (
@@ -3785,10 +3837,12 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            if ($configToModify.virtualMachines.role -contains "CAS" -or $configToModify.virtualMachines.role -contains "Primary" -or $configToModify.virtualMachines.role -contains "Secondary") {
-                $network = Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
+
+            $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+            if ($network) {
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
             }
+
         }
         "PassiveSite" {
             $virtualMachine.memory = "4GB"

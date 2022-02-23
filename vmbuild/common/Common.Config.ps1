@@ -1289,12 +1289,16 @@ function Get-List {
                 $vm | Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
             }
             $domain = $DeployConfigClone.vmoptions.domainName
-            $subnet = $DeployConfigClone.vmoptions.network
+            $network = $DeployConfigClone.vmoptions.network
+
             $prefix = $DeployConfigClone.vmoptions.prefix
             foreach ($vm in $DeployConfigClone.virtualMachines) {
                 $found = $false
                 if ($vm.hidden) {
                     continue
+                }
+                if ($vm.network){
+                    $network = $vm.network
                 }
                 foreach ($vm2 in $return) {
                     if ($vm2.vmName -eq $vm.vmName) {
@@ -1306,7 +1310,7 @@ function Get-List {
                     continue
                 }
                 $newVM = $vm
-                $newVM | Add-Member -MemberType NoteProperty -Name "subnet" -Value $subnet -Force
+                $newVM | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
                 $newVM | Add-Member -MemberType NoteProperty -Name "Domain" -Value $domain -Force
                 $newVM | Add-Member -MemberType NoteProperty -Name "prefix" -Value $prefix -Force
                 $newVM | Add-Member -MemberType NoteProperty -Name "source" -Value "config" -Force
