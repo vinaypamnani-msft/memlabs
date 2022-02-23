@@ -108,13 +108,13 @@ foreach ($SecondaryVM in $SecondaryVMs) {
     $secondaryFQDN = $SecondaryVM.vmName + "." + $DomainFullName
     $secondarySiteCode = $SecondaryVM.siteCode
     $parentSiteCode = $SecondaryVM.parentSiteCode
-
+    $installed = $false
     # Check if Passive already exists
     $exists = Get-CMSiteRole -SiteSystemServerName $secondaryFQDN -RoleName "SMS Site Server"
     if ($exists) {
-        Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName). Exiting."
+        Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName)."
         Start-Sleep -Seconds 5 # Force sleep for status to update on host.
-        $installFailure = $true
+        $installed = $true
         continue
     }
 
@@ -166,7 +166,7 @@ foreach ($SecondaryVM in $SecondaryVMs) {
     }
 
     $i = 0
-    $installed = $false
+
 
     do {
 
