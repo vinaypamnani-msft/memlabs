@@ -507,12 +507,12 @@ function Get-ValidPRISiteCodes {
     $existingSiteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode
 
     if ($Config) {
-        # $containsPS = $Config.virtualMachines.role -contains "Primary"
-        # if ($containsPS) {
-        #     $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
-        #     # We dont support multiple subnets per config yet
-        #     # $existingSiteCodes += $PSVM.siteCode
-        # }
+         $containsPS = $Config.virtualMachines.role -contains "Primary"
+         if ($containsPS) {
+             $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
+             # We dont support multiple subnets per config yet
+              $existingSiteCodes += $PSVM.siteCode
+         }
     }
 
     return ($existingSiteCodes | Select-Object -Unique)

@@ -858,6 +858,11 @@ function New-VmNote {
 
         $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
 
+        $network = $DeployConfig.vmOptions.network
+        if ($ThisVm.network) {
+            $network = $ThisVm.network
+        }
+
         $vmNote = [PSCustomObject]@{
             inProgress           = $InProgress
             success              = $Successful
@@ -865,7 +870,7 @@ function New-VmNote {
             deployedOS           = $ThisVM.operatingSystem
             domain               = $DeployConfig.vmOptions.domainName
             adminName            = $DeployConfig.vmOptions.adminName
-            network              = $DeployConfig.vmOptions.network
+            network              = $network
             prefix               = $DeployConfig.vmOptions.prefix
             memLabsDeployVersion = $Common.MemLabsVersion
         }
@@ -2041,6 +2046,7 @@ function Set-SupportedOptions {
         "DC",
         "Primary",
         "CAS",
+        "Secondary",
         "PassiveSite",
         "FileServer",
         "DPMP",

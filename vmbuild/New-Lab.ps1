@@ -267,6 +267,17 @@ try {
         return
     }
 
+    foreach ($virtualMachine in $deployConfig.VirtualMachines) {
+        if ($virtualMachine.network -and $virtualMachine.network -ne $deployConfig.vmoptions.network) {
+            $DC = get-list2 -deployConfig $deployConfig | where-object {$_.role -eq "DC"}
+            $DNSServer = ($DC.subnet.Substring(0, $DC.subnet.LastIndexOf(".")) + ".1")
+            $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer
+            if (-not $worked) {
+                return
+            }
+        }
+    }
+
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
     #if ($containsIN) {

@@ -66,7 +66,6 @@ function ConvertTo-DeployConfigEx {
 
         $SQLAO = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and -not $_.hidden }
 
-
         switch ($thisVM.role) {
             "FileServer" {
                 if ($SQLAO) {

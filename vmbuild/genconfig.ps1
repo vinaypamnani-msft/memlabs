@@ -956,6 +956,11 @@ function Select-MainMenu {
 }
 
 function Get-ValidSubnets {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $configToCheck = $global:config
+    )
 
     $subnetlist = @()
     for ($i = 1; $i -lt 254; $i++) {
@@ -1911,7 +1916,9 @@ function Select-Subnet {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
-        [object] $configToCheck = $global:config
+        [object] $configToCheck = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentNetworkIsValid")]
+        [bool] $CurrentNetworkIsValid = $true
     )
     Show-SubnetNote
 
@@ -1919,8 +1926,15 @@ function Select-Subnet {
         $subnetlist = Get-ValidSubnets
         $customOptions = @{ "C" = "Custom Subnet" }
         $network = $null
+        if ($CurrentNetworkIsValid) {
+            $current = $configToCheck.vmOptions.network
+        }
+        else{
+            $subnetList = $subnetList | where-object {$_ -ne $configToCheck.vmOptions.network}
+            $current =  $subnetlist[0]
+        }
         while (-not $network) {
-            $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue ($configToCheck.vmOptions.network)
+            $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue $current
             if ($network.ToLowerInvariant() -eq "c") {
                 $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
             }
@@ -3743,6 +3757,10 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            if ($configToModify.virtualMachines.role -contains "CAS" -or $configToModify.virtualMachines.role -contains "Primary" -or $configToModify.virtualMachines.role -contains "Secondary"){
+                $network  = Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+            }
         }
         "PassiveSite" {
             $virtualMachine.memory = "4GB"

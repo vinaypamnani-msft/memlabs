@@ -33,7 +33,12 @@ $global:VM_Create = {
             $network = "Internet"
         }
         else {
-            $network = $deployConfig.vmOptions.network
+            if ($currentItem.network) {
+                $network = $currentItem.network
+            }
+            else {
+                $network = $deployConfig.vmOptions.network
+            }
         }
 
         # Set domain name, depending on whether we need to create new VM or use existing one
@@ -145,18 +150,22 @@ $global:VM_Create = {
                 $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
                 #$vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop
                 if ($vmnet) {
-                    $network = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf("."))
+                    $realnetwork = $deployConfig.vmOptions.network
+                    if ($currentItem.network) {
+                        $realnetwork = $currentItem.network
+                    }
+                    $network = $realnetwork.Substring(0, $realnetwork.LastIndexOf("."))
                     if ($currentItem.role -eq "CAS") {
                         Remove-DhcpServerv4Reservation -IPAddress ($network + ".5") -ErrorAction SilentlyContinue
-                        Add-DhcpServerv4Reservation -ScopeId $deployConfig.vmOptions.network -IPAddress ($network + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($network + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop
                     }
                     if ($currentItem.role -eq "Primary") {
                         Remove-DhcpServerv4Reservation -IPAddress ($network + ".10") -ErrorAction SilentlyContinue
-                        Add-DhcpServerv4Reservation -ScopeId $deployConfig.vmOptions.network -IPAddress ($network + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($network + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop
                     }
                     if ($currentItem.role -eq "Secondary") {
                         Remove-DhcpServerv4Reservation -IPAddress ($network + ".15") -ErrorAction SilentlyContinue
-                        Add-DhcpServerv4Reservation -ScopeId $deployConfig.vmOptions.network -IPAddress ($network + ".15") -ClientId $vmnet.MacAddress -Description "Reservation for Secondary" -ErrorAction Stop
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($network + ".15") -ClientId $vmnet.MacAddress -Description "Reservation for Secondary" -ErrorAction Stop
                     }
                 }
             }
@@ -548,7 +557,7 @@ $global:VM_Config = {
                         $Configuration.ScriptWorkFlow.StartTime = ''
                         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
                     }
-                    else{
+                    else {
                         Remove-Item $ConfigurationFile -Force -Confirm:$false -ErrorAction Stop
                     }
                 }
@@ -980,12 +989,19 @@ $global:VM_Config = {
                         }
                     }
                 }
-
+                $stopwatch = [System.Diagnostics.Stopwatch]::new()
+                $Stopwatch.Start()
                 $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
+                $Stopwatch.Stop()
                 Start-Sleep -Seconds 3
 
                 if ($status.ScriptBlockFailed) {
-                    $failedHeartbeats++
+                    if ($stopWatch.elapsed.TotalSeconds -gt 10) {
+                        $failedHeartbeats = $failedHeartbeats + ([math]::Round($stopwatch.elapsed.TotalSeconds / 5, 0))
+                    }
+                    else {
+                        $failedHeartbeats++
+                    }
                     # Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
                     if ($failedHeartbeats -gt 10) {
                         try {
