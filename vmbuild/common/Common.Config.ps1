@@ -198,6 +198,15 @@ function New-DeployConfig {
             ThisMachineName = $null
         }
 
+        $sysCenterId = "SysCenterId"
+        $sysCenterIdPath = "E:\$sysCenterId.txt"
+        if (Test-Path $sysCenterIdPath) {
+            $id = Get-Content $sysCenterIdPath -ErrorAction SilentlyContinue
+            if ($id) {
+                $params | Add-Member -MemberType NoteProperty -Name $sysCenterId -Value $id.Trim() -Force
+            }
+        }
+
         $deploy = [PSCustomObject]@{
             cmOptions       = $configObject.cmOptions
             vmOptions       = $configObject.vmOptions

@@ -70,40 +70,12 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Setting the Client Push Account"
     Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
     Start-Sleep -Seconds 5
+
+    # Restart services to make sure push account is acknowledged by CCM
+    Write-DscStatus "Restarting services"
+    Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+    Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
 }
-
-
-# Enable EHTTP, some components are still installing and they reset it to Disabled.
-# Keep setting it every 30 seconds, 10 times and bail...
-$attempts = 0
-if ($ThisVM.hidden) {
-    # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
-    $attempts = 10
-}
-
-$enabled = $false
-Write-DscStatus "Enabling e-HTTP"
-do {
-    $attempts++
-    Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
-    Start-Sleep 30
-    $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
-    $enabled = ($prop.Value -band 1024) -eq 1024
-    Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled" -RetrySeconds 10
-} until ($attempts -ge 30)
-
-if (-not $enabled) {
-    Write-DscStatus "e-HTTP not enabled after trying $attempts times, skip."
-}
-else {
-    Write-DscStatus "e-HTTP was enabled."
-}
-
-# Restart services to make sure push account is acknowledged by CCM
-Write-DscStatus "Restarting services"
-Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
-
 
 function Install-DP {
     param (

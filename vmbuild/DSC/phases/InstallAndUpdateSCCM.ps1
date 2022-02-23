@@ -28,6 +28,11 @@ if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
     $sqlInstanceName = $SQLVM.sqlInstanceName
+    if ($SQLVM.AlwaysOnName) {
+        $installToAO = $true
+        $sqlServerName = $SQLVM.AlwaysOnName
+        $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
+    }
 }
 else {
     $sqlServerName = $env:COMPUTERNAME
@@ -104,6 +109,7 @@ JoinCEIP=0
 SQLServerName=%SQLMachineFQDN%
 DatabaseName=%SQLInstance%CM_%SiteCode%
 SQLSSBPort=4022
+AGBackupShare=
 
 [CloudConnectorOptions]
 CloudConnector=1
@@ -133,6 +139,14 @@ SysCenterId=
     # $cmini = $cmini.Replace('%SQLDataFilePath%', $sqlinfo.DefaultData)
     # $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CM%', $CM)
+
+    if ($installToAO) {
+        $cmini = $cmini.Replace('AGBackupShare=', "AGBackupShare=$agBackupShare")
+    }
+
+    if ($deployConfig.parameters.SysCenterId) {
+        $cmini = $cmini.Replace('SysCenterId=', "SysCenterId=$($deployConfig.parameters.SysCenterId)")
+    }
 
     # Remove items not needed on CAS
     if ($installAction -eq "InstallCAS") {
@@ -617,7 +631,7 @@ else {
 
         # Wait for replication ready
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
-        Write-DscStatus "Primary installation complete. Waiting for replication link to be 'Active'"
+        Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
         Start-Sleep -Seconds 30
         while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
             Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 60
