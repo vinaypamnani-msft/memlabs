@@ -617,7 +617,7 @@ function Get-ExistingSiteServer {
                         SiteCode = $vm.siteCode
                         Domain   = $vm.domain
                         State    = $vm.State
-                        Subnet   = $vm.Subnet
+                        Network   = $vm.Network
                     }
                     $existingValue += $so
                 }
@@ -630,7 +630,7 @@ function Get-ExistingSiteServer {
                         SiteCode = $vm.siteCode
                         Domain   = $vm.domain
                         State    = $vm.State
-                        Subnet   = $vm.Subnet
+                        Network   = $vm.Network
                     }
                     $existingValue += $so
                 }

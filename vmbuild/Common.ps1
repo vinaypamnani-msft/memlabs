@@ -1282,11 +1282,11 @@ function New-VirtualMachine {
 
 
         $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
-        if (-not ($dc.subnet)) {
+        if (-not ($dc.network)) {
             $dns = $DeployConfig.vmOptions.network.Substring(0, $DeployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
         }
         else {
-            $dns = $dc.subnet.Substring(0, $dc.subnet.LastIndexOf(".")) + ".1"
+            $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
         }
 
 
