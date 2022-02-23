@@ -56,20 +56,24 @@ Configuration Phase6
             $waitOnDependency += "[DelegateControl]Add$server"
         }
 
-        WriteStatus WaitExtSchema {
-            DependsOn = $waitOnDependency
-            Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
-        }
+        $nextDepend = $waitOnDependency
 
-        WaitForExtendSchemaFile WaitForExtendSchemaFile {
-            MachineName = if ($CSName) { $CSName } else { $PSName }
-            ExtFolder   = $CM
-            Ensure      = "Present"
-            DependsOn   = "[WriteStatus]WaitExtSchema"
+        if ($CSName -or $PSName) {
+            WriteStatus WaitExtSchema {
+                DependsOn = $nextDepend
+                Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
+            }
+
+            WaitForExtendSchemaFile WaitForExtendSchemaFile {
+                MachineName = if ($CSName) { $CSName } else { $PSName }
+                ExtFolder   = $CM
+                Ensure      = "Present"
+                DependsOn   = "[WriteStatus]WaitExtSchema"
+            }
         }
 
         WriteStatus Complete {
-            DependsOn = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
+            DependsOn = $nextDepend
             Status    = "Complete!"
         }
     }

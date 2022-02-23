@@ -19,8 +19,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
+    [ValidateRange(2, 6)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
+    [ValidateRange(2, 6)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf

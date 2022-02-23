@@ -253,7 +253,7 @@ Configuration Phase5
         }
 
         xClusterNetwork 'ChangeNetwork-192' {
-            Address              = $deployConfig.vmOptions.network
+            Address              = $thisVM.thisParams.vmNetwork
             AddressMask          = '255.255.255.0'
             Name                 = 'Domain Network'
             Role                 = '0'
@@ -282,6 +282,7 @@ Configuration Phase5
             Status    = "Waiting for '$($thisVM.fileServerVM)' to Complete"
             DependsOn = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
         }
+
         WaitForAny FileShareComplete {
             NodeName             = $thisVM.fileServerVM
             ResourceName         = "[WriteStatus]Complete"
@@ -632,7 +633,7 @@ Configuration Phase5
         }
 
         xClusterNetwork 'ChangeNetwork-192' {
-            Address              = $deployConfig.vmOptions.network
+            Address              = $Node1VM.thisParams.vmNetwork
             AddressMask          = '255.255.255.0'
             Name                 = 'Domain Network'
             Role                 = '0'
