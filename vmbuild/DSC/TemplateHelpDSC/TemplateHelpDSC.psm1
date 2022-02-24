@@ -2606,7 +2606,7 @@ class ADServicePrincipalName2 {
             if ($spnAccounts.SamAccountName -notcontains $this.Account) {
                 Write-Verbose -Message ("Adding service principal name '{0}' to account '{1}. (ADSPN0006)" -f $this.ServicePrincipalName, $this.Account)
 
-                Get-ADObject -Filter { SamAccountName -eq $Account } |
+                Get-ADObject -Filter { SamAccountName -eq $this.Account } |
                 Set-ADObject -Add @{
                     ServicePrincipalName = $this.ServicePrincipalName
                 }
