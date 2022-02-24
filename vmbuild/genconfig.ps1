@@ -3113,15 +3113,26 @@ function Get-AdditionalValidations {
                 if ($RemoteSQLVM.OtherNode) {
                     #This is SQLAO
                     $newSQLName = $($property.SiteCode) + "SQLAO1"
-                    $name2 = $($property.SiteCode) + "SQLAO2"
-                    $OtherNode = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $($RemoteSQLVM.OtherNode) }
-                    $OtherNode.vmName = $name2
-                    $RemoteSQLVM.OtherNode = $name2
-
-
                 }
-                $RemoteSQLVM.vmName = $newSQLName
-                $property.RemoteSQLVM = $newSQLName
+                $rename = $true
+                $response = Read-Host2 -Prompt "Rename $($property.RemoteSQLVM) to $($newSQLName)? (Y/n)" -HideHelp
+                if (-not [String]::IsNullOrWhiteSpace($response)) {
+                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                        $rename = $false
+                    }
+                }
+                if ($rename -eq $true) {
+
+
+                    if ($RemoteSQLVM.OtherNode) {
+                        $name2 = $($property.SiteCode) + "SQLAO2"
+                        $OtherNode = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $($RemoteSQLVM.OtherNode) }
+                        $OtherNode.vmName = $name2
+                        $RemoteSQLVM.OtherNode = $name2
+                    }
+                    $RemoteSQLVM.vmName = $newSQLName
+                    $property.RemoteSQLVM = $newSQLName
+                }
             }
             if ($($property.vmName) -ne $newName) {
                 $rename = $true
@@ -3725,8 +3736,7 @@ function Get-NetworkForVM {
     )
 
     $currentNetwork = $ConfigToModify.vmOptions.Network
-    if ($currentNetwork -eq "10.234.241.0")
-    {
+    if ($currentNetwork -eq "10.234.241.0") {
         return
     }
     if ($vm.Network) {
