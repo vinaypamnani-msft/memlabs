@@ -260,8 +260,14 @@ function New-RDCManFileFromHyperV {
     param(
         [string]$rdcmanfile,
         [bool]$OverWrite = $false,
-        [switch]$NoActivity
+        [switch]$NoActivity,
+        [switch]$WhatIf
     )
+
+    if ($WhatIf.IsPresent) {
+        Write-Log "[WhatIf] Will update MEMLabs.RDG file on Desktop, if needed."
+        return
+    }
 
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity:$Activity

@@ -1728,10 +1728,13 @@ Function Show-Summary {
         $availableMemory = Get-AvailableMemoryGB
         Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine"
     }
-    Write-GreenCheck "Domain Admin account: " -NoNewLine
-    Write-Host -ForegroundColor Green "$($deployConfig.vmOptions.adminName)" -NoNewline
-    Write-Host " Password: " -NoNewLine
-    Write-Host -ForegroundColor Green "$($Common.LocalAdmin.GetNetworkCredential().Password)"
+
+    if (-not $Common.DevBranch) {
+        Write-GreenCheck "Domain Admin account: " -NoNewLine
+        Write-Host -ForegroundColor Green "$($deployConfig.vmOptions.adminName)" -NoNewline
+        Write-Host " Password: " -NoNewLine
+        Write-Host -ForegroundColor Green "$($Common.LocalAdmin.GetNetworkCredential().Password)"
+    }
 
     $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,
     @{Label = "Procs"; Expression = { $_.virtualProcs } },
