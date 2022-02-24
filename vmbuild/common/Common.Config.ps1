@@ -39,7 +39,7 @@ function Get-UserConfiguration {
     }
     catch {
         $return.Message = "Get-UserConfiguration: Failed to load $configPath. $_"
-        Write-Log "$($_.ScriptStackTrace)" -LogOnly
+        Write-Log "Get-UserConfiguration Trace: $($_.ScriptStackTrace)" -LogOnly
         return $return
     }
 
@@ -221,7 +221,7 @@ function New-DeployConfig {
     }
 }
 #Add-ExistingVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
-function Add-RemoteSQLVMToDeployConfig{
+function Add-RemoteSQLVMToDeployConfig {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Existing VM Name")]
@@ -283,7 +283,9 @@ function Add-ExistingVMsToDeployConfig {
         if ($SQLAOVM.FileServerVM) {
             Add-ExistingVMToDeployConfig -vmName $SQLAOVM.FileServerVM -configToModify $config
         }
-        Add-ExistingVMsToDeployConfig -vmName $SQLAOVM.OtherNode -configToModify $config
+        if ($SQLAOVM.OtherNode) {
+            Add-ExistingVMToDeployConfig -vmName $SQLAOVM.OtherNode -configToModify $config
+        }
     }
 
 
@@ -537,12 +539,12 @@ function Get-ValidPRISiteCodes {
     $existingSiteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode
 
     if ($Config) {
-         $containsPS = $Config.virtualMachines.role -contains "Primary"
-         if ($containsPS) {
-             $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
-             # We dont support multiple subnets per config yet
-              $existingSiteCodes += $PSVM.siteCode
-         }
+        $containsPS = $Config.virtualMachines.role -contains "Primary"
+        if ($containsPS) {
+            $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
+            # We dont support multiple subnets per config yet
+            $existingSiteCodes += $PSVM.siteCode
+        }
     }
 
     return ($existingSiteCodes | Select-Object -Unique)
@@ -617,7 +619,7 @@ function Get-ExistingSiteServer {
                         SiteCode = $vm.siteCode
                         Domain   = $vm.domain
                         State    = $vm.State
-                        Network   = $vm.Network
+                        Network  = $vm.Network
                     }
                     $existingValue += $so
                 }
@@ -630,7 +632,7 @@ function Get-ExistingSiteServer {
                         SiteCode = $vm.siteCode
                         Domain   = $vm.domain
                         State    = $vm.State
-                        Network   = $vm.Network
+                        Network  = $vm.Network
                     }
                     $existingValue += $so
                 }
@@ -1297,7 +1299,7 @@ function Get-List {
                 if ($vm.hidden) {
                     continue
                 }
-                if ($vm.network){
+                if ($vm.network) {
                     $network = $vm.network
                 }
                 foreach ($vm2 in $return) {
