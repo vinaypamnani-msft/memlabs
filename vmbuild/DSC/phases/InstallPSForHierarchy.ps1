@@ -56,16 +56,16 @@ $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.js
 # Wait for ScriptWorkflow.json to exist on CAS
 Write-DscStatus "Waiting for $CSName to begin installation"
 while (!(Test-Path $CSConfigurationFile)) {
-    Write-DscStatus "Waiting for $CSName to begin installation" -RetrySeconds 60
-    Start-Sleep -Seconds 60
+    Write-DscStatus "Waiting for $CSName to begin installation" -RetrySeconds 30
+    Start-Sleep -Seconds 30
 }
 
 # Read CAS actions file, wait for install to finish
 Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr"
 $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
 while ($CSConfiguration.$("InstallSCCM").Status -ne "Completed") {
-    Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr" -NoLog -RetrySeconds 60
-    Start-Sleep -Seconds 60
+    Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr" -NoLog -RetrySeconds 30
+    Start-Sleep -Seconds 30
     $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
 }
 
@@ -74,8 +74,8 @@ if ($UpdateToLatest) {
     Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr"
     $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
     while ($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed") {
-        Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 60
-        Start-Sleep -Seconds 60
+        Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 30
+        Start-Sleep -Seconds 30
         $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
     }
 }
@@ -202,8 +202,8 @@ CCARSiteServer=%CASMachineFQDN%
     $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
     Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
     while ($CSConfiguration.$("PSReadytoUse").Status -ne "Completed") {
-        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 60
-        Start-Sleep -Seconds 60
+        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 30
+        Start-Sleep -Seconds 30
         $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
     }
 
