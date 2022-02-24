@@ -119,7 +119,7 @@ function Remove-Orphaned {
     }
 
     # Loop through vm's again (in case some were deleted above)
-    $vmNetworksInUse = Get-List -Type UniqueSubnet -SmartUpdate
+    $vmNetworksInUse = Get-List -Type UniqueSwitch -SmartUpdate
     $vmNetworksInUse2 = $vmNetworksInUse -replace "Internet", "172.31.250.0"
 
     Write-Log "Detecting orphaned DHCP Scopes" -Activity
@@ -192,7 +192,7 @@ function Remove-Domain {
 
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
     $vmsToDelete = Get-List -Type VM -DomainName $DomainName
-    $scopesToDelete = Get-List -Type UniqueSubnet -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
 
     if ($vmsToDelete) {
         foreach ($vm in $vmsToDelete) {
@@ -227,7 +227,7 @@ function Remove-All {
     )
 
     $vmsToDelete = Get-List -Type VM
-    $scopesToDelete = Get-List -Type UniqueSubnet -DomainName $DomainName
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName
 
     if ($vmsToDelete) {
         Write-Log "Removing ALL virtual machines" -Activity
