@@ -3343,7 +3343,7 @@ function Select-Options {
         if ($isVM) {
             $i++
             $fakeNetwork = $i
-            Write-Option $i "$($("network").PadRight($padding," "")) = <Default>"
+            Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
         }
 
         if ($null -ne $additionalOptions) {
