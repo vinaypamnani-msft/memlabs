@@ -1944,6 +1944,8 @@ function Select-Subnet {
         [bool] $CurrentNetworkIsValid = $true
     )
 
+
+    #Get-PSCallStack | out-host
     if ($configToCheck.virtualMachines.role -contains "DC") {
         if ($CurrentNetworkIsValid) {
             $subnetlist = Get-ValidSubnets
@@ -3330,7 +3332,7 @@ function Select-Options {
             if ($item -eq "network") {
                 $isVM = $false
             }
-            if ($item -eq "role" -and $value -eq "DC"){
+            if ($item -eq "role" -and $value -eq "DC") {
                 $isVM = $false
             }
             #$padding = 27 - ($i.ToString().Length)
@@ -3454,16 +3456,24 @@ function Select-Options {
                     continue MainLoop
                 }
                 "network" {
-                    $network = Select-Subnet
+                    if ($property.vmName) {
+                        $network = Get-NetworkForVM -vm $property
+                    }
+                    else {
+                        $network = Select-Subnet
+                    }
+
                     if ($network -eq $global:config.vmOptions.network) {
                         write-host -ForegroundColor Yellow "Not changing network as this is the default network."
                         continue MainLoop
                     }
-                    if ($fakeNetwork) {
-                        $property | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
-                    }
-                    else {
-                        $property.network = $network
+                    if ($network) {
+                        if ($fakeNetwork) {
+                            $property | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
+                        }
+                        else {
+                            $property.network = $network
+                        }
                     }
                     Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
@@ -3704,10 +3714,11 @@ function Get-NetworkForVM {
         [object] $ConfigToModify = $global:config
     )
 
-
-
-
     $currentNetwork = $ConfigToModify.vmOptions.Network
+    if ($currentNetwork -eq "10.234.241.0")
+    {
+        return
+    }
     if ($vm.Network) {
         $currentNetwork = $vm.Network
     }
@@ -3722,6 +3733,9 @@ function Get-NetworkForVM {
 
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
+            else {
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+            }
         }
         "Primary" {
             if ($currentNetwork -in $SiteServers.network) {
@@ -3729,12 +3743,20 @@ function Get-NetworkForVM {
 
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
+            else {
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+            }
         }
         "CAS" {
+            $SiteServers = get-list2 -deployConfig $ConfigToModify  | Where-Object { ($_.Role -eq "Primary" -or $_.Role -eq "Secondary" -or $_.Role -eq "CAS") -and $_.vmName -ne $vm.vmName }
+            $SiteServers = $SiteServers | Where-Object { -not ($_.Role -eq "Primary" -and $_.ParentSiteCode -eq $vm.SiteCode) }
             if ($currentNetwork -in $SiteServers.network) {
                 Write-host "$CurrentNetwork is in $($SiteServers.network)"
 
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
+            }
+            else {
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
             }
         }
         "PassiveSite" {
