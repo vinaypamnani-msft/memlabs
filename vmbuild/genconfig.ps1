@@ -895,7 +895,7 @@ function Select-MainMenu {
             "s" { return $false }
             "r" {
                 $c = Test-Configuration -InputObject $Global:Config
-                $global:DebugConfig = $c
+                $global:DebugConfig = $c.DeployConfig
                 write-Host 'Debug Config stored in $global:DebugConfig'
                 return $global:DebugConfig
             }
