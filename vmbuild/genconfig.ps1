@@ -907,7 +907,6 @@ function Select-MainMenu {
                 $config = Test-Configuration -InputObject $Global:Config
                 foreach ($currentItem in $config.deployConfig.virtualMachines) {
                     $deployConfigCopy = $config.deployConfig | ConvertTo-Json -Depth 5 | ConvertFrom-Json
-                    Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
                     $vm = $currentItem
                     $vm | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $deployConfigCopy.thisParams -Force
                     $returnArray.VMs += $vm

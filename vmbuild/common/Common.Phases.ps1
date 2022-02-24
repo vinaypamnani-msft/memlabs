@@ -131,7 +131,6 @@ function Start-PhaseJobs {
 
         $deployConfigCopy = ConvertTo-DeployConfigEx -deployConfig $deployConfig
         $deployConfigCopy.parameters.ThisMachineName = $currentItem.vmName
-        Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
 
         if ($WhatIf) {
             Write-Log "[Phase $Phase] Will start a job for VM $($currentItem.vmName)"

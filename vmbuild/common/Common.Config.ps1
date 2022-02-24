@@ -214,7 +214,8 @@ function New-DeployConfig {
             parameters      = $params
         }
 
-        return $deploy
+        $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deploy
+        return $deployConfigEx
     }
     catch {
         Write-Exception -ExceptionInfo $_ -AdditionalInfo ($configObject | ConvertTo-Json)
@@ -490,19 +491,6 @@ function Get-SQLAOConfig {
     }
 
     return $config
-}
-
-function Add-PerVMSettings {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Config to Modify")]
-        [object] $deployConfig,
-        [Parameter(Mandatory = $true, HelpMessage = "Current Item")]
-        [object] $thisVM
-    )
-    # This function is defunct. Please remove.
-    return
-
 }
 
 function Get-ValidCASSiteCodes {

@@ -69,7 +69,6 @@ try {
     $result = Test-Configuration -InputObject $userConfig.Config
     Add-ExistingVMsToDeployConfig -config $result.DeployConfig
     $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
-    Add-PerVMSettings -deployConfig $result.DeployConfig -thisVM $ThisVM
     $deployConfigCopy = ConvertTo-DeployConfigEx -deployConfig $result.DeployConfig
 
     # Dump config to file, for debugging
