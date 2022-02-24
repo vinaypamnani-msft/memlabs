@@ -3182,7 +3182,9 @@ function Get-SortedProperties {
 
     $Sorted = @()
     $members = $property | Get-Member -MemberType NoteProperty
-
+    if ($members.Name -contains "vmName") {
+        $sorted += "vmName"
+    }
     if ($members.Name -contains "domainName") {
         $sorted += "domainName"
     }
@@ -3199,9 +3201,7 @@ function Get-SortedProperties {
         $sorted += "basePath"
     }
 
-    if ($members.Name -contains "vmName") {
-        $sorted += "vmName"
-    }
+
     if ($members.Name -contains "role") {
         $sorted += "role"
     }
@@ -3319,13 +3319,29 @@ function Select-Options {
             return $null
         }
 
+        $isVM = $false
         # Get the Property Names and Values.. Present as Options.
         foreach ($item in (Get-SortedProperties $property)) {
             $i = $i + 1
             $value = $property."$($item)"
+            if ($item -eq "vmName") {
+                $isVM = $true
+            }
+            if ($item -eq "network") {
+                $isVM = $false
+            }
+            if ($item -eq "role" -and $value -eq "DC"){
+                $isVM = $false
+            }
             #$padding = 27 - ($i.ToString().Length)
             $padding = 26
             Write-Option $i "$($($item).PadRight($padding," "")) = $value"
+        }
+        $fakeNetwork = $null
+        if ($isVM) {
+            $i++
+            $fakeNetwork = $i
+            Write-Option $i "$($("network").PadRight($padding," "")) = <Default>"
         }
 
         if ($null -ne $additionalOptions) {
@@ -3373,16 +3389,26 @@ function Select-Options {
         }
         # We got the [1] Number pressed. Lets match that up to the actual value.
         $i = 0
+        $done = $false
         foreach ($item in (Get-SortedProperties $property)) {
 
+            if ($done) {
+                break
+            }
             $i = $i + 1
 
-            if (-not ($response -eq $i)) {
-                continue
+            if ($fakeNetwork -and $response -eq $fakeNetwork) {
+                $name = "network"
+                $done = $true
             }
+            else {
+                if (-not ($response -eq $i)) {
+                    continue
+                }
+                $value = $property."$($item)"
+                $name = $($item)
 
-            $value = $property."$($item)"
-            $name = $($item)
+            }
 
             switch ($name) {
                 "operatingSystem" {
@@ -3429,7 +3455,16 @@ function Select-Options {
                 }
                 "network" {
                     $network = Select-Subnet
-                    $property.network = $network
+                    if ($network -eq $global:config.vmOptions.network) {
+                        write-host -ForegroundColor Yellow "Not changing network as this is the default network."
+                        continue MainLoop
+                    }
+                    if ($fakeNetwork) {
+                        $property | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
+                    }
+                    else {
+                        $property.network = $network
+                    }
                     Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
                 }
@@ -3702,7 +3737,7 @@ function Get-NetworkForVM {
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
         }
-        "PassiveSite"{
+        "PassiveSite" {
             $SS = Get-SiteServerForSiteCode -siteCode $vm.SiteCode -deployConfig $ConfigToModify -type VM
             if ($ss.network -ne $currentNetwork) {
                 return $ss.Network
