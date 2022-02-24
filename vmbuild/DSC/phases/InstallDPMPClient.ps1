@@ -243,12 +243,10 @@ if ($mpCount -eq 0) {
     Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
 }
 
-# exit if rerunning DSC to add passive site
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
 
-
-$bgs = $ThisVM.thisParams.sitesAndNetworks
+$bgs = $ThisVM.thisParams.sitesAndNetworks | Where-Object { $_.SiteCode -in $ValidSiteCodes }
 $bgsCount = $bgs.count
 # Create BGs
 Write-DscStatus "Create $bgsCount Boundary Groups"
