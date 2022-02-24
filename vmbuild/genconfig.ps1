@@ -896,8 +896,7 @@ function Select-MainMenu {
             "r" {
                 $c = Test-Configuration -InputObject $Global:Config
                 $global:DebugConfig = $c
-                $global:DebugConfigEx = ConvertTo-DeployConfigEx -DeployConfig $c.DeployConfig
-                write-Host 'Debug Config stored in $global:DebugConfig and $global:DebugConfigEx'
+                write-Host 'Debug Config stored in $global:DebugConfig'
                 return $global:DebugConfig
             }
             "p" {
@@ -1982,7 +1981,7 @@ function Show-SubnetNote {
     $noteColor = "cyan"
     $textColor = "gray"
     $highlightColor = "darkyellow"
-    Get-PSCallStack | out-host
+    #Get-PSCallStack | out-host
     Write-Host
     write-host -ForegroundColor $noteColor "Note: " -NoNewline
     write-host -foregroundcolor $textColor "You can only have 1 " -NoNewLine
@@ -3730,7 +3729,9 @@ function Get-NetworkForVM {
         [Parameter(Mandatory = $true, HelpMessage = "VM Object")]
         [object] $vm,
         [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
-        [object] $ConfigToModify = $global:config
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "If a new network isnt needed, return null")]
+        [bool] $ReturnIfNotNeeded = $false
     )
 
     $currentNetwork = $ConfigToModify.vmOptions.Network
@@ -3752,7 +3753,9 @@ function Get-NetworkForVM {
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
             else {
-                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+                if (-not $ReturnIfNotNeeded) {
+                    return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+                }
             }
         }
         "Primary" {
@@ -3762,7 +3765,9 @@ function Get-NetworkForVM {
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
             else {
-                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+                if (-not $ReturnIfNotNeeded) {
+                    return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+                }
             }
         }
         "CAS" {
@@ -3774,7 +3779,9 @@ function Get-NetworkForVM {
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
             else {
-                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+                if (-not $ReturnIfNotNeeded) {
+                    return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+                }
             }
         }
         "PassiveSite" {
@@ -3784,7 +3791,10 @@ function Get-NetworkForVM {
             }
         }
         Default {
-            return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+            if (-not $ReturnIfNotNeeded) {
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
+
+            }
         }
     }
 
@@ -3901,7 +3911,7 @@ function Add-NewVMForRole {
                 $existingPrimaryVM | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $newSiteCode -Force
             }
             if (-not $test) {
-                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
                 }
@@ -3931,7 +3941,7 @@ function Add-NewVMForRole {
             $virtualMachine.operatingSystem = $OperatingSystem
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
             if (-not $test) {
-                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
                 }
@@ -3948,7 +3958,7 @@ function Add-NewVMForRole {
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             if (-not $test) {
-                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
                 }
@@ -3964,7 +3974,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
 
             if (-not $test) {
-                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
                 }
