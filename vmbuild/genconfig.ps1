@@ -3729,7 +3729,7 @@ function Get-NetworkForVM {
     switch ($vm.role) {
         "Secondary" {
             if ($currentNetwork -in $SiteServers.network) {
-                Write-host "$CurrentNetwork is in $($SiteServers.network)"
+                #Write-host "$CurrentNetwork is in $($SiteServers.network)"
 
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
@@ -3739,7 +3739,7 @@ function Get-NetworkForVM {
         }
         "Primary" {
             if ($currentNetwork -in $SiteServers.network) {
-                Write-host "$CurrentNetwork is in $($SiteServers.network)"
+                #Write-host "$CurrentNetwork is in $($SiteServers.network)"
 
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
@@ -3751,7 +3751,7 @@ function Get-NetworkForVM {
             $SiteServers = get-list2 -deployConfig $ConfigToModify  | Where-Object { ($_.Role -eq "Primary" -or $_.Role -eq "Secondary" -or $_.Role -eq "CAS") -and $_.vmName -ne $vm.vmName }
             $SiteServers = $SiteServers | Where-Object { -not ($_.Role -eq "Primary" -and $_.ParentSiteCode -eq $vm.SiteCode) }
             if ($currentNetwork -in $SiteServers.network) {
-                Write-host "$CurrentNetwork is in $($SiteServers.network)"
+                #Write-host "$CurrentNetwork is in $($SiteServers.network)"
 
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false
             }
@@ -3764,6 +3764,9 @@ function Get-NetworkForVM {
             if ($ss.network -ne $currentNetwork) {
                 return $ss.Network
             }
+        }
+        Default {
+            return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true
         }
     }
 
