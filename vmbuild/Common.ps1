@@ -2143,6 +2143,12 @@ if (-not $Common.Initialized) {
         $devBranch = $true
     }
 
+    # PS Version
+    $PS7 = $false
+    if ($PSVersionTable.PSVersion.Major -eq 7) {
+        $PS7 = $true
+    }
+
     # Set-StrictMode -Off
     # if ($devBranch) {
     #     Set-StrictMode -Version 1.0
@@ -2161,6 +2167,7 @@ if (-not $Common.Initialized) {
     $global:Common = [PSCustomObject]@{
         MemLabsVersion        = "220202"
         LatestHotfixVersion   = $latestHotfixVersion
+        PS7                   = $PS7
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
