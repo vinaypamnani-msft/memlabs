@@ -129,7 +129,7 @@ function Start-PhaseJobs {
             continue
         }
 
-        $deployConfigCopy = ConvertTo-DeployConfigEx -deployConfig $deployConfig
+        $deployConfigCopy = $deployConfig | ConvertTo-Json -depth 5 | ConvertFrom-Json
         $deployConfigCopy.parameters.ThisMachineName = $currentItem.vmName
 
         if ($WhatIf) {
