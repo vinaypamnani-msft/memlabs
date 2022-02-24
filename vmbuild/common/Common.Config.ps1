@@ -1625,19 +1625,25 @@ Function Show-Summary {
             else {
                 Write-RedX "ConfigMgr will NOT updated to latest"
             }
-            $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-            if ($PSVM) {
-                if ($PSVM.ParentSiteCode) {
-                    Write-GreenCheck "ConfigMgr Primary server will join a Hierarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
-                }
-                else {
-                    Write-GreenCheck "Primary server with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
+            $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
+            if ($PS) {
+                foreach ($PSVM in $PS) {
+                    if ($PSVM.ParentSiteCode) {
+                        Write-GreenCheck "ConfigMgr Primary server will join a Hierarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
+                    }
+                    else {
+                        Write-GreenCheck "Primary server with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
+                    }
                 }
             }
 
             $SSVM = $fixedConfig | Where-Object { $_.Role -eq "Secondary" }
             if ($SSVM) {
-                Write-GreenCheck "Secondary Site will be installed: $($SSVM.SiteCode) -> $($SSVM.ParentSiteCode)"
+                Write-GreenCheck -NoNewLine "Secondary Site(s) will be installed:"
+                foreach ($SS in $SSVM) {
+                    write-host -NoNewLine " $($SS.SiteCode) -> $($SS.ParentSiteCode)"
+                }
+                write-host
             }
             if ($containsPS) {
                 if ($containsPassive) {
