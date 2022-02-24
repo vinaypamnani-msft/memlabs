@@ -478,10 +478,10 @@ try {
             $global:vm_remove_list = @()
 
             # Create/Updated RDCMan file
-            if (Test-Path "C:\tools\rdcman.exe") {
-                Start-Sleep -Seconds 5
-                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
-            }
+
+            Start-Sleep -Seconds 5
+            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+
 
             $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
         }
