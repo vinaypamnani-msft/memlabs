@@ -114,24 +114,17 @@ function Write-Phase {
 # Main script starts here
 try {
 
-    Write-Host ("`r`n" * 6)
-    Start-Maintenance
-
-    if ($Configuration) {
-        Write-Log "### START." -Activity
-        Write-Log "Validating specified configuration: $Configuration"
-        $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
-        if ($configResult.Loaded) {
-            $userConfig = $configResult.Config
-            # Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
-        }
-        else {
-            Write-Log $configResult.Message -Failure
-            Write-Host
-            return
-        }
+    if ($Common.PS7) {
+        Write-Host
     }
     else {
+        Write-Host ("`r`n" * 6)
+    }
+
+    Start-Maintenance
+
+    # Get config
+    if (-not $Configuration) {
         Write-Log "No Configuration specified. Calling genconfig." -Activity
         Set-Location $PSScriptRoot
         $result = ./genconfig.ps1 -InternalUseOnly -Verbose:$enableVerbose -Debug:$enableDebug
@@ -150,11 +143,14 @@ try {
             return
         }
 
-        Write-Log "### START." -Activity
-        Write-Log "Using $($result.ConfigFileName) provided by genconfig"
-        Write-Log "genconfig specified DeployNow: $($result.DeployNow);" -Verbose
-        $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
+        $Configuration = $result.ConfigFileName
+    }
 
+    # Load config
+    if ($Configuration) {
+        Write-Log "### START." -Activity
+        Write-Log "Validating specified configuration: $Configuration"
+        $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
             $userConfig = $configResult.Config
         }
@@ -163,44 +159,22 @@ try {
             Write-Host
             return
         }
-
+    }
+    else {
+        Write-Host
+        Write-Log "No Configuration was specified." -Failure
+        Write-Host
+        return
     }
 
     Set-QuickEdit -DisableQuickEdit
+    $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
-    # Timer
-    $timer = New-Object -TypeName System.Diagnostics.Stopwatch
-    $timer.Start()
-
-    # Load configuration
+    # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
-        if ($testConfigResult.Valid -or ($Phase -or $SkipPhase -or $StopPhase -or $StartPhase)) {
+        if ($testConfigResult.Valid -or $phasedRun) {   # Skip validation in phased run
             $deployConfig = $testConfigResult.DeployConfig
-            $InProgessVMs = @()
-
-            foreach ($thisVM in $deployConfig.virtualMachines) {
-                $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
-                if ($thisVMObject.inProgress -eq $true) {
-                    $InProgessVMs += $thisVMObject.vmName
-                }
-
-            }
-
-            if (-not ($Phase -or $SkipPhase -or $StopPhase -or $StartPhase)) {
-                if ($InProgessVMs.Count -gt 0) {
-                    Write-Host
-                    write-host -ForegroundColor Blue "*************************************************************************************************************************************"
-                    write-host -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
-                    write-log "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
-                    write-host
-                    write-host -ForegroundColor White "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
-                    write-host -ForegroundColor Blue "*************************************************************************************************************************************"
-
-                    return
-                }
-            }
-
             Write-GreenCheck "Configuration validated successfully." -ForeGroundColor Green
         }
         else {
@@ -218,6 +192,15 @@ try {
         Write-Host
         return
     }
+
+    # Skip if any VM in progress
+    if ($phasedRun -and (Test-InProgress -DeployConfig $deployConfig)) {
+        return
+    }
+
+    # Timer
+    $timer = New-Object -TypeName System.Diagnostics.Stopwatch
+    $timer.Start()
 
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
@@ -246,7 +229,6 @@ try {
             }
         }
 
-
         if ($DownloadFilesOnly.IsPresent) {
             $timer.Stop()
             Write-Host
@@ -262,9 +244,10 @@ try {
         return
     }
 
+    # Create additional switches
     foreach ($virtualMachine in $deployConfig.VirtualMachines) {
         if ($virtualMachine.network -and $virtualMachine.network -ne $deployConfig.vmoptions.network) {
-            $DC = get-list2 -deployConfig $deployConfig | where-object {$_.role -eq "DC"}
+            $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
             $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
             $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
             if (-not $worked) {
@@ -275,16 +258,15 @@ try {
 
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
-    #if ($containsIN) {
     $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -WhatIf:$WhatIf
     if ($containsIN -and (-not $worked)) {
         return
     }
-    #}
 
+    # AO VM switch and DHCP scope
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
     if ($containsAO) {
-        $worked = Add-SwitchAndDhcp -NetworkName "cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
+        $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
         if (-not $worked) {
             return
         }
@@ -301,9 +283,7 @@ try {
         }
     }
 
-    # Generate RDCMan file
-    #New-RDCManFile $deployConfig $global:Common.RdcManFilePath
-
+    # Show summary
     Write-Log "Deployment Summary" -Activity -HostOnly
     Show-Summary -deployConfig $deployConfig
 
@@ -312,7 +292,7 @@ try {
         return $deployConfig
     }
 
-    # Prepare existing VM
+    # Prepare existing VM - Phase 0
     $prepared = $true
     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
     if ($containsHidden) {
@@ -331,7 +311,7 @@ try {
         $runPhase1 = $false
     }
 
-    #
+    # Run Phases
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -371,76 +351,13 @@ try {
                     # Clear out vm remove list
                     $global:vm_remove_list = @()
 
+                    # Create RDCMan file
                     Start-Sleep -Seconds 5
                     New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false -NoActivity -WhatIf:$WhatIf
                 }
             }
         }
     }
-
-    # if ($Phase) {
-    #     $created = $true
-    #     $configured = Start-Phase -Phase $Phase -deployConfig $deployConfig
-    # }
-    # else {
-
-    #     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
-    #     if ($containsHidden) {
-    #         $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig
-    #     }
-    #     else {
-    #         $prepared = $true
-    #     }
-
-    #     if (-not $prepared) {
-    #         Write-Log "Phase 1 - Skipped Virtual Machine Creation and Configuration because errors were encountered in Phase 0." -Activity
-    #         $created = $configured = $false
-    #     }
-    #     else {
-
-    #         if ($SkipPhase) {
-    #             $created = $true
-    #         }
-    #         else {
-    #             $created = Start-Phase -Phase 1 -deployConfig $deployConfig
-    #         }
-
-    #         if (-not $created) {
-    #             Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
-    #         }
-    #         else {
-
-    #             # Clear out vm remove list
-    #             $global:vm_remove_list = @()
-
-    #             # Create/Updated RDCMan file
-    #             Start-Sleep -Seconds 5
-    #             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
-
-    #             $start = 2
-    #             if ($StartPhase) {
-    #                 $start = $StartPhase
-    #             }
-
-    #             $maxPhase = 6
-    #             if ($StopPhase) {
-    #                 $maxPhase = $StopPhase
-    #             }
-
-    #             for ($i = $start; $i -le $maxPhase; $i++) {
-
-    #                 if ($SkipPhase -and $i -in $SkipPhase) {
-    #                     continue
-    #                 }
-
-    #                 $configured = Start-Phase -Phase $i -deployConfig $deployConfig
-    #                 if (-not $configured) {
-    #                     break
-    #                 }
-    #             }
-    #         }
-    #     }
-    # }
 
     $timer.Stop()
 

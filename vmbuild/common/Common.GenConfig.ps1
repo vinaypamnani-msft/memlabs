@@ -56,7 +56,7 @@ function ConvertTo-DeployConfigEx {
         }
 
         #Get the current network from get-list or config
-        $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
+        $thisVMObject = Get-VMFromList2 -deployConfig $deployConfig -vmName $thisVM.vmName
         if ($thisVMObject.network) {
             $thisParams | Add-Member -MemberType NoteProperty -Name "vmNetwork" -Value $thisVMObject.network -Force
         }

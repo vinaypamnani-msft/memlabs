@@ -232,7 +232,7 @@ function Add-RemoteSQLVMToDeployConfig {
         [bool] $hidden = $true
     )
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
-    $remoteSQLVM = Get-VMObjectFromConfigOrExisting -deployConfig $configToModify -vmName $vmName
+    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName
     if ($remoteSQLVM.OtherNode) {
         Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.OtherNode -configToModify $configToModify -hidden:$hidden
     }
@@ -294,7 +294,7 @@ function Add-ExistingVMsToDeployConfig {
     foreach ($PassiveVM in $PassiveVMs) {
         $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode
         if ($ActiveNode) {
-            $ActiveNodeVM = Get-VMObjectFromConfigOrExisting -deployConfig $config -vmName $ActiveNode
+            $ActiveNodeVM = Get-VMFromList2 -deployConfig $config -vmName $ActiveNode
             if ($ActiveNodeVM) {
                 if ($ActiveNodeVM.remoteSQLVM) {
                     Add-RemoteSQLVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
@@ -728,7 +728,7 @@ function get-RoleForSitecode {
     return $null
 }
 
-function Get-VMObjectFromConfigOrExisting {
+function Get-VMFromList2 {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
@@ -737,12 +737,7 @@ function Get-VMObjectFromConfigOrExisting {
         [object] $vmName
     )
 
-    $vm = Get-List -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.vmName -eq $vmName -and -not $_.hidden }
-    if ($vm) {
-        return $vm
-    }
-
-    $vm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
+    $vm = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $vmName }
     if ($vm) {
         return $vm
     }
@@ -770,13 +765,13 @@ function Get-PrimarySiteServerForSiteCode {
         }
     }
     if ($roleforSite -eq "Secondary") {
-        $SiteServerVM = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $SiteServer
+        $SiteServerVM = Get-VMFromList2 -deployConfig $deployConfig -vmName $SiteServer
         $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.parentSiteCode
         if ($type -eq "Name") {
             return $SiteServer
         }
         else {
-            return Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $SiteServer
+            return Get-VMFromList2 -deployConfig $deployConfig -vmName $SiteServer
         }
     }
 }
@@ -1385,6 +1380,35 @@ function Get-List2 {
     return ($return | Sort-Object -Property source)
 }
 
+function Test-InProgress {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $DeployConfig
+    )
+
+    $InProgessVMs = @()
+    foreach ($thisVM in $deployConfig.virtualMachines) {
+        $thisVMObject = Get-VMFromList2 -deployConfig $deployConfig -vmName $thisVM.vmName
+        if ($thisVMObject.inProgress -eq $true) {
+            $InProgessVMs += $thisVMObject.vmName
+        }
+    }
+
+    if ($InProgessVMs.Count -gt 0) {
+        Write-Host
+        write-host -ForegroundColor Blue "*************************************************************************************************************************************"
+        write-host -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
+        write-log "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
+        write-host
+        write-host -ForegroundColor White "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
+        write-host -ForegroundColor Blue "*************************************************************************************************************************************"
+        return $false
+    }
+
+    return $true
+
+}
 
 Function Write-GreenCheck {
     [CmdletBinding()]
