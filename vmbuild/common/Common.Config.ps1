@@ -873,6 +873,28 @@ function Get-SubnetList {
     }
 }
 
+function Get-NetworkList {
+
+    param(
+        [Parameter(Mandatory = $false)]
+        [string] $DomainName
+    )
+    try {
+
+        if ($DomainName) {
+            return (Get-List -Type Network -DomainName $DomainName)
+        }
+
+        return (Get-List -Type Network)
+
+    }
+    catch {
+        Write-Log "Failed to get network list. $_" -Failure -LogOnly
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
+        return $null
+    }
+}
+
 function Get-DomainList {
 
     try {
@@ -1165,7 +1187,7 @@ function Get-List {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, ParameterSetName = "Type")]
-        [ValidateSet("VM", "Subnet", "Prefix", "UniqueDomain", "UniqueSubnet", "UniquePrefix")]
+        [ValidateSet("VM", "Subnet", "Prefix", "UniqueDomain", "UniqueSubnet", "UniquePrefix","Network","UniqueNetwork")]
         [string] $Type,
         [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [string] $DomainName,
@@ -1320,7 +1342,9 @@ function Get-List {
         if ($Type -eq "Subnet") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
         }
-
+        if ($Type -eq "Network") {
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property network, Domain | Sort-Object -Property * -Unique
+        }
         if ($Type -eq "Prefix") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
         }
@@ -1331,6 +1355,10 @@ function Get-List {
 
         if ($Type -eq "UniqueSubnet") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
+        }
+
+        if ($Type -eq "UniqueNetwork") {
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty network -Unique -ErrorAction SilentlyContinue
         }
 
         if ($Type -eq "UniquePrefix") {

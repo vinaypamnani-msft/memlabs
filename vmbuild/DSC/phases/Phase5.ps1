@@ -769,7 +769,7 @@ Configuration Phase5
         }
 
         WriteStatus SQLAOWait {
-            Dependson = '[SqlEndpoint]HADREndpoint'
+            Dependson = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
             Status    = "Waiting for '$node1' to create the Availability Group"
         }
 
@@ -779,7 +779,7 @@ Configuration Phase5
             RetryCount           = 90
             ServerName           = $node1
             InstanceName         = $node1vm.sqlInstanceName
-            Dependson            = '[SqlEndpoint]HADREndpoint'
+            Dependson            = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
             PsDscRunAsCredential = $Admincreds
         }
 
