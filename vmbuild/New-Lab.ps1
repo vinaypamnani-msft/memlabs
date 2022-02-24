@@ -183,7 +183,6 @@ try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
         if ($testConfigResult.Valid -or ($Phase -or $SkipPhase -or $StopPhase -or $StartPhase)) {
             $deployConfig = $testConfigResult.DeployConfig
-            Add-ExistingVMsToDeployConfig -config $deployConfig
             $InProgessVMs = @()
 
             foreach ($thisVM in $deployConfig.virtualMachines) {
