@@ -1,11 +1,11 @@
 USE [msdb]
 GO
 
-/****** Object:  Job [IndexOptimize - USER_DATABASES]    Script Date: 2/22/2022 10:30:53 PM ******/
+/****** Object:  Job [MemLabs IndexOptimize - USER_DATABASES]    Script Date: 2/24/2022 3:53:05 PM ******/
 BEGIN TRANSACTION
 DECLARE @ReturnCode INT
 SELECT @ReturnCode = 0
-/****** Object:  JobCategory [Database Maintenance]    Script Date: 2/22/2022 10:30:53 PM ******/
+/****** Object:  JobCategory [Database Maintenance]    Script Date: 2/24/2022 3:53:05 PM ******/
 IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'Database Maintenance' AND category_class=1)
 BEGIN
 EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'Database Maintenance'
@@ -25,7 +25,7 @@ EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'MemLabs IndexOptimize - USER
 		@category_name=N'Database Maintenance',
 		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
-/****** Object:  Step [IndexOptimize - USER_DATABASES]    Script Date: 2/22/2022 10:30:53 PM ******/
+/****** Object:  Step [MemLabs IndexOptimize - USER_DATABASES]    Script Date: 2/24/2022 3:53:05 PM ******/
 EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'MemLabs IndexOptimize - USER_DATABASES',
 		@step_id=1,
 		@cmdexec_success_code=0,
@@ -36,8 +36,13 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'MemLabs 
 		@retry_attempts=0,
 		@retry_interval=0,
 		@os_run_priority=0, @subsystem=N'TSQL',
-		@command=N'EXECUTE [dbo].[IndexOptimize]
+		@command=N'EXECUTE dbo.IndexOptimize
 @Databases = ''USER_DATABASES'',
+@FragmentationLow = NULL,
+@FragmentationMedium = ''INDEX_REORGANIZE,INDEX_REBUILD_ONLINE,INDEX_REBUILD_OFFLINE'',
+@FragmentationHigh = ''INDEX_REBUILD_ONLINE,INDEX_REBUILD_OFFLINE'',
+@FragmentationLevel1 = 5,
+@FragmentationLevel2 = 30,
 @LogToTable = ''Y''',
 		@database_name=N'master',
 		@output_file_name=N'$(ESCAPE_SQUOTE(SQLLOGDIR))\$(ESCAPE_SQUOTE(JOBNAME))_$(ESCAPE_SQUOTE(STEPID))_$(ESCAPE_SQUOTE(DATE))_$(ESCAPE_SQUOTE(TIME)).txt',
