@@ -13,7 +13,12 @@ function Write-DscStatusSetup {
 }
 
 function Write-DscStatus {
-    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds, [switch]$Failure)
+    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds, [switch]$Failure, [string]$MachineName)
+
+    $RemoteStatusFile = $null
+    if ($MachineName -and ($MachineName -ne $Env:ComputerName)) {
+        $RemoteStatusFile = "\\$($MachineName)\c$\staging\DSC\DSC_Status.txt"
+    }
 
     if ($RetrySeconds) {
         $status = "$status; checking again in $RetrySeconds seconds"
@@ -26,7 +31,29 @@ function Write-DscStatus {
 
     if (-not $NoStatus.IsPresent) {
         $StatusPrefix = "Setting up ConfigMgr."
-        "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
+        try {
+            if ($RemoteStatusFile) {
+                $contents = Get-Content $RemoteStatusFile
+                if ($contents -and $contents.EndsWith("Complete!"){
+                    #Remote Contents end with Complete!.  Write to local file to prevent overwriting this event.
+                    "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
+                }
+                else{
+                    #Remote Contents Are fine to overwrite
+                    "$StatusPrefix Current Status: $status" | Out-File $RemoteStatusFile -Force
+                }
+            }else {
+                #Write Status Locally, since RemoteStatusFile was not set.
+                "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
+            }
+
+        }
+        catch {
+            if ($RemoteStatusFile) {
+                 #If we are writing remote, and we had an exception.. Log the Status Locally
+                "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
+            }
+        }
     }
 
     if (-not $NoLog.IsPresent) {
@@ -49,7 +76,7 @@ if (!(Test-Path $ProvisionToolPath)) {
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $scenario = $deployConfig.parameters.Scenario
 
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $deployconfig.Parameters.ThisMachineName}
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
 $CurrentRole = $ThisVM.role
 
 # contains passive?
@@ -64,7 +91,7 @@ $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 if (Test-Path -Path $ConfigurationFile) {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 }
-if (-not ($configuration.ScriptWorkflow)){
+if (-not ($configuration.ScriptWorkflow)) {
     $Configuration = $null
 }
 if (-not $Configuration) {
@@ -155,7 +182,7 @@ if (-not $Configuration) {
                     StartTime = ''
                     EndTime   = ''
                 }
-                InstallSecondary = @{
+                InstallSecondary             = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''

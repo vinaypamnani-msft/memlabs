@@ -112,7 +112,7 @@ foreach ($SecondaryVM in $SecondaryVMs) {
     # Check if Passive already exists
     $exists = Get-CMSiteRole -SiteSystemServerName $secondaryFQDN -RoleName "SMS Site Server"
     if ($exists) {
-        Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName)."
+        Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName)." -MachineName $SecondaryVM.vmName
         Start-Sleep -Seconds 5 # Force sleep for status to update on host.
         $installed = $true
         continue
@@ -125,11 +125,11 @@ foreach ($SecondaryVM in $SecondaryVMs) {
 
     $mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
     if ($mpCount -eq 0) {
-        Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName"
+        Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName" -MachineName $SecondaryVM.vmName
         Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
     }
 
-    Write-DscStatus "Adding secondary site server on $secondaryFQDN with Site Code $secondarySiteCode, attached to $parentSiteCode"
+    Write-DscStatus "Adding secondary site server on $secondaryFQDN with Site Code $secondarySiteCode, attached to $parentSiteCode" -MachineName $SecondaryVM.vmName
     try {
 
         $Date = [DateTime]::Now.AddYears(30)
@@ -151,7 +151,7 @@ foreach ($SecondaryVM in $SecondaryVMs) {
     catch {
         try {
             $_ | Out-File $global:StatusLog -Append
-            Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_. Retrying once."
+            Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_. Retrying once." -MachineName $SecondaryVM.vmName
             Start-Sleep -Seconds 30
             New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                 -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
@@ -159,7 +159,7 @@ foreach ($SecondaryVM in $SecondaryVMs) {
         }
         catch {
             $_ | Out-File $global:StatusLog -Append
-            Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_" -Failure
+            Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_" -Failure -MachineName $SecondaryVM.vmName
             $installFailure = $true
             continue
         }
@@ -178,7 +178,7 @@ foreach ($SecondaryVM in $SecondaryVMs) {
         }
 
         if ($siteStatus -and $siteStatus.Status -eq 3) {
-            Write-DscStatus "Adding secondary site server failed. Review details in ConfigMgr Console." -Failure
+            Write-DscStatus "Adding secondary site server failed. Review details in ConfigMgr Console." -Failure -MachineName $SecondaryVM.vmName
             $installFailure = $true
         }
 
@@ -186,18 +186,18 @@ foreach ($SecondaryVM in $SecondaryVMs) {
             $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
 
             if ($state) {
-                Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds 30
+                Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds 30 -MachineName $SecondaryVM.vmName
             }
 
             if (-not $state) {
                 if (0 -eq $i % 40) {
-                    Write-DscStatus "No Progress reported after $($i * 30) seconds, restarting SMS_Executive"
+                    Write-DscStatus "No Progress reported after $($i * 30) seconds, restarting SMS_Executive" -MachineName $SecondaryVM.vmName
                     Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
                     Start-Sleep -Seconds 30
                 }
 
                 if ($i -gt 61) {
-                    Write-DscStatus "No Progress for adding secondary site reported after $($i * 30) seconds, giving up." -Failure
+                    Write-DscStatus "No Progress for adding secondary site reported after $($i * 30) seconds, giving up." -Failure -MachineName $SecondaryVM.vmName
                     $installFailure = $true
                 }
             }
@@ -210,15 +210,15 @@ foreach ($SecondaryVM in $SecondaryVMs) {
     if ($installed) {
         # Wait for replication ready
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
-        Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'"
+        Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'" -MachineName $SecondaryVM.vmName
         Start-Sleep -Seconds 30
         while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 ) {
-            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30
+            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $SecondaryVM.vmName
             Start-Sleep -Seconds 30
             $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
         }
 
-        Write-DscStatus "Secondary installation complete. Replication link is 'Active'."
+        Write-DscStatus "Secondary installation complete. Replication link is 'Active'." -MachineName $SecondaryVM.vmName
     }
 }
 # Update actions file
