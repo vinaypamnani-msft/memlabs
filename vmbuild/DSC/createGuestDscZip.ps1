@@ -67,7 +67,6 @@ try {
     # Create dummy file so config doesn't fail
     $userConfig = Get-UserConfiguration -Configuration $configName
     $result = Test-Configuration -InputObject $userConfig.Config
-    Add-ExistingVMsToDeployConfig -config $result.DeployConfig
     $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
     $deployConfigCopy = ConvertTo-DeployConfigEx -deployConfig $result.DeployConfig
 

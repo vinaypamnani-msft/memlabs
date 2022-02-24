@@ -795,9 +795,8 @@ function Test-Configuration {
     #     }
     # }
 
+    # Get deployConfig without existing VM's for validation
     $deployConfig = New-DeployConfig -configObject $configObject
-    $return.DeployConfig = $deployConfig
-
 
     if ($deployConfig.virtualMachines.Count -eq 0) {
         $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
@@ -1070,6 +1069,13 @@ function Test-Configuration {
         Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
         Get-List -type VM -SmartUpdate | Out-Null
     }
+
+    # Add existing VM's
+    Add-ExistingVMsToDeployConfig -config $deployConfig
+
+    # Add thisParams
+    $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
+    $return.DeployConfig = $deployConfigEx
 
     # Return if validation failed
     if ($return.Problems -ne 0) {

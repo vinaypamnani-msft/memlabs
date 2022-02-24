@@ -214,8 +214,7 @@ function New-DeployConfig {
             parameters      = $params
         }
 
-        $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deploy
-        return $deployConfigEx
+        return $deploy
     }
     catch {
         Write-Exception -ExceptionInfo $_ -AdditionalInfo ($configObject | ConvertTo-Json)
