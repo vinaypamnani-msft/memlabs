@@ -776,7 +776,7 @@ function Select-DeleteDomain {
 
 function Select-DeletePending {
 
-    get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Subnet, SQLVersion | Out-Host
+    get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
     Write-Host "Please confirm these VM's are not currently in process of being deployed."
     Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
     $response = Read-Host2 -Prompt "Are you sure? (y/N)" -HideHelp
@@ -964,7 +964,7 @@ function Get-ValidSubnets {
 
 
     $usedSubnets = @()
-    $usedSubnets += (Get-SubnetList).subnet
+    $usedSubnets += (Get-NetworkList).network
 
     if (-not $AllowExisting) {
         $usedSubnets += $configToCheck.vmOptions.network
@@ -1474,12 +1474,12 @@ function Select-NewDomainConfig {
 
             $valid = $false
             while ($valid -eq $false) {
-                $customOptions = @{ "C" = "Custom Subnet" }
+                $customOptions = @{ "C" = "Custom Network" }
                 $network = $null
                 while (-not $network) {
                     $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -CurrentValue ($subnetList | Select-Object -First 1)
                     if ($network.ToLowerInvariant() -eq "c") {
-                        $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
+                        $network = Read-Host2 -Prompt "Enter Custom Network (eg 192.168.1.0):"
                     }
                 }
                 $newConfig.vmOptions.network = $network
@@ -1604,7 +1604,7 @@ Function Get-DomainStatsLine {
     $ExistingSecCount = ($ListCache | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
     $ExistingDPMPCount = ($ListCache | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $ExistingSQLCount = ($ListCache | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
-    $ExistingSubnetCount = ($ListCache | Select-Object -Property Subnet -unique | measure-object).Count
+    $ExistingSubnetCount = ($ListCache | Select-Object -Property Network -unique | measure-object).Count
     $TotalVMs = ($ListCache | Measure-Object).Count
     $TotalRunningVMs = ($ListCache | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
     $TotalMem = ($ListCache | Measure-Object -Sum MemoryGB).Sum
@@ -1664,7 +1664,7 @@ function Show-ExistingNetwork {
         }
         $domain = ($domainExpanded -Split " ")[0]
 
-        get-list -Type VM -DomainName $domain | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Subnet, SQLVersion | Out-Host
+        get-list -Type VM -DomainName $domain | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
 
         $response = Read-Host2 -Prompt "Add new VMs to this domain? (Y/n)" -HideHelp
         if (-not [String]::IsNullOrWhiteSpace($response)) {
@@ -2026,7 +2026,7 @@ function Select-ExistingSubnets {
         $validEntryFound = $false
         $customOptions = @{ "N" = "add New Subnet to domain" }
         $subnetList = @()
-        $subnetList += Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Sort-Object | Get-Unique
+        $subnetList += Get-NetworkList -DomainName $Domain | Select-Object -Expand Network | Sort-Object | Get-Unique
 
         $subnetListNew = @()
         if ($Role -eq "Primary" -or $Role -eq "CAS" -or $Role -eq "Secondary") {
@@ -2084,7 +2084,7 @@ function Select-ExistingSubnets {
                 $response = "n"
             }
             else {
-                $response = Get-Menu -Prompt "Select existing subnet" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue
+                $response = Get-Menu -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue
             }
             write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
             if ([string]::IsNullOrWhiteSpace($response)) {

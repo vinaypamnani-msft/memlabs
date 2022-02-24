@@ -986,7 +986,6 @@ function Get-VMNetworkCached {
         EntryAdded = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
 
-    ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
     return $vmCacheEntry
 }
 
