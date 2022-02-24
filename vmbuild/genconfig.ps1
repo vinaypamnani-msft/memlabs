@@ -3110,6 +3110,16 @@ function Get-AdditionalValidations {
             #Set the SQL Name after all checks are done.
             if ($property.RemoteSQLVM) {
                 $RemoteSQLVM = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $($property.RemoteSQLVM) }
+                if ($RemoteSQLVM.OtherNode) {
+                    #This is SQLAO
+                    $newSQLName = $($property.SiteCode) + "SQLAO1"
+                    $name2 = $($property.SiteCode) + "SQLAO2"
+                    $OtherNode = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $($RemoteSQLVM.OtherNode) }
+                    $OtherNode.vmName = $name2
+                    $RemoteSQLVM.OtherNode = $name2
+
+
+                }
                 $RemoteSQLVM.vmName = $newSQLName
                 $property.RemoteSQLVM = $newSQLName
             }
