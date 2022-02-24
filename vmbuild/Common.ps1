@@ -2108,6 +2108,21 @@ function Set-SupportedOptions {
 
 }
 
+function Get-BranchName {
+    try {
+        $branch = git rev-parse --abbrev-ref HEAD
+
+        if ($branch -eq "HEAD") {
+            # we're probably in detached HEAD state, so print the SHA
+            $branch = git rev-parse --short HEAD
+        }
+
+        return $branch
+
+    } catch {
+        return $null
+    }
+}
 
 
 ####################
@@ -2140,7 +2155,7 @@ if (-not $Common.Initialized) {
     $devBranch = $false
     try {
         if ($pwd.Path -like '*memlabs*') {
-            $currentBranch = (& git branch) -match '\*'
+            $currentBranch = Get-BranchName
         }
     }
     catch {}
