@@ -851,28 +851,6 @@ function Get-ActiveSiteServerForSiteCode {
     return $null
 }
 
-function Get-SubnetList {
-
-    param(
-        [Parameter(Mandatory = $false)]
-        [string] $DomainName
-    )
-    try {
-
-        if ($DomainName) {
-            return (Get-List -Type Subnet -DomainName $DomainName)
-        }
-
-        return (Get-List -Type Subnet)
-
-    }
-    catch {
-        Write-Log "Failed to get subnet list. $_" -Failure -LogOnly
-        Write-Log "$($_.ScriptStackTrace)" -LogOnly
-        return $null
-    }
-}
-
 function Get-NetworkList {
 
     param(
@@ -986,7 +964,9 @@ function Get-VMNetworkCached {
         EntryAdded = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
 
-    ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
+    if ($vmNet.SwitchName) {
+        ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
+    }
     return $vmCacheEntry
 }
 
@@ -1122,7 +1102,7 @@ function Get-VMFromHyperV {
     $vmObject = [PSCustomObject]@{
         vmName          = $vm.Name
         vmId            = $vm.Id
-        subnet          = $vmNet.SwitchName
+        switch          = $vmNet.SwitchName
         memoryGB        = $vm.MemoryAssigned / 1GB
         memoryStartupGB = $memoryStartupGB
         diskUsedGB      = [math]::Round($diskSizeGB, 2)
@@ -1187,7 +1167,7 @@ function Get-List {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, ParameterSetName = "Type")]
-        [ValidateSet("VM", "Subnet", "Prefix", "UniqueDomain", "UniqueSubnet", "UniquePrefix","Network","UniqueNetwork")]
+        [ValidateSet("VM", "Switch", "Prefix", "UniqueDomain", "UniqueSwitch", "UniquePrefix", "Network", "UniqueNetwork")]
         [string] $Type,
         [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [string] $DomainName,
@@ -1339,28 +1319,24 @@ function Get-List {
         }
 
         # Include Internet subnets, filtering them out as-needed in Common.Remove
-        if ($Type -eq "Subnet") {
-            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Subnet, Domain | Sort-Object -Property * -Unique
+        if ($Type -eq "Switch") {
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property 'Switch', Domain | Sort-Object -Property * -Unique
         }
         if ($Type -eq "Network") {
-            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property network, Domain | Sort-Object -Property * -Unique
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Network, Domain | Sort-Object -Property * -Unique
         }
         if ($Type -eq "Prefix") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -Property Prefix, Domain | Sort-Object -Property * -Unique
         }
-
         if ($Type -eq "UniqueDomain") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
         }
-
-        if ($Type -eq "UniqueSubnet") {
-            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Subnet -Unique -ErrorAction SilentlyContinue
+        if ($Type -eq "UniqueSwitch") {
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty 'Switch' -Unique -ErrorAction SilentlyContinue
         }
-
         if ($Type -eq "UniqueNetwork") {
-            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty network -Unique -ErrorAction SilentlyContinue
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Network -Unique -ErrorAction SilentlyContinue
         }
-
         if ($Type -eq "UniquePrefix") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Prefix -Unique -ErrorAction SilentlyContinue
         }

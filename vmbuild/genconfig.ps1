@@ -964,7 +964,7 @@ function Get-ValidSubnets {
 
 
     $usedSubnets = @()
-    $usedSubnets += (Get-SubnetList).subnet
+    $usedSubnets += (Get-NetworkList).Network
 
     if (-not $AllowExisting) {
         $usedSubnets += $configToCheck.vmOptions.network
@@ -2026,7 +2026,7 @@ function Select-ExistingSubnets {
         $validEntryFound = $false
         $customOptions = @{ "N" = "add New Subnet to domain" }
         $subnetList = @()
-        $subnetList += Get-SubnetList -DomainName $Domain | Select-Object -Expand Subnet | Sort-Object | Get-Unique
+        $subnetList += Get-NetworkList -DomainName $Domain | Select-Object -Expand Network | Sort-Object | Get-Unique
 
         $subnetListNew = @()
         if ($Role -eq "Primary" -or $Role -eq "CAS" -or $Role -eq "Secondary") {
