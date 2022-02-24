@@ -964,7 +964,7 @@ function Get-ValidSubnets {
 
 
     $usedSubnets = @()
-    $usedSubnets += (Get-NetworkList).network
+    $usedSubnets += (Get-NetworkList).Network
 
     if (-not $AllowExisting) {
         $usedSubnets += $configToCheck.vmOptions.network
