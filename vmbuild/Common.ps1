@@ -136,7 +136,7 @@ function Write-Log {
 
     # Write progress if output stream and failure present
     if ($OutputStream.IsPresent -and $Failure.IsPresent) {
-        Write-Progress -Activity $Text -Status "Failed :(" -Completed
+        Write-Progress -Activity $Text -Status "Failed :-(" -Completed
     }
 
     # Write to console, if not logOnly and not OutputStream
@@ -148,6 +148,11 @@ function Write-Log {
     # Always log verbose to host, if VerboseEnabled
     if ($IsVerbose -and $Common.VerboseEnabled) {
         $writeHost = $true
+    }
+
+    # Suppress write-host when in-job
+    if ($InJob.IsPresent) {
+        $writeHost = $false
     }
 
     if ($writeHost) {
