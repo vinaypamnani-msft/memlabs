@@ -484,8 +484,8 @@ if ($UpdateToLatest) {
             #waiting package downloaded
             $downloadstarttime = get-date
             while ($updatepack.State -eq 262145) {
-                Write-DscStatus "Download in progress. Waiting for '$($updatepack.Name)' download to complete" -RetrySeconds 60
-                Start-Sleep 60
+                Write-DscStatus "Download in progress. Waiting for '$($updatepack.Name)' download to complete" -RetrySeconds 30
+                Start-Sleep 30
                 $updatepack = Get-CMSiteUpdate -Name $updatepack.Name -Fast
                 $downloadspan = New-TimeSpan -Start $downloadstarttime -End (Get-Date)
                 if ($downloadspan.Minutes -ge 30) {
@@ -624,8 +624,8 @@ else {
         $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
         Write-DscStatus "Waiting for Primary site installation to finish"
         while (!$PSSystemServer) {
-            Write-DscStatus "Waiting for Primary site installation to finish" -NoLog -RetrySeconds 60
-            Start-Sleep -Seconds 60
+            Write-DscStatus "Waiting for Primary site installation to finish" -NoLog -RetrySeconds 30
+            Start-Sleep -Seconds 30
             $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
         }
 
@@ -634,8 +634,8 @@ else {
         Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
         Start-Sleep -Seconds 30
         while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 60
-            Start-Sleep -Seconds 60
+            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30
+            Start-Sleep -Seconds 30
             $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
         }
 

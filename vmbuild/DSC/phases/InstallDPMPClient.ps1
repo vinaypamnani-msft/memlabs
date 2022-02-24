@@ -372,8 +372,8 @@ foreach ($client in $ClientNameList) {
         Invoke-CMSystemDiscovery
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
-        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 60
-        Start-Sleep -Seconds 60
+        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
+        Start-Sleep -Seconds 30
         $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
     }
 

@@ -190,10 +190,10 @@ foreach ($SecondaryVM in $SecondaryVMs) {
             }
 
             if (-not $state) {
-                if (0 -eq $i % 20) {
+                if (0 -eq $i % 40) {
                     Write-DscStatus "No Progress reported after $($i * 30) seconds, restarting SMS_Executive"
                     Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-                    Start-Sleep -Seconds 60
+                    Start-Sleep -Seconds 30
                 }
 
                 if ($i -gt 61) {
@@ -213,8 +213,8 @@ foreach ($SecondaryVM in $SecondaryVMs) {
         Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'"
         Start-Sleep -Seconds 30
         while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 ) {
-            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 60
-            Start-Sleep -Seconds 60
+            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30
+            Start-Sleep -Seconds 30
             $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
         }
 
