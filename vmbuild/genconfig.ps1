@@ -7,7 +7,6 @@ param (
 $return = [PSCustomObject]@{
     ConfigFileName = $null
     DeployNow      = $false
-    ForceNew       = $false
 }
 
 # Set Debug & Verbose

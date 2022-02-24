@@ -4,8 +4,6 @@ param (
     [string]$Configuration,
     [Parameter(Mandatory = $false, HelpMessage = "Download all files required by the specified config without deploying any VMs.")]
     [switch]$DownloadFilesOnly,
-    [Parameter(Mandatory = $false, HelpMessage = "Force recreation of virtual machines, if already present.")]
-    [switch]$ForceNew,
     [Parameter(Mandatory = $false, HelpMessage = "Force redownload of required files, if already present.")]
     [switch]$ForceDownloadFiles,
     [Parameter(Mandatory = $false, HelpMessage = "Timeout in minutes for VM Configuration.")]
@@ -148,17 +146,13 @@ try {
             return
         }
 
-        if ($result.ForceNew) {
-            $ForceNew = $true
-        }
-
         if (-not $($result.DeployNow)) {
             return
         }
 
         Write-Log "### START." -Activity
         Write-Log "Using $($result.ConfigFileName) provided by genconfig"
-        Write-Log "genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)" -Verbose
+        Write-Log "genconfig specified DeployNow: $($result.DeployNow);" -Verbose
         $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
 
         if ($configResult.Loaded) {
