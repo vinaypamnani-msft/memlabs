@@ -257,7 +257,7 @@ try {
         if ($DownloadFilesOnly.IsPresent) {
             $timer.Stop()
             Write-Host
-            Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
+            Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Success
             Write-Host
             return
         }
@@ -453,11 +453,11 @@ try {
 
     if (-not $prepared -or -not $configured) {
         Write-Host
-        Write-Log "### SCRIPT FINISHED WITH FAILURES. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Failure -NoIndent
+        Write-Log "### SCRIPT FINISHED WITH FAILURES. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
         Write-Host
     }
     else {
-        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Activity
+        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
     }
 
     $NewLabsuccess = $true
