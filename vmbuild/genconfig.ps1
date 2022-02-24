@@ -1983,7 +1983,7 @@ function Show-SubnetNote {
     $noteColor = "cyan"
     $textColor = "gray"
     $highlightColor = "darkyellow"
-    #Get-PSCallStack | out-host
+    Get-PSCallStack | out-host
     Write-Host
     write-host -ForegroundColor $noteColor "Note: " -NoNewline
     write-host -foregroundcolor $textColor "You can only have 1 " -NoNewLine
@@ -3901,9 +3901,11 @@ function Add-NewVMForRole {
             if ($existingPrimaryVM) {
                 $existingPrimaryVM | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $newSiteCode -Force
             }
-            $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
-            if ($network) {
-                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+            if (-not $test) {
+                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+                if ($network) {
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+                }
             }
         }
         "Primary" {
@@ -3929,9 +3931,11 @@ function Add-NewVMForRole {
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
-            $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
-            if ($network) {
-                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+            if (-not $test) {
+                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+                if ($network) {
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+                }
             }
 
         }
@@ -3944,10 +3948,11 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-
-            $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
-            if ($network) {
-                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+            if (-not $test) {
+                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+                if ($network) {
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+                }
             }
 
         }
@@ -3958,9 +3963,12 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
-            if ($network) {
-                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+
+            if (-not $test) {
+                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig
+                if ($network) {
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+                }
             }
         }
         "WorkgroupMember" {}
