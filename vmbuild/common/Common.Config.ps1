@@ -1746,8 +1746,14 @@ Function Show-Summary {
             $SiteCode
         }
     },
+    @{Label = "Network"; Expression = {
+            if ($_.Network) { $_.Network }
+            else {
+                $deployConfig.vmOptions.network + " [Default]"
+            }
+        }
+    },
     @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
-    @{Label = "Network"; Expression = { $_.Network } },
     @{Label = "SQL"; Expression = {
             if ($null -ne $_.SqlVersion) {
                 $_.SqlVersion
