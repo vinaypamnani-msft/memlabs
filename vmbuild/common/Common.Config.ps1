@@ -1768,7 +1768,13 @@ Function Show-Summary {
             }
         }
     },
-    @{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
+    #@{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
+    @{Label = "Disks"; Expression = {
+            $Disks = @("C")
+            $Disks += $_.additionalDisks.psobject.Properties.Name | Where-Object { $_ }
+            $Disks -Join ","
+        }
+    },
     @{Label = "SQL"; Expression = {
             if ($null -ne $_.SqlVersion) {
                 $_.SqlVersion
