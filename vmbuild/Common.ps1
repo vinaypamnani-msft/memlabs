@@ -2152,6 +2152,8 @@ if (-not $Common.Initialized) {
     $PS7 = $false
     if ($PSVersionTable.PSVersion.Major -eq 7) {
         $PS7 = $true
+        $PSStyle.Progress.Style = "`e[38;5;123m"
+        $PSStyle.Progress.MaxWidth = 500
     }
 
     # Set-StrictMode -Off
