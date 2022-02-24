@@ -925,7 +925,6 @@ function Select-MainMenu {
                 $filename = Save-Config $Global:Config
                 #$creds = New-Object System.Management.Automation.PSCredential ($Global:Config.vmOptions.adminName, $Global:Common.LocalAdmin.GetNetworkCredential().Password)
                 $t = Test-Configuration -InputObject $Global:Config
-                Add-ExistingVMsToDeployConfig -config $t.DeployConfig
                 foreach ($virtualMachine in $t.DeployConfig.virtualMachines) {
                     $i = $i + 1
                     $name = $virtualMachine
