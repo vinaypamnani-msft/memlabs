@@ -68,7 +68,7 @@ try {
     $userConfig = Get-UserConfiguration -Configuration $configName
     $result = Test-Configuration -InputObject $userConfig.Config
     $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
-    $deployConfigCopy = ConvertTo-DeployConfigEx -deployConfig $result.DeployConfig
+    $deployConfigCopy = $result.DeployConfig
 
     # Dump config to file, for debugging
     #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
