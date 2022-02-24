@@ -128,7 +128,7 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
         }
 
-        $existingSubnet = Get-List -Type Network | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) }
+        $existingSubnet = Get-List -Type Network -SmartUpdate | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) }
         if ($existingSubnet) {
             if (-not ($($ConfigObject.vmoptions.domainName) -in $($existingSubnet.Domain))) {
                 Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
@@ -137,7 +137,7 @@ function Test-ValidVmOptions {
             $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" })
             if ($CASorPRIorSEC) {
                 $existingCASorPRIorSEC = @()
-                $existingCASorPRIorSEC += Get-List -Type VM | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
+                $existingCASorPRIorSEC += Get-List -Type VM -SmartUpdate| Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
                 if ($existingCASorPRIorSEC.Count -gt 0) {
                     Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
                 }
@@ -471,7 +471,7 @@ function Test-ValidRoleDC {
                 }
 
                 # Account validation
-                $vmProps = Get-List -Type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $_.role -eq "DC" }
+                $vmProps = Get-List -Type VM -DomainName $($ConfigObject.vmOptions.DomainName) -SmartUpdate | Where-Object { $_.role -eq "DC" }
                 if ($vmProps.AdminName -ne $ConfigObject.vmOptions.adminName) {
                     Add-ValidationMessage -Message "Account Validation: Existing DC [$existingDC] is using a different admin name [$($ConfigObject.vmOptions.adminName)] for deployment. You must use the existing admin user [$($vmProps.AdminName)]." -ReturnObject $ReturnObject -Warning
                     Get-List -type VM -SmartUpdate | Out-Null
@@ -578,7 +578,7 @@ function Test-ValidRoleSiteServer {
         }
     }
 
-    $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $null -ne $_.siteCode }
+    $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) -SmartUpdate| Where-Object { $null -ne $_.siteCode }
     foreach ($vmWithSiteCode in $otherVMs) {
         if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
             Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
@@ -620,7 +620,7 @@ function Test-ValidRolePassiveSite {
     if ($VM.remoteContentLibVM) {
         $fsInConfig = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $VM.remoteContentLibVM }
         if (-not $fsInConfig) {
-            $fsVM = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) | Where-Object { $_.vmName -eq $VM.remoteContentLibVM }
+            $fsVM = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) -SmartUpdate| Where-Object { $_.vmName -eq $VM.remoteContentLibVM }
         }
         else {
             $fsVM = $fsInConfig
@@ -1023,7 +1023,7 @@ function Test-Configuration {
     # Primary site without CAS
     if ($deployConfig.parameters.scenario -eq "Hierarchy") {
         $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
-        $existingCS = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
+        $existingCS = Get-List2 -DeployConfig $deployConfig -SmartUpdate | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
         if (-not $existingCS) {
             Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
         }
@@ -1060,7 +1060,7 @@ function Test-Configuration {
     }
 
     # Names in domain
-    $allVMs = Get-List -Type VM | Select-Object -Expand VmName
+    $allVMs = Get-List -Type VM -SmartUpdate | Select-Object -Expand VmName
     $all = $allVMs + $vmInDeployment
     $unique2 = $all | Select-Object -Unique
     $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
