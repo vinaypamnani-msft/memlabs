@@ -460,7 +460,7 @@ function Get-SQLAOConfig {
         }
     }
     if (-not ($PrimaryAO.ClusterIPAddress)){
-        throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
+        #throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
     }
 
     $config = [PSCustomObject]@{
