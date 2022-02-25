@@ -2590,17 +2590,16 @@ class ModuleAdd {
     [bool] Test() {
 
         $_ModuleName = $this.CheckModuleName
+        write-verbose ('Searching for module:' + $_ModuleName)
         $GetModuleStatus = Get-InstalledModule -Name $_ModuleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
-        write-verbose ('Searching for module:' + $_ModuleName + 'ModuleStatus:' + $GetModuleStatus)
-
-
-        IF ($null -eq $GetModuleStatus) {
-            Return $false
+        if ($GetModuleStatus) {
+            write-verbose ('Found module:' + $_ModuleName + 'ModuleStatus:' + $GetModuleStatus.Version)
+            return $true
         }
-        ELSE {
-            Return $true
-        }
+
+        return $false
+
     }
 
     [ModuleAdd] Get() {
@@ -2788,12 +2787,13 @@ class ActiveDirectorySPN {
         Foreach ($user in $this.UserName) {
             $_UserName = $user
 
-            write-verbose ('Adding Write Validated SPN permission to User ' + $user + ' on ' + $user + ' account')
-            write-verbose ('Setting Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
+            write-verbose ('Adding Write Validated SPN permission to User ' + $user + ' on ' + $_UserNameCluster + ' account')
+            write-verbose ('Setting Permissions for User:' + $_UserNameCluster + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
             #Set SPN permissions to object to allow it to update SPN registrations.
 
             $oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
             $UserObject = "CN=$_UserName,$_OULocationUser"
+            $TargetUserObject = "CN=$_UserNameCluster,$_OULocationUser"
 
             write-verbose ('ObjectPath set to  AD:' + $UserObject)
 
@@ -2810,13 +2810,13 @@ class ActiveDirectorySPN {
             #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
             #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
 
-            $ACL = Get-Acl -Path "AD:$UserObject"
+            $ACL = Get-Acl -Path "AD:$TargetUserObject"
             $currentSSDL = $ACL.Sddl
 
             $newSSDL = $currentSSDL + $oldSddl
             $ACL.SetSecurityDescriptorSddlForm($newSSDL)
 
-            Set-Acl -AclObject $acl -Path "AD:$UserObject"
+            Set-Acl -AclObject $acl -Path "AD:$TargetUserObject"
             write-verbose (' Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName + ' have been set')
         }
 
@@ -2842,21 +2842,21 @@ class ActiveDirectorySPN {
             $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
             $SIDMatch = $Matches[0]
 
-            $oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
+            $oldSddl = $oldSddl -replace ($SIDMatch, $DeviceObject)
 
             #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
             #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
 
             write-verbose ('Device:' + $_DeviceName + ' UserSet is:' + $_UserNameCluster + ' On Domain:' + $_FQDNDomainName)
 
-            $ACL = Get-Acl -Path "AD:$DeviceObject"
+            $ACL = Get-Acl -Path "AD:$UserObject"
             $currentSSDL = $ACL.Sddl
 
 
             $newSSDL = $currentSSDL + $oldSddl
             $ACL.SetSecurityDescriptorSddlForm($newSSDL)
 
-            Set-Acl -AclObject $acl -Path "AD:$DeviceObject"
+            Set-Acl -AclObject $acl -Path "AD:$UserObject"
             write-verbose (' Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName + ' have been set')
         }
     }

@@ -203,45 +203,24 @@ Configuration Phase5
             Status = "Adding Windows Features"
         }
 
-        WindowsFeature ADDADPS {
-            Ensure    = 'Present'
-            Name      = 'RSAT-AD-PowerShell'
-            DependsOn = "[WriteStatus]WindowsFeature"
+        WindowsFeatureSet WindowsFeatureSet
+        {
+            Name                 = @('RSAT-AD-PowerShell', 'Failover-clustering', 'RSAT-Clustering-PowerShell', 'RSAT-Clustering-CmdInterface', 'RSAT-Clustering-Mgmt' )
+            Ensure               = 'Present'
+            IncludeAllSubFeature = $true
         }
 
         ModuleAdd SQLServerModule {
             Key             = 'Always'
             CheckModuleName = 'SqlServer'
-            DependsOn       = "[WriteStatus]WindowsFeature"
         }
 
-        WindowsFeature AddFailoverFeature {
-            Ensure    = 'Present'
-            Name      = 'Failover-clustering'
-            DependsOn = "[WriteStatus]WindowsFeature"
-        }
+        $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
 
-        WindowsFeature AddRemoteServerAdministrationToolsClusteringPowerShellFeature {
-            Ensure    = 'Present'
-            Name      = 'RSAT-Clustering-PowerShell'
-            DependsOn = '[WindowsFeature]AddFailoverFeature'
-        }
 
-        WindowsFeature AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature {
-            Ensure    = 'Present'
-            Name      = 'RSAT-Clustering-CmdInterface'
-            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringPowerShellFeature'
-        }
-
-        WindowsFeature AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature {
-            Ensure    = 'Present'
-            Name      = 'RSAT-Clustering-Mgmt'
-            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature'
-        }
-
-        WriteStatus Cluster {
-            DependsOn = "[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature"
-            Status    = "Creating Windows Cluster and Network"
+        WriteStatus CreateCluster {
+            DependsOn = $nextDepend
+            Status    = "Creating Cluster $($thisVM.ClusterName) on $($thisVM.thisParams.SQLAO.ClusterIPAddress)"
         }
 
         xCluster CreateCluster {
@@ -249,25 +228,25 @@ Configuration Phase5
             StaticIPAddress               = $thisVM.thisParams.SQLAO.ClusterIPAddress
             # This user must have the permission to create the CNO (Cluster Name Object) in Active Directory, unless it is prestaged.
             DomainAdministratorCredential = $Admincreds
-            DependsOn                     = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
+            DependsOn                     = $nextDepend
         }
 
         xClusterNetwork 'ChangeNetwork-192' {
-            Address              = $thisVM.thisParams.vmNetwork
-            AddressMask          = '255.255.255.0'
-            Name                 = 'Domain Network'
-            Role                 = '0'
-            DependsOn            = '[xCluster]CreateCluster'
-            PsDscRunAsCredential = $Admincreds
+            Address     = $thisVM.thisParams.vmNetwork
+            AddressMask = '255.255.255.0'
+            Name        = 'Domain Network'
+            Role        = '0'
+            DependsOn   = '[xCluster]CreateCluster'
+            #PsDscRunAsCredential = $Admincreds
         }
 
         xClusterNetwork 'ChangeNetwork-10' {
-            Address              = '10.250.250.0'
-            AddressMask          = '255.255.255.0'
-            Name                 = 'Cluster Network'
-            Role                 = '3'
-            DependsOn            = '[xCluster]CreateCluster'
-            PsDscRunAsCredential = $Admincreds
+            Address     = '10.250.250.0'
+            AddressMask = '255.255.255.0'
+            Name        = 'Cluster Network'
+            Role        = '3'
+            DependsOn   = '[xCluster]CreateCluster'
+            #PsDscRunAsCredential = $Admincreds
         }
 
         #WaitForAny WaitForCluster {
@@ -284,12 +263,12 @@ Configuration Phase5
         }
 
         WaitForAny FileShareComplete {
-            NodeName             = $thisVM.fileServerVM
-            ResourceName         = "[WriteStatus]Complete"
-            RetryIntervalSec     = 10
-            RetryCount           = 180
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+            NodeName         = $thisVM.fileServerVM
+            ResourceName     = "[WriteStatus]Complete"
+            RetryIntervalSec = 10
+            RetryCount       = 180
+            #PsDscRunAsCredential = $Admincreds
+            DependsOn        = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
         }
 
         WriteStatus ClusterJoin {
@@ -298,118 +277,132 @@ Configuration Phase5
         }
 
         WaitForAny WaitForClusterJoin {
-            NodeName             = $node2
-            ResourceName         = '[xClusterQuorum]ClusterWitness'
-            RetryIntervalSec     = 10
-            RetryCount           = 90
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[xCluster]CreateCluster'
+            NodeName         = $node2
+            ResourceName     = '[xClusterQuorum]ClusterWitness'
+            RetryIntervalSec = 10
+            RetryCount       = 90
+            #PsDscRunAsCredential = $Admincreds
+            DependsOn        = '[xCluster]CreateCluster'
         }
 
-        ClusterRemoveUnwantedIPs ClusterRemoveUnwantedIPs {
-            ClusterName          = $thisVM.ClusterName
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[WaitForAny]WaitForClusterJoin'
+        $nextDepend = "[WaitForAny]WaitForClusterJoin"
+
+        WriteStatus ClusterSetOwnerNodes {
+            DependsOn = $nextDepend
+            Status    = "Setting OwnerNodes $($thisVM.ClusterName) to $($thisVM.thisParams.SQLAO.ClusterNodes -Join ',')"
         }
 
         ClusterSetOwnerNodes ClusterSetOwnerNodes {
-            ClusterName          = $thisVM.ClusterName
+            ClusterName = $thisVM.ClusterName
             #Nodes                = ($AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName), ($AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName)
-            Nodes                = $thisVM.thisParams.SQLAO.ClusterNodes
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
+            Nodes       = $thisVM.thisParams.SQLAO.ClusterNodes
+            #PsDscRunAsCredential = $Admincreds
+            DependsOn            =$nextDepend
         }
+        $nextDepend = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
 
         WaitForAll DCComplete {
             ResourceName     = '[WriteStatus]Complete'
             NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
             RetryIntervalSec = 5
             RetryCount       = 450
-            Dependson        = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
+            Dependson        = $nextDepend
         }
+        $nextDepend = '[WaitForAll]DCComplete'
+
 
         WriteStatus SvcAccount {
-            DependsOn = '[WaitForAll]DCComplete'
+            DependsOn = $nextDepend
             Status    = "Configuring SQL Service Accounts and SQL Logins"
         }
 
         #Change SQL Service Account
         SqlLogin 'Add_WindowsUserAgent' {
-            Ensure               = 'Present'
-            Name                 = $thisVM.thisParams.SQLAO.SqlAgentServiceAccountFQ
-            LoginType            = 'WindowsUser'
-            ServerName           = $thisVM.vmName
-            InstanceName         = $thisVM.sqlInstanceName
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[WriteStatus]SvcAccount'
+            Ensure       = 'Present'
+            Name         = $thisVM.thisParams.SQLAO.SqlAgentServiceAccountFQ
+            LoginType    = 'WindowsUser'
+            ServerName   = $thisVM.vmName
+            InstanceName = $thisVM.sqlInstanceName
+            #PsDscRunAsCredential = $Admincreds
+            DependsOn    = '[WriteStatus]SvcAccount'
         }
 
         SqlLogin 'Add_WindowsUser' {
-            Ensure               = 'Present'
-            Name                 = $thisVM.thisParams.SQLAO.SqlServiceAccountFQ
-            LoginType            = 'WindowsUser'
-            ServerName           = $thisVM.vmName
-            InstanceName         = $thisVM.sqlInstanceName
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[WriteStatus]SvcAccount'
+            Ensure       = 'Present'
+            Name         = $thisVM.thisParams.SQLAO.SqlServiceAccountFQ
+            LoginType    = 'WindowsUser'
+            ServerName   = $thisVM.vmName
+            InstanceName = $thisVM.sqlInstanceName
+            #PsDscRunAsCredential = $Admincreds
+            DependsOn    = '[WriteStatus]SvcAccount'
         }
 
 
         SqlRole 'Add_ServerRole' {
-            Ensure               = 'Present'
-            ServerRoleName       = 'SysAdmin'
-            ServerName           = $thisVM.vmName
-            InstanceName         = $thisVM.sqlInstanceName
-            MembersToInclude     = $thisVM.thisParams.SQLAO.SqlAgentServiceAccountFQ, $thisVM.thisParams.SQLAO.SqlServiceAccountFQ, 'BUILTIN\Administrators'
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[SqlLogin]Add_WindowsUser'
+            Ensure           = 'Present'
+            ServerRoleName   = 'SysAdmin'
+            ServerName       = $thisVM.vmName
+            InstanceName     = $thisVM.sqlInstanceName
+            MembersToInclude = $thisVM.thisParams.SQLAO.SqlAgentServiceAccountFQ, $thisVM.thisParams.SQLAO.SqlServiceAccountFQ, 'BUILTIN\Administrators'
+            #PsDscRunAsCredential = $Admincreds
+            DependsOn        = '[SqlLogin]Add_WindowsUser'
         }
 
 
         # Adding the required service account to allow the cluster to log into SQL
         SqlLogin 'AddNTServiceClusSvc' {
-            Ensure               = 'Present'
-            Name                 = 'NT SERVICE\ClusSvc'
-            LoginType            = 'WindowsUser'
-            ServerName           = $Node.NodeName
-            InstanceName         = $thisVM.sqlInstanceName
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[SqlLogin]Add_WindowsUser'
+            Ensure       = 'Present'
+            Name         = 'NT SERVICE\ClusSvc'
+            LoginType    = 'WindowsUser'
+            ServerName   = $Node.NodeName
+            InstanceName = $thisVM.sqlInstanceName
+            #PsDscRunAsCredential = $Admincreds
+            DependsOn    = '[SqlRole]Add_ServerRole'
         }
 
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions' {
-            DependsOn            = '[SqlLogin]AddNTServiceClusSvc'
-            Ensure               = 'Present'
-            ServerName           = $Node.NodeName
-            InstanceName         = $thisVM.sqlInstanceName
-            Principal            = 'NT SERVICE\ClusSvc'
-            Permission           = 'AlterAnyAvailabilityGroup', 'ViewServerState'
-            PsDscRunAsCredential = $Admincreds
+            DependsOn    = '[SqlLogin]AddNTServiceClusSvc'
+            Ensure       = 'Present'
+            ServerName   = $Node.NodeName
+            InstanceName = $thisVM.sqlInstanceName
+            Principal    = 'NT SERVICE\ClusSvc'
+            Permission   = 'AlterAnyAvailabilityGroup', 'ViewServerState'
+            #PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[SqlPermission]AddNTServiceClusSvcPermissions'
+
+        WriteStatus HADREndpoint {
+            DependsOn = $nextDepend
+            Status    = "Configuring HADR Database Mirroring"
         }
 
         # Create a DatabaseMirroring endpoint
         SqlEndpoint 'HADREndpoint' {
-            EndPointName         = 'HADR'
-            EndpointType         = 'DatabaseMirroring'
-            Ensure               = 'Present'
-            Port                 = 5022
-            ServerName           = $Node.NodeName
-            InstanceName         = $thisVM.sqlInstanceName
-            PsDscRunAsCredential = $Admincreds
+            EndPointName = 'HADR'
+            EndpointType = 'DatabaseMirroring'
+            Ensure       = 'Present'
+            Port         = 5022
+            ServerName   = $Node.NodeName
+            InstanceName = $thisVM.sqlInstanceName
+            DependsOn    = $nextDepend
+            #PsDscRunAsCredential = $Admincreds
         }
+        $nextDepend = '[SqlEndpoint]HADREndpoint'
 
         # Ensure the HADR option is enabled for the instance
         SqlAlwaysOnService 'EnableHADR' {
-            Ensure               = 'Present'
-            InstanceName         = $thisVM.sqlInstanceName
-            ServerName           = $Node.NodeName
-            PsDscRunAsCredential = $Admincreds
+            Ensure       = 'Present'
+            InstanceName = $thisVM.sqlInstanceName
+            ServerName   = $Node.NodeName
+            DependsOn    = $nextDepend
+            #PsDscRunAsCredential = $Admincreds
         }
+        $nextDepend = '[SqlAlwaysOnService]EnableHADR'
 
         WriteStatus SQLAG {
-            DependsOn = '[SqlAlwaysOnService]EnableHADR', '[SqlEndpoint]HADREndpoint', '[SqlPermission]AddNTServiceClusSvcPermissions'
-            Status    = "Creating Availability Group and Listener"
+            DependsOn = $nextDepend
+            Status    = "Creating Availability Group $($thisVM.thisParams.SQLAO.ClusterNameAoG) on $($Node.NodeName)\$($thisVM.sqlInstanceName)"
         }
 
         # Create the availability group on the instance tagged as the primary replica
@@ -424,22 +417,45 @@ Configuration Phase5
             ConnectionModeInSecondaryRole = 'AllowAllConnections'
             FailoverMode                  = 'Manual'
             HealthCheckTimeout            = 15000
-            DependsOn                     = '[SqlAlwaysOnService]EnableHADR', '[SqlEndpoint]HADREndpoint', '[SqlPermission]AddNTServiceClusSvcPermissions'
-            PsDscRunAsCredential          = $Admincreds
+            ProcessOnlyOnActiveNode       = $true
+            BasicAvailabilityGroup        = $false
+            DatabaseHealthTrigger         = $true
+            DtcSupportEnabled             = $true
+            DependsOn                     = $nextDepend
+            #PsDscRunAsCredential          = $Admincreds
+        }
+        $nextDepend = '[SqlAG]CMCASAG'
+
+        WriteStatus SqlAGListener {
+            DependsOn = $nextDepend
+            Status    = "Creating Availability Group Listener"
+        }
+        SqlAGListener 'AvailabilityGroupListener' {
+            Ensure            = 'Present'
+            ServerName        = $Node.NodeName
+            InstanceName      = $thisVM.sqlInstanceName
+            AvailabilityGroup = $thisVM.thisParams.SQLAO.ClusterNameAoG
+            DHCP              = $false
+            Name              = $thisVM.thisParams.SQLAO.ClusterNameAoG
+            IpAddress         = $thisVM.thisParams.SQLAO.AGIPAddress
+            Port              = 1500
+            DependsOn         = $nextDepend
+            #PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[SqlAGListener]AvailabilityGroupListener'
+
+        WriteStatus ClusterRemoveUnwantedIPs {
+            DependsOn =  $nextDepend
+            Status    = "Removing Unwanted IPs from Cluster"
         }
 
-        SqlAGListener 'AvailabilityGroupListener' {
-            Ensure               = 'Present'
-            ServerName           = $Node.NodeName
-            InstanceName         = $thisVM.sqlInstanceName
-            AvailabilityGroup    = $thisVM.thisParams.SQLAO.ClusterNameAoG
-            DHCP                 = $false
-            Name                 = $thisVM.thisParams.SQLAO.ClusterNameAoG
-            IpAddress            = $thisVM.thisParams.SQLAO.AGIPAddress
-            Port                 = 1500
-            DependsOn            = '[SqlAG]CMCASAG'
-            PsDscRunAsCredential = $Admincreds
+        ClusterRemoveUnwantedIPs ClusterRemoveUnwantedIPs {
+            ClusterName = $thisVM.ClusterName
+            #PsDscRunAsCredential = $Admincreds
+            DependsOn   =  $nextDepend
         }
+        $nextDepend = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
+
 
         $lspn1 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.ClusterNameAoG
         $lspn2 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.ClusterNameAoGFQDN
@@ -447,41 +463,47 @@ Configuration Phase5
         $lspn4 = $lspn2 + ":1500"
         $account = $thisVM.thisParams.SQLAO.SqlServiceAccount
 
-        ADServicePrincipalName2 'lspn1' {
+        WriteStatus SPNS {
+            DependsOn = $nextDepend
+            Status    = "Adding SQLAO SPNs $lspn1, $lspn2, $lspn3, $lspn4 to $account"
+        }
+
+        ADServicePrincipalName 'lspn1' {
             Ensure               = 'Present'
             ServicePrincipalName = $lspn1
             Account              = $account
-            Dependson            = '[SqlAGListener]AvailabilityGroupListener'
+            Dependson            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
-        ADServicePrincipalName2 'lspn2' {
+        ADServicePrincipalName 'lspn2' {
             Ensure               = 'Present'
             ServicePrincipalName = $lspn2
             Account              = $account
-            Dependson            = '[SqlAGListener]AvailabilityGroupListener'
+            Dependson            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
-        ADServicePrincipalName2 'lspn3' {
+        ADServicePrincipalName 'lspn3' {
             Ensure               = 'Present'
             ServicePrincipalName = $lspn3
             Account              = $account
-            Dependson            = '[SqlAGListener]AvailabilityGroupListener'
+            Dependson            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
-        ADServicePrincipalName2 'lspn4' {
+        ADServicePrincipalName 'lspn4' {
             Ensure               = 'Present'
             ServicePrincipalName = $lspn4
             Account              = $account
-            Dependson            = '[SqlAGListener]AvailabilityGroupListener'
+            Dependson            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
+        $nextDepend = '[ADServicePrincipalName]lspn1', '[ADServicePrincipalName]lspn2', '[ADServicePrincipalName]lspn3', '[ADServicePrincipalName]lspn4'
 
         WriteStatus AgListen {
-            DependsOn = '[ADServicePrincipalName2]lspn4'
+            DependsOn = $nextDepend
             Status    = "Waiting on $node2 to Join the Sql Availability Group Listener"
         }
 
@@ -490,7 +512,7 @@ Configuration Phase5
             NodeName         = $node2
             RetryIntervalSec = 2
             RetryCount       = 450
-            Dependson        = '[SqlAGListener]AvailabilityGroupListener'
+            Dependson        = $nextDepend
         }
 
         $dbName = "TESTDB"
@@ -498,17 +520,27 @@ Configuration Phase5
         $nextDepend = '[WaitForAll]AddReplica'
         if ($dbName) {
 
-            SqlDatabase 'SetRecoveryModel' {
-                Ensure               = 'Present'
-                ServerName           = $Node.NodeName
-                InstanceName         = $thisVM.sqlInstanceName
-                Name                 = $dbName
-                RecoveryModel        = 'Full'
-
-                PsDscRunAsCredential = $Admincreds
-                DependsOn            = $nextDepend
+            WriteStatus SetRecoveryModel {
+                DependsOn = $nextDepend
+                Status    = "Creaing $dbName and setting to Full Recovery Model"
             }
 
+            SqlDatabase 'SetRecoveryModel' {
+                Ensure        = 'Present'
+                ServerName    = $Node.NodeName
+                InstanceName  = $thisVM.sqlInstanceName
+                Name          = $dbName
+                RecoveryModel = 'Full'
+
+                # PsDscRunAsCredential = $Admincreds
+                DependsOn     = $nextDepend
+            }
+            $nextDepend = '[SqlDatabase]SetRecoveryModel'
+
+            WriteStatus AddAGDatabaseMemberships {
+                DependsOn = $nextDepend
+                Status    = "Adding $dbName to Always On Group"
+            }
             SqlAGDatabase 'AddAGDatabaseMemberships' {
                 AvailabilityGroupName   = $thisVM.thisParams.SQLAO.ClusterNameAoG
                 BackupPath              = $thisVM.thisParams.SQLAO.BackupShareFQ
@@ -519,7 +551,7 @@ Configuration Phase5
                 ProcessOnlyOnActiveNode = $true
                 MatchDatabaseOwner      = $true
                 PsDscRunAsCredential    = $Admincreds
-                DependsOn               = '[SqlDatabase]SetRecoveryModel'
+                DependsOn               = $nextDepend
             }
             $nextDepend = '[SqlAGDatabase]AddAGDatabaseMemberships'
         }
@@ -565,51 +597,37 @@ Configuration Phase5
             Status = "Adding Windows Features"
         }
 
-        WindowsFeature ADDADPS {
-            Ensure    = 'Present'
-            Name      = 'RSAT-AD-PowerShell'
-            DependsOn = "[WriteStatus]WindowsFeature"
+        WindowsFeatureSet WindowsFeatureSet
+        {
+            Name                 = @('RSAT-AD-PowerShell', 'Failover-clustering', 'RSAT-Clustering-PowerShell', 'RSAT-Clustering-CmdInterface', 'RSAT-Clustering-Mgmt' )
+            Ensure               = 'Present'
+            IncludeAllSubFeature = $true
         }
 
-        WindowsFeature AddFailoverFeature {
-            Ensure = 'Present'
-            Name   = 'Failover-clustering'
+        ModuleAdd SQLServerModule {
+            Key             = 'Always'
+            CheckModuleName = 'SqlServer'
         }
 
-        WindowsFeature AddRemoteServerAdministrationToolsClusteringPowerShellFeature {
-            Ensure    = 'Present'
-            Name      = 'RSAT-Clustering-PowerShell'
-            DependsOn = '[WindowsFeature]AddFailoverFeature'
-        }
-
-        WindowsFeature AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature {
-            Ensure    = 'Present'
-            Name      = 'RSAT-Clustering-CmdInterface'
-            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringPowerShellFeature'
-        }
-
-        WindowsFeature AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature {
-            Ensure    = 'Present'
-            Name      = 'RSAT-Clustering-Mgmt'
-            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringCmdInterfaceFeature'
-        }
+        $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
 
         WriteStatus WaitCluster {
             Status    = "Waiting for Cluster '$($Node1VM.ClusterName)' to become active"
-            DependsOn = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
+            DependsOn = $nextDepend
         }
 
         xWaitForCluster WaitForCluster {
             Name                 = $Node1VM.ClusterName
             RetryIntervalSec     = 15
             RetryCount           = 60
-            DependsOn            = '[WindowsFeature]AddRemoteServerAdministrationToolsClusteringMgmtInterfaceFeature'
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
+        $nextDepend = '[xWaitForCluster]WaitForCluster'
 
         WriteStatus WaitClusterNetwork {
             Status    = "Waiting for '$node1' to create Windows Cluster Network"
-            DependsOn = '[xWaitForCluster]WaitForCluster'
+            DependsOn = $nextDepend
         }
 
         WaitForAny WaitForClusteringNetworking {
@@ -618,18 +636,20 @@ Configuration Phase5
             RetryIntervalSec     = 10
             RetryCount           = 90
             PsDscRunAsCredential = $Admincreds
+            DependsOn = $nextDepend
         }
+        $nextDepend = '[WaitForAny]WaitForClusteringNetworking'
 
         WriteStatus JoinCluster {
             Status    = "Joining Windows Cluster '$($Node1VM.ClusterName)' on '$node1'"
-            DependsOn = '[xWaitForCluster]WaitForCluster'
+            DependsOn = $nextDepend
         }
 
         xCluster JoinSecondNodeToCluster {
             Name                 = $Node1VM.ClusterName
             StaticIPAddress      = $Node1VM.thisParams.SQLAO.ClusterIPAddress
             PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[xWaitForCluster]WaitForCluster', '[WaitForAny]WaitForClusteringNetworking'
+            DependsOn            =  $nextDepend
         }
 
         xClusterNetwork 'ChangeNetwork-192' {
@@ -717,17 +737,6 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
 
-        SqlRole 'Add_ServerRole' {
-            Ensure               = 'Present'
-            ServerRoleName       = 'SysAdmin'
-            ServerName           = $node.NodeName
-            InstanceName         = $node1vm.sqlInstanceName
-            MembersToInclude     = $node1vm.thisParams.SQLAO.SqlAgentServiceAccountFQ, $node1vm.thisParams.SQLAO.SqlServiceAccountFQ, 'BUILTIN\Administrators'
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[SqlLogin]Add_WindowsUser'
-        }
-
-        # Adding the required service account to allow the cluster to log into SQL
         SqlLogin 'AddNTServiceClusSvc' {
             Ensure               = 'Present'
             Name                 = 'NT SERVICE\ClusSvc'
@@ -738,9 +747,22 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
 
+        $nextDepend = '[SqlLogin]Add_WindowsUserAgent', '[SqlLogin]Add_WindowsUser', '[SqlLogin]AddNTServiceClusSvc'
+
+        SqlRole 'Add_ServerRole' {
+            Ensure               = 'Present'
+            ServerRoleName       = 'SysAdmin'
+            ServerName           = $node.NodeName
+            InstanceName         = $node1vm.sqlInstanceName
+            MembersToInclude     = $node1vm.thisParams.SQLAO.SqlAgentServiceAccountFQ, $node1vm.thisParams.SQLAO.SqlServiceAccountFQ, 'BUILTIN\Administrators'
+            PsDscRunAsCredential = $Admincreds
+            DependsOn            = $nextDepend
+        }
+
+
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions' {
-            DependsOn            = '[SqlLogin]AddNTServiceClusSvc'
+            DependsOn            = $nextDepend
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
@@ -748,6 +770,7 @@ Configuration Phase5
             Permission           = 'AlterAnyAvailabilityGroup', 'ViewServerState'
             PsDscRunAsCredential = $Admincreds
         }
+        $nextDepend = '[SqlRole]Add_ServerRole', '[SqlPermission]AddNTServiceClusSvcPermissions'
 
         # Create a DatabaseMirroring endpoint
         SqlEndpoint 'HADREndpoint' {
@@ -757,7 +780,7 @@ Configuration Phase5
             Port                 = 5022
             ServerName           = $Node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            DependsOn            = "[SqlPermission]AddNTServiceClusSvcPermissions"
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -766,7 +789,7 @@ Configuration Phase5
             InstanceName         = $node1vm.sqlInstanceName
             ServerName           = $Node.NodeName
             PsDscRunAsCredential = $Admincreds
-            Dependson = '[SqlEndpoint]HADREndpoint'
+            Dependson            = '[SqlEndpoint]HADREndpoint'
         }
 
         WriteStatus SQLAOWait {
@@ -783,9 +806,10 @@ Configuration Phase5
             Dependson            = '[SqlAlwaysOnService]EnableHADR'
             PsDscRunAsCredential = $Admincreds
         }
+        $nextDepend = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
 
         WriteStatus SQLAO1 {
-            DependsOn = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
+            DependsOn = $nextDepend
             Status    = "Waiting for $node1 to complete"
         }
 
@@ -794,11 +818,12 @@ Configuration Phase5
             NodeName         = $node1
             RetryIntervalSec = 2
             RetryCount       = 450
-            Dependson        = '[WriteStatus]SQLAO1'
+            Dependson        = $nextDepend
         }
+        $nextDepend = '[WaitForAll]AG'
 
         WriteStatus SQLAO2 {
-            DependsOn = '[WaitForAll]AG'
+            DependsOn = $nextDepend
             Status    = "Adding replica to the Availability Group"
         }
 
@@ -822,7 +847,7 @@ Configuration Phase5
             PrimaryReplicaServerName      = $node1VM.thisParams.SQLAO.PrimaryReplicaServerName
             PrimaryReplicaInstanceName    = $node1vm.sqlInstanceName
             ProcessOnlyOnActiveNode       = $true
-            DependsOn                     = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
+            DependsOn                     = $nextDepend
             PsDscRunAsCredential          = $Admincreds
         }
 
@@ -912,7 +937,7 @@ Configuration Phase5
 
             ActiveDirectorySPN "SQLAOSPN$i" {
                 Key              = "SQLAOSPN$i"
-                UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount
+                UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount, 'vmbuildadmin', $deployConfig.vmOptions.adminName
                 FQDNDomainName   = $DomainName
                 OULocationUser   = $pNode.thisParams.SQLAO.OULocationUser
                 OULocationDevice = $pNode.thisParams.SQLAO.OULocationDevice

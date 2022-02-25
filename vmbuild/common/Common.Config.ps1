@@ -453,11 +453,14 @@ function Get-SQLAOConfig {
     $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
 
     if (-not ($PrimaryAO.ClusterIPAddress)) {
-        $vm = Get-List2 -deployConfig $deployConfig | where-object { $_.vmName -eq $PrimaryAO.vmName }
+        $vm = Get-List2 -deployConfig $deployConfig -SmartUpdate | where-object { $_.vmName -eq $PrimaryAO.vmName }
         if ($vm.ClusterIPAddress) {
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $vm.ClusterIPAddress -Force
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $vm.AGIPAddress -Force
         }
+    }
+    if (-not ($PrimaryAO.ClusterIPAddress)){
+        throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
     }
 
     $config = [PSCustomObject]@{
@@ -1177,10 +1180,9 @@ function Get-List {
     )
 
     $mtx = New-Object System.Threading.Mutex($false, "GetList")
-    $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
-    write-log "[$tid] Attempting to acquire 'GetList' Mutex" -LogOnly -Verbose
+    write-log "Attempting to acquire 'GetList' Mutex" -LogOnly -Verbose
     [void]$mtx.WaitOne()
-    write-log "[$tid] acquired 'GetList' Mutex" -LogOnly -Verbose
+    write-log "acquired 'GetList' Mutex" -LogOnly -Verbose
     try {
 
         if ($FlushCache.IsPresent) {
