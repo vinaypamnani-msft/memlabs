@@ -26,6 +26,7 @@ function Write-JobProgress {
             try {
                 if ($Common.PS7) {
                     $jobName = "  $($jobName.PadRight(15," "))"
+                    # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                 }
                 Write-Progress -Id $Job.Id -Activity "$jobName`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
             }
