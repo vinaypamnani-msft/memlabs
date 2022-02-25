@@ -66,18 +66,34 @@ function Start-VM2 {
 
     $vm = Get-VM2 -Name $Name
 
+    if ($vm.State -eq "Running") {
+        Write-Log "${$Name}: VM is already running."
+        return
+    }
+
     if ($vm) {
         $i = 0
-
+        $running = $false
         do {
             $i++
             if ($i -gt 1) {
                 Start-Sleep -Seconds $RetrySeconds
             }
             Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue
+            $vm = Get-VM2 -Name $Name
+            if ($vm.State -eq "Running") {
+                $running = $true
+            }
         }
 
-        until ($i -gt $retryCount -or $StopError.Count -eq 0)
+        until ($i -gt $retryCount -or $running)
+
+        if ($running) {
+            Write-Log "${$Name}: VM was started." -LogOnly
+            if ($Passthru.IsPresent) {
+                return $true
+            }
+        }
 
         if ($StopError.Count -ne 0) {
             Write-Log "${$Name}: Failed to start the VM. $StopError" -Warning
@@ -86,8 +102,17 @@ function Start-VM2 {
             }
         }
         else {
-            if ($Passthru.IsPresent) {
-                return $true
+            $vm = Get-VM2 -Name $Name
+            if ($vm.State -eq "Running") {
+                Write-Log "${$Name}: VM was started." -LogOnly
+                if ($Passthru.IsPresent) {
+                    return $true
+                }
+            }else {
+                Write-Log "${$Name}: VM was not started. Current State $($vm.State)" -Warning
+                if ($Passthru.IsPresent) {
+                    return $false
+                }
             }
         }
     }
@@ -162,9 +187,9 @@ function Get-VMCheckpoint2 {
 
     if ($vm) {
         if ($name) {
-        return Get-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
+            return Get-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
         }
-        else{
+        else {
             return Get-VMCheckpoint -VM $vm  -ErrorAction SilentlyContinue
         }
     }

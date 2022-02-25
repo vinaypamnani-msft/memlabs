@@ -3864,7 +3864,7 @@ function Add-NewVMForRole {
     $vprocs = 2
 
     $installSSMS = $false
-    if ($OperatingSystem.Contains("Server")) {
+    if ($OperatingSystem.Contains("Server") -and ($role -ne "DC")) {
         $memory = "4GB"
         $vprocs = 4
         $installSSMS = $true
@@ -3877,7 +3877,7 @@ function Add-NewVMForRole {
         virtualProcs    = $vprocs
     }
 
-    if ($role -notin ("OSDCLient", "AADJoined")) {
+    if ($role -notin ("OSDCLient", "AADJoined", "DC")) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
     }
     $existingPrimary = $null
