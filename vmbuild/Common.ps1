@@ -166,9 +166,9 @@ function Write-Log {
             Write-Host $Text @HashArguments
         }
     }
-
+    $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
     $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss:fff'
-    $Text = "$time $Text"
+    $Text = "$time [$tid] $Text"
 
     # Write to log, non verbose entries
     $write = $false
@@ -1208,21 +1208,39 @@ function New-VirtualMachine {
     Write-Log "$VmName`: Enabling Hyper-V Guest Services"
     Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
 
-    if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
-        New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
-        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-    }
+    $mtx = New-Object System.Threading.Mutex($false, "TPM")
+    write-log "Attempting to acquire 'TPM' Mutex" -LogOnly
+    [void]$mtx.WaitOne()
+    write-log "acquired 'TPM' Mutex" -LogOnly
+    try {
+        if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
+            New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
+            New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+        }
 
-    $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
-    if ($localCASupported -eq 1) {
-        Write-Log "$VmName`: Enabling TPM"
-        $HGOwner = Get-HgsGuardian MemLabsGuardian
-        $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
-        Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
-        Enable-VMTPM $VmName -ErrorAction SilentlyContinue ## Only required for Win11
+        $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
+        if ($localCASupported -eq 1) {
+            Write-Log "$VmName`: Enabling TPM"
+            $HGOwner = Get-HgsGuardian MemLabsGuardian
+            $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
+            if (-not $KeyProtector -or -not ($KeyProtector.RawData)) {
+                Write-Log "$VmName`: New-HgsKeyProtector failed"
+                return $false
+            }
+            Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
+            Enable-VMTPM $VmName -ErrorAction Stop ## Only required for Win11
+        }
+        else {
+            Write-Log "$VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
+        }
     }
-    else {
-        Write-Log "$VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
+    catch {
+        Write-Log "$VmName`: TPM failed $_"
+        return $false
+    }
+    finally {
+        [void]$mtx.ReleaseMutex()
+        [void]$mtx.Dispose()
     }
 
     Write-Log "$VmName`: Setting Processor count to $Processors"
@@ -1278,6 +1296,7 @@ function New-VirtualMachine {
     Write-Log "$VmName`: Starting virtual machine"
     $started = Start-VM2 -Name $VmName -Passthru
     if (-not $started) {
+        Write-Log "$VmName`: VM Not Started."
         return $false
     }
 
@@ -1301,10 +1320,9 @@ function New-VirtualMachine {
         }
 
         $mtx = New-Object System.Threading.Mutex($false, "GetIP")
-        $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
-        write-log "[$tid] Attempting to acquire 'GetIP' Mutex" -LogOnly
+        write-log "Attempting to acquire 'GetIP' Mutex" -LogOnly
         [void]$mtx.WaitOne()
-        write-log "[$tid] acquired 'GetIP' Mutex" -LogOnly
+        write-log "acquired 'GetIP' Mutex" -LogOnly
         try {
             $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0"
             Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
@@ -1395,7 +1413,7 @@ function Wait-ForVm {
         do {
             try {
                 $vmTest = Get-VM2 -Name $VmName
-                if (-not $vmTest){
+                if (-not $vmTest) {
                     Write-Progress -Activity  "$VmName`: Cound not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
                     Write-Log -Failure "Cound not find VM $VMName"
                     return
@@ -1515,7 +1533,7 @@ function Wait-ForVm {
         }
 
         $vmTest = Get-VM2 -Name $VmName
-        if (-not $vmTest){
+        if (-not $vmTest) {
             Write-Progress -Activity  "$VmName`: Cound not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
             Write-Log -Failure "Cound not find VM $VMName"
             return
@@ -2119,7 +2137,8 @@ function Get-BranchName {
 
         return $branch
 
-    } catch {
+    }
+    catch {
         return $null
     }
 }

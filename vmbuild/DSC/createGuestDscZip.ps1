@@ -73,6 +73,7 @@ try {
     # Dump config to file, for debugging
     #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
     $filePath = "C:\temp\deployConfig.json"
+    $deployConfigCopy.parameters.ThisMachineName = $vmName
     $deployConfigCopy | ConvertTo-Json -Depth 5 | Out-File $filePath -Force
 
     # Create local compressed file and inject appropriate appropriate TemplateHelpDSC
@@ -114,7 +115,7 @@ try {
             }
         )
     }
-
+write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath ""C:\Temp\$($role)-Config"" "
     & "$($dscRole)" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config" | out-host
 }
 finally {

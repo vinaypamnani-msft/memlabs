@@ -2335,7 +2335,30 @@ class ClusterRemoveUnwantedIPs {
     [void] Set() {
         try {
             $_ClusterName = $this.ClusterName
-            $ResourcesToRemove = (Get-ClusterResource -Cluster $_ClusterName | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            $valid = $false
+            $failCount = 0
+            $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
+            if ($Cluster) {
+                $valid = $true
+            }
+            while (-not $valid -and $failCount -lt 15) {
+                try {
+                    $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
+                    if ($Cluster) {
+                        $valid = $true
+                    }
+                    else {
+                        $failCount++
+                        start-sleep 60
+                    }
+                }
+                catch {
+                    Write-Verbose "$_ Failed Get-ClusterResource for $_ClusterName"
+                    $failCount++
+                    start-sleep 60
+                }
+            }
+            $ResourcesToRemove = ($Cluster | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
             if ($ResourcesToRemove) {
                 foreach ($Resource in $ResourcesToRemove) {
                     Write-Verbose "Cluster Removing $($resource.Name)"
@@ -2356,7 +2379,31 @@ class ClusterRemoveUnwantedIPs {
 
         try {
             $_ClusterName = $this.ClusterName
-            $ResourcesToRemove = (Get-ClusterResource -Cluster $_ClusterName | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            $valid = $false
+            $failCount = 0
+            $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
+            if ($Cluster) {
+                $valid = $true
+            }
+            while (-not $valid -and $failCount -lt 15) {
+                try {
+                    $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
+                    if ($Cluster) {
+                        $valid = $true
+                    }
+                    else {
+                        Write-Verbose "$_ Get-ClusterResource for $_ClusterName did not return an entry"
+                        $failCount++
+                        start-sleep 60
+                    }
+                }
+                catch {
+                    Write-Verbose "$_ Failed Get-ClusterResource for $_ClusterName"
+                    $failCount++
+                    start-sleep 60
+                }
+            }
+            $ResourcesToRemove = ($Cluster | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
 
             if ($ResourcesToRemove) {
                 return $false
