@@ -61,7 +61,7 @@ $global:VM_Create = {
             # Check if VM already exists
             $exists = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
             if ($exists) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): VM already exists. Exiting." -Failure -OutputStream -HostOnly
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM already exists. Exiting." -Failure -OutputStream -HostOnly
                 return
             }
 
@@ -93,13 +93,13 @@ $global:VM_Create = {
             $created = New-VirtualMachine @HashArguments
 
             if (-not $created) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): VM was not created. Check vmbuild logs." -Failure -OutputStream -HostOnly
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM was not created. Check vmbuild logs." -Failure -OutputStream -HostOnly
                 return
             }
 
             if ($currentItem.role -eq "OSDClient") {
                 New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
                 return
             }
 
@@ -111,7 +111,7 @@ $global:VM_Create = {
 
             $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
             if (-not $connected) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
                 return
             }
         }
@@ -122,7 +122,7 @@ $global:VM_Create = {
                 # Validation should prevent from ever getting in this block
                 $started = Start-VM2 -Name $currentItem.vmName -Passthru
                 if (-not $started) {
-                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Could not start the VM. Exiting." -Failure -OutputStream
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not start the VM. Exiting." -Failure -OutputStream
                     return
                 }
             }
@@ -131,7 +131,7 @@ $global:VM_Create = {
             if ($currentItem.role -eq "DC") {
                 $testNet = Test-NetConnection -ComputerName $currentItem.vmName -Port 3389
                 if (-not $testNet.TcpTestSucceeded) {
-                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Could not verify if RDP is enabled. Restarting the computer." -OutputStream -Warning
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if RDP is enabled. Restarting the computer." -OutputStream -Warning
                     Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
                     Start-Sleep -Seconds 10
                 }
@@ -139,7 +139,7 @@ $global:VM_Create = {
 
             $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
             if (-not $connected) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
                 return
             }
         }
@@ -170,8 +170,8 @@ $global:VM_Create = {
                 }
             }
             catch {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Could not assign DHCP Reservation for $($currentItem.role). $_" -Warning
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): $($_.ScriptStackTrace)" -LogOnly
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not assign DHCP Reservation for $($currentItem.role). $_" -Warning
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): $($_.ScriptStackTrace)" -LogOnly
             }
         }
 
@@ -179,14 +179,14 @@ $global:VM_Create = {
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
         if (-not $ps) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
             return
         }
 
         # Set PS Execution Policy (required on client OS)
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
         if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
         }
 
@@ -225,17 +225,17 @@ $global:VM_Create = {
         }
 
         if ($createVM) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile"
             if ($result.ScriptBlockFailed) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
                 $skipVersionUpdate = $true
             }
 
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Updating Password Expiration for vmbuildadmin account."
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Updating Password Expiration for vmbuildadmin account."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix Local Account Password Expiration"
             if ($result.ScriptBlockFailed) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed to fix the password expiration policy for vmbuildadmin." -Warning -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to fix the password expiration policy for vmbuildadmin." -Warning -OutputStream
                 $skipVersionUpdate = $true
             }
 
@@ -244,16 +244,16 @@ $global:VM_Create = {
                 $timeZone = (Get-Timezone).id
             }
 
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Setting timezone to '$timeZone'."
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting timezone to '$timeZone'."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { param ($timezone) Set-TimeZone -Id $timezone } -ArgumentList $timeZone -DisplayName "Setting timezone to '$timeZone'"
             if ($result.ScriptBlockFailed) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed to set the timezone." -Warning -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set the timezone." -Warning -OutputStream
             }
 
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Setting TLS 1.2 registry keys."
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting TLS 1.2 registry keys."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Set_TLS12Keys -DisplayName "Setting TLS 1.2 Registry Keys"
             if ($result.ScriptBlockFailed) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed to set TLS 1.2 Registry Keys." -Warning -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set TLS 1.2 Registry Keys." -Warning -OutputStream
             }
 
             # Set vm note
@@ -267,7 +267,7 @@ $global:VM_Create = {
         # Copy SQL files to VM
         if ($currentItem.sqlVersion -and $createVM) {
 
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Copying SQL installation files to the VM."
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying SQL installation files to the VM."
             Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed
 
             # Determine which SQL version files should be used
@@ -287,7 +287,7 @@ $global:VM_Create = {
             # Copy files from DVD
             $result = Invoke-VmCommand -VmName $currentItem.vmName -DisplayName "Copy SQL Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
             if ($result.ScriptBlockFailed) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
 
@@ -296,15 +296,15 @@ $global:VM_Create = {
         }
 
         if ($createVM) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
         }
         else {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role)." -OutputStream -Success
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role)." -OutputStream -Success
         }
     }
     catch {
-        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
-        Write-Log -LogOnly "PSJOB [Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)"
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)"
     }
 }
 
@@ -353,7 +353,7 @@ $global:VM_Config = {
         # Verify again that VM is connectable, in case DSC caused a reboot
         $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
         if (-not $connected) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
             return
         }
 
@@ -361,7 +361,7 @@ $global:VM_Config = {
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
         if (-not $ps) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
             return
         }
 
@@ -378,10 +378,10 @@ $global:VM_Config = {
             }
         }
 
-        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
         if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
         }
 
         # Boot To OOBE?
@@ -391,12 +391,12 @@ $global:VM_Config = {
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown }
             if ($result.ScriptBlockFailed) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
             }
             else {
                 $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 15
                 if (-not $ready) {
-                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
                 }
                 else {
                     $started = Start-VM2 -Name $currentItem.vmName -Passthru
@@ -404,14 +404,14 @@ $global:VM_Config = {
                         $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
                         if ($oobeStarted) {
                             Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
-                            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
                         }
                         else {
-                            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Timed out while waiting for OOBE to start." -OutputStream -Failure
                         }
                     }
                     else {
-                        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): VM Failed to start." -OutputStream -Failure
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Failed to start." -OutputStream -Failure
                     }
 
                 }
@@ -427,10 +427,10 @@ $global:VM_Config = {
         }
 
         # Copy DSC files
-        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Copying required PS modules to the VM."
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying required PS modules to the VM."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force }
         if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy required PS modules to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy required PS modules to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         }
         Copy-Item -ToSession $ps -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
@@ -499,7 +499,7 @@ $global:VM_Config = {
                 }
             }
             catch {
-                $error_message = "PSJOB [Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
+                $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message
@@ -509,17 +509,17 @@ $global:VM_Config = {
         $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
 
         # Extract DSC modules
-        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -ArgumentList $dscZipHash -DisplayName "Expand_Archive ScriptBlock"
         if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
         }
 
-        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Installing DSC Modules."
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Installing DSC Modules."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -ArgumentList $dscZipHash -DisplayName "DSC: Install Modules"
         if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
         }
 
@@ -598,7 +598,7 @@ $global:VM_Config = {
                 $deployConfig | ConvertTo-Json -Depth 5 | Out-File $deployConfigPath -Force -Confirm:$false
             }
             catch {
-                $error_message = "PSJOB [Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
+                $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message
@@ -616,10 +616,10 @@ $global:VM_Config = {
             }
         }
 
-        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Clearing previous DSC status"
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Clearing previous DSC status"
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
         }
 
@@ -694,7 +694,7 @@ $global:VM_Config = {
                 & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
             }
             catch {
-                $error_message = "PSJOB [Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
+                $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message
@@ -781,7 +781,7 @@ $global:VM_Config = {
                 & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $credsForDSC -ConfigurationData $cd -OutputPath $dscConfigPath
             }
             catch {
-                $error_message = "PSJOB [Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
+                $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message
@@ -823,7 +823,7 @@ $global:VM_Config = {
                 }
             }
             catch {
-                $error_message = "PSJOB [Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
+                $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
                 Write-Error $error_message
                 return $error_message
@@ -836,7 +836,7 @@ $global:VM_Config = {
         }
 
         if ($skipStartDsc) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on the DC."
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on the DC."
         }
         else {
 
@@ -856,7 +856,7 @@ $global:VM_Config = {
                     foreach ($node in $nonReadyNodes) {
                         $result = Invoke-VmCommand -VmName $node -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
                         if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
-                            Write-Log "PSJOB [Phase $Phase]: Node $node is NOT ready."
+                            Write-Log "[Phase $Phase]: Node $node is NOT ready."
                             $allNodesReady = $false
                         }
                         else {
@@ -870,22 +870,22 @@ $global:VM_Config = {
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Start-Sleep -Seconds 15
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
                 # Retry once before exiting
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
                 if ($result.ScriptBlockFailed) {
-                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return
                 }
             }
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration."
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration."
         }
 
         ### ===========================
@@ -924,7 +924,7 @@ $global:VM_Config = {
                 if ($dscStatusPolls -ge 10) {
                     $failure = $false
                     $dscStatusPolls = 0 # Do this every 30 seconds or so
-                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Polling DSC Status via Get-DscConfigurationStatus" -Verbose
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Polling DSC Status via Get-DscConfigurationStatus" -Verbose
                     $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
                         $ProgressPreference = 'SilentlyContinue'
                         Get-DscConfigurationStatus
@@ -946,36 +946,36 @@ $global:VM_Config = {
                                 $errorObject = $badResource.Error | ConvertFrom-Json -ErrorAction SilentlyContinue
                                 if ($errorObject.FullyQualifiedErrorId -ne "NonTerminatingErrorFromProvider") {
                                     $msg = "$errorResourceId`: $($errorObject.FullyQualifiedErrorId) $($errorObject.Exception.Message)"
-                                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Failure -OutputStream
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Failure -OutputStream
                                     $failure = $true
                                 }
                             }
 
                             # Write-Output, and bail
                             if (-not $msg) {
-                                #  [x] [<ScriptBlock>] PSJOB: ADA-W11Client1: DSC encountered failures. Attempting to continue. Status: Failure Output: Machine reboot failed. Please reboot it manually to finish processing the request.
+                                #  [x] [<ScriptBlock>] ADA-W11Client1: DSC encountered failures. Attempting to continue. Status: Failure Output: Machine reboot failed. Please reboot it manually to finish processing the request.
                                 # This condition is expected, and we are actually rebooting.
                                 if ($($dscStatus.ScriptBlockOutput.Error) -like "*Machine reboot failed*") {
                                     #If we dont reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
                                     continue
                                 }
                                 if ($($dscStatus.ScriptBlockOutput.Error) -like "*Could not find mandatory property*") {
-                                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
                                     $failure = $true
                                 }
 
                                 if ($($dscStatus.ScriptBlockOutput.Error) -like "*Compilation errors occurred*") {
-                                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
                                     $failure = $true
                                 }
 
                                 if ($($dscStatus.ScriptBlockOutput.Error) -ne $lasterror) {
                                     $failCount = 0
-                                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Warning -OutputStream
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Warning -OutputStream
                                 }
                                 $failCount++
                                 if ($failCount -gt 100) {
-                                    Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
                                     $failure = $true
                                 }
                                 $lasterror = $($dscStatus.ScriptBlockOutput.Error)
@@ -1002,7 +1002,7 @@ $global:VM_Config = {
                     else {
                         $failedHeartbeats++
                     }
-                    # Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
+                    # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
                     if ($failedHeartbeats -gt 10) {
                         try {
                             Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($failedHeartbeats / $failedHeartbeatThreshold * 100)
@@ -1018,7 +1018,7 @@ $global:VM_Config = {
                     try {
                         Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
                         Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-                        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
                         $vm = Get-VM2 -Name $($currentItem.vmName)
                         Stop-VM -VM $vm -TurnOff | Out-Null
                         Start-Sleep -Seconds 5
@@ -1041,7 +1041,7 @@ $global:VM_Config = {
                                 $currentStatusTrimmed = $currentStatus.Substring(0, $currentStatus.IndexOf("; checking again in "))
                             }
                             catch {
-                                write-Log -LogOnly "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed SubString for checking again for $currentStatus in: $_"
+                                write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Failed SubString for checking again for $currentStatus in: $_"
                             }
                         }
                         else {
@@ -1049,11 +1049,11 @@ $global:VM_Config = {
                         }
 
                         if ($currentStatusTrimmed.Contains("JOBFAILURE: ")) {
-                            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $currentStatusTrimmed" -Failure -OutputStream
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $currentStatusTrimmed" -Failure -OutputStream
                             break
                         }
 
-                        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
                         $previousStatus = $currentStatus
                     }
 
@@ -1071,7 +1071,7 @@ $global:VM_Config = {
                                     }
                                 }
                                 catch {
-                                    write-Log -LogOnly "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed SubString for ConfigMgrSetup.log in for line $logEntry : $_"
+                                    write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Failed SubString for ConfigMgrSetup.log in for line $logEntry : $_"
                                 }
                                 try {
                                     Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
@@ -1095,14 +1095,14 @@ $global:VM_Config = {
                     if ($complete) {
                         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "=== Failed Configuration Manager Server Setup ===" -Context 0, 0 } -SuppressLog
                         if ($result.ScriptBlockOutput.Line) {
-                            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
                             return
                         }
                     }
                     # ~Setup has encountered fatal errors
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "~Setup has encountered fatal errors" -Context 0, 0 } -SuppressLog
                     if ($result.ScriptBlockOutput.Line) {
-                        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
                         return
                     }
                 }
@@ -1118,8 +1118,8 @@ $global:VM_Config = {
             } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
         }
         catch {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
             return
         }
 
@@ -1142,7 +1142,7 @@ $global:VM_Config = {
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -ArgumentList $netProfile -DisplayName "Set Ethernet as Trusted"
             if ($result.ScriptBlockFailed) {
-                Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
             }
         }
 
@@ -1152,15 +1152,15 @@ $global:VM_Config = {
         }
 
         if (-not $complete) {
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): VM Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -OutputStream -Failure
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -OutputStream -Failure
         }
         else {
             Write-Progress "$($currentItem.role) Configuration completed successfully. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -Completed
-            Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): VM Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
         }
     }
     catch {
-        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
-        Write-Log "PSJOB [Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
     }
 }
