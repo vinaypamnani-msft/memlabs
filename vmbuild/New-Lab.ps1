@@ -354,6 +354,7 @@ try {
                     # Create RDCMan file
                     Start-Sleep -Seconds 5
                     New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false -NoActivity -WhatIf:$WhatIf
+                    #Refresh deployConfig to add any props that may have been added in New-VirtualMachine, eg ClusterIPAddress
                     $deployConfig = ConvertTo-DeployConfigEx -DeployConfig $deployConfig
                 }
             }
