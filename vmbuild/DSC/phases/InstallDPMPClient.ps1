@@ -12,9 +12,8 @@ $DomainName = $DomainFullName.Split(".")[0]
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
 
-#bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
+# bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
 $ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
-#$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
 $cm_svc = "$DomainName\cm_svc"
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 
@@ -23,39 +22,31 @@ $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
 # Read Site Code from registry
-Write-DscStatus "Setting PS Drive for ConfigMgr"
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
-$ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
-
-# Get CM module path
-$key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-$subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-$uiInstallPath = $subKey.GetValue("UI Installation Directory")
-$modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-$initParams = @{}
-
-# Import the ConfigurationManager.psd1 module
-if ($null -eq (Get-Module ConfigurationManager)) {
-    Import-Module $modulePath
+if (-not $SiteCode) {
+    Write-DscStatus "Failed to get 'Site Code' from SOFTWARE\Microsoft\SMS\Identification. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return
 }
 
-# Connect to the site's drive if it is not already present
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-$psDriveFailcount = 0
-while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-    $psDriveFailcount++
-    if ($psDriveFailcount -gt 20) {
-        Write-DscStatus "Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log"
-        return
-    }
-    Write-DscStatus "Retry in 10s to Set PS Drive" -NoLog
-    Start-Sleep -Seconds 10
-    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+# Provider
+$smsProvider = Get-SMSProvider -SiteCode $SiteCode
+if (-not $smsProvider.FQDN) {
+    Write-DscStatus "Failed to get SMS Provider for site $SiteCode. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return $false
+}
+
+# Set CMSite Provider
+$worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($smsProvider.FQDN)
+if (-not $worked) {
+    return
 }
 
 # Set the current location to be the site code.
-Set-Location "$($SiteCode):\" @initParams
-
+Set-Location "$($SiteCode):\"
+if ((Get-Location).Drive.Name -ne $SiteCode) {
+    Write-DscStatus "Failed to Set-Location to $SiteCode`:"
+    return $false
+}
 
 $cm_svc_file = "$LogPath\cm_svc.txt"
 if (Test-Path $cm_svc_file) {
@@ -75,102 +66,6 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Restarting services"
     Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
     Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
-}
-
-function Install-DP {
-    param (
-        [Parameter()]
-        [string]
-        $ServerFQDN,
-        [string]
-        $ServerSiteCode
-    )
-
-    $i = 0
-    $installFailure = $false
-    $DPFQDN = $ServerFQDN
-
-    do {
-
-        $i++
-
-        # Create Site system Server
-        #============
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
-        if (-not $SystemServer) {
-            Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
-            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
-        }
-
-        # Install DP
-        #============
-        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
-        if (-not $dpinstalled) {
-            Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role."
-            $Date = [DateTime]::Now.AddYears(30)
-            #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
-            Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 60
-        }
-        else {
-            Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
-            $dpinstalled = $true
-        }
-
-        if ($i -gt 10) {
-            Write-DscStatus "No Progress after $i tries, Giving up on $DPFQDN SiteCode: $ServerSiteCode ."
-            $installFailure = $true
-        }
-
-        Start-Sleep -Seconds 10
-
-    } until ($dpinstalled -or $installFailure)
-}
-
-function Install-MP {
-    param (
-        [string]
-        $ServerFQDN,
-        [string]
-        $ServerSiteCode
-    )
-
-    $i = 0
-    $installFailure = $false
-    $MPFQDN = $ServerFQDN
-
-    do {
-
-        $i++
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
-        if (-not $SystemServer) {
-            Write-DscStatus "Creating new CM Site System server on $MPFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
-        }
-
-        $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
-        if (-not $mpinstalled) {
-            Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
-            Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 60
-        }
-        else {
-            Write-DscStatus "MP Role detected on $MPFQDN"
-            $mpinstalled = $true
-        }
-
-        if ($i -gt 10) {
-            Write-DscStatus "No Progress after $i tries, Giving up."
-            $installFailure = $true
-        }
-
-        Start-Sleep -Seconds 10
-
-    } until ($mpinstalled -or $installFailure)
 }
 
 $DPs = @()
@@ -243,12 +138,9 @@ if ($mpCount -eq 0) {
     Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
 }
 
-$ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
-
+# Create Boundary groups
 $bgs = $ThisVM.thisParams.sitesAndNetworks | Where-Object { $_.SiteCode -in $ValidSiteCodes }
 $bgsCount = $bgs.count
-# Create BGs
 Write-DscStatus "Create $bgsCount Boundary Groups"
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     $siteStatus = Get-CMSite -SiteCode $bgsitecode
