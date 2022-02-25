@@ -852,7 +852,7 @@ $global:VM_Config = {
                     $attempts++
                     $allNodesReady = $true
                     $nonReadyNodes = $nodeList.Clone()
-                    Write-Progress "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $attempts
+                    Write-Progress "[$($currentItem.role)] Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $attempts
                     foreach ($node in $nonReadyNodes) {
                         $result = Invoke-VmCommand -VmName $node -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
                         if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
@@ -905,7 +905,7 @@ $global:VM_Config = {
 
         $noStatus = $true
         try {
-            Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" `
+            Write-Progress "[$($currentItem.role)] Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" `
                 -Status "Waiting for job progress" `-PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         }
         catch {}
@@ -1005,7 +1005,7 @@ $global:VM_Config = {
                     # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
                     if ($failedHeartbeats -gt 10) {
                         try {
-                            Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($failedHeartbeats / $failedHeartbeatThreshold * 100)
+                            Write-Progress "[$($currentItem.role)] Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($failedHeartbeats / $failedHeartbeatThreshold * 100)
                         }
                         catch {}
                     }
@@ -1017,7 +1017,7 @@ $global:VM_Config = {
                 if ($failedHeartbeats -gt $failedHeartbeatThreshold) {
                     try {
                         Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
-                        Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                        Write-Progress "[$($currentItem.role)] Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
                         $vm = Get-VM2 -Name $($currentItem.vmName)
                         Stop-VM -VM $vm -TurnOff | Out-Null
@@ -1074,7 +1074,7 @@ $global:VM_Config = {
                                     write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Failed SubString for ConfigMgrSetup.log in for line $logEntry : $_"
                                 }
                                 try {
-                                    Write-Progress "Waiting $timeout minutes for $($currentItem.role) Configuration. ConfigMgrSetup is running. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                                    Write-Progress "[$($currentItem.role)] Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $logEntry -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                                 }
                                 catch {}
                             }
@@ -1085,7 +1085,7 @@ $global:VM_Config = {
                     if (-not $skipProgress) {
                         # Write progress
                         try {
-                            Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                            Write-Progress "[$($currentItem.role)] Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                         }
                         catch {}
                     }
@@ -1109,7 +1109,7 @@ $global:VM_Config = {
                 else {
                     if ($noStatus) {
                         try {
-                            Write-Progress "Waiting $timeout minutes for $($currentItem.role) configuration. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                            Write-Progress "[$($currentItem.role)] Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for job progress" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                         }
                         catch {}
                     }
