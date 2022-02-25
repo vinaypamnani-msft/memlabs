@@ -582,16 +582,20 @@ function Select-StartDomain {
             $waitSecondsDC = 20
             $waitSeconds = 10
             if ($dc -and ($dc.State -ne "Running")) {
-                write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
+                Show-StatusEraseLine "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM" -indent
+                #write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
                 start-vm2 $dc.vmName
+                Write-GreenCheck "DC [$($dc.vmName)] has been started. Waiting $waitSecondsDC before starting other VMs"
                 start-Sleep -Seconds $waitSecondsDC
             }
 
             if ($sqlServers) {
                 foreach ($sql in $sqlServers) {
                     if ($sql.State -ne "Running") {
-                        write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
+                        Show-StatusEraseLine "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM" -indent
+                        #write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
                         start-vm2 $sql.vmName
+                        Write-GreenCheck "SQL Server [$($sql.vmName)] has been started. Waiting $waitSeconds before starting other VMs"
                     }
                 }
                 start-sleep $waitSeconds
@@ -600,8 +604,10 @@ function Select-StartDomain {
             if ($cas) {
                 foreach ($ss in $cas) {
                     if ($ss.State -ne "Running") {
-                        write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
+                        Show-StatusEraseLine "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM" -indent
+                        #write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
                         start-vm2 $ss.vmName
+                        Write-GreenCheck "CAS [$($ss.vmName)] has been started. Waiting $waitSeconds before starting other VMs"
                     }
                 }
                 start-sleep $waitSeconds
@@ -610,8 +616,10 @@ function Select-StartDomain {
             if ($pri) {
                 foreach ($ss in $pri) {
                     if ($ss.State -ne "Running") {
-                        write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
+                        Show-StatusEraseLine "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM" -indent
+                        #write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
                         start-vm2 $ss.vmName
+                        Write-GreenCheck "Primary [$($ss.vmName)] has been started. Waiting $waitSeconds before starting other VMs"
                     }
                 }
                 start-sleep $waitSeconds
@@ -619,20 +627,23 @@ function Select-StartDomain {
             if ($CriticalOnly -eq $false) {
                 foreach ($vm in $other) {
                     if ($vm.State -ne "Running") {
-                        write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
+                       # Show-StatusEraseLine "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM" -indent
+                        #write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
                         #start-job -Name $vm.vmName -ScriptBlock { param($vm) start-vm2 $vm } -ArgumentList $vm.vmName | Out-Null
                         $vm2 = get-vm2 -Name $vm.VmName
                         start-vm -VM $vm2 -AsJob  | Out-Null
-
+                        Write-GreenCheck "VM [$($vm.vmName)] has been started."
                     }
                 }
             }
-            Write-Log -HostOnly "Waiting for VM Start Jobs to complete" -Verbose
+            Show-StatusEraseLine "Waiting for all VMs to Start" -indent
+            #Write-Log -HostOnly "Waiting for VM Start Jobs to complete" -Verbose
             get-job | wait-job | out-null
-            Write-Log -HostOnly "VM Start Jobs are complete" -Verbose
+            get-list -type VM -SmartUpdate | out-null
+            Write-GreenCheck "VM Start Jobs are complete"
+            #Write-Log -HostOnly "VM Start Jobs are complete" -Verbose
             get-job | remove-job | out-null
 
-            get-list -type VM -SmartUpdate | out-null
             return
 
         }
