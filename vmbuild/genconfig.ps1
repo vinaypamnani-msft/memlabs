@@ -319,8 +319,8 @@ function get-SnapshotDomain {
         }
     }
 
-    write-host
-    Write-Host "$domain has been CheckPointed"
+    #write-host
+    #Write-Host "$domain has been CheckPointed"
 }
 
 function select-RestoreSnapshotDomain {
@@ -416,8 +416,8 @@ function select-RestoreSnapshotDomain {
         }
 
     }
-    write-host
-    Write-GreenCheck "$domain has been Restored!"
+    #write-host
+    #Write-GreenCheck "$domain has been Restored!"
     Select-StartDomain -domain $domain -response $startAll
 }
 

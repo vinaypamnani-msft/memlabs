@@ -2366,7 +2366,7 @@ class ClusterRemoveUnwantedIPs {
                 }
             }
             Write-Verbose "Cluster Registering new DNS records"
-            Get-ClusterResource -Name $_ClusterName | Update-ClusterNetworkNameResource
+            Get-ClusterResource -Name "Cluster Name" | Update-ClusterNetworkNameResource
             Write-Verbose "Finished Removing Unwanted Cluster IPs"
         }
         catch {
