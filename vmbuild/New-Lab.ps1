@@ -195,7 +195,7 @@ try {
 
     # Skip if any VM in progress
     if ($phasedRun -and (Test-InProgress -DeployConfig $deployConfig)) {
-        return
+    #    return
     }
 
     # Timer
