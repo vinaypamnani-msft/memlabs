@@ -17,7 +17,7 @@ function Write-DscStatus {
 
     $RemoteStatusFile = $null
     if ($MachineName -and ($MachineName -ne $Env:ComputerName)) {
-        $RemoteStatusFile = "\\$($MachineName)\c$\staging\DSC\DSC_Status.txt"
+        $RemoteStatusFile = "FileSystem::\\$($MachineName)\c$\staging\DSC\DSC_Status.txt"
     }
 
     if ($RetrySeconds) {
@@ -40,7 +40,7 @@ function Write-DscStatus {
                 }
                 else{
                     #Remote Contents Are fine to overwrite
-                    "$StatusPrefix Current Status: $status" | Out-File $RemoteStatusFile -Force
+                    "$StatusPrefix Current Status: $status" | Out-File -FilePath $RemoteStatusFile -Force
                 }
             }else {
                 #Write Status Locally, since RemoteStatusFile was not set.
@@ -51,7 +51,7 @@ function Write-DscStatus {
         catch {
             if ($RemoteStatusFile) {
                  #If we are writing remote, and we had an exception.. Log the Status Locally
-                "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
+                "Exception: $_ $StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
             }
         }
     }
