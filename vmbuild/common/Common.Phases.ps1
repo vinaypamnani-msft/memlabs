@@ -1,6 +1,6 @@
 
 function Write-JobProgress {
-    param($Job)
+    param($Job, $MaxJobNameLength)
 
     #Make sure the first child job exists
     if ($null -ne $Job.ChildJobs[0].Progress) {
@@ -25,7 +25,11 @@ function Write-JobProgress {
             }
             try {
                 if ($Common.PS7) {
-                    $jobName = "  $($jobName.PadRight(15," "))"
+                    $padding = 0
+                    if ($MaxJobNameLength) {
+                        $padding = $MaxJobNameLength
+                    }
+                    $jobName = "  $($jobName.PadRight($padding," "))"
                     # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                 }
                 Write-Progress -Id $Job.Id -Activity "$jobName`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
@@ -65,7 +69,7 @@ function Start-Phase {
         return $true
     }
 
-    $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs
+    $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -MaxJobNameLength $start.MaxJobNameLength
     Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures."
 
     if ($result.Failed -gt 0) {
@@ -93,10 +97,11 @@ function Start-PhaseJobs {
         if (-not $ConfigurationData) {
             # Nothing applicable for this phase
             return [PSCustomObject]@{
-                Failed     = 0
-                Success    = 0
-                Jobs       = 0
-                Applicable = $false
+                Failed           = 0
+                Success          = 0
+                Jobs             = 0
+                Applicable       = $false
+                MaxJobNameLength = 0
             }
         }
 
@@ -108,6 +113,8 @@ function Start-PhaseJobs {
         $multiNodeDsc = $false
     }
 
+    $global:vm_remove_list = @()
+    $maxJobNameLength = 0
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
         # Don't touch non-hidden VM's in Phase 0
@@ -138,7 +145,10 @@ function Start-PhaseJobs {
             continue
         }
 
-        $jobName = $currentItem.vmName
+        $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
+        if ($jobName.Length -gt $maxJobNameLength) {
+            $maxJobNameLength = $jobName.Length
+        }
 
         if ($Phase -eq 0 -or $Phase -eq 1) {
             # Create/Prepare VM
@@ -146,6 +156,12 @@ function Start-PhaseJobs {
             if (-not $job) {
                 Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
                 $job_created_no++
+            }
+            else {
+                if ($Phase -eq 1) {
+                    # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
+                    $global:vm_remove_list += $jobName
+                }
             }
         }
         else {
@@ -169,10 +185,11 @@ function Start-PhaseJobs {
 
     # Create return object
     $return = [PSCustomObject]@{
-        Failed     = $job_created_no
-        Success    = $job_created_yes
-        Jobs       = $jobs
-        Applicable = $true
+        Failed           = $job_created_no
+        Success          = $job_created_yes
+        Jobs             = $jobs
+        Applicable       = $true
+        MaxJobNameLength = $maxJobNameLength
     }
 
     if ($job_created_no -eq 0) {
@@ -190,7 +207,8 @@ function Wait-Phase {
 
     param(
         [int]$Phase,
-        $Jobs
+        $Jobs,
+        [int]$MaxJobNameLength
     )
 
     # Create return object
@@ -200,21 +218,12 @@ function Wait-Phase {
         Warning = 0
     }
 
-    # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
-    $global:vm_remove_list = @()
-    if ($Phase -eq 1) {
-        foreach ($job in $jobs) {
-            $jobName = $job | Select-Object -ExpandProperty Name
-            $global:vm_remove_list += $jobName
-        }
-    }
-
     $FailRetry = 0
     do {
 
         $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
         foreach ($job in $runningJobs) {
-            Write-JobProgress($job)
+            Write-JobProgress -Job $job -MaxJobNameLength $MaxJobNameLength
         }
 
         $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
@@ -227,14 +236,13 @@ function Wait-Phase {
                 Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red
                 Write-Progress -Id $job.Id -Activity $job.Name -Completed
                 $jobs.Remove($job)
-
                 $return.Failed++
             }
         }
         $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
         foreach ($job in $completedJobs) {
 
-            Write-JobProgress($job)
+            Write-JobProgress -Job $job -MaxJobNameLength $MaxJobNameLength
 
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
             if (-not $jobOutput) {
