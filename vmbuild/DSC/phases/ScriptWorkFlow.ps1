@@ -27,14 +27,14 @@ function Write-DscStatus {
     if ($Failure.IsPresent) {
         # Add prefix that host job can use to acknowledge failure
         $status = "JOBFAILURE: $status"
-    }
+    }w
 
     if (-not $NoStatus.IsPresent) {
         $StatusPrefix = "Setting up ConfigMgr."
         try {
             if ($RemoteStatusFile) {
                 $contents = Get-Content $RemoteStatusFile
-                if ($contents -and $contents.EndsWith("Complete!"){
+                if ($contents -and $contents.EndsWith("Complete!")){
                     #Remote Contents end with Complete!.  Write to local file to prevent overwriting this event.
                     "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
                 }
