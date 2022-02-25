@@ -937,7 +937,7 @@ Configuration Phase5
 
             ActiveDirectorySPN "SQLAOSPN$i" {
                 Key              = "SQLAOSPN$i"
-                UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount, 'vmbuildadmin', $deployConfig.vmOptions.adminName
+                UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount
                 FQDNDomainName   = $DomainName
                 OULocationUser   = $pNode.thisParams.SQLAO.OULocationUser
                 OULocationDevice = $pNode.thisParams.SQLAO.OULocationDevice

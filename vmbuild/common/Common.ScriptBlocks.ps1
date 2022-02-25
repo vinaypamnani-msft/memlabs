@@ -906,7 +906,7 @@ $global:VM_Config = {
         $noStatus = $true
         try {
             Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" `
-                -Status "Waiting for job progress" `-PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                -Status "Ready and Waiting for job progress" `-PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
         }
         catch {}
         $dscStatusPolls = 0
