@@ -104,7 +104,11 @@ Set-Location "$($SiteCode):\" @initParams
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $SecondaryVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
+
+Write-DscStatus "Installing Secondary Site on [$($SecondaryVMs.vmName -join ',')]"
+
 foreach ($SecondaryVM in $SecondaryVMs) {
+
     $secondaryFQDN = $SecondaryVM.vmName + "." + $DomainFullName
     $secondarySiteCode = $SecondaryVM.siteCode
     $parentSiteCode = $SecondaryVM.parentSiteCode

@@ -36,22 +36,22 @@ function Write-DscStatus {
                 $contents = Get-Content $RemoteStatusFile
                 if ($contents -and $contents.EndsWith("Complete!")){
                     #Remote Contents end with Complete!.  Write to local file to prevent overwriting this event.
-                    "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
+                    "$StatusPrefix Status: $status" | Out-File $global:StatusFile -Force
                 }
                 else{
                     #Remote Contents Are fine to overwrite
-                    "$StatusPrefix Current Status: $status" | Out-File -FilePath $RemoteStatusFile -Force
+                    "$StatusPrefix [$($Env:ComputerName)]: $status" | Out-File -FilePath $RemoteStatusFile -Force
                 }
             }else {
                 #Write Status Locally, since RemoteStatusFile was not set.
-                "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
+                "$StatusPrefix Status: $status" | Out-File $global:StatusFile -Force
             }
 
         }
         catch {
             if ($RemoteStatusFile) {
                  #If we are writing remote, and we had an exception.. Log the Status Locally
-                "Exception: $_ $StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
+                "Exception: $_ $StatusPrefix Status: $status" | Out-File $global:StatusFile -Force
             }
         }
     }
