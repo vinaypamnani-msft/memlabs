@@ -30,6 +30,23 @@ Function Get-SupportedOperatingSystemsForRole {
     return $AllList
 }
 
+
+Function Show-StatusEraseLine {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "role")]
+        [string] $data,
+        [Parameter(Mandatory = $false, HelpMessage = "role")]
+        [switch] $indent
+    )
+    if ($indent) {
+        Write-Host "  " -NoNewline
+    }
+    Write-Host $data -NoNewline
+    start-Sleep -seconds 2 | out-null
+    Write-Host "`r" -NoNewline
+    #Write-GreenCheck "Check Point Complete for ADA-DC1" -ForeGroundColor Green
+}
+
 function ConvertTo-DeployConfigEx {
     [CmdletBinding()]
     param (

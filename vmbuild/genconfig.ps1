@@ -299,7 +299,7 @@ function get-SnapshotDomain {
                 if ($tries -gt 10) {
                     return
                 }
-                Write-Host "Checkpointing $($vm.VmName) to [$($snapshot)]"
+                Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
                 $json = $snapshot + ".json"
                 $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path $json
                 (Get-VM2 -Name $($vm.VmName)).notes | Out-File $notesFile
@@ -307,10 +307,11 @@ function get-SnapshotDomain {
 
                 Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
                 $complete = $true
+                Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete"
             }
             catch {
-                write-log "Error: $_"
-                write-log "Retrying."
+                Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
+                write-log "Error: $_" -LogOnly
                 $tries++
                 Start-Sleep 10
 
@@ -335,7 +336,7 @@ function select-RestoreSnapshotDomain {
 
     $snapshots = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*MemLabs*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
     if (-not $snapshots) {
-        write-host "No snapshots found for $domain"
+        Write-OrangePoint "No snapshots found for $domain"
         return
     }
     $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots
@@ -376,7 +377,7 @@ function select-RestoreSnapshotDomain {
                 $checkPoint = Get-VMCheckpoint2 -VMName $vm.vmName -Name $response -ErrorAction SilentlyContinue | Sort-Object CreationTime | Select-Object -Last 1
 
                 if ($checkPoint) {
-                    Write-Host "Restoring $($vm.VmName)"
+                    Show-StatusEraseLine "Restoring $($vm.VmName)" -indent
                     $checkPoint | Restore-VMCheckpoint -Confirm:$false
                     if ($response -eq "MemLabs Snapshot") {
                         $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
@@ -389,13 +390,13 @@ function select-RestoreSnapshotDomain {
                         $notes = Get-Content $notesFile
                         set-vm -VMName $vm.vmName -notes $notes
                     }
-
+                    Write-GreenCheck "Restore Complete for $($vm.VmName)"
                 }
                 $complete = $true
             }
             catch {
-                write-log "$_"
-                write-host "Retrying..."
+                Write-RedX "Restore of $($vm.VmName) Failed. Retrying. See Logs for error."
+                write-log "Error: $_" -LogOnly
                 Start-Sleep 10
                 $tries++
 
@@ -416,7 +417,7 @@ function select-RestoreSnapshotDomain {
 
     }
     write-host
-    Write-Host "$domain has been Restored"
+    Write-Host "  $domain has been Restored"
     Select-StartDomain -domain $domain -response $startAll
 }
 
@@ -431,7 +432,7 @@ function select-DeleteSnapshotDomain {
 
     $snapshots = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*MemLabs*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
     if (-not $snapshots) {
-        write-host "No snapshots found for $domain"
+        Write-OrangePoint "No snapshots found for $domain"
         return
     }
     $response = get-menu -Prompt "Select Snapshot to merge/delete" -OptionArray $snapshots -additionalOptions @{"A" = "All Snapshots" }
@@ -456,7 +457,7 @@ function select-DeleteSnapshotDomain {
                 if ($snapshots) {
                     foreach ($snapshot in $snapshots) {
                         if ($snapshot -eq $response -or $response -eq "A") {
-                            Write-Host "Removing $snapshot for $($vm.VmName) and merging into vhdx"
+                            Show-StatusEraseLine "Removing $snapshot for $($vm.VmName) and merging into vhdx" -indent
                             Remove-VMCheckpoint2 -VMName $vm.vmName -Name $snapshot
 
                             if ($snapshot -eq "MemLabs Snapshot") {
@@ -469,6 +470,7 @@ function select-DeleteSnapshotDomain {
                             if (Test-Path $notesFile) {
                                 Remove-Item $notesFile -Force
                             }
+                            Write-GreenCheck "Merge of $snapshot into $($vm.VmName) complete"
                         }
                     }
                 }
@@ -484,7 +486,7 @@ function select-DeleteSnapshotDomain {
     }
     get-list -type vm -SmartUpdate | out-null
     write-host
-    Write-Host "$domain snapshots have been merged"
+    Write-Host "  $domain snapshots have been merged"
 
 }
 
