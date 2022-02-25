@@ -2167,6 +2167,7 @@ if (-not $Common.Initialized) {
     # Write progress
     Write-Progress "Loading required modules." -Status "Please wait..." -PercentComplete -1
     $global:vm_remove_list = @()
+
     ###################
     ### GIT BRANCH  ###
     ###################

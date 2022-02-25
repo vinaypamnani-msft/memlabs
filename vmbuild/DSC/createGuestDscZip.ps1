@@ -30,6 +30,7 @@ try {
     Write-Host "Importing Modules.."
     $modules = @(
         'Az.Compute',
+        'PSDesiredStateConfiguration',
         'ActiveDirectoryDsc',
         'xDscDiagnostics',
         'ComputerManagementDsc',
