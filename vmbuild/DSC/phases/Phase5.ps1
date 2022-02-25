@@ -192,6 +192,7 @@ Configuration Phase5
         }
 
     }
+
     Node $AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName
     {
         $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
@@ -446,12 +447,12 @@ Configuration Phase5
 
         WriteStatus ClusterRemoveUnwantedIPs {
             DependsOn =  $nextDepend
-            Status    = "Removing Unwanted IPs from Cluster"
+            Status    = "Removing DHCP IPs from Cluster"
         }
 
         ClusterRemoveUnwantedIPs ClusterRemoveUnwantedIPs {
             ClusterName = $thisVM.ClusterName
-            #PsDscRunAsCredential = $Admincreds
+            PsDscRunAsCredential = $Admincreds
             DependsOn   =  $nextDepend
         }
         $nextDepend = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
@@ -678,8 +679,8 @@ Configuration Phase5
         WaitForAny FileShareComplete {
             NodeName             = $node1VM.fileServerVM
             ResourceName         = "[WriteStatus]Complete"
-            RetryIntervalSec     = 10
-            RetryCount           = 180
+            RetryIntervalSec     = 2
+            RetryCount           = 900
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
         }
@@ -935,17 +936,18 @@ Configuration Phase5
                 DependsOn   = '[WriteStatus]SQLAOGroup'
             }
 
-            ActiveDirectorySPN "SQLAOSPN$i" {
-                Key              = "SQLAOSPN$i"
-                UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount
-                FQDNDomainName   = $DomainName
-                OULocationUser   = $pNode.thisParams.SQLAO.OULocationUser
-                OULocationDevice = $pNode.thisParams.SQLAO.OULocationDevice
-                ClusterDevice    = $pNode.thisParams.SQLAO.ClusterNodes
-                UserNameCluster  = $pNode.thisParams.SQLAO.SqlServiceAccount
-                Dependson        = "[ADGroup]SQLAOGroup$i"
-            }
-            $adGroupDependancy += "[ActiveDirectorySPN]SQLAOSPN$i"
+            $adGroupDependancy += "[ADGroup]SQLAOGroup$i"
+            #ActiveDirectorySPN "SQLAOSPN$i" {
+            #    Key              = "SQLAOSPN$i"
+            #    UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount
+            #    FQDNDomainName   = $DomainName
+            #    OULocationUser   = $pNode.thisParams.SQLAO.OULocationUser
+            #    OULocationDevice = $pNode.thisParams.SQLAO.OULocationDevice
+            #    ClusterDevice    = $pNode.thisParams.SQLAO.ClusterNodes
+            #    UserNameCluster  = $pNode.thisParams.SQLAO.SqlServiceAccount
+            #    Dependson        = "[ADGroup]SQLAOGroup$i"
+            #}
+            #$adGroupDependancy += "[ActiveDirectorySPN]SQLAOSPN$i"
         }
 
         WriteStatus Complete {

@@ -417,7 +417,7 @@ function select-RestoreSnapshotDomain {
 
     }
     write-host
-    Write-Host "  $domain has been Restored"
+    Write-GreenCheck "$domain has been Restored!"
     Select-StartDomain -domain $domain -response $startAll
 }
 
@@ -544,10 +544,10 @@ function Select-StartDomain {
 
         $notRunning = $vms | Where-Object { $_.State -ne "Running" }
         if ($notRunning -and ($notRunning | Measure-Object).count -gt 0) {
-            Write-Host "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
+            Write-OrangePoint "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
         }
         else {
-            Write-Host "All VM's in '$domain' are already Running"
+            Write-GreenCheck "All VM's in '$domain' are already Running"
             return
         }
 
