@@ -231,59 +231,64 @@ Configuration Phase5
             DomainAdministratorCredential = $Admincreds
             DependsOn                     = $nextDepend
         }
+        $nextDepend = '[xCluster]CreateCluster'
 
-        xClusterNetwork 'ChangeNetwork-192' {
-            Address     = $thisVM.thisParams.vmNetwork
-            AddressMask = '255.255.255.0'
-            Name        = 'Domain Network'
-            Role        = '0'
-            DependsOn   = '[xCluster]CreateCluster'
-            #PsDscRunAsCredential = $Admincreds
+        WriteStatus JoinCluster {
+            DependsOn = $nextDepend
+            Status    = "Waiting on $node2 To Join Cluster"
+        }
+
+        WaitForAny CreateCluster {
+            NodeName             = $node2
+            ResourceName         = "[xCluster]JoinSecondNodeToCluster"
+            RetryIntervalSec     = 120
+            RetryCount           = 15
+            PsDscRunAsCredential = $Admincreds
+            DependsOn            = $nextDepend
+        }
+        $nextDepend = '[WaitForAny]CreateCluster'
+
+        WriteStatus 'ChangeNetwork-10' {
+            DependsOn = $nextDepend
+            Status    = "Adding '10.250.250.0' to Cluster"
         }
 
         xClusterNetwork 'ChangeNetwork-10' {
-            Address     = '10.250.250.0'
-            AddressMask = '255.255.255.0'
-            Name        = 'Cluster Network'
-            Role        = '3'
-            DependsOn   = '[xCluster]CreateCluster'
-            #PsDscRunAsCredential = $Admincreds
+            Address              = '10.250.250.0'
+            AddressMask          = '255.255.255.0'
+            Name                 = 'Cluster Network'
+            Role                 = '3'
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
         }
+        $nextDepend = '[xClusterNetwork]ChangeNetwork-10'
 
-        #WaitForAny WaitForCluster {
-        #    NodeName             = $AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName
-        #    ResourceName         = '[xCluster]JoinSecondNodeToCluster'
-        #    RetryIntervalSec     = 10
-        #    RetryCount           = 90
-        #    PsDscRunAsCredential = $Admincreds
-        #    DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
-        #}
         WriteStatus WaitForFS {
             Status    = "Waiting for '$($thisVM.fileServerVM)' to Complete"
-            DependsOn = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+            DependsOn = $nextDepend
         }
 
         WaitForAny FileShareComplete {
-            NodeName         = $thisVM.fileServerVM
-            ResourceName     = "[WriteStatus]Complete"
-            RetryIntervalSec = 10
-            RetryCount       = 180
-            #PsDscRunAsCredential = $Admincreds
-            DependsOn        = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+            NodeName             = $thisVM.fileServerVM
+            ResourceName         = "[WriteStatus]Complete"
+            RetryIntervalSec     = 10
+            RetryCount           = 180
+            PsDscRunAsCredential = $Admincreds
+            DependsOn            = $nextDepend
         }
 
         WriteStatus ClusterJoin {
             DependsOn = "[WaitForAny]FileShareComplete"
-            Status    = "Waiting for '$node2' to join Cluster"
+            Status    = "Waiting for '$node2' to join Cluster Quorum ClusterWitness"
         }
 
         WaitForAny WaitForClusterJoin {
-            NodeName         = $node2
-            ResourceName     = '[xClusterQuorum]ClusterWitness'
-            RetryIntervalSec = 10
-            RetryCount       = 90
-            #PsDscRunAsCredential = $Admincreds
-            DependsOn        = '[xCluster]CreateCluster'
+            NodeName             = $node2
+            ResourceName         = '[xClusterQuorum]ClusterWitness'
+            RetryIntervalSec     = 10
+            RetryCount           = 90
+            PsDscRunAsCredential = $Admincreds
+            DependsOn            = '[xCluster]CreateCluster'
         }
 
         $nextDepend = "[WaitForAny]WaitForClusterJoin"
@@ -298,7 +303,7 @@ Configuration Phase5
             #Nodes                = ($AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName), ($AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName)
             Nodes       = $thisVM.thisParams.SQLAO.ClusterNodes
             #PsDscRunAsCredential = $Admincreds
-            DependsOn            =$nextDepend
+            DependsOn   = $nextDepend
         }
         $nextDepend = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
 
@@ -401,6 +406,21 @@ Configuration Phase5
         }
         $nextDepend = '[SqlAlwaysOnService]EnableHADR'
 
+        WriteStatus 'ChangeNetwork-192' {
+            DependsOn = $nextDepend
+            Status    = "Adding $($thisVM.thisParams.vmNetwork) to Cluster"
+        }
+
+        xClusterNetwork 'ChangeNetwork-192' {
+            Address              = $thisVM.thisParams.vmNetwork
+            AddressMask          = '255.255.255.0'
+            Name                 = 'Domain Network'
+            Role                 = '0'
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[xClusterNetwork]ChangeNetwork-192'
+
         WriteStatus SQLAG {
             DependsOn = $nextDepend
             Status    = "Creating Availability Group $($thisVM.thisParams.SQLAO.ClusterNameAoG) on $($Node.NodeName)\$($thisVM.sqlInstanceName)"
@@ -446,14 +466,14 @@ Configuration Phase5
         $nextDepend = '[SqlAGListener]AvailabilityGroupListener'
 
         WriteStatus ClusterRemoveUnwantedIPs {
-            DependsOn =  $nextDepend
+            DependsOn = $nextDepend
             Status    = "Removing DHCP IPs from Cluster"
         }
 
         ClusterRemoveUnwantedIPs ClusterRemoveUnwantedIPs {
-            ClusterName = $thisVM.ClusterName
+            ClusterName          = $thisVM.ClusterName
             PsDscRunAsCredential = $Admincreds
-            DependsOn   =  $nextDepend
+            DependsOn            = $nextDepend
         }
         $nextDepend = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
 
@@ -576,7 +596,7 @@ Configuration Phase5
             TestFilePath     = $AgentJobTest
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
-            DependsOn        =  $nextDepend
+            DependsOn        = $nextDepend
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 
@@ -619,27 +639,13 @@ Configuration Phase5
 
         xWaitForCluster WaitForCluster {
             Name                 = $Node1VM.ClusterName
-            RetryIntervalSec     = 15
-            RetryCount           = 60
+            RetryIntervalSec     = 180
+            RetryCount           = 5
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[xWaitForCluster]WaitForCluster'
 
-        WriteStatus WaitClusterNetwork {
-            Status    = "Waiting for '$node1' to create Windows Cluster Network"
-            DependsOn = $nextDepend
-        }
-
-        WaitForAny WaitForClusteringNetworking {
-            NodeName             = $node1
-            ResourceName         = '[xClusterNetwork]ChangeNetwork-10'
-            RetryIntervalSec     = 10
-            RetryCount           = 90
-            PsDscRunAsCredential = $Admincreds
-            DependsOn = $nextDepend
-        }
-        $nextDepend = '[WaitForAny]WaitForClusteringNetworking'
 
         WriteStatus JoinCluster {
             Status    = "Joining Windows Cluster '$($Node1VM.ClusterName)' on '$node1'"
@@ -650,16 +656,26 @@ Configuration Phase5
             Name                 = $Node1VM.ClusterName
             StaticIPAddress      = $Node1VM.thisParams.SQLAO.ClusterIPAddress
             PsDscRunAsCredential = $Admincreds
-            DependsOn            =  $nextDepend
+            DependsOn            = $nextDepend
         }
+        $nextDepend = '[xCluster]JoinSecondNodeToCluster'
 
-        xClusterNetwork 'ChangeNetwork-192' {
-            Address              = $Node1VM.thisParams.vmNetwork
-            AddressMask          = '255.255.255.0'
-            Name                 = 'Domain Network'
-            Role                 = '0'
-            DependsOn            = '[xCluster]JoinSecondNodeToCluster'
-            PsDscRunAsCredential = $Admincreds
+
+
+        #WaitForAny WaitForClusteringNetworking {
+        #    NodeName             = $node1
+        #    ResourceName         = '[xClusterNetwork]ChangeNetwork-10'
+        #    RetryIntervalSec     = 10
+        #    RetryCount           = 90
+        #    PsDscRunAsCredential = $Admincreds
+        #    DependsOn = $nextDepend
+        #}
+        #$nextDepend = '[WaitForAny]WaitForClusteringNetworking'
+
+
+        WriteStatus "ChangeNetwork-10" {
+            Status    = "Setting Cluster Network 10.250.250.0 to Type 3"
+            DependsOn = $nextDepend
         }
 
         xClusterNetwork 'ChangeNetwork-10' {
@@ -667,13 +683,16 @@ Configuration Phase5
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
             Role                 = '3'
-            DependsOn            = '[xCluster]JoinSecondNodeToCluster'
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
+        $nextDepend = '[xClusterNetwork]ChangeNetwork-10'
+
+
 
         WriteStatus WaitForFS {
             Status    = "Waiting for '$($Node1VM.fileServerVM)' to Complete"
-            DependsOn = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+            DependsOn = $nextDepend
         }
 
         WaitForAny FileShareComplete {
@@ -682,7 +701,7 @@ Configuration Phase5
             RetryIntervalSec     = 2
             RetryCount           = 900
             PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[xClusterNetwork]ChangeNetwork-10', '[xClusterNetwork]ChangeNetwork-192'
+            DependsOn            = $nextDepend
         }
 
 
@@ -823,6 +842,21 @@ Configuration Phase5
         }
         $nextDepend = '[WaitForAll]AG'
 
+        WriteStatus "ChangeNetwork-192" {
+            Status    = "Setting Domain Network $($Node1VM.thisParams.vmNetwork) to Type 0"
+            DependsOn = $nextDepend
+        }
+
+        xClusterNetwork 'ChangeNetwork-192' {
+            Address              = $Node1VM.thisParams.vmNetwork
+            AddressMask          = '255.255.255.0'
+            Name                 = 'Domain Network'
+            Role                 = '0'
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[xClusterNetwork]ChangeNetwork-192'
+
         WriteStatus SQLAO2 {
             DependsOn = $nextDepend
             Status    = "Adding replica to the Availability Group"
@@ -904,7 +938,7 @@ Configuration Phase5
             TestFilePath     = $AgentJobTest
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
-            DependsOn        =  $nextDepend
+            DependsOn        = $nextDepend
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 
