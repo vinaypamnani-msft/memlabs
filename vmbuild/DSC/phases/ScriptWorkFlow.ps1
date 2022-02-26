@@ -3,74 +3,8 @@ param(
     [string]$LogPath
 )
 
-$global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
-$global:StatusLog = "C:\staging\DSC\InstallCMLog.txt"
-
-function Write-DscStatusSetup {
-    $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
-    $StatusPrefix | Out-File $global:StatusFile -Force
-    "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $StatusPrefix" | Out-File -Append $global:StatusLog
-}
-
-function Write-DscStatus {
-    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds, [switch]$Failure, [string]$MachineName)
-
-    $RemoteStatusFile = $null
-    if ($MachineName -and ($MachineName -ne $Env:ComputerName)) {
-        $RemoteStatusFile = "FileSystem::\\$($MachineName)\c$\staging\DSC\DSC_Status.txt"
-    }
-
-    if ($RetrySeconds) {
-        $status = "$status; checking again in $RetrySeconds seconds"
-    }
-
-    if ($Failure.IsPresent) {
-        # Add prefix that host job can use to acknowledge failure
-        $status = "JOBFAILURE: $status"
-    }w
-
-    if (-not $NoStatus.IsPresent) {
-        $StatusPrefix = "Setting up ConfigMgr."
-        try {
-            if ($RemoteStatusFile) {
-                $contents = Get-Content $RemoteStatusFile
-                if ($contents -and $contents.EndsWith("Complete!")){
-                    #Remote Contents end with Complete!.  Write to local file to prevent overwriting this event.
-                    "$StatusPrefix Status: $status" | Out-File $global:StatusFile -Force
-                }
-                else{
-                    #Remote Contents Are fine to overwrite
-                    "$StatusPrefix [$($Env:ComputerName)]: $status" | Out-File -FilePath $RemoteStatusFile -Force
-                }
-            }else {
-                #Write Status Locally, since RemoteStatusFile was not set.
-                "$StatusPrefix Status: $status" | Out-File $global:StatusFile -Force
-            }
-
-        }
-        catch {
-            if ($RemoteStatusFile) {
-                 #If we are writing remote, and we had an exception.. Log the Status Locally
-                "Exception: $_ $StatusPrefix Status: $status" | Out-File $global:StatusFile -Force
-            }
-        }
-    }
-
-    if (-not $NoLog.IsPresent) {
-        "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $status" | Out-File -Append $global:StatusLog
-    }
-
-    if ($Failure.IsPresent) {
-        # Add a sleep so host VM has had time to poll for this entry
-        Start-Sleep -Seconds 10
-    }
-}
-
-# Provision Tool path, RegisterTaskScheduler copies files here
-$ProvisionToolPath = "$env:windir\temp\ProvisionScript"
-if (!(Test-Path $ProvisionToolPath)) {
-    New-Item $ProvisionToolPath -ItemType directory | Out-Null
-}
+# dot source functions
+. $PSScriptRoot\ScriptFunctions.ps1
 
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
@@ -85,8 +19,6 @@ $containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq 
 
 # Script Workflow json file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
-
-
 
 if (Test-Path -Path $ConfigurationFile) {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -182,11 +114,6 @@ if (-not $Configuration) {
                     StartTime = ''
                     EndTime   = ''
                 }
-                InstallSecondary             = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
                 ScriptWorkflow               = @{
                     Status    = 'NotStart'
                     StartTime = ''
@@ -206,26 +133,37 @@ if (-not $Configuration) {
         }
     }
 
+    if ($containsPassive) {
+        $Actions += @{
+            InstallSecondary = @{
+                Status    = 'NotStart'
+                StartTime = ''
+                EndTime   = ''
+            }
+        }
+    }
+
     $Configuration = New-Object -TypeName psobject -Property $Actions
-    $Configuration.ScriptWorkflow.Status = "Running"
-    $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
+
+$Configuration.ScriptWorkflow.Status = "Running"
+$Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 if ($scenario -eq "Standalone") {
 
     #Install CM and Config
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
 
     if ($containsSecondary) {
         # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
     #Install DP/MP/Client
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
 
 }
@@ -235,31 +173,31 @@ if ($scenario -eq "Hierarchy") {
     if ($CurrentRole -eq "CAS") {
 
         #Install CM and Config
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
 
     }
     elseif ($CurrentRole -eq "Primary") {
 
         #Install CM and Config
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPSForHierarchy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
 
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
-            $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
         #Install DP/MP/Client
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
     }
 }
 
 if ($containsPassive) {
     # Install Passive Site Server
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPassiveSiteServer.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
 }
 
@@ -272,5 +210,5 @@ $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
-$ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "EnableEHTTP.ps1"
+$ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
 . $ScriptFile $ConfigFilePath $LogPath

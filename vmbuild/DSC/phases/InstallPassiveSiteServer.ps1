@@ -19,40 +19,31 @@ $Configuration.InstallPassive.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 # Read Site Code from registry
-Write-DscStatus "Setting PS Drive for ConfigMgr"
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
-$ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
-$localSiteServer = $ProviderMachineName
-
-# Get CM module path
-$key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-$subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-$uiInstallPath = $subKey.GetValue("UI Installation Directory")
-$modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-$initParams = @{}
-
-# Import the ConfigurationManager.psd1 module
-if ($null -eq (Get-Module ConfigurationManager)) {
-    Import-Module $modulePath
+if (-not $SiteCode) {
+    Write-DscStatus "Failed to get 'Site Code' from SOFTWARE\Microsoft\SMS\Identification. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return
 }
 
-# Connect to the site's drive if it is not already present
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+# Provider
+$smsProvider = Get-SMSProvider -SiteCode $SiteCode
+if (-not $smsProvider.FQDN) {
+    Write-DscStatus "Failed to get SMS Provider for site $SiteCode. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return $false
+}
 
-$psDriveFailcount = 0
-while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-    $psDriveFailcount++
-    if ($psDriveFailcount -gt 20) {
-        Write-DscStatus "Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log"
-        return
-    }
-    Write-DscStatus "Retry in 10s to Set PS Drive" -NoLog
-    Start-Sleep -Seconds 10
-    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+# Set CMSite Provider
+$worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($smsProvider.FQDN)
+if (-not $worked) {
+    return
 }
 
 # Set the current location to be the site code.
-Set-Location "$($SiteCode):\" @initParams
+Set-Location "$($SiteCode):\"
+if ((Get-Location).Drive.Name -ne $SiteCode) {
+    Write-DscStatus "Failed to Set-Location to $SiteCode`:"
+    return $false
+}
 
 # Get info for Passive Site Server
 $ThisMachineName = $deployconfig.Parameters.ThisMachineName
@@ -134,6 +125,7 @@ $add_local_admin = {
 Write-DscStatus "Verifying/adding Active and Passive computer accounts on all site system servers"
 $siteSystems = Get-CMSiteSystemServer -SiteCode $SiteCode | Select-Object -Expand NetworkOSPath
 $siteSystems += "\\$remoteLibVMName"
+$localSiteServer = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
 foreach ($server in $siteSystems) {
     $serverName = $server.Substring(2, $server.Length - 2) # NetworkOSPath = \\server.domain.dom
     if ($serverName -eq $localSiteServer) {
@@ -227,12 +219,12 @@ $failureCount = 0
 do {
 
     $i++
-    $prereqFailure = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedPrereqMonitoring  -Filter "IsComplete = 4 AND Applicable = 1 AND Progress = 100 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+    $prereqFailure = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_HA_SiteServerDetailedPrereqMonitoring  -Filter "IsComplete = 4 AND Applicable = 1 AND Progress = 100 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
     if ($prereqFailure) {
         Write-DscStatus "Failed to add passive site server on $passiveFQDN due to prereq failure. Reason: $($prereqFailure.SubStageName)" -Failure
     }
 
-    $installFailure = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 4 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+    $installFailure = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 4 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
     if ($installFailure) {
         $failureCount++
         if ($failureCount -gt 10) {
@@ -244,7 +236,7 @@ do {
         $failureCount = 0
     }
 
-    $state = Get-WmiObject -ComputerName $ProviderMachineName -Namespace root\SMS\site_$SiteCode -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 2 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+    $state = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 2 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
 
     if ($state) {
         Write-DscStatus "Adding passive site server on $passiveFQDN`: $($state.SubStageName)" -RetrySeconds 30

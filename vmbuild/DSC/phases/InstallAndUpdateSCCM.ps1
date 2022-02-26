@@ -12,10 +12,9 @@ $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CurrentRole = $ThisVM.role
-#$PSVM = $deployConfig.thisParams.PrimaryVM
-$PSVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisVM.thisParams.Primary}
+$PSVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisVM.thisParams.Primary }
 
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
@@ -200,82 +199,32 @@ else {
     Write-DscStatus "ConfigMgr is already installed."
 }
 
-# get the available update
-function getupdate() {
-
-    Write-DscStatus "Get CM Update..." -NoStatus
-
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-    $CMPSSuppressFastNotUsedCheck = $true
-
-    $updatepacklist = Get-CMSiteUpdate -Fast | Where-Object { $_.State -ne 196612 }
-    $getupdateretrycount = 0
-    while ($updatepacklist.Count -eq 0) {
-
-        if ($getupdateretrycount -eq 3) {
-            break
-        }
-
-        Write-DscStatus "No update found. Running Invoke-CMSiteUpdateCheck and waiting for 2 mins..." -NoStatus
-        $getupdateretrycount++
-
-        Invoke-CMSiteUpdateCheck -ErrorAction Ignore
-        Start-Sleep 120
-
-        $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 }
-    }
-
-    $updatepack = ""
-
-    if ($updatepacklist.Count -eq 0) {
-        # No updates
-    }
-    elseif ($updatepacklist.Count -eq 1) {
-        # Single update
-        $updatepack = $updatepacklist
-    }
-    else {
-        # Multiple updates
-        $updatepack = ($updatepacklist | Sort-Object -Property fullversion)[-1]
-    }
-
-    return $updatepack
-}
-
 # Read Site Code from registry
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
-$ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
-
-# Get CM module path
-$key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-$subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-$uiInstallPath = $subKey.GetValue("UI Installation Directory")
-$modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-$initParams = @{}
-
-# Import the ConfigurationManager.psd1 module
-if ($null -eq (Get-Module ConfigurationManager)) {
-    Import-Module $modulePath
+if (-not $SiteCode) {
+    Write-DscStatus "Failed to get 'Site Code' from SOFTWARE\Microsoft\SMS\Identification. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return
 }
 
-# Connect to the site's drive if it is not already present
-Write-DscStatus "Setting PS Drive"
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue
+# Provider
+$smsProvider = Get-SMSProvider -SiteCode $SiteCode
+if (-not $smsProvider.FQDN) {
+    Write-DscStatus "Failed to get SMS Provider for site $SiteCode. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return $false
+}
 
-$psDriveFailcount = 0
-while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-    $psDriveFailcount++
-    if ($psDriveFailcount -gt 20) {
-        Write-DscStatus "Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log"
-        return
-    }
-    Write-DscStatus "Retry in 10s to Set PS Drive for site $SiteCode on $ProviderMachineName"
-    Start-Sleep -Seconds 10
-    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+# Set CMSite Provider
+$worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($smsProvider.FQDN)
+if (-not $worked) {
+    return
 }
 
 # Set the current location to be the site code.
-Set-Location "$($SiteCode):\" @initParams
+Set-Location "$($SiteCode):\"
+if ((Get-Location).Drive.Name -ne $SiteCode) {
+    Write-DscStatus "Failed to Set-Location to $SiteCode`:"
+    return $false
+}
 
 # Add vmbuildadmin as Full Admin
 Write-DscStatus "Adding 'vmbuildadmin' account as Full Administrator in ConfigMgr"
@@ -408,7 +357,7 @@ if ($UpdateToLatest) {
     # Check for updates
     $retrytimes = 0
     $downloadretrycount = 0
-    $updatepack = getupdate
+    $updatepack = Get-UpdatePack
     if ($updatepack -ne "") {
         Write-DscStatus "Found '$($updatepack.Name)' update."
     }
@@ -555,7 +504,7 @@ if ($UpdateToLatest) {
 
             #Get if there are any other updates need to be installed
             Write-DscStatus "Checking if another update is available..."
-            $updatepack = getupdate
+            $updatepack = Get-UpdatePack
             if ($updatepack -ne "") {
                 Write-DscStatus "Found another update: '$($updatepack.Name)'."
             }
@@ -614,12 +563,12 @@ else {
     $Configuration.UpgradeSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-    # Waiting for PS ready to use
-    $Configuration.PSReadyToUse.Status = 'Running'
-    $Configuration.PSReadyToUse.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-
     if ($PSVM) {
+        # Waiting for PS ready to use
+        $Configuration.PSReadyToUse.Status = 'Running'
+        $Configuration.PSReadyToUse.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
         $PSSiteCode = $PSVM.siteCode
         $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
         Write-DscStatus "Waiting for Primary site installation to finish"
@@ -640,10 +589,10 @@ else {
         }
 
         Write-DscStatus "Primary installation complete. Replication link is 'Active'."
-    }
 
-    # Update Actions file
-    $Configuration.PSReadyToUse.Status = 'Completed'
-    $Configuration.PSReadyToUse.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        # Update Actions file
+        $Configuration.PSReadyToUse.Status = 'Completed'
+        $Configuration.PSReadyToUse.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    }
 }
