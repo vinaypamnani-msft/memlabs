@@ -71,15 +71,11 @@ Function Read-SingleKeyWithTimeout {
             }
         }
         if ($Prompt) {
-            switch (($i++ % 32)/8) {
-                0 { Write-Host -NoNewline -ForegroundColor Green ("`b`b`b : ")}
-
-                1 {Write-Host -NoNewline -ForegroundColor Red ("`b`b`b : ")}
-
-                2 {Write-Host -NoNewline -ForegroundColor Yellow ("`b`b`b : ")}
-
-                3 {Write-Host -NoNewline -ForegroundColor Blue ("`b`b`b : ")}
-
+            switch (($i++ % 32) / 8) {
+                0 { Write-Host -NoNewline -ForegroundColor Green ("`b`b`b : ") }
+                1 { Write-Host -NoNewline -ForegroundColor Red ("`b`b`b : ") }
+                2 { Write-Host -NoNewline -ForegroundColor Yellow ("`b`b`b : ") }
+                3 { Write-Host -NoNewline -ForegroundColor Blue ("`b`b`b : ") }
             }
         }
         #Write-Host -NoNewline ("`b `b{0}" -f '/?\|'[($i++ % 4)])
