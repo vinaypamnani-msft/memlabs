@@ -2285,7 +2285,7 @@ function Read-YesorNoWithTimeout {
             $valid = $true
         }
     }
-
+    Write-Host
     return $response
 }
 
