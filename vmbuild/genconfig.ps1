@@ -2441,7 +2441,7 @@ function get-ValidResponse {
         else {
             $response = Read-Single -Prompt $prompt $currentValue
             #$response = Read-Host2 -Prompt $prompt $currentValue
-            if ([int]$response -is [int]) {
+            if (($response -as [int]) -is [int]) {
                 $testmax = $response + "0"
                 if ([int]$testmax -le [int]$max) {
                     $response2 = Read-SingleKeyWithTimeout -timeout 3
@@ -2459,7 +2459,7 @@ function get-ValidResponse {
             }
             else {
                 try {
-                    if ([int]$response -is [int]) {
+                    if (($response -as [int]) -is [int]) {
                         if ([int]$response -le [int]$max -and [int]$response -gt 0 ) {
                             $responseValid = $true
                         }
@@ -2510,7 +2510,7 @@ function get-ValidResponse {
             if ($additionalOptions) {
                 $validResponses += $additionalOptions.Keys | Where-Object { -not $_.StartsWith("*") }
             }
-            write-host -ForegroundColor Red "Invalid response.  " -NoNewline
+            write-host -ForegroundColor Red "Invalid response '$response'.  " -NoNewline
             write-host "Valid Responses are: " -NoNewline
             write-host -ForegroundColor Green "$($validResponses -join ",")"
         }

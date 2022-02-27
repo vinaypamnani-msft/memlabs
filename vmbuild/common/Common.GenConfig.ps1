@@ -34,20 +34,49 @@ Function Read-SingleKeyWithTimeout {
     param (
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
         [int] $timeout = 10,
-        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
+        [Parameter(Mandatory = $false, HelpMessage = "Valid Keys")]
         [string[]] $ValidKeys,
-        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
+        [Parameter(Mandatory = $false, HelpMessage = "Prompt")]
         [string] $Prompt
     )
+
+
+    Function Write-Prompt {
+        param (
+            [Parameter(Mandatory = $true, HelpMessage = "color")]
+            [string] $color
+        )
+        [int]$charsToDelete = $Prompt.Length + $charsToDeleteNextTime
+
+        Write-Host -NoNewline ("`b" * $charsToDelete)
+        if ($timeout -ne 0) {
+            Write-Host "[" -NoNewline
+            if ($timeoutLeft -le 3) {
+                write-Host -Foregroundcolor Red $timeoutLeft -NoNewline
+            }
+            else {
+                write-Host $timeoutLeft -NoNewline
+            }
+            Write-Host "]" -NoNewline
+            $charsToDeleteNextTime = "[$timeoutLeft]".Length
+        }
+        Write-Host -NoNewline -ForegroundColor $color ($Prompt)
+        return $charsToDeleteNextTime
+    }
     $host.ui.RawUI.FlushInputBuffer()
     $key = $null
     $secs = 0
-
+    $charsToDeleteNextTime = 0
     if ($Prompt) {
+        if ($timeout) {
+            Write-Host "[$timeout]" -NoNewline
+            $charsToDeleteNextTime = "[$timeout]".Length
+        }
         Write-Host $Prompt -NoNewline
     }
-
+    $i = 0
     While ($secs -le ($timeout * 40)) {
+        $timeoutLeft = [Math]::Round(($timeout) - $secs / 40, 0)
         if ([Console]::KeyAvailable) {
             $key = $host.UI.RawUI.ReadKey()
             if ($key.VirtualKeyCode -eq 13) {
@@ -72,10 +101,10 @@ Function Read-SingleKeyWithTimeout {
         }
         if ($Prompt) {
             switch (($i++ % 32) / 8) {
-                0 { Write-Host -NoNewline -ForegroundColor Green ("`b`b`b : ") }
-                1 { Write-Host -NoNewline -ForegroundColor Red ("`b`b`b : ") }
-                2 { Write-Host -NoNewline -ForegroundColor Yellow ("`b`b`b : ") }
-                3 { Write-Host -NoNewline -ForegroundColor Blue ("`b`b`b : ") }
+                0 { $charsToDeleteNextTime = Write-Prompt -Color Green }
+                1 { $charsToDeleteNextTime = Write-Prompt -Color Red }
+                2 { $charsToDeleteNextTime = Write-Prompt -Color Yellow }
+                3 { $charsToDeleteNextTime = Write-Prompt -Color Blue }
             }
         }
         #Write-Host -NoNewline ("`b `b{0}" -f '/?\|'[($i++ % 4)])

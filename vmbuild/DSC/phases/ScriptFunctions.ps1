@@ -228,6 +228,27 @@ function Install-MP {
     } until ($mpinstalled -or $installFailure)
 }
 
+function Write-ScriptWorkFlowData {
+    param (
+        [object]
+        $Configuration,
+        [string]
+        $ConfigurationFile
+    )
+
+    $mutexName = "ScriptWorkflow"
+
+    $mtx = New-Object System.Threading.Mutex($false, $mutexName)
+    [void]$mtx.WaitOne()
+    try {
+        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    }
+    finally {
+        [void]$mtx.ReleaseMutex()
+        [void]$mtx.Dispose()
+    }
+}
+
 function Get-UpdatePack {
 
     Write-DscStatus "Get CM Update..." -NoStatus

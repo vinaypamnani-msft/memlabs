@@ -552,9 +552,9 @@ $global:VM_Config = {
                 if (Test-Path $ConfigurationFile) {
                     "Resetting $ConfigurationFile" | Out-File $log -Append
                     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-                    if ($Configuration.ScriptWorkFlow) {
-                        $Configuration.ScriptWorkFlow.Status = 'NotStart'
-                        $Configuration.ScriptWorkFlow.StartTime = ''
+                    if ($Configuration.ScriptWorkflow) {
+                        $Configuration.ScriptWorkflow.Status = 'NotStart'
+                        $Configuration.ScriptWorkflow.StartTime = ''
                         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
                     }
                     else {

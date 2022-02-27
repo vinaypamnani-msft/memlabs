@@ -476,11 +476,32 @@ class WaitForEvent {
             $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
         }
 
-        $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+        $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
+        Write-Verbose "Attempting to acquire '$_FileName' Mutex"
+        [void]$mtx.WaitOne()
+        Write-Verbose "acquired '$_FileName' Mutex"
+        $Configuration = $null
+        try {
+            $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+        }
+        finally {
+            [void]$mtx.ReleaseMutex()
+            [void]$mtx.Dispose()
+        }
         while ($Configuration.$($this.ReadNode).Status -ne $this.ReadNodeValue) {
             Write-Verbose "Wait for step: [$($this.ReadNode)] to finish on $($this.MachineName), will try 60 seconds later..."
             Start-Sleep -Seconds 60
-            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
+            Write-Verbose "Attempting to acquire '$_FileName' Mutex"
+            [void]$mtx.WaitOne()
+            Write-Verbose "acquired '$_FileName' Mutex"
+            try {
+                $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            }
+            finally {
+                [void]$mtx.ReleaseMutex()
+                [void]$mtx.Dispose()
+            }
         }
     }
 
@@ -493,10 +514,23 @@ class WaitForEvent {
         $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
 
         if (!(Test-Path $ConfigurationFile)) { return $false }
-
-        $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-        if ($Configuration.$($this.ReadNode).Status -eq $this.ReadNodeValue) {
-            return $true
+        $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
+        Write-Verbose "Attempting to acquire '$_FileName' Mutex"
+        [void]$mtx.WaitOne()
+        Write-Verbose "acquired '$_FileName' Mutex"
+        try {
+            $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+            if ($Configuration.$($this.ReadNode).Status -eq $this.ReadNodeValue) {
+                return $true
+            }
+            return $false
+        }
+        catch {
+            return $false
+        }
+        finally {
+            [void]$mtx.ReleaseMutex()
+            [void]$mtx.Dispose()
         }
 
         return $false
@@ -1399,7 +1433,7 @@ class RegisterTaskScheduler {
             }
 
             $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-            if (-not ($Configuration.ScriptWorkFlow)) {
+            if (-not ($Configuration.ScriptWorkflow)) {
                 return $false
             }
             if ($Configuration.ScriptWorkflow.Status -eq 'NotStart') {

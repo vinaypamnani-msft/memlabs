@@ -174,8 +174,8 @@ Configuration Phase6
         }
 
         RegisterTaskScheduler RunScriptWorkflow {
-            TaskName       = "ScriptWorkFlow"
-            ScriptName     = "ScriptWorkFlow.ps1"
+            TaskName       = "ScriptWorkflow"
+            ScriptName     = "ScriptWorkflow.ps1"
             ScriptPath     = $PSScriptRoot
             ScriptArgument = "$DeployConfigPath $LogPath"
             AdminCreds     = $CMAdmin
