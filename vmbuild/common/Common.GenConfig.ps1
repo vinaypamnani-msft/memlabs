@@ -30,6 +30,40 @@ Function Get-SupportedOperatingSystemsForRole {
     return $AllList
 }
 
+Function Read-SingleKeyWithTimeout {
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
+        [int] $timeout = 10
+    )
+    $key = $null
+    $secs = 0
+
+    While ($secs -le ($timeout * 40)) {
+        if ([Console]::KeyAvailable) {
+            $key = $host.UI.RawUI.ReadKey()
+            if ($key.VirtualKeyCode -eq 13) {
+                return $null
+            }
+            if ($key.Character) {
+                return $key.Character.ToString()
+            }
+            else {
+                $key = $null
+            }
+        }
+        start-sleep -Milliseconds 25
+        if ($timeout -ne 0) {
+            #infinite wait
+            $secs++
+        }
+    }
+
+    if (-not $key) {
+        return $null
+    }
+
+}
+
 
 Function Show-StatusEraseLine {
     param (
@@ -97,13 +131,13 @@ function ConvertTo-DeployConfigEx {
                     $DomainAccountsUPN = @()
                     $DomainComputers = @()
                     foreach ($sql in $SQLAO) {
-                        if ($sql.OtherNode){
+                        if ($sql.OtherNode) {
 
-                        $ClusterName = $sql.ClusterName
+                            $ClusterName = $sql.ClusterName
 
-                        $DomainAccountsUPN += @($sql.SqlServiceAccount, $sql.SqlAgentAccount)
+                            $DomainAccountsUPN += @($sql.SqlServiceAccount, $sql.SqlAgentAccount)
 
-                        $DomainComputers += @($ClusterName)
+                            $DomainComputers += @($ClusterName)
                         }
                     }
 

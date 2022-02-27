@@ -437,13 +437,13 @@ Configuration Phase5
             ConnectionModeInPrimaryRole   = 'AllowAllConnections'
             ConnectionModeInSecondaryRole = 'AllowAllConnections'
             FailoverMode                  = 'Manual'
-            HealthCheckTimeout            = 15000
+            HealthCheckTimeout            = 30000
             ProcessOnlyOnActiveNode       = $true
             BasicAvailabilityGroup        = $false
-            DatabaseHealthTrigger         = $true
-            DtcSupportEnabled             = $true
+            DatabaseHealthTrigger         = $false
+            DtcSupportEnabled             = $false
             DependsOn                     = $nextDepend
-            #PsDscRunAsCredential          = $Admincreds
+            PsDscRunAsCredential          = $Admincreds
         }
         $nextDepend = '[SqlAG]CMCASAG'
 
@@ -461,7 +461,7 @@ Configuration Phase5
             IpAddress         = $thisVM.thisParams.SQLAO.AGIPAddress
             Port              = 1500
             DependsOn         = $nextDepend
-            #PsDscRunAsCredential = $Admincreds
+            PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[SqlAGListener]AvailabilityGroupListener'
 

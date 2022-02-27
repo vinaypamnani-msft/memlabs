@@ -79,7 +79,7 @@ function Set-CMSiteProvider {
 
     # Connect to the site's drive if it is not already present
     Write-DscStatus "Setting PS Drive" -NoStatus
-    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderFQDN @initParams -ErrorAction SilentlyContinue | Out-Null
+    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderFQDN -scope global @initParams -ErrorAction SilentlyContinue | Out-Null
 
     $psDriveFailcount = 0
     while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
@@ -90,7 +90,7 @@ function Set-CMSiteProvider {
         }
         Write-DscStatus "Retry in 10s to Set PS Drive for site $SiteCode on $ProviderFQDN" -NoStatus
         Start-Sleep -Seconds 10
-        New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderFQDN @initParams | Out-Null
+        New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderFQDN -scope global @initParams | Out-Null
     }
 
     Write-DscStatus "Successfully set PS Drive for site $SiteCode on $ProviderFQDN" -NoStatus
