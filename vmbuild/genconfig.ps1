@@ -2257,8 +2257,8 @@ function Read-Single {
         Write-Host -ForegroundColor yellow $currentValue -NoNewline
         Write-Host "]" -NoNewline
     }
-    Write-Host " : " -NoNewline
-    $response = Read-SingleKeyWithTimeout -timeout 0
+
+    $response = Read-SingleKeyWithTimeout -timeout 0 -Prompt " : "
     return $response
 }
 
@@ -2285,11 +2285,11 @@ function Read-YesorNoWithTimeout {
         Write-Host -ForegroundColor yellow $currentValue -NoNewline
         Write-Host "]" -NoNewline
     }
-    Write-Host " : " -NoNewline
+
 
     $valid = $false
     while (-not $valid) {
-        $response = Read-SingleKeyWithTimeout -timeout $timeout
+        $response = Read-SingleKeyWithTimeout -timeout $timeout -ValidKeys "Y","y","N","n" -Prompt " : "
         if ($null -eq $response -or $response -eq 'Y' -or $response -eq 'y' -or $response -eq 'N' -or $response -eq 'n') {
             $valid = $true
         }

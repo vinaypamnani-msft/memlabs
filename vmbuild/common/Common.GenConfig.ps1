@@ -33,11 +33,19 @@ Function Get-SupportedOperatingSystemsForRole {
 Function Read-SingleKeyWithTimeout {
     param (
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
-        [int] $timeout = 10
+        [int] $timeout = 10,
+        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
+        [string[]] $ValidKeys,
+        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
+        [string] $Prompt
     )
     $host.ui.RawUI.FlushInputBuffer()
     $key = $null
     $secs = 0
+
+    if ($Prompt) {
+        Write-Host $Prompt -NoNewline
+    }
 
     While ($secs -le ($timeout * 40)) {
         if ([Console]::KeyAvailable) {
@@ -46,13 +54,35 @@ Function Read-SingleKeyWithTimeout {
                 return $null
             }
             if ($key.Character) {
-                return $key.Character.ToString()
+                if ($ValidKeys) {
+                    if ($key.Character.ToString() -in $ValidKeys) {
+                        return $key.Character.ToString()
+                    }
+                    else {
+                        Write-Host -NoNewline ("`b `b")
+                    }
+                }
+                else {
+                    return $key.Character.ToString()
+                }
             }
             else {
                 $key = $null
             }
         }
-        Write-Host -NoNewline ("`b{0}" -f '/?\|'[($i++ % 4)])
+        if ($Prompt) {
+            switch (($i++ % 32)/8) {
+                0 { Write-Host -NoNewline -ForegroundColor Green ("`b`b`b : ")}
+
+                1 {Write-Host -NoNewline -ForegroundColor Red ("`b`b`b : ")}
+
+                2 {Write-Host -NoNewline -ForegroundColor Yellow ("`b`b`b : ")}
+
+                3 {Write-Host -NoNewline -ForegroundColor Blue ("`b`b`b : ")}
+
+            }
+        }
+        #Write-Host -NoNewline ("`b `b{0}" -f '/?\|'[($i++ % 4)])
         start-sleep -Milliseconds 25
         if ($timeout -ne 0) {
             #infinite wait
