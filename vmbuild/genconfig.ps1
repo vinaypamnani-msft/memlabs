@@ -357,7 +357,7 @@ function select-RestoreSnapshotDomain {
     }
 
     $startAll = Read-YesorNoWithTimeout -Prompt "Start All vms after restore? (Y/n)" -HideHelp
-    if ($startAll.ToLowerInvariant() -eq "n" -or $startAll.ToLowerInvariant() -eq "no") {
+    if ($startAll -and ($startAll.ToLowerInvariant() -eq "n" -or $startAll.ToLowerInvariant() -eq "no")) {
         $startAll = $null
     }
     else {
@@ -414,7 +414,7 @@ function select-RestoreSnapshotDomain {
     if ($missingVMS.Count -gt 0) {
         #Write-Host
         #$response2 = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
-        if ($DeleteVMs.ToLowerInvariant() -eq "y" -or $DeleteVMs.ToLowerInvariant() -eq "yes") {
+        if ($DeleteVMs -and ($DeleteVMs.ToLowerInvariant() -eq "y" -or $DeleteVMs.ToLowerInvariant() -eq "yes")) {
             foreach ($item in $missingVMS) {
                 Remove-VirtualMachine -VmName $item
             }
@@ -779,7 +779,7 @@ function Select-DeleteDomain {
         else {
             $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $response? (Y/n)" -HideHelp -timeout 180
 
-            if ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no") {
+            if ($response2 -and ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no")) {
                 continue
             }
             else {
@@ -1281,7 +1281,9 @@ function Get-ValidDomainNames {
         "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" #; "techpreview.com" = "CTP-" #techpreview.com is reserved for tech preview CM Installs
     }
     foreach ($domain in (Get-DomainList)) {
-        $ValidDomainNames.Remove($domain.ToLowerInvariant())
+        if ($domain) {
+            $ValidDomainNames.Remove($domain.ToLowerInvariant())
+        }
     }
 
     $usedPrefixes = Get-List -Type UniquePrefix
@@ -1371,17 +1373,19 @@ function select-NewDomainName {
 
             while (-not $domain) {
                 $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions -CurrentValue ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1) -Test:$false
-                if ($domain.ToLowerInvariant() -eq "c") {
+                if ($domain -and ($domain.ToLowerInvariant() -eq "c")) {
                     $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
                 }
                 if ($domain.Length -lt 3) {
                     $domain = $null
                 }
             }
-            if ((get-list -Type UniqueDomain) -contains $domain.ToLowerInvariant()) {
-                Write-Host
-                Write-Host -ForegroundColor Red "Domain is already in use. Please use the Expand option to expand the domain"
-                continue
+            if ($domain) {
+                if ((get-list -Type UniqueDomain) -contains $domain.ToLowerInvariant()) {
+                    Write-Host
+                    Write-Host -ForegroundColor Red "Domain is already in use. Please use the Expand option to expand the domain"
+                    continue
+                }
             }
             return $domain
         }
@@ -1496,7 +1500,7 @@ function Select-NewDomainConfig {
                 $network = $null
                 while (-not $network) {
                     $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -CurrentValue ($subnetList | Select-Object -First 1)
-                    if ($network.ToLowerInvariant() -eq "c") {
+                    if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                         $network = Read-Host2 -Prompt "Enter Custom Network (eg 192.168.1.0):"
                     }
                 }
@@ -1551,6 +1555,9 @@ function Select-Config {
         Write-Host
         Write-Verbose "3 Select-Config"
         $response = Read-Host2 -Prompt "Which config do you want to load"
+        if (-not $response) {
+            $response = ""
+        }
         try {
             if ([int]$response -is [int]) {
                 if ([int]$response -le [int]$i -and [int]$response -gt 0 ) {
@@ -1700,7 +1707,7 @@ function Show-ExistingNetwork {
     $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" -and ($_.Role -eq "CAS" -or $_.Role -eq "Primary" -or $_.Role -eq "DC") } | Measure-Object).Count
     if ($TotalStoppedVMs -gt 0) {
         $response = Read-YesorNoWithTimeout -Prompt "$TotalStoppedVMs Critical VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp
-        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+        if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
         }
         else {
             Select-StartDomain -domain $domain -response "C"
@@ -1979,7 +1986,7 @@ function Select-Subnet {
         }
         while (-not $network) {
             $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue $current
-            if ($network.ToLowerInvariant() -eq "c") {
+            if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                 $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
             }
         }
@@ -2113,7 +2120,7 @@ function Select-ExistingSubnets {
             $response = $response -Split " " | Select-Object -First 1
             write-Verbose "Sanitized response '$response'"
 
-            if ($response.ToLowerInvariant() -eq "n") {
+            if ($response -and ($response.ToLowerInvariant() -eq "n")) {
                 if ($SiteServerRole -and $ConfigToCheck) {
                     $subnetList = Get-ValidSubnets -configToCheck $ConfigToCheck -AllowExisting:$false
                 }
@@ -2124,7 +2131,7 @@ function Select-ExistingSubnets {
                 $network = $null
                 while (-not $network) {
                     $network = Get-Menu -Prompt "Select New Network" -OptionArray $subnetlist -additionalOptions $customOptions -Test:$false -CurrentValue $($subnetList | Select-Object -First 1)
-                    if ($network.ToLowerInvariant() -eq "c") {
+                    if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                         $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
                     }
                 }
@@ -2469,21 +2476,27 @@ function get-ValidResponse {
                 catch {}
 
                 foreach ($i in $($additionalOptions.keys)) {
-                    if ($response.ToLowerInvariant() -eq $i.ToLowerInvariant()) {
-                        $responseValid = $true
+                    if ($response) {
+                        if ($response.ToLowerInvariant() -eq $i.ToLowerInvariant()) {
+                            $responseValid = $true
+                        }
                     }
                 }
             }
             if ($responseValid -eq $false -and $currentValue -is [bool]) {
-                if ($currentValue.ToLowerInvariant() -eq "true" -or $currentValue.ToLowerInvariant() -eq "false") {
-                    $responseValid = $false
-                    if ($response.ToLowerInvariant() -eq "true") {
-                        $response = $true
-                        $responseValid = $true
-                    }
-                    if ($response.ToLowerInvariant() -eq "false") {
-                        $response = $false
-                        $responseValid = $true
+                if ($currentValue) {
+                    if ($currentValue.ToLowerInvariant() -eq "true" -or $currentValue.ToLowerInvariant() -eq "false") {
+                        $responseValid = $false
+                        if ($response) {
+                            if ($response.ToLowerInvariant() -eq "true") {
+                                $response = $true
+                                $responseValid = $true
+                            }
+                            if ($response.ToLowerInvariant() -eq "false") {
+                                $response = $false
+                                $responseValid = $true
+                            }
+                        }
                     }
                 }
             }
@@ -2598,7 +2611,7 @@ Function Get-ParentSiteCodeMenu {
         do {
             $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to" -OptionArray $casSiteCodes -CurrentValue $CurrentValue -additionalOptions $additionalOptions -Test:$false
         } while (-not $result)
-        if ($result.ToLowerInvariant() -eq "x") {
+        if ($result -and ($result.ToLowerInvariant() -eq "x")) {
             return $null
         }
         else {
@@ -2690,7 +2703,7 @@ Function Get-SiteCodeForDPMP {
             while (-not $result) {
                 $result = Get-Menu -Prompt "Select sitecode to connect DPMP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false
             }
-            if ($result.ToLowerInvariant() -eq "x") {
+            if ($result -and ($result.ToLowerInvariant() -eq "x")) {
                 return $null
             }
             else {
@@ -2715,6 +2728,9 @@ Function Get-SiteCodeMenu {
     #Get-PSCallStack | out-host
     $result = Get-SiteCodeForDPMP -CurrentValue $CurrentValue -Domain $configToCheck.vmoptions.domainName
 
+    if (-not $result){
+        return
+    }
     if ($result.ToLowerInvariant() -eq "x") {
         $property."$name" = $null
     }
@@ -2860,6 +2876,9 @@ Function Get-remoteSQLVM {
         }
         $result = Get-Menu "Select Remote SQL VM, or Select Local" $($validVMs) $CurrentValue -Test:$false -additionalOptions $additionalOptions
 
+        if (-not $result) {
+            return
+        }
         switch ($result.ToLowerInvariant()) {
             "l" {
                 Set-SiteServerLocalSql $property
@@ -2914,6 +2933,9 @@ Function Get-domainUser {
 
         $result = Get-Menu "Select User" $($users) $CurrentValue -Test:$false -additionalOptions $additionalOptions
 
+        if (-not $result){
+            return
+        }
         switch ($result.ToLowerInvariant()) {
             "n" {
                 $result = Read-Host2 -Prompt "Enter desired Username"
@@ -3494,7 +3516,7 @@ function Select-Options {
         $return = $null
         if ($null -ne $additionalOptions) {
             foreach ($item in $($additionalOptions.keys)) {
-                if ($response.ToLowerInvariant() -eq $item.ToLowerInvariant()) {
+                if (($response -and $item)-and ($response.ToLowerInvariant() -eq $item.ToLowerInvariant())) {
                     # Return fails here for some reason. If the values were the same, let the user escape, as no changes were made.
                     $return = $item
                 }
@@ -4572,7 +4594,7 @@ function Select-VirtualMachines {
                     if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                         #if ($i -eq $response) {
                         $response = Read-YesorNoWithTimeout -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (Y/n)" -HideHelp
-                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                        if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
                         }
                         else {
                             if ($virtualMachine.role -eq "FileServer") {
@@ -4672,10 +4694,10 @@ function Save-Config {
     elseif (-not $config.cmOptions) {
         $file += "-NOSCCM-"
     }
-    elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "cas" }) {
+    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }) {
         $file += "-CAS-$($config.cmOptions.version)-"
     }
-    elseif ($Config.virtualMachines | Where-Object { $_.Role.ToLowerInvariant() -eq "primary" }) {
+    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }) {
         $file += "-PRI-$($config.cmOptions.version)-"
     }
 

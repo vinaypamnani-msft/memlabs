@@ -49,20 +49,21 @@ if (!(Test-Path C:\$CM\Redist)) {
 }
 
 # Read Actions file
+
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
 # Reset upgrade action (in case called again in add to existing scenario)
 $Configuration.UpgradeSCCM.Status = 'NotStart'
 $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
 
     # Set Install action as Running
     $Configuration.InstallSCCM.Status = 'Running'
     $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
     # Ensure CM files were downloaded
     $cmsourcepath = "c:\$CM"
@@ -192,7 +193,7 @@ SysCenterId=
     # Write action completed
     $Configuration.InstallSCCM.Status = 'Completed'
     $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 }
 else {
@@ -255,7 +256,7 @@ if ($UpdateToLatest) {
     # Update actions file
     $Configuration.UpgradeSCCM.Status = 'Running'
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
     # Wait for 2 mins before checking DMP Downloader status
     Write-DscStatus "Checking for updates. Waiting for DMP Downloader."
@@ -547,27 +548,27 @@ else {
     $Configuration.UpgradeSCCM.Status = 'NotRequested'
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration.UpgradeSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 }
 
 if ($installAction -eq "InstallPrimarySite") {
 
     # We're done, Update Actions file
     $Configuration.UpgradeSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 }
 else {
 
     # Write action completed, PS can start when UpgradeSCCM.EndTime is not empty
     $Configuration.UpgradeSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
     if ($PSVM) {
         # Waiting for PS ready to use
         $Configuration.PSReadyToUse.Status = 'Running'
         $Configuration.PSReadyToUse.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
         $PSSiteCode = $PSVM.siteCode
         $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
@@ -593,6 +594,7 @@ else {
         # Update Actions file
         $Configuration.PSReadyToUse.Status = 'Completed'
         $Configuration.PSReadyToUse.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+
     }
 }

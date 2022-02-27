@@ -52,6 +52,7 @@ Function Read-SingleKeyWithTimeout {
                 $key = $null
             }
         }
+        Write-Host -NoNewline ("`b{0}" -f '/?\|'[($i++ % 4)])
         start-sleep -Milliseconds 25
         if ($timeout -ne 0) {
             #infinite wait
