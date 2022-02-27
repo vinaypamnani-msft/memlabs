@@ -1179,6 +1179,7 @@ function Get-List {
         [object] $DeployConfig
     )
 
+    #Get-PSCallStack | out-host
     $mtx = New-Object System.Threading.Mutex($false, "GetList")
     write-log "Attempting to acquire 'GetList' Mutex" -LogOnly -Verbose
     [void]$mtx.WaitOne()

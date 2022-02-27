@@ -2289,7 +2289,7 @@ function Read-YesorNoWithTimeout {
 
     $valid = $false
     while (-not $valid) {
-        $response = Read-SingleKeyWithTimeout -timeout $timeout -ValidKeys "Y","y","N","n" -Prompt " : "
+        $response = Read-SingleKeyWithTimeout -timeout $timeout -ValidKeys "Y", "y", "N", "n" -Prompt " : "
         if ($null -eq $response -or $response -eq 'Y' -or $response -eq 'y' -or $response -eq 'N' -or $response -eq 'n') {
             $valid = $true
         }
@@ -2428,31 +2428,39 @@ function get-ValidResponse {
         [switch] $TestBeforeReturn
 
     )
-
+    $response = $null
+    $response2 = $null
     $responseValid = $false
     while ($responseValid -eq $false) {
         Write-Host
-        Write-Verbose "5 get-ValidResponse"
-        if ($max -lt 10 ) {
-            $response = Read-Single -Prompt $prompt $currentValue
-            #Write-Host "`r --------------- Processing Response $response -------------"
-            Write-Host
+        Write-Verbose "5 get-ValidResponse max = $max $($additionalOptions.Keys -join ",")"
+
+
+        Write-Verbose "5 else get-ValidResponse max = $max"
+        $response = Read-Single -Prompt $prompt $currentValue
+        if ($null -eq $response){
+            return
         }
-        else {
-            $response = Read-Single -Prompt $prompt $currentValue
-            #$response = Read-Host2 -Prompt $prompt $currentValue
-            if (($response -as [int]) -is [int]) {
-                $testmax = $response + "0"
-                if ([int]$testmax -le [int]$max) {
-                    $response2 = Read-SingleKeyWithTimeout -timeout 3
-                }
-                if ($response2) {
-                    $response = $response + $response2
-                }
+        #$response = Read-Host2 -Prompt $prompt $currentValue
+        if (($response -as [int]) -is [int]) {
+            [int]$testmax = ([string]$response + "0" -as [int])
+            if ([int]$testmax -le [int]$max) {
+                $response2 = Read-SingleKeyWithTimeout -timeout 3
             }
-            Write-Host
-            #Write-Host "`r --------------- Processing Response $response -------------"
         }
+        foreach ($key in $additionalOptions.Keys) {
+            if ($key.length -gt 1 -and ($key.StartsWith($response))) {
+                $response2 = Read-SingleKeyWithTimeout -timeout 3
+                break
+            }
+        }
+        if ($response2) {
+            $response = $response + $response2
+        }
+
+        Write-Host
+        #Write-Host "`r --------------- Processing Response $response -------------"
+
         try {
             if ([String]::IsNullOrWhiteSpace($response)) {
                 $responseValid = $true
@@ -2728,7 +2736,7 @@ Function Get-SiteCodeMenu {
     #Get-PSCallStack | out-host
     $result = Get-SiteCodeForDPMP -CurrentValue $CurrentValue -Domain $configToCheck.vmoptions.domainName
 
-    if (-not $result){
+    if (-not $result) {
         return
     }
     if ($result.ToLowerInvariant() -eq "x") {
@@ -2933,7 +2941,7 @@ Function Get-domainUser {
 
         $result = Get-Menu "Select User" $($users) $CurrentValue -Test:$false -additionalOptions $additionalOptions
 
-        if (-not $result){
+        if (-not $result) {
             return
         }
         switch ($result.ToLowerInvariant()) {
@@ -3091,7 +3099,14 @@ function Get-AdditionalValidations {
 
         "SqlServiceAccount" {
             if ($property.Role -eq "SQLAO") {
-                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                $SQLAO = @($property)
+                if ($property.OtherNode) {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
+                }
+                else {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
+                }
+
                 foreach ($sql in $SQLAO) {
                     $sql.$name = $value
                 }
@@ -3099,7 +3114,13 @@ function Get-AdditionalValidations {
         }
         "SqlAgentAccount" {
             if ($property.Role -eq "SQLAO") {
-                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                $SQLAO = @($property)
+                if ($property.OtherNode) {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
+                }
+                else {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
+                }
                 foreach ($sql in $SQLAO) {
                     $sql.$name = $value
                 }
@@ -3107,7 +3128,13 @@ function Get-AdditionalValidations {
         }
         "sqlVersion" {
             if ($property.Role -eq "SQLAO") {
-                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                $SQLAO = @($property)
+                if ($property.OtherNode) {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
+                }
+                else {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
+                }
                 foreach ($sql in $SQLAO) {
                     $sql.$name = $value
                 }
@@ -3115,7 +3142,13 @@ function Get-AdditionalValidations {
         }
         "sqlInstanceName" {
             if ($property.Role -eq "SQLAO") {
-                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                $SQLAO = @($property)
+                if ($property.OtherNode) {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
+                }
+                else {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
+                }
                 foreach ($sql in $SQLAO) {
                     $sql.$name = $value
                 }
@@ -3124,14 +3157,34 @@ function Get-AdditionalValidations {
         }
         "sqlInstanceDir" {
             if ($property.Role -eq "SQLAO") {
-                $SQLAO = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" }
+                $SQLAO = @($property)
+                if ($property.OtherNode) {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
+                }
+                else {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
+                }
                 foreach ($sql in $SQLAO) {
                     $sql.$name = $value
                 }
             }
 
         }
+        "network" {
+            if ($property.Role -eq "SQLAO") {
+                $SQLAO = @($property)
+                if ($property.OtherNode) {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
+                }
+                else {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
+                }
+                foreach ($sql in $SQLAO) {
+                    $sql.$name = $value
+                }
+            }
 
+        }
         "vmName" {
 
             $CASVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
@@ -3149,7 +3202,7 @@ function Get-AdditionalValidations {
                 }
             }
 
-            if ($Property.Role -eq "FileServer" -and $null -ne $SQLAO) {
+            if ($Property.Role -eq "FileServer" -and $null -ne $SQLAOs) {
                 foreach ($SQLAO in $SQAOs) {
                     if ($SQLAO.FileServerVM -eq $CurrentValue) {
                         $SQLAO.FileServerVM = $value
@@ -3516,7 +3569,7 @@ function Select-Options {
         $return = $null
         if ($null -ne $additionalOptions) {
             foreach ($item in $($additionalOptions.keys)) {
-                if (($response -and $item)-and ($response.ToLowerInvariant() -eq $item.ToLowerInvariant())) {
+                if (($response -and $item) -and ($response.ToLowerInvariant() -eq $item.ToLowerInvariant())) {
                     # Return fails here for some reason. If the values were the same, let the user escape, as no changes were made.
                     $return = $item
                 }
@@ -4327,6 +4380,9 @@ function Select-VirtualMachines {
             $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
         }
         Write-Log -HostOnly -Verbose "response = $response"
+        if ([String]::IsNullOrWhiteSpace($response)) {
+            return
+        }
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
                 #$role = Select-RolesForNew
