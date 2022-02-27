@@ -2268,6 +2268,7 @@ function Read-YesorNoWithTimeout {
         [int] $timeout = 10
 
     )
+
     if (-not $HideHelp.IsPresent) {
         write-help
     }
@@ -2278,6 +2279,7 @@ function Read-YesorNoWithTimeout {
         Write-Host "]" -NoNewline
     }
     Write-Host " : " -NoNewline
+
     $valid = $false
     while (-not $valid) {
         $response = Read-SingleKeyWithTimeout -timeout $timeout

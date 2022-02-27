@@ -35,6 +35,7 @@ Function Read-SingleKeyWithTimeout {
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
         [int] $timeout = 10
     )
+    $host.ui.RawUI.FlushInputBuffer()
     $key = $null
     $secs = 0
 
