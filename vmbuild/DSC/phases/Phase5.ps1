@@ -13,6 +13,7 @@ Configuration Phase5
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
+    $netbiosName = $DomainName.Split(".")[0]
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Log share
@@ -56,7 +57,7 @@ Configuration Phase5
                 Path              = $primaryVM.thisParams.SQLAO.WitnessLocalPath
                 AccessControlList = @(
                     NTFSAccessControlList {
-                        Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupName)"
+                        Principal          = "$netbiosName\$($primaryVM.thisParams.SQLAO.GroupName)"
                         ForcePrincipal     = $false
                         AccessControlEntry = @(
                             NTFSAccessControlEntry {
@@ -104,7 +105,7 @@ Configuration Phase5
                     #    )
                     #}
                     NTFSAccessControlList {
-                        Principal          = "$DomainName\$DomainAdminName"
+                        Principal          = "$netbiosName\$DomainAdminName"
                         ForcePrincipal     = $false
                         AccessControlEntry = @(
                             NTFSAccessControlEntry {
@@ -148,7 +149,7 @@ Configuration Phase5
                         )
                     }
                     NTFSAccessControlList {
-                        Principal          = "$DomainName\$DomainAdminName"
+                        Principal          = "$netbiosName\$DomainAdminName"
                         ForcePrincipal     = $false
                         AccessControlEntry = @(
                             NTFSAccessControlEntry {
@@ -160,7 +161,7 @@ Configuration Phase5
                         )
                     }
                     NTFSAccessControlList {
-                        Principal          = "$DomainName\vmbuildadmin"
+                        Principal          = "$netbiosName\vmbuildadmin"
                         ForcePrincipal     = $false
                         AccessControlEntry = @(
                             NTFSAccessControlEntry {
@@ -190,7 +191,7 @@ Configuration Phase5
                 Path                  = $primaryVM.thisParams.SQLAO.BackupLocalPath
                 Description           = $primaryVM.thisParams.SQLAO.BackupShare
                 FolderEnumerationMode = 'AccessBased'
-                FullAccess            = $primaryVM.thisParams.SQLAO.SqlServiceAccountFQ, $primaryVM.thisParams.SQLAO.SqlAgentServiceAccountFQ, "$DomainName\$DomainAdminName", "$DomainName\vmbuildadmin"
+                FullAccess            = $primaryVM.thisParams.SQLAO.SqlServiceAccountFQ, $primaryVM.thisParams.SQLAO.SqlAgentServiceAccountFQ, "$netbiosName\$DomainAdminName", "$netbiosName\vmbuildadmin"
                 ReadAccess            = "Everyone"
                 DependsOn             = "[NTFSAccessEntry]ClusterBackupPermissions$i"
             }
