@@ -2165,12 +2165,13 @@ function Get-BranchName {
 if (-not $Common.Initialized) {
 
     # Write progress
-    Write-Progress "Loading required modules." -Status "Please wait..." -PercentComplete -1
+    Write-Progress "Loading required modules." -Status "Please wait..." -PercentComplete 1
     $global:vm_remove_list = @()
 
     ###################
     ### GIT BRANCH  ###
     ###################
+    Write-Progress "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
     write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
     $devBranch = $false
     try {
@@ -2185,6 +2186,7 @@ if (-not $Common.Initialized) {
 
     # PS Version
     $PS7 = $false
+    Write-Progress "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
     if ($PSVersionTable.PSVersion.Major -eq 7) {
         $PS7 = $true
         $PSStyle.Progress.Style = "`e[38;5;123m"
@@ -2195,7 +2197,7 @@ if (-not $Common.Initialized) {
     # if ($devBranch) {
     #     Set-StrictMode -Version 1.0
     # }
-
+    Write-Progress "Loading required modules." -Status "Checking Directories" -PercentComplete 5
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
@@ -2203,8 +2205,10 @@ if (-not $Common.Initialized) {
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
     # Get latest hotfix version
+    Write-Progress "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 7
     $latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
 
+    Write-Progress "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 10
     # Common global props
     $global:Common = [PSCustomObject]@{
         MemLabsVersion        = "220202"
@@ -2246,11 +2250,13 @@ if (-not $Common.Initialized) {
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access
+    Write-Progress "Loading required modules." -Status "Checking Storage Config" -PercentComplete 12
     Get-StorageConfig
 
     ### Set supported options
+    Write-Progress "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 14
     Set-SupportedOptions
-
+    $i = 15
     if (-not $InJob.IsPresent) {
 
         try {
@@ -2264,11 +2270,14 @@ if (-not $Common.Initialized) {
         # Retrieve VM List, and cache results
         $list = Get-List -Type VM -ResetCache
         foreach ($vm in $list) {
+            $i++
+            Write-Progress "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
             $vm2 = Get-VM -id $vm.vmId
             Update-VMInformation -vm $vm2
         }
     }
-
+    $i++
+    Write-Progress "Loading required modules." -Status "Moving Logs" -PercentComplete $i
     # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
     Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
     $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
@@ -2276,7 +2285,8 @@ if (-not $Common.Initialized) {
         Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
     }
-
+    $i++
+    Write-Progress "Loading required modules." -Status "Finalizing" -PercentComplete $i
     # Add HGS Registry key to allow local CA Cert
     New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
 

@@ -444,8 +444,9 @@ function Get-SQLAOConfig {
 
     $ClusterName = $PrimaryAO.ClusterName
     $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix, "")
-    $ServiceAccount = "$($ClusterNameNoPrefix)Svc"
-    $AgentAccount = "$($ClusterNameNoPrefix)Agent"
+
+    $ServiceAccount =  $PrimaryAO.SqlServiceAccount
+    $AgentAccount = $PrimaryAO.SqlAgentAccount
 
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
@@ -464,8 +465,9 @@ function Get-SQLAOConfig {
     }
 
     $config = [PSCustomObject]@{
-        GroupName                  = $ClusterName
+        GroupName                  = $ClusterName+"Group"
         GroupMembers               = @("$($PrimaryAO.vmName)$", "$($SecondAO)$", "$($ClusterName)$")
+        GroupMembersFQ             = @("$($netbiosName + "\" + $PrimaryAO.vmName)$", "$($netbiosName + "\" + $SecondAO)$", "$($netbiosName + "\" + $ClusterName)$")
         SqlServiceAccount          = $ServiceAccount
         SqlServiceAccountFQ        = $netbiosName + "\" + $ServiceAccount
         SqlAgentServiceAccount     = $AgentAccount

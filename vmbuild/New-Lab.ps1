@@ -238,6 +238,7 @@ try {
         }
     }
 
+    $AddedScopes = @($deployConfig.vmOptions.network)
     # Test if hyper-v switch exists, if not create it
     $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
     if (-not $worked) {
@@ -246,7 +247,11 @@ try {
 
     # Create additional switches
     foreach ($virtualMachine in $deployConfig.VirtualMachines) {
-        if ($virtualMachine.network -and $virtualMachine.network -ne $deployConfig.vmoptions.network) {
+        if ($virtualMachine.network) {
+            if ($AddedScopes -contains $virtualMachine.network) {
+                continue
+            }
+            $AddedScopes += $virtualMachine.network
             $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
             $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
             $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf

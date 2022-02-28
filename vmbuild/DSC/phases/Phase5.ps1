@@ -56,19 +56,7 @@ Configuration Phase5
                 Path              = $primaryVM.thisParams.SQLAO.WitnessLocalPath
                 AccessControlList = @(
                     NTFSAccessControlList {
-                        Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupMembers[0])"
-                        ForcePrincipal     = $true
-                        AccessControlEntry = @(
-                            NTFSAccessControlEntry {
-                                AccessControlType = 'Allow'
-                                FileSystemRights  = 'FullControl'
-                                Inheritance       = 'This folder subfolders and files'
-                                Ensure            = 'Present'
-                            }
-                        )
-                    }
-                    NTFSAccessControlList {
-                        Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupMembers[1])"
+                        Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupName)"
                         ForcePrincipal     = $false
                         AccessControlEntry = @(
                             NTFSAccessControlEntry {
@@ -79,18 +67,42 @@ Configuration Phase5
                             }
                         )
                     }
-                    NTFSAccessControlList {
-                        Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupMembers[2])"
-                        ForcePrincipal     = $false
-                        AccessControlEntry = @(
-                            NTFSAccessControlEntry {
-                                AccessControlType = 'Allow'
-                                FileSystemRights  = 'FullControl'
-                                Inheritance       = 'This folder subfolders and files'
-                                Ensure            = 'Present'
-                            }
-                        )
-                    }
+                    #NTFSAccessControlList {
+                    #    Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupMembers[0])"
+                    #    ForcePrincipal     = $true
+                    #    AccessControlEntry = @(
+                    #        NTFSAccessControlEntry {
+                    #            AccessControlType = 'Allow'
+                    #            FileSystemRights  = 'FullControl'
+                    #            Inheritance       = 'This folder subfolders and files'
+                    #            Ensure            = 'Present'
+                    #        }
+                    #    )
+                    #}
+                    #NTFSAccessControlList {
+                    #    Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupMembers[1])"
+                    #    ForcePrincipal     = $false
+                    #    AccessControlEntry = @(
+                    #        NTFSAccessControlEntry {
+                    #            AccessControlType = 'Allow'
+                    #            FileSystemRights  = 'FullControl'
+                    #            Inheritance       = 'This folder subfolders and files'
+                    #            Ensure            = 'Present'
+                    #        }
+                    #    )
+                    #}
+                    #NTFSAccessControlList {
+                    #    Principal          = "$DomainName\$($primaryVM.thisParams.SQLAO.GroupMembers[2])"
+                    #    ForcePrincipal     = $false
+                    #    AccessControlEntry = @(
+                    #        NTFSAccessControlEntry {
+                    #            AccessControlType = 'Allow'
+                    #            FileSystemRights  = 'FullControl'
+                    #            Inheritance       = 'This folder subfolders and files'
+                    #            Ensure            = 'Present'
+                    #        }
+                    #    )
+                    #}
                     NTFSAccessControlList {
                         Principal          = "$DomainName\$DomainAdminName"
                         ForcePrincipal     = $false
@@ -168,7 +180,7 @@ Configuration Phase5
                 Path                  = $primaryVM.thisParams.SQLAO.WitnessLocalPath
                 Description           = $primaryVM.thisParams.SQLAO.WitnessShare
                 FolderEnumerationMode = 'AccessBased'
-                FullAccess            = $primaryVM.thisParams.SQLAO.GroupMembers
+                FullAccess            = $primaryVM.thisParams.SQLAO.GroupMembersFQ
                 ReadAccess            = "Everyone"
                 DependsOn             = "[NTFSAccessEntry]ClusterWitnessPermissions$i"
             }
@@ -307,14 +319,19 @@ Configuration Phase5
         }
         $nextDepend = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
 
-        WaitForAll DCComplete {
-            ResourceName     = '[WriteStatus]Complete'
-            NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
-            RetryIntervalSec = 5
-            RetryCount       = 450
-            Dependson        = $nextDepend
-        }
-        $nextDepend = '[WaitForAll]DCComplete'
+        #WriteStatus WaitForDC {
+        #    DependsOn = $nextDepend
+        #    Status    = "Waiting for DC $(($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName) to Complete"
+        #}
+
+        #WaitForAny DCComplete {
+        #    ResourceName     = '[WriteStatus]Complete'
+        #    NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+        #    RetryIntervalSec = 5
+        #    RetryCount       = 450
+        #    Dependson        = $nextDepend
+        #}
+        #$nextDepend = '[WaitForAny]DCComplete'
 
 
         WriteStatus SvcAccount {
@@ -718,23 +735,24 @@ Configuration Phase5
             DependsOn            = '[WaitForAny]FileShareComplete'
             PsDscRunAsCredential = $Admincreds
         }
+        $nextDepend = '[xClusterQuorum]ClusterWitness'
 
-        WriteStatus WaitForDC {
-            Status    = "Waiting for DC to Complete"
-            DependsOn = '[xClusterQuorum]ClusterWitness'
-        }
+        #WriteStatus WaitForDC {
+        #    Status    = "Waiting for DC to Complete"
+        #    DependsOn = $nextDepend
+        #}
 
-        WaitForAll DCComplete {
-            ResourceName     = '[WriteStatus]Complete'
-            NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
-            RetryIntervalSec = 5
-            RetryCount       = 450
-            Dependson        = '[xClusterQuorum]ClusterWitness'
-        }
+        #WaitForAny DCComplete {
+        #    ResourceName     = '[WriteStatus]Complete'
+        #    NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+        #    RetryIntervalSec = 5
+        #    RetryCount       = 450
+        #    Dependson        = $nextDepend
+        #}
 
         WriteStatus SqlLogins {
             Status    = "Adding SQL Logins"
-            DependsOn = '[WaitForAll]DCComplete'
+            DependsOn = $nextDepend
         }
 
         SqlLogin 'Add_WindowsUserAgent' {
@@ -743,7 +761,7 @@ Configuration Phase5
             LoginType            = 'WindowsUser'
             ServerName           = $node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            Dependson            = '[WaitForAll]DCComplete'
+            Dependson            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -753,7 +771,7 @@ Configuration Phase5
             LoginType            = 'WindowsUser'
             ServerName           = $node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            Dependson            = '[WaitForAll]DCComplete'
+            Dependson            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -763,7 +781,7 @@ Configuration Phase5
             LoginType            = 'WindowsUser'
             ServerName           = $Node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            Dependson            = '[WaitForAll]DCComplete'
+            Dependson            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -931,7 +949,7 @@ Configuration Phase5
         }
 
         SqlScript 'InstallAgentJob' {
-            ServerName       = $nodename
+            ServerName       = $node.nodename
             InstanceName     = $node1vm.sqlInstanceName
             #Credential       = $Admincreds
             SetFilePath      = $AgentJobSet
@@ -988,7 +1006,6 @@ Configuration Phase5
             Dependson = $adGroupDependancy
             Status    = "Complete!"
         }
-
 
     }
 
