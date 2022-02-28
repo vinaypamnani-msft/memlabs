@@ -2436,13 +2436,13 @@ function get-ValidResponse {
         [switch] $TestBeforeReturn
 
     )
-    $response = $null
-    $response2 = $null
+
     $responseValid = $false
     while ($responseValid -eq $false) {
         Write-Host
         Write-Verbose "5 get-ValidResponse max = $max $($additionalOptions.Keys -join ",")"
-
+        $response = $null
+        $response2 = $null
 
         Write-Verbose "5 else get-ValidResponse max = $max"
         $response = Read-Single -Prompt $prompt $currentValue
@@ -2453,12 +2453,12 @@ function get-ValidResponse {
         if (($response -as [int]) -is [int]) {
             [int]$testmax = ([string]$response + "0" -as [int])
             if ([int]$testmax -le [int]$max) {
-                $response2 = Read-SingleKeyWithTimeout -timeout 3
+                $response2 = Read-SingleKeyWithTimeout -timeout 2
             }
         }
         foreach ($key in $additionalOptions.Keys) {
             if ($key.length -gt 1 -and ($key.StartsWith($response))) {
-                $response2 = Read-SingleKeyWithTimeout -timeout 3
+                $response2 = Read-SingleKeyWithTimeout -timeout 2
                 break
             }
         }
