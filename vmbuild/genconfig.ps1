@@ -3811,7 +3811,7 @@ Function Get-TestResult {
         [object] $config = $Global:Config
     )
 
-    Get-PSCallStack | out-host
+    #Get-PSCallStack | out-host
     #If Config hasnt been generated yet.. Nothing to test
     if ($null -eq $config) {
         return $true
