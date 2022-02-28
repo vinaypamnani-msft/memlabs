@@ -95,7 +95,10 @@ Function Read-SingleKeyWithTimeout {
                     Write-Host -NoNewline (" `b `b")
                     return "BACKSPACE"
                 }
-                else { continue }
+                else {
+                    Write-Host " " -NoNewline
+                    continue
+                }
             }
 
             if ($key.Character) {
