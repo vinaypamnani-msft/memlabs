@@ -63,6 +63,7 @@ Function Read-SingleKeyWithTimeout {
         Write-Host -NoNewline -ForegroundColor $color ($Prompt)
         return $charsToDeleteNextTime
     }
+    start-sleep -Milliseconds 100
     $host.ui.RawUI.FlushInputBuffer()
     $key = $null
     $secs = 0
