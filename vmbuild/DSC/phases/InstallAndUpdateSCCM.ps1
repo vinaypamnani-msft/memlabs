@@ -169,7 +169,7 @@ SysCenterId=
         }
     }
 
-    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
+    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER" -or $installToAO) {
         $cmini = $cmini.Replace('%SQLInstance%', "")
     }
     else {
