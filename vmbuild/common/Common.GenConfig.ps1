@@ -51,15 +51,16 @@ Function Read-SingleKeyWithTimeout {
         #Write-Host -NoNewline ("`b" * $charsToDelete)
         $deleteChars = ("`b" * $charsToDelete)
         if ($timeout -ne 0) {
-            Write-Host ($deleteChars + "[") -NoNewline
             $deleteChars = ""
             if ($timeoutLeft -le 3) {
+                Write-Host ($deleteChars + "[") -NoNewline
                 write-Host -Foregroundcolor Red $timeoutLeft -NoNewline
+                Write-Host "]" -NoNewline
             }
             else {
-                write-Host $timeoutLeft -NoNewline
+                write-Host ($deleteChars + "[" + $timeoutLeft + "]") -NoNewline
             }
-            Write-Host "]" -NoNewline
+
             $charsToDeleteNextTime = "[$timeoutLeft]".Length
         }
         Write-Host -NoNewline -ForegroundColor $color ($deleteChars + $Prompt)
