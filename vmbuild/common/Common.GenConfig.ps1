@@ -48,9 +48,11 @@ Function Read-SingleKeyWithTimeout {
         )
         [int]$charsToDelete = $Prompt.Length + $charsToDeleteNextTime
 
-        Write-Host -NoNewline ("`b" * $charsToDelete)
+        #Write-Host -NoNewline ("`b" * $charsToDelete)
+        $deleteChars = ("`b" * $charsToDelete)
         if ($timeout -ne 0) {
-            Write-Host "[" -NoNewline
+            Write-Host $deleteChars + "[" -NoNewline
+            $deleteChars = ""
             if ($timeoutLeft -le 3) {
                 write-Host -Foregroundcolor Red $timeoutLeft -NoNewline
             }
@@ -60,7 +62,7 @@ Function Read-SingleKeyWithTimeout {
             Write-Host "]" -NoNewline
             $charsToDeleteNextTime = "[$timeoutLeft]".Length
         }
-        Write-Host -NoNewline -ForegroundColor $color ($Prompt)
+        Write-Host -NoNewline -ForegroundColor $color ($deleteChars + $Prompt)
         return $charsToDeleteNextTime
     }
 
@@ -102,7 +104,7 @@ Function Read-SingleKeyWithTimeout {
             }
         }
         if ($Prompt) {
-            switch (($i++ % 32) / 8) {
+            switch (($i++ % 128) / 32) {
                 0 { $charsToDeleteNextTime = Write-Prompt -Color Green }
                 1 { $charsToDeleteNextTime = Write-Prompt -Color Red }
                 2 { $charsToDeleteNextTime = Write-Prompt -Color Yellow }
