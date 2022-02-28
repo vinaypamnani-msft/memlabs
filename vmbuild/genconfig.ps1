@@ -2443,8 +2443,8 @@ function get-ValidResponse {
         Write-Verbose "5 get-ValidResponse max = $max $($additionalOptions.Keys -join ",")"
         $response = $null
         $response2 = $null
+        $first = $true
         while (-not $response) {
-            $first = $true
             $response = $null
             $response2 = $null
 
