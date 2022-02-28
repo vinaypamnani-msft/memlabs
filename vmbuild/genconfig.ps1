@@ -1422,9 +1422,9 @@ function Select-NewDomainConfig {
             Write-Host -ForegroundColor Yellow "Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
 
             $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
-            if ([string]::IsNullOrWhiteSpace($response)) {
-                return
-            }
+            #if ([string]::IsNullOrWhiteSpace($response)) {
+            #    return
+            #}
         }
 
 
@@ -2255,10 +2255,10 @@ function Read-Single {
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
         Write-Host " [" -NoNewline
         Write-Host -ForegroundColor yellow $currentValue -NoNewline
-        Write-Host "]" -NoNewline
+        Write-Host "] " -NoNewline
     }
 
-    $response = Read-SingleKeyWithTimeout -timeout 0 -Prompt " : "
+    $response = Read-SingleKeyWithTimeout -timeout 0 -Prompt ": "
     return $response
 }
 
@@ -2283,13 +2283,13 @@ function Read-YesorNoWithTimeout {
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
         Write-Host " [" -NoNewline
         Write-Host -ForegroundColor yellow $currentValue -NoNewline
-        Write-Host "]" -NoNewline
+        Write-Host "] " -NoNewline
     }
 
 
     $valid = $false
     while (-not $valid) {
-        $response = Read-SingleKeyWithTimeout -timeout $timeout -ValidKeys "Y", "y", "N", "n" -Prompt " : "
+        $response = Read-SingleKeyWithTimeout -timeout $timeout -ValidKeys "Y", "y", "N", "n" -Prompt ": "
         if ($null -eq $response -or $response -eq 'Y' -or $response -eq 'y' -or $response -eq 'N' -or $response -eq 'n') {
             $valid = $true
         }

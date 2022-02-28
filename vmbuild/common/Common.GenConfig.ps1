@@ -63,8 +63,7 @@ Function Read-SingleKeyWithTimeout {
         Write-Host -NoNewline -ForegroundColor $color ($Prompt)
         return $charsToDeleteNextTime
     }
-    start-sleep -Milliseconds 100
-    $host.ui.RawUI.FlushInputBuffer()
+
     $key = $null
     $secs = 0
     $charsToDeleteNextTime = 0
@@ -76,6 +75,8 @@ Function Read-SingleKeyWithTimeout {
         Write-Host $Prompt -NoNewline
     }
     $i = 0
+    start-sleep -Milliseconds 200
+    $host.ui.RawUI.FlushInputBuffer()
     While ($secs -le ($timeout * 40)) {
         $timeoutLeft = [Math]::Round(($timeout) - $secs / 40, 0)
         if ([Console]::KeyAvailable) {
