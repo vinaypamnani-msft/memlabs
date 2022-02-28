@@ -2443,27 +2443,41 @@ function get-ValidResponse {
         Write-Verbose "5 get-ValidResponse max = $max $($additionalOptions.Keys -join ",")"
         $response = $null
         $response2 = $null
+        while (-not $response) {
+            $response = $null
+            $response2 = $null
 
-        Write-Verbose "5 else get-ValidResponse max = $max"
-        $response = Read-Single -Prompt $prompt $currentValue
-        if ($null -eq $response) {
-            return
-        }
-        #$response = Read-Host2 -Prompt $prompt $currentValue
-        if (($response -as [int]) -is [int]) {
-            [int]$testmax = ([string]$response + "0" -as [int])
-            if ([int]$testmax -le [int]$max) {
-                $response2 = Read-SingleKeyWithTimeout -timeout 2
+            Write-Verbose "5 else get-ValidResponse max = $max"
+            if ($prompt) {
+                $response = Read-Single -Prompt $prompt $currentValue
             }
-        }
-        foreach ($key in $additionalOptions.Keys) {
-            if ($key.length -gt 1 -and ($key.StartsWith($response))) {
-                $response2 = Read-SingleKeyWithTimeout -timeout 2
-                break
+            else {
+                $response = $response = Read-SingleKeyWithTimeout -timeout 0
             }
-        }
-        if ($response2) {
-            $response = $response + $response2
+            $prompt = $null
+            if ($null -eq $response) {
+                return
+            }
+            #$response = Read-Host2 -Prompt $prompt $currentValue
+            if (($response -as [int]) -is [int]) {
+                [int]$testmax = ([string]$response + "0" -as [int])
+                if ([int]$testmax -le [int]$max) {
+                    $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace
+                }
+            }
+            foreach ($key in $additionalOptions.Keys) {
+                if ($key.length -gt 1 -and ($key.StartsWith($response))) {
+                    $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace
+                    break
+                }
+            }
+            if ($response2 -eq "BACKSPACE") {
+                $response = $null
+                $response2 = $null
+            }
+            if ($response2) {
+                $response = $response + $response2
+            }
         }
 
         Write-Host

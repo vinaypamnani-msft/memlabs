@@ -37,7 +37,9 @@ Function Read-SingleKeyWithTimeout {
         [Parameter(Mandatory = $false, HelpMessage = "Valid Keys")]
         [string[]] $ValidKeys,
         [Parameter(Mandatory = $false, HelpMessage = "Prompt")]
-        [string] $Prompt
+        [string] $Prompt,
+        [Parameter(Mandatory = $false, HelpMessage = "Returns the string BACKSPACE on backspace")]
+        [switch] $backspace
     )
 
 
@@ -45,6 +47,7 @@ Function Read-SingleKeyWithTimeout {
         param (
             [Parameter(Mandatory = $true, HelpMessage = "color")]
             [string] $color
+
         )
         [int]$charsToDelete = $Prompt.Length + $charsToDeleteNextTime
 
@@ -83,9 +86,18 @@ Function Read-SingleKeyWithTimeout {
         $timeoutLeft = [Math]::Round(($timeout) - $secs / 40, 0)
         if ([Console]::KeyAvailable) {
             $key = $host.UI.RawUI.ReadKey()
+            $host.ui.RawUI.FlushInputBuffer()
             if ($key.VirtualKeyCode -eq 13) {
                 return $null
             }
+            if ($key.VirtualKeyCode -eq 8) {
+                if ($backspace) {
+                    Write-Host -NoNewline (" `b `b")
+                    return "BACKSPACE"
+                }
+                else { continue }
+            }
+
             if ($key.Character) {
                 if ($ValidKeys) {
                     if ($key.Character.ToString() -in $ValidKeys) {
@@ -96,6 +108,7 @@ Function Read-SingleKeyWithTimeout {
                     }
                 }
                 else {
+                    #$key | out-host
                     return $key.Character.ToString()
                 }
             }
