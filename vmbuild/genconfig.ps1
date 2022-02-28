@@ -2444,17 +2444,18 @@ function get-ValidResponse {
         $response = $null
         $response2 = $null
         while (-not $response) {
+            $first = $true
             $response = $null
             $response2 = $null
 
             Write-Verbose "5 else get-ValidResponse max = $max"
-            if ($prompt) {
+            if ($first) {
                 $response = Read-Single -Prompt $prompt $currentValue
             }
             else {
                 $response = $response = Read-SingleKeyWithTimeout -timeout 0
             }
-            $prompt = $null
+            $first = $false
             if ($null -eq $response) {
                 return
             }
