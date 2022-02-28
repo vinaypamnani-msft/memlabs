@@ -2463,12 +2463,12 @@ function get-ValidResponse {
             if (($response -as [int]) -is [int]) {
                 [int]$testmax = ([string]$response + "0" -as [int])
                 if ([int]$testmax -le [int]$max) {
-                    $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace
+                    $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
                 }
             }
             foreach ($key in $additionalOptions.Keys) {
                 if ($key.length -gt 1 -and ($key.StartsWith($response))) {
-                    $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace
+                    $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
                     break
                 }
             }

@@ -39,7 +39,9 @@ Function Read-SingleKeyWithTimeout {
         [Parameter(Mandatory = $false, HelpMessage = "Prompt")]
         [string] $Prompt,
         [Parameter(Mandatory = $false, HelpMessage = "Returns the string BACKSPACE on backspace")]
-        [switch] $backspace
+        [switch] $backspace,
+        [Parameter(Mandatory = $false, HelpMessage = "Does not flush input buffer")]
+        [switch] $NoFlush
     )
 
 
@@ -80,8 +82,10 @@ Function Read-SingleKeyWithTimeout {
         Write-Host $Prompt -NoNewline
     }
     $i = 0
-    start-sleep -Milliseconds 100
-    $host.ui.RawUI.FlushInputBuffer()
+    if (-not $NoFlush) {
+        start-sleep -Milliseconds 200
+        $host.ui.RawUI.FlushInputBuffer()
+    }
     While ($secs -le ($timeout * 40)) {
         $timeoutLeft = [Math]::Round(($timeout) - $secs / 40, 0)
         if ([Console]::KeyAvailable) {
