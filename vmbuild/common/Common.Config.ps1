@@ -776,7 +776,7 @@ function Get-PrimarySiteServerForSiteCode {
             return $SiteServer
         }
         else {
-            return Get-VMFromList2 -deployConfig $deployConfig -vmName $SiteServer
+            return Get-VMFromList2 -deployConfig $deployConfig -vmName $SiteServer.vmName
         }
     }
 }
