@@ -131,7 +131,7 @@ function Select-ConfigMenu {
         }
         Write-Host
         Write-Host -ForegroundColor cyan "---  Create Config"
-        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine
+        $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false
 
         write-Verbose "1 response $response"
         if (-not $response) {
@@ -1421,7 +1421,7 @@ function Select-NewDomainConfig {
             Write-Host
             Write-Host -ForegroundColor Yellow "Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
 
-            $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions
+            $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions -test:$false
             #if ([string]::IsNullOrWhiteSpace($response)) {
             #    return
             #}
@@ -1467,7 +1467,10 @@ function Select-NewDomainConfig {
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
             }
         }
-        $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+        $valid = $true
+        if ($test) {
+            $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+        }
 
         if ($valid) {
             $valid = $false
@@ -1484,7 +1487,12 @@ function Select-NewDomainConfig {
                 if ($version) {
                     $newConfig.cmOptions.version = $version
                 }
-                $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+                if ($domain -in ((Get-ValidDomainNames).Keys)) {
+                    $valid = $true
+                }
+                else {
+                    $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+                }
                 if (-not $valid) {
                     $domain = $null
                 }
@@ -1499,7 +1507,7 @@ function Select-NewDomainConfig {
                 $customOptions = @{ "C" = "Custom Network" }
                 $network = $null
                 while (-not $network) {
-                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -CurrentValue ($subnetList | Select-Object -First 1)
+                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlist -additionalOptions $customOptions -CurrentValue ($subnetList | Select-Object -First 1) -test:$test
                     if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                         $network = Read-Host2 -Prompt "Enter Custom Network (eg 192.168.1.0):"
                     }
@@ -1891,7 +1899,7 @@ function Select-RolesForExisting {
 
     $OptionArray = @{ "H" = $ha_Text }
 
-    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray
+    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
 
     $role = $role.Split("[")[0].Trim()
     if ($role -eq "CAS and Primary") {
@@ -2438,7 +2446,7 @@ function get-ValidResponse {
 
         Write-Verbose "5 else get-ValidResponse max = $max"
         $response = Read-Single -Prompt $prompt $currentValue
-        if ($null -eq $response){
+        if ($null -eq $response) {
             return
         }
         #$response = Read-Host2 -Prompt $prompt $currentValue
@@ -3803,6 +3811,7 @@ Function Get-TestResult {
         [object] $config = $Global:Config
     )
 
+    Get-PSCallStack | out-host
     #If Config hasnt been generated yet.. Nothing to test
     if ($null -eq $config) {
         return $true
