@@ -23,15 +23,18 @@ if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
     $sqlInstanceName = $SQLVM.sqlInstanceName
+    $sqlPort = $SQLVM.thisParams.sqlPort
     if ($SQLVM.AlwaysOnName) {
         $installToAO = $true
         $sqlServerName = $SQLVM.AlwaysOnName
         $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
+        $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
     }
 }
 else {
     $sqlServerName = $env:COMPUTERNAME
     $sqlInstanceName = $ThisVM.sqlInstanceName
+    $sqlPort = $ThisVM.thisParams.sqlPort
 }
 
 # Set Site Code
@@ -124,6 +127,7 @@ JoinCEIP=0
 [SQLConfigOptions]
 SQLServerName=%SQLMachineFQDN%
 DatabaseName=%SQLInstance%CM_%SiteCode%
+SQLServerPort=%SqlPort%
 SQLSSBPort=4022
 AGBackupShare=
 
@@ -157,6 +161,7 @@ CCARSiteServer=%CASMachineFQDN%
     $cmini = $cmini.Replace('%SQLMachineFQDN%', "$sqlServerName.$DomainFullName")
     $cmini = $cmini.Replace('%SiteCode%', $SiteCode)
     $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+    $cmini = $cmini.Replace('%SqlPort%', $sqlPort)
     # $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
     # $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CASMachineFQDN%', "$CSName.$DomainFullName")

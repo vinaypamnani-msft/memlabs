@@ -132,7 +132,7 @@ configuration Phase4
 
         ChangeSqlInstancePort SqlInstancePort {
             SQLInstanceName = $SQLInstanceName
-            SQLInstancePort = 2433
+            SQLInstancePort = $ThisVM.thisParams.sqlPort
             Ensure          = "Present"
             DependsOn       = "[SqlMemory]SetSqlMemory"
         }
@@ -148,11 +148,8 @@ configuration Phase4
             $SPNs = @()
             $SPNs += "MSSQLSvc/" + $thisvm.VmName
             $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName
-            if ($SQLInstanceName -eq "MSSQLSERVER") {
-                $port = "1433"
-            }
-            else {
-                $port = "2433"
+            $port = $ThisVM.thisParams.SqlPort
+            if ($SQLInstanceName -ne "MSSQLSERVER") {
                 $SPNs += "MSSQLSvc/" + $thisvm.VmName + ":" + $SQLInstanceName
                 $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName + ":" + $SQLInstanceName
 

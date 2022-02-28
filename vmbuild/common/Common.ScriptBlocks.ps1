@@ -1093,7 +1093,8 @@ $global:VM_Config = {
                     # Check if complete
                     $complete = $status.ScriptBlockOutput -eq "Complete!"
                     if ($complete) {
-                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "=== Failed Configuration Manager Server Setup ===" -Context 0, 0 } -SuppressLog
+                        #~~===================== Failed Configuration Manager Server Setup =====================
+                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup" -Context 0, 0 } -SuppressLog
                         if ($result.ScriptBlockOutput.Line) {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
                             return

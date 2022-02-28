@@ -30,6 +30,27 @@ Function Get-SupportedOperatingSystemsForRole {
     return $AllList
 }
 
+
+Function Show-JobsProgress {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Activity Name")]
+        [string] $Activity
+    )
+
+    $jobs = get-job | Where-Object { $_.state -eq "running" }
+    $total = $jobs.count
+    $runningjobs = $jobs.count
+    #Write-Host "Total $total Running $runningjobs"
+    while ($runningjobs -gt 0) {
+        $percent = [math]::Round((($total - $runningjobs) / $total * 100), 2)
+        write-progress -activity $Activity -status "Progress: $percent%" -percentcomplete (($total - $runningjobs) / $total * 100)
+
+        $runningjobs = (get-job | Where-Object { $_.state -eq "running" }).Count
+    }
+    write-progress -activity $Activity -Completed
+}
+
+
 Function Read-SingleKeyWithTimeout {
     param (
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
@@ -391,6 +412,13 @@ function ConvertTo-DeployConfigEx {
             $thisParams | Add-Member -MemberType NoteProperty -Name "sqlCUURL" -Value $sqlCUUrl -Force
             $backupSolutionURL = "https://ola.hallengren.com/scripts/MaintenanceSolution.sql"
             $thisParams | Add-Member -MemberType NoteProperty -Name "backupSolutionURL" -Value $backupSolutionURL -Force
+
+            if ($thisvm.sqlInstanceName -eq "MSSQLSERVER" ) {
+                $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 1433 -Force
+            }
+            else {
+                $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 2433 -Force
+            }
 
             $DomainAdminName = $deployConfig.vmOptions.adminName
             $DomainName = $deployConfig.parameters.domainName

@@ -491,7 +491,7 @@ function Get-SQLAOConfig {
         BackupShareFQ              = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Backup"
         WitnessShare               = "$($ClusterNameNoPrefix)-Witness"
         BackupShare                = "$($ClusterNameNoPrefix)-Backup"
-
+        SQLAOPort                  = 1500
     }
 
     return $config

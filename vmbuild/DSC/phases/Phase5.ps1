@@ -469,6 +469,8 @@ Configuration Phase5
             DependsOn = $nextDepend
             Status    = "Creating Availability Group Listener"
         }
+
+        $AOSqlPort = $thisVM.thisParams.SQLAO.SQLAOPort
         SqlAGListener 'AvailabilityGroupListener' {
             Ensure            = 'Present'
             ServerName        = $Node.NodeName
@@ -477,7 +479,7 @@ Configuration Phase5
             DHCP              = $false
             Name              = $thisVM.thisParams.SQLAO.ClusterNameAoG
             IpAddress         = $thisVM.thisParams.SQLAO.AGIPAddress
-            Port              = 1500
+            Port              = $AOSqlPort
             DependsOn         = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -498,8 +500,8 @@ Configuration Phase5
 
         $lspn1 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.ClusterNameAoG
         $lspn2 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.ClusterNameAoGFQDN
-        $lspn3 = $lspn1 + ":1500"
-        $lspn4 = $lspn2 + ":1500"
+        $lspn3 = $lspn1 + ":" + $AOSqlPort
+        $lspn4 = $lspn2 + ":" + $AOSqlPort
         $account = $thisVM.thisParams.SQLAO.SqlServiceAccount
 
         WriteStatus SPNS {

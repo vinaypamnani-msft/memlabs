@@ -644,7 +644,8 @@ function Select-StartDomain {
             }
             Show-StatusEraseLine "Waiting for all VMs to Start" -indent
             #Write-Log -HostOnly "Waiting for VM Start Jobs to complete" -Verbose
-            get-job | wait-job | out-null
+            #get-job | wait-job | out-null
+            Show-JobsProgress -Activity "Starting VMs"
             get-list -type VM -SmartUpdate | out-null
             Write-GreenCheck "VM Start Jobs are complete"
             #Write-Log -HostOnly "VM Start Jobs are complete" -Verbose
@@ -655,7 +656,8 @@ function Select-StartDomain {
         }
         else {
             start-vm2 $response
-            get-job | wait-job | out-null
+            #get-job | wait-job | out-null
+            Show-JobsProgress -Activity "Starting VMs"
             get-job | remove-job | out-null
             #get-list -type VM -SmartUpdate | out-null
             $response = $null
@@ -733,14 +735,16 @@ function Select-StopDomain {
                     stop-vm -VM $VM2 -force -AsJob | Out-Null
                 }
             }
-            get-job | wait-job | Out-Null
+            #get-job | wait-job | Out-Null
+            Show-JobsProgress -Activity "Stopping VMs"
             get-job | remove-job | Out-Null
             get-list -type VM -SmartUpdate | out-null
             return
         }
         else {
             stop-vm2 $response -force
-            get-job | wait-job | Out-Null
+            #get-job | wait-job | Out-Null
+            Show-JobsProgress -Activity "Stopping VMs"
             get-job | remove-job | Out-Null
             get-list -type VM -SmartUpdate | out-null
         }

@@ -1769,8 +1769,14 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For SCCM"
 
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM"
+
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 2433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM"
+
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1500' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM"
 
             New-NetFirewallRule -DisplayName 'RPC Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'Wake on LAN Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol UDP -LocalPort 9 -Group "For SCCM"
@@ -1808,7 +1814,10 @@ class OpenFirewallPortForSCCM {
             #Dynamic Port
             New-NetFirewallRule -DisplayName 'RPC Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'RPC Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM PXE SP"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM PXE SP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM PXE SP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM PXE SP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM PXE SP"
+
             New-NetFirewallRule -DisplayName 'DHCP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(67.68) -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'TFTP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 69  -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'BINL Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4011 -Group "For SCCM PXE SP"
@@ -1840,8 +1849,12 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'HTTP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80 -Group "For SCCM FSP"
         }
         if ($_Role -contains "Reporting Services Point") {
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM RSP"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 2433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1500' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM RSP"
             New-NetFirewallRule -DisplayName 'HTTP(S) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For SCCM RSP"
             New-NetFirewallRule -DisplayName 'SMB Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM RSP"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM RSP"
@@ -1856,7 +1869,9 @@ class OpenFirewallPortForSCCM {
         }
         if ($_Role -contains "Management Point") {
             New-NetFirewallRule -DisplayName 'HTTP(S) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For SCCM MP"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 389 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) UDP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol UDP -LocalPort 636 -Group "For SCCM MP"
@@ -1879,7 +1894,9 @@ class OpenFirewallPortForSCCM {
         }
         if ($_Role -contains "Server Locator Point") {
             New-NetFirewallRule -DisplayName 'HTTP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80 -Group "For SCCM SLP"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server SLP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server SLP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SQL Server SLP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SQL Server SLP"
             New-NetFirewallRule -DisplayName 'SMB Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM SLP"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM SLP"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For SCCM SLP"
@@ -1887,7 +1904,9 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'RPC Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM RSP"
         }
         if ($_Role -contains "SQL Server") {
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 2433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1500' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SQL Server"
             New-NetFirewallRule -DisplayName 'WMI' -Program "%systemroot%\system32\svchost.exe" -Service "winmgmt" -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort Domain -Group "For SQL Server WMI"
             New-NetFirewallRule -DisplayName 'DCOM' -Program "%systemroot%\system32\svchost.exe" -Service "rpcss" -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SQL Server DCOM"
             New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SQL Server"
