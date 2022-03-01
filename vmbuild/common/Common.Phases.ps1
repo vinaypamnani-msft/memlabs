@@ -511,6 +511,26 @@ function Get-Phase6ConfigurationData {
             }
             $cd.AllNodes += $newItem
             $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+
+
+            if ($vm.RemoteSQLVM) {
+                $remoteSQL = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vm.RemoteSQLVM }
+                $newItem = @{
+                    NodeName = $remoteSQL.vmName
+                    Role     = "SqlServer"
+                }
+                $cd.AllNodes += $newItem
+                $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                if ($remoteSQL.OtherNode) {
+
+                    $newItem = @{
+                        NodeName = $remoteSQL.OtherNode
+                        Role     = "SqlServer"
+                    }
+                    $cd.AllNodes += $newItem
+                    $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                }
+            }
         }
 
         $all = @{

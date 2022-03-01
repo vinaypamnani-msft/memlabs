@@ -578,6 +578,14 @@ $global:VM_Config = {
                     Rename-Item -Path $dscConfigPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
                 }
 
+                $SccmLogFilePath = "C:\ConfigMgrSetup.log"
+                if (Test-Path $SccmLogFilePath) {
+                    $newName = $SccmLogFilePath -replace "ConfigMgrSetup", ("ConfigMgrSetup" + (get-date).ToString("_yyyyMMdd_HHmmss"))
+                    "Renaming $SccmLogFilePath to $newName" | Out-File $log -Append
+                    Rename-Item -Path $SccmLogFilePath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+                }
+
+
                 # Remove DSC_Status file, if exists
                 $dscStatus = "C:\staging\DSC\DSC_Status.txt"
                 if (Test-Path $dscStatus) {

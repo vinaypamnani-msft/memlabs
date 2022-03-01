@@ -26,6 +26,84 @@ Configuration Phase6
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
+
+    Node $AllNodes.Where{ $_.Role -eq 'SqlServer' }.NodeName
+    {
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+        $AgentJobSet = "C:\staging\DSC\SQLScripts\Disable-AgentJob-Set.sql"
+        $AgentJobTest = "C:\staging\DSC\SQLScripts\AgentJob-Test.sql"
+        $AgentJobGet = "C:\staging\DSC\SQLScripts\AgentJob-Get.sql"
+
+
+        WriteStatus DisableAgentJob {
+            Status = "Disabling Agent Jobs"
+        }
+
+        SqlScript 'DisableAgentJob' {
+            ServerName       = $thisvm.VmName
+            InstanceName     = $thisVM.sqlInstanceName
+            #Credential       = $Admincreds
+            SetFilePath      = $AgentJobSet
+            TestFilePath     = $AgentJobTest
+            GetFilePath      = $AgentJobGet
+            DisableVariables = $true
+        }
+        $nextDepend = '[SqlScript]DisableAgentJob'
+
+
+        $WaitFor = @()
+        $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $node.NodeName }
+        if ($serverToWait) {
+            $WaitFor += $serverToWait.vmName
+        }
+        if ($ThisVm.role -eq "SQLAO" -and (-not $ThisVM.OtherNode)) {
+            $primaryNode = $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $node.NodeName }
+            $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName }
+            if ($serverToWait) {
+                $WaitFor += $serverToWait.vmName
+            }
+        }
+        $WaitFor = $WaitFor | Where-Object { $_ } | select-object -Unique
+        if ($WaitFor) {
+            WriteStatus WaitSCCM {
+                DependsOn = $nextDepend
+                Status    = "Waiting on $($WaitFor -join ",") to Complete"
+            }
+
+            WaitForAll WaitSCCM {
+                ResourceName     = '[WaitForEvent]WorkflowComplete'
+                NodeName         = $WaitFor
+                RetryIntervalSec = 60
+                RetryCount       = 300
+                Dependson        = $nextDepend
+            }
+            $nextDepend = '[WaitForAll]WaitSCCM'
+        }
+
+        $AgentJobSet = "C:\staging\DSC\SQLScripts\Enable-AgentJob-Set.sql"
+
+        WriteStatus EnableAgentJob {
+            Status = "Enabling Agent Jobs"
+        }
+
+        SqlScript 'EnableAgentJob' {
+            ServerName       = $thisvm.VmName
+            InstanceName     = $thisVM.sqlInstanceName
+            #Credential       = $Admincreds
+            SetFilePath      = $AgentJobSet
+            TestFilePath     = $AgentJobTest
+            GetFilePath      = $AgentJobGet
+            DisableVariables = $true
+            DependsOn        = $nextDepend
+        }
+        $nextDepend = '[SqlScript]EnableAgentJob'
+
+        WriteStatus Complete {
+            DependsOn = $nextDepend
+            Status    = "Complete!"
+        }
+    }
+
     Node $AllNodes.Where{ $_.Role -eq 'DC' }.NodeName
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }

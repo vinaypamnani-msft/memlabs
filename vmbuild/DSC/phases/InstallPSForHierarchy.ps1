@@ -175,7 +175,7 @@ CCARSiteServer=%CASMachineFQDN%
         $cmini = $cmini.Replace('SysCenterId=', "SysCenterId=$($deployConfig.parameters.SysCenterId)")
     }
 
-    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
+    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER" -or $installToAO) {
         $cmini = $cmini.Replace('%SQLInstance%', "")
     }
     else {

@@ -1375,6 +1375,8 @@ class RegisterTaskScheduler {
         $exists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
         if ($exists) {
             if ($exists.state -eq "Running") {
+                stop-Process -Name setup -Force -ErrorAction SilentlyContinue
+                stop-Process -Name setupwpf -Force -ErrorAction SilentlyContinue
                 $exists | Stop-ScheduledTask -ErrorAction SilentlyContinue
             }
             Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
@@ -1432,6 +1434,7 @@ class RegisterTaskScheduler {
 
     [bool] Test() {
 
+        return $false
         try {
             $ConfigurationFile = Join-Path -Path "C:\Staging\DSC" -ChildPath "ScriptWorkflow.json"
             if (-not (Test-Path $ConfigurationFile)) {
