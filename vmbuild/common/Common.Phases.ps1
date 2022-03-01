@@ -1,6 +1,6 @@
 
 function Write-JobProgress {
-    param($Job, $MaxJobNameLength)
+    param($Job, $AdditionalData)
 
     #Make sure the first child job exists
     if ($null -ne $Job.ChildJobs[0].Progress) {
@@ -24,17 +24,25 @@ function Write-JobProgress {
                 $latestPercentComplete = 0
             }
             try {
+                $padding = 0
+                $jobName2 = "  $($jobName.PadRight($padding," "))"
+
                 if ($Common.PS7) {
-                    $padding = 0
-                    if ($MaxJobNameLength) {
-                        $padding = $MaxJobNameLength
+                    if ($AdditionalData) {
+                        $padding1 = $AdditionalData.MaxVmNameLength
+                        $padding2 = $AdditionalData.MaxRoleNameLength
+                        $vmName = ($jobName -split " ")[0]
+                        $roleName = ($jobName -split " ")[1]
+                        $jobName2 = "  $($vmName.PadRight($padding1," ")) $($roleName.PadRight($padding2," "))"
                     }
-                    $jobName = "  $($jobName.PadRight($padding," "))"
+
                     # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                 }
-                Write-Progress -Id $Job.Id -Activity "$jobName`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
+                Write-Progress -Id $Job.Id -Activity "$jobName2`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
             }
-            catch {}
+            catch {
+                Write-Log "[$jobName] Exception during job progress reporting. $vmName; $roleName; $AdditionalData. $_" -Verbose
+            }
         }
     }
 }
@@ -69,7 +77,7 @@ function Start-Phase {
         return $true
     }
 
-    $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -MaxJobNameLength $start.MaxJobNameLength
+    $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData
     Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures."
 
     if ($result.Failed -gt 0) {
@@ -97,11 +105,11 @@ function Start-PhaseJobs {
         if (-not $ConfigurationData) {
             # Nothing applicable for this phase
             return [PSCustomObject]@{
-                Failed           = 0
-                Success          = 0
-                Jobs             = 0
-                Applicable       = $false
-                MaxJobNameLength = 0
+                Failed         = 0
+                Success        = 0
+                Jobs           = 0
+                Applicable     = $false
+                AdditionalData = $null
             }
         }
 
@@ -114,7 +122,8 @@ function Start-PhaseJobs {
     }
 
     $global:vm_remove_list = @()
-    $maxJobNameLength = 0
+    $maxVmNameLength = 0
+    $maxRoleNameLength = 0
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
         # Don't touch non-hidden VM's in Phase 0
@@ -146,8 +155,11 @@ function Start-PhaseJobs {
         }
 
         $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
-        if ($jobName.Length -gt $maxJobNameLength) {
-            $maxJobNameLength = $jobName.Length
+        if ($currentItem.vmName.Length -gt $maxVmNameLength) {
+            $maxVmNameLength = $currentItem.vmName.Length
+        }
+        if ($currentItem.role.Length -gt $maxRoleNameLength) {
+            $maxRoleNameLength = $currentItem.role.Length
         }
 
         if ($Phase -eq 0 -or $Phase -eq 1) {
@@ -183,13 +195,18 @@ function Start-PhaseJobs {
         }
     }
 
+    $additionalData = [PSCustomObject]@{
+        MaxVmNameLength   = $maxVmNameLength
+        MaxRoleNameLength = $maxRoleNameLength + 2
+    }
+
     # Create return object
     $return = [PSCustomObject]@{
-        Failed           = $job_created_no
-        Success          = $job_created_yes
-        Jobs             = $jobs
-        Applicable       = $true
-        MaxJobNameLength = $maxJobNameLength
+        Failed         = $job_created_no
+        Success        = $job_created_yes
+        Jobs           = $jobs
+        Applicable     = $true
+        AdditionalData = $additionalData
     }
 
     if ($job_created_no -eq 0) {
@@ -208,7 +225,7 @@ function Wait-Phase {
     param(
         [int]$Phase,
         $Jobs,
-        [int]$MaxJobNameLength
+        $AdditionalData
     )
 
     # Create return object
@@ -223,7 +240,7 @@ function Wait-Phase {
 
         $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
         foreach ($job in $runningJobs) {
-            Write-JobProgress -Job $job -MaxJobNameLength $MaxJobNameLength
+            Write-JobProgress -Job $job -AdditionalData $AdditionalData
         }
 
         $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
@@ -242,7 +259,7 @@ function Wait-Phase {
         $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
         foreach ($job in $completedJobs) {
 
-            Write-JobProgress -Job $job -MaxJobNameLength $MaxJobNameLength
+            Write-JobProgress -Job $job -AdditionalData $AdditionalData
 
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
             if (-not $jobOutput) {
