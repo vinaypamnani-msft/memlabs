@@ -1106,6 +1106,12 @@ $global:VM_Config = {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
                         return
                     }
+                    #ERROR: Computer account doesn't have admininstrative rights to the SQL Server~
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ERROR: Computer account doesn't have admininstrative rights to the SQL Server~" -Context 0, 0 } -SuppressLog
+                    if ($result.ScriptBlockOutput.Line) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
+                        return
+                    }
                 }
                 else {
                     if ($noStatus) {

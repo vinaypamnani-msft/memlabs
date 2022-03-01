@@ -1374,6 +1374,9 @@ class RegisterTaskScheduler {
 
         $exists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
         if ($exists) {
+            if ($exists.state -eq "Running") {
+                $exists | Stop-ScheduledTask -ErrorAction SilentlyContinue
+            }
             Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
         }
 
@@ -1400,7 +1403,10 @@ class RegisterTaskScheduler {
         $Principal = New-ScheduledTaskPrincipal -UserId $_AdminCreds.UserName -RunLevel Highest
         $Password = $_AdminCreds.GetNetworkCredential().Password
 
+
+
         $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
+
         $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force
 
         # $TaskStartTime = [datetime]::Now.AddMinutes(2)
