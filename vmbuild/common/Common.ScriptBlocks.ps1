@@ -426,25 +426,22 @@ $global:VM_Config = {
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures."
         }
 
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Detect if modules need to be updated."
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue } -DisplayName "DSC: Detect modules."
+        $guestZipHash = $result.ScriptBlockOutput.Hash
+
         # Copy DSC files
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying required PS modules to the VM."
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force }
         if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy required PS modules to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC Files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         }
         Copy-Item -ToSession $ps -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
         $Expand_Archive = {
-            param($zipHash)
-
             $zipPath = "C:\staging\DSC\DSC.zip"
             $extractPath = "C:\staging\DSC\modules"
             try {
-                $dscHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
-                if ($dscHash -eq $zipHash -and (Test-Path $extractPath)) {
-                    #return
-                }
-
                 Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
             }
             catch {
@@ -460,7 +457,6 @@ $global:VM_Config = {
 
         # Install DSC Modules
         $DSC_InstallModules = {
-            param($zipHash)
 
             try {
                 $global:ScriptBlockName = "DSC_InstallModules"
@@ -473,13 +469,6 @@ $global:VM_Config = {
                 $log = "C:\staging\DSC\DSC_Init.txt"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
                 "`r`n=====`r`nDSC_InstallModules: Started at $time`r`n=====" | Out-File $log -Force
-
-                $zipPath = "C:\staging\DSC\DSC.zip"
-                $dscHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
-                if ($dscHash -eq $zipHash -and (Test-Path "C:\Program Files\WindowsPowerShell\Modules\TemplateHelpDSC")) {
-                    "Skipped installing modules. DSC.zip hasn't changed." | Out-File $log -Append
-                    #return
-                }
 
                 # Install modules
                 "Installing modules" | Out-File $log -Append
@@ -508,19 +497,25 @@ $global:VM_Config = {
 
         $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
 
-        # Extract DSC modules
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -ArgumentList $dscZipHash -DisplayName "Expand_Archive ScriptBlock"
-        if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-            return
-        }
+        if ($dscZipHash -ne $guestZipHash) {
 
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Installing DSC Modules."
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -ArgumentList $dscZipHash -DisplayName "DSC: Install Modules"
-        if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
-            return
+            # Extract DSC modules
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -DisplayName "Expand_Archive ScriptBlock"
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
+
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Installing DSC Modules."
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -DisplayName "DSC: Install Modules"
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
+        }
+        else {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Skipped expanding and installing modules since DSC.zip is not newer."
         }
 
         $DSC_ClearStatus = {
