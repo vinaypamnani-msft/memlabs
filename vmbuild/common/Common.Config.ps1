@@ -760,6 +760,9 @@ function Get-PrimarySiteServerForSiteCode {
         [string] $type = "Name"
     )
     $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode
+    if (-not $SiteServer) {
+        throw "Could not find SiteServer for $SiteCode"
+    }
     $roleforSite = get-RoleForSitecode -ConfigToCheck $deployConfig -siteCode $SiteCode
     if ($roleforSite -eq "Primary") {
         if ($type -eq "Name") {
@@ -771,7 +774,15 @@ function Get-PrimarySiteServerForSiteCode {
     }
     if ($roleforSite -eq "Secondary") {
         $SiteServerVM = Get-VMFromList2 -deployConfig $deployConfig -vmName $SiteServer
+        if (-not $SiteServer) {
+            write-host $SiteServerVM | ConvertTo-Json
+            throw "Could not find VM $SiteServer"
+        }
         $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.parentSiteCode
+        if (-not $SiteServer) {
+            write-host $SiteServerVM | ConvertTo-Json
+            throw "Secondary: Could not find SiteServer for $($SiteServerVM.parentSiteCode)"
+        }
         if ($type -eq "Name") {
             return $SiteServer
         }

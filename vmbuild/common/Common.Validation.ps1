@@ -1117,6 +1117,7 @@ function Test-Configuration {
         $return.Message = $_
         $return.Problems += 1
         #$return.Failures += 1
+        Write-Exception -ExceptionInfo $_
         Write-Progress -Activity "Validating Configuration"  -Completed
         return $return
     }
