@@ -38,14 +38,14 @@ Function Show-JobsProgress {
     )
 
     $jobs = get-job | Where-Object { $_.state -eq "running" }
-    $total = $jobs.count
-    $runningjobs = $jobs.count
+    [int]$total = $jobs.count -as [int]
+    [int]$runningjobs = $jobs.count -as [int]
     #Write-Host "Total $total Running $runningjobs"
     while ($runningjobs -gt 0) {
         $percent = [math]::Round((($total - $runningjobs) / $total * 100), 2)
         write-progress -activity $Activity -status "Progress: $percent%" -percentcomplete (($total - $runningjobs) / $total * 100)
 
-        $runningjobs = (get-job | Where-Object { $_.state -eq "running" }).Count
+        [int]$runningjobs = (get-job | Where-Object { $_.state -eq "running" }).Count -as [int]
     }
     write-progress -activity $Activity -Completed
 }

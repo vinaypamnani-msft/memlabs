@@ -562,7 +562,7 @@ function Select-StartDomain {
         $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" }
 
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None"
+            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None" -timeout:10
         }
         else {
             $response = $preResponse
@@ -696,7 +696,7 @@ function Select-StopDomain {
         $vmsname = $running | Select-Object -ExpandProperty vmName
         $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None"
+            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None" -timeout 10
         }
         else {
             $response = $preResponse
@@ -2258,7 +2258,9 @@ function Read-Single {
         [Parameter(Mandatory = $false, HelpMessage = "shows current value in []")]
         [string] $currentValue,
         [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
-        [switch] $HideHelp
+        [switch] $HideHelp,
+        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
+        [int] $timeout = 0
     )
     if (-not $HideHelp.IsPresent) {
         write-help
@@ -2270,7 +2272,7 @@ function Read-Single {
         Write-Host "] " -NoNewline
     }
 
-    $response = Read-SingleKeyWithTimeout -timeout 0 -Prompt ": "
+    $response = Read-SingleKeyWithTimeout -timeout $timeout -Prompt ": "
     return $response
 }
 
@@ -2328,7 +2330,9 @@ function Get-Menu {
         [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
         [bool] $Test = $true,
         [Parameter(Mandatory = $false, HelpMessage = "Supress newline")]
-        [switch] $NoNewLine
+        [switch] $NoNewLine,
+        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
+        [int] $timeout = 0
     )
 
     if (!$NoNewLine) {
@@ -2398,7 +2402,7 @@ function Get-Menu {
     }
     $totalOptions = $preOptions + $additionalOptions
 
-    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test
+    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $i = 0
@@ -2437,7 +2441,9 @@ function get-ValidResponse {
         [switch]
         $AnyString,
         [Parameter(Mandatory = $false, HelpMessage = "Run a test-Configuration before exiting")]
-        [switch] $TestBeforeReturn
+        [switch] $TestBeforeReturn,
+        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
+        [int] $timeout = 0
 
     )
 
@@ -2454,7 +2460,7 @@ function get-ValidResponse {
 
             Write-Verbose "5 else get-ValidResponse max = $max"
             if ($first) {
-                $response = Read-Single -Prompt $prompt $currentValue
+                $response = Read-Single -Prompt $prompt $currentValue -timeout:$timeout
             }
             else {
                 $response = $response = Read-SingleKeyWithTimeout -timeout 0

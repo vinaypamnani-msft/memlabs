@@ -1413,7 +1413,7 @@ function Wait-ForVm {
         do {
             try {
                 $vmTest = Get-VM2 -Name $VmName
-                if (-not $vmTest){
+                if (-not $vmTest) {
                     Write-Progress -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
                     Write-Log -Failure "Could not find VM $VMName"
                     return
@@ -1533,7 +1533,7 @@ function Wait-ForVm {
         }
 
         $vmTest = Get-VM2 -Name $VmName
-        if (-not $vmTest){
+        if (-not $vmTest) {
             Write-Progress -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
             Write-Log -Failure "Could not find VM $VMName"
             return
@@ -2143,6 +2143,19 @@ function Get-BranchName {
     }
 }
 
+Function Set-PS7ProgressWidth {
+    if ($PSVersionTable.PSVersion.Major -eq 7) {
+        $maxWidth = 500
+        try {
+            $currentWidth = [Console]::WindowWidth
+            if ($currentWidth -gt 0) {
+                $maxWidth = [Math]::Round(($currentWidth * 0.8), 0)
+            }
+        }
+        catch {}
+        $PSStyle.Progress.MaxWidth = $maxWidth
+    }
+}
 
 ####################
 ### DOT SOURCING ###
@@ -2190,7 +2203,7 @@ if (-not $Common.Initialized) {
     if ($PSVersionTable.PSVersion.Major -eq 7) {
         $PS7 = $true
         $PSStyle.Progress.Style = "`e[38;5;123m"
-        $PSStyle.Progress.MaxWidth = 500
+
     }
 
     # Set-StrictMode -Off

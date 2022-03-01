@@ -64,6 +64,8 @@ if (-not $NoWindowResize.IsPresent) {
     }
 }
 
+Set-PS7ProgressWidth
+
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
@@ -173,7 +175,8 @@ try {
     # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
-        if ($testConfigResult.Valid -or $phasedRun) {   # Skip validation in phased run
+        if ($testConfigResult.Valid -or $phasedRun) {
+            # Skip validation in phased run
             $deployConfig = $testConfigResult.DeployConfig
             Write-GreenCheck "Configuration validated successfully." -ForeGroundColor Green
         }
@@ -195,7 +198,7 @@ try {
 
     # Skip if any VM in progress
     if ($phasedRun -and (Test-InProgress -DeployConfig $deployConfig)) {
-    #    return
+        #    return
     }
 
     # Timer
@@ -283,8 +286,14 @@ try {
         Write-Log "Stopping and removing existing jobs." -Verbose -LogOnly
         foreach ($job in $existingJobs) {
             Write-Log "Removing job $($job.Id) with name $($job.Name)" -Verbose -LogOnly
-            $job | Stop-Job -ErrorAction SilentlyContinue
-            $job | Remove-Job -ErrorAction SilentlyContinue
+            try {
+                $job | Stop-Job -ErrorAction SilentlyContinue
+                $job | Remove-Job -ErrorAction SilentlyContinue
+            }
+            catch {
+                write-log "Failed to remove jobs $_"
+                return
+            }
         }
     }
 
