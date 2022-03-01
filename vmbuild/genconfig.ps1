@@ -530,6 +530,71 @@ function select-OptimizeDomain {
 
 }
 
+
+function Get-CriticalVMs {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [string] $domain
+    )
+
+    $return = [pscustomObject]@{
+        DC      = @()
+        FS      = @()
+        SQL     = @()
+        CAS     = @()
+        PRI     = @()
+        ALLCRIT = @()
+        NONCRIT = @()
+    }
+    $vms = get-list -type vm -DomainName $domain -SmartUpdate
+
+
+    $return.dc += $vms | Where-Object { $_.Role -eq "DC" }
+    $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "DC" }
+    $vms = $vms | Where-Object { $_.Role -ne "DC" }
+
+    #$sqlServers = $vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
+    $sqlServerNames = ($vms | Where-Object { $_.remoteSQLVM }).remoteSQLVM | Select-Object -Unique
+
+    foreach ($sqlName in $sqlServerNames) {
+        $thisSql = $vms | Where-Object { $_.vmName -eq $sqlName }
+        $vms = $vms | Where-Object { $_.vmName -ne $sqlName }
+        $return.SQL += $thisSql
+        $return.ALLCRIT += $thisSql
+        if ($thisSql.OtherNode) {
+            $return.SQL += $vms | Where-Object { $_.vmName -eq $thisSql.OtherNode }
+            $return.ALLCRIT += $vms | Where-Object { $_.vmName -eq $thisSql.OtherNode }
+            $vms = $vms | Where-Object { $_.vmName -ne $thisSql.OtherNode }
+        }
+    }
+
+
+    $fileServerNames = @()
+    $fileServerNames += ($vms | Where-Object { $_.remoteContentLibVM }).remoteContentLibVM
+    $fileServerNames += ($vms | Where-Object { $_.fileServerVM }).fileServerVM
+    $fileServerNames = $fileServerNames | Select-Object -Unique
+
+    foreach ($fsName in $fileServerNames) {
+        $thisfs = $vms | Where-Object { $_.vmName -eq $fsName }
+        $vms = $vms | Where-Object { $_.vmName -ne $fsName }
+        $return.FS += $thisfs
+        $return.ALLCRIT += $thisfs
+    }
+
+    $return.CAS += $vms | Where-Object { $_.Role -eq "CAS" }
+    $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "CAS" }
+    $vms = $vms | Where-Object { $_.Role -ne "CAS" }
+    $return.PRI += $vms | Where-Object { $_.Role -eq "Primary" }
+    $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "Primary" }
+    $vms = $vms | Where-Object { $_.Role -ne "Primary" }
+    $return.NONCRIT += $vms
+
+    #$return | ConvertTo-Json | Out-Host
+    return $return
+}
+
+
 function Select-StartDomain {
     [CmdletBinding()]
     param (
@@ -579,59 +644,73 @@ function Select-StartDomain {
                 $CriticalOnly = $true
             }
             $response = $null
-            $dc = $vms | Where-Object { $_.Role -eq "DC" }
-            $sqlServers = $vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
-            $cas = $vms | Where-Object { $_.Role -eq "CAS" }
-            $pri = $vms | Where-Object { $_.Role -eq "Primary" }
-            $other = $vms | Where-Object { $_.vmName -notin $dc.vmName -and $_.vmName -notin $sqlServers.vmName -and $_.vmName -notin $cas.vmName -and $_.vmName -notin $pri.vmName }
+            $crit = Get-CriticalVMs -domain $domain
 
             $waitSecondsDC = 20
             $waitSeconds = 10
-            if ($dc -and ($dc.State -ne "Running")) {
-                Show-StatusEraseLine "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM" -indent
-                #write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
-                start-vm2 $dc.vmName
-                Write-GreenCheck "DC [$($dc.vmName)] has been started. Waiting $waitSecondsDC before starting other VMs"
-                start-Sleep -Seconds $waitSecondsDC
+
+            if ($crit.DC) {
+                foreach ($dc in $crit.DC) {
+                    if ($dc -and ($dc.State -ne "Running")) {
+                        Show-StatusEraseLine "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM" -indent
+                        #write-host "DC [$($dc.vmName)] state is [$($dc.State)]. Starting VM and waiting $waitSecondsDC seconds before continuing"
+                        start-vm2 $dc.vmName
+                        Write-GreenCheck "DC [$($dc.vmName)] has been started. Waiting $waitSecondsDC seconds before starting other VMs"
+                        start-Sleep -Seconds $waitSecondsDC
+                    }
+                }
             }
 
-            if ($sqlServers) {
-                foreach ($sql in $sqlServers) {
+
+            if ($crit.FS) {
+                foreach ($fs in $crit.FS) {
+
+                    if ($fs.State -ne "Running") {
+                        Show-StatusEraseLine "File Server [$($fs.vmName)] state is [$($fs.State)]. Starting VM" -indent
+                        start-vm2 $fs.vmName
+                        Write-GreenCheck "File Server [$($fs.vmName)] has been started. Waiting $waitSeconds seconds before starting other VMs"
+                    }
+                }
+                start-sleep $waitSeconds
+            }
+            if ($crit.SQL) {
+                foreach ($sql in $crit.SQL) {
+
                     if ($sql.State -ne "Running") {
                         Show-StatusEraseLine "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM" -indent
                         #write-host "SQL Server [$($sql.vmName)] state is [$($sql.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
                         start-vm2 $sql.vmName
-                        Write-GreenCheck "SQL Server [$($sql.vmName)] has been started. Waiting $waitSeconds before starting other VMs"
+                        Write-GreenCheck "SQL Server [$($sql.vmName)] has been started. Waiting $waitSeconds seconds before starting other VMs"
                     }
                 }
                 start-sleep $waitSeconds
             }
 
-            if ($cas) {
-                foreach ($ss in $cas) {
+            if ($crit.CAS) {
+                foreach ($ss in $crit.CAS) {
                     if ($ss.State -ne "Running") {
                         Show-StatusEraseLine "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM" -indent
                         #write-host "CAS [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
                         start-vm2 $ss.vmName
-                        Write-GreenCheck "CAS [$($ss.vmName)] has been started. Waiting $waitSeconds before starting other VMs"
+                        Write-GreenCheck "CAS [$($ss.vmName)] has been started. Waiting $waitSeconds seconds before starting other VMs"
                     }
                 }
                 start-sleep $waitSeconds
             }
 
-            if ($pri) {
-                foreach ($ss in $pri) {
+            if ($crit.PRI) {
+                foreach ($ss in $crit.PRI) {
                     if ($ss.State -ne "Running") {
                         Show-StatusEraseLine "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM" -indent
                         #write-host "Primary [$($ss.vmName)] state is [$($ss.State)]. Starting VM and waiting $waitSeconds seconds before continuing"
                         start-vm2 $ss.vmName
-                        Write-GreenCheck "Primary [$($ss.vmName)] has been started. Waiting $waitSeconds before starting other VMs"
+                        Write-GreenCheck "Primary [$($ss.vmName)] has been started. Waiting $waitSeconds seconds before starting other VMs"
                     }
                 }
                 start-sleep $waitSeconds
             }
             if ($CriticalOnly -eq $false) {
-                foreach ($vm in $other) {
+                foreach ($vm in $crit.NONCRIT) {
                     if ($vm.State -ne "Running") {
                         # Show-StatusEraseLine "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM" -indent
                         #write-host "VM [$($vm.vmName)] state is [$($vm.State)]. Starting VM"
@@ -708,36 +787,32 @@ function Select-StopDomain {
         }
         if ($response -eq "A" -or $response -eq "C" -or $response -eq "N") {
 
-            $nonCriticalOnly = $false
+
+            $crit = Get-CriticalVMs -domain $domain
+
+            $vmList = @()
+
             if ($response -eq "N") {
-                $nonCriticalOnly = $true
+                $vmList = $crit.NONCRIT
+
             }
             if ($response -eq "C") {
-                $criticalOnly = $true
+                $vmList = $crit.ALLCRIT
             }
-            foreach ($vm in $vms) {
-                if ($nonCriticalOnly -eq $true) {
-                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "Secondary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
-                        continue
-                    }
-                }
-                if ($criticalOnly -eq $true) {
-                    if ($vm.Role -eq "CAS" -or $vm.Role -eq "Primary" -or $vm.Role -eq "Secondary" -or $vm.Role -eq "DC" -or ($vm.Role -eq "DomainMember" -and $null -ne $vm.SqlVersion) ) {
 
-                    }
-                    else {
-                        continue
-                    }
-                }
-                $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
-                if ($vm2.State -eq "Running") {
+            foreach ($vm in $vmList) {
+                if ($vm.State -eq "Running") {
+                    $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
                     Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
                     stop-vm -VM $VM2 -force -AsJob | Out-Null
                 }
             }
             #get-job | wait-job | Out-Null
             Show-JobsProgress -Activity "Stopping VMs"
-            get-job | remove-job | Out-Null
+            try {
+                get-job | remove-job | Out-Null
+            }
+            catch {}
             get-list -type VM -SmartUpdate | out-null
             return
         }
