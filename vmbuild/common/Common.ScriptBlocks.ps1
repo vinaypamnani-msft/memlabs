@@ -442,7 +442,7 @@ $global:VM_Config = {
             try {
                 $dscHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
                 if ($dscHash -eq $zipHash -and (Test-Path $extractPath)) {
-                    return
+                    #return
                 }
 
                 Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
@@ -478,7 +478,7 @@ $global:VM_Config = {
                 $dscHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
                 if ($dscHash -eq $zipHash -and (Test-Path "C:\Program Files\WindowsPowerShell\Modules\TemplateHelpDSC")) {
                     "Skipped installing modules. DSC.zip hasn't changed." | Out-File $log -Append
-                    return
+                    #return
                 }
 
                 # Install modules
