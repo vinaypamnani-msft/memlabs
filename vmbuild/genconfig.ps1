@@ -787,17 +787,21 @@ function Select-StopDomain {
         }
         if ($response -eq "A" -or $response -eq "C" -or $response -eq "N") {
 
-
-            $crit = Get-CriticalVMs -domain $domain
-
             $vmList = @()
 
-            if ($response -eq "N") {
-                $vmList = $crit.NONCRIT
-
+            if ($response -eq "A") {
+                $vmList = $running
             }
-            if ($response -eq "C") {
-                $vmList = $crit.ALLCRIT
+            else {
+                $crit = Get-CriticalVMs -domain $domain
+
+                if ($response -eq "N") {
+                    $vmList = $crit.NONCRIT
+
+                }
+                if ($response -eq "C") {
+                    $vmList = $crit.ALLCRIT
+                }
             }
 
             foreach ($vm in $vmList) {
