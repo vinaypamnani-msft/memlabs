@@ -270,7 +270,7 @@ function Get-UpdatePack {
         Invoke-CMSiteUpdateCheck -ErrorAction Ignore
         Start-Sleep 120
 
-        $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 }
+        $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -notlike "*hotfix*"} # filter hotfixes
     }
 
     $updatepack = ""
