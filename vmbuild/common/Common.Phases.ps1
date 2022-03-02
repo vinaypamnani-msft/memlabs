@@ -334,17 +334,20 @@ function Get-ConfigurationData {
     }
 
     if ($cd) {
-        foreach ($node in ($cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") })) {
+        $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
 
-            $worked = Start-VM2 -name $node -PassThru
-
-            if (-not $worked) {
-                write-log -failure "Could not start VM $node"
-            }
+        $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+        $failures = Invoke-SmartStartVMs -CritList $critlist
+        if ($failures -ne 0) {
+            write-log "$failures VM(s) could not be started" -Failure
         }
-    }
 
-    return $cd
+
+
+    }
+}
+
+return $cd
 }
 
 function Get-Phase2ConfigurationData {
