@@ -45,6 +45,7 @@ Configuration Phase5
                 Ensure          = "Present"
                 DependsOn       = "[WriteStatus]ClusterShare"
             }
+            $nextDepend = "[File]ClusterBackup$i"
 
             WriteStatus "WaitForDC$($primaryVM.vmName)" {
                 Status    = "Waiting for DC to Complete"
@@ -57,6 +58,7 @@ Configuration Phase5
                 RetryIntervalSec = 5
                 RetryCount       = 450
                 Dependson        = $nextDepend
+                PsDscRunAsCredential = $Admincreds
             }
             $nextDepend = "[WaitForAny]DCComplete$($primaryVM.vmName)"
 
@@ -64,7 +66,7 @@ Configuration Phase5
                 DestinationPath = $primaryVM.thisParams.SQLAO.WitnessLocalPath
                 Type            = 'Directory'
                 Ensure          = "Present"
-                DependsOn       = "[WriteStatus]ClusterShare"
+                DependsOn       = $nextDepend
             }
 
             NTFSAccessEntry "ClusterWitnessPermissions$i" {
@@ -568,6 +570,7 @@ Configuration Phase5
             RetryIntervalSec = 2
             RetryCount       = 450
             Dependson        = $nextDepend
+            PsDscRunAsCredential = $Admincreds
         }
 
         $dbName = "TESTDB"
@@ -765,6 +768,7 @@ Configuration Phase5
             RetryIntervalSec = 5
             RetryCount       = 450
             Dependson        = $nextDepend
+            PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = "[WaitForAny]DCComplete"
 
@@ -875,6 +879,7 @@ Configuration Phase5
             RetryIntervalSec = 2
             RetryCount       = 450
             Dependson        = $nextDepend
+            PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[WaitForAll]AG'
 
@@ -931,6 +936,7 @@ Configuration Phase5
                 RetryIntervalSec = 2
                 RetryCount       = 450
                 Dependson        = $nextDepend
+                PsDscRunAsCredential = $Admincreds
             }
 
             WaitForAll AddAGDatabaseMemberships {
@@ -939,6 +945,7 @@ Configuration Phase5
                 RetryIntervalSec = 2
                 RetryCount       = 450
                 Dependson        = '[WaitForAll]RecoveryModel'
+                PsDscRunAsCredential = $Admincreds
             }
 
             $nextDepend = '[WaitForAll]AddAGDatabaseMemberships'

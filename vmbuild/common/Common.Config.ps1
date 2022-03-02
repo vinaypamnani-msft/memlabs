@@ -369,6 +369,9 @@ function Add-ExistingVMToDeployConfig {
         $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
     }
 
+    if (-not $newVMObject.vmName) {
+        throw "Could not add hidden VM, because it does not have a vmName property"
+    }
     $configToModify.virtualMachines += $newVMObject
 }
 

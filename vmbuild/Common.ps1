@@ -1191,7 +1191,7 @@ function New-VirtualMachine {
     $osDiskPath = Join-Path $vm.Path $osDiskName
 
     if (-not $OSDClient.IsPresent) {
-        $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
+        $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
         if (-not $worked) {
             Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
             return $false
@@ -2149,7 +2149,7 @@ Function Set-PS7ProgressWidth {
         try {
             $currentWidth = [Console]::WindowWidth
             if ($currentWidth -gt 0) {
-                $maxWidth = [Math]::Round(($currentWidth * 0.8), 0)
+                $maxWidth = [Math]::Round(($currentWidth * 0.95), 0)
             }
         }
         catch {}

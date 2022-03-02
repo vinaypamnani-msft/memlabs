@@ -336,11 +336,31 @@ function Get-ConfigurationData {
     if ($cd) {
         $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
 
+        $dc = $cd.AllNodes | Where-Object { $_.Role -eq "DC" }
+        if ($dc) {
+            try {
+                $OriginalProgressPreference = $Global:ProgressPreference
+                $Global:ProgressPreference = 'SilentlyContinue'
+                $testNet = Test-NetConnection -ComputerName $dc.NodeName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                $Global:ProgressPreference = $OriginalProgressPreference
+
+                if (-not $testNet.TcpTestSucceeded) {
+                    Write-Log "[Phase $Phase]: $($dc.NodeName): Could not verify if RDP is enabled. Restarting the computer." -OutputStream -Warning
+                    Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
+                    Start-Sleep -Seconds 20
+                }
+            }
+            catch {}
+        }
+
+
         $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
         $failures = Invoke-SmartStartVMs -CritList $critlist
         if ($failures -ne 0) {
             write-log "$failures VM(s) could not be started" -Failure
         }
+
+
     }
 
     return $cd

@@ -671,6 +671,8 @@ $global:VM_Config = {
                     return $error_message
                 }
 
+                $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;C:\Windows\system32\WindowsPowerShell\v1.0\Modules"
+
                 # Dot Source config script
                 . "$dscConfigScript"
 
@@ -747,6 +749,7 @@ $global:VM_Config = {
                 }
 
                 # Dot Source config script
+                $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;C:\Windows\system32\WindowsPowerShell\v1.0\Modules"
                 . "$dscConfigScript"
 
                 # Configuration Data

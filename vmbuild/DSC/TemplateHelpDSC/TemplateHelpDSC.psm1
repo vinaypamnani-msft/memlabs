@@ -1729,6 +1729,10 @@ class OpenFirewallPortForSCCM {
 
         Write-Verbose "Current Role is : $_Role"
 
+
+        New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+        New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+
         if ($_Role -contains "DC") {
             #HTTP(S) Requests
             New-NetFirewallRule -DisplayName 'HTTP(S) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For DC"
