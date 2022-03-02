@@ -338,8 +338,8 @@ function Get-ConfigurationData {
 
         $dc = $cd.AllNodes | Where-Object { $_.Role -eq "DC" }
         if ($dc) {
+            $OriginalProgressPreference = $Global:ProgressPreference
             try {
-                $OriginalProgressPreference = $Global:ProgressPreference
                 $Global:ProgressPreference = 'SilentlyContinue'
                 $testNet = Test-NetConnection -ComputerName $dc.NodeName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
                 $Global:ProgressPreference = $OriginalProgressPreference
@@ -351,6 +351,9 @@ function Get-ConfigurationData {
                 }
             }
             catch {}
+            finally{
+                $Global:ProgressPreference = $OriginalProgressPreference
+            }
         }
 
 
