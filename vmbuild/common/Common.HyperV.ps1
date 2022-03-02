@@ -68,6 +68,9 @@ function Start-VM2 {
 
     if ($vm.State -eq "Running") {
         Write-Log "${$Name}: VM is already running."
+        if ($Passthru) {
+            return $true
+        }
         return
     }
 

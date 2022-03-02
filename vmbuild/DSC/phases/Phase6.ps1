@@ -27,6 +27,22 @@ Configuration Phase6
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
 
+    Node $AllNodes.Where{ $_.Role -eq 'FileServer' }.NodeName
+    {
+        WriteStatus Complete {
+            DependsOn = $nextDepend
+            Status    = "Complete!"
+        }
+    }
+
+    Node $AllNodes.Where{ $_.Role -eq 'DPMP' }.NodeName
+    {
+        WriteStatus Complete {
+            DependsOn = $nextDepend
+            Status    = "Complete!"
+        }
+    }
+
     Node $AllNodes.Where{ $_.Role -eq 'SqlServer' }.NodeName
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }

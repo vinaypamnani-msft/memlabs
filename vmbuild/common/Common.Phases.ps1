@@ -332,6 +332,18 @@ function Get-ConfigurationData {
     if ($global:Common.VerboseEnabled) {
         $cd | ConvertTo-Json | out-host
     }
+
+    if ($cd) {
+        foreach ($node in ($cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") })) {
+
+            $worked = Start-VM2 -name $node -PassThru
+
+            if (-not $worked) {
+                write-log -failure "Could not start VM $node"
+            }
+        }
+    }
+
     return $cd
 }
 
@@ -521,13 +533,26 @@ function Get-Phase6ConfigurationData {
 
     if ($deployConfig.cmOptions.Install) {
 
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary") }) {
+        $fsVMsAdded = @()
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP") }) {
             $newItem = @{
                 NodeName = $vm.vmName
                 Role     = $vm.Role
             }
             $cd.AllNodes += $newItem
             $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+
+            if ($vm.PassiveSite) {
+                if ($fsVMsAdded -notcontains $vm.remoteContentLibVM) {
+                    $newItem = @{
+                        NodeName = $vm.remoteContentLibVM
+                        Role     = "FileServer"
+                    }
+                    $fsVMsAdded += $vm.remoteContentLibVM
+                    $cd.AllNodes += $newItem
+                    $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                }
+            }
 
 
             if ($vm.RemoteSQLVM) {
@@ -539,6 +564,16 @@ function Get-Phase6ConfigurationData {
                 $cd.AllNodes += $newItem
                 $NumberOfNodesAdded = $NumberOfNodesAdded + 1
                 if ($remoteSQL.OtherNode) {
+
+                    if ($fsVMsAdded -notcontains $remoteSQL.fileServerVM) {
+                        $newItem = @{
+                            NodeName = $remoteSQL.fileServerVM
+                            Role     = "FileServer"
+                        }
+                        $fsVMsAdded += $remoteSQL.fileServerVM
+                        $cd.AllNodes += $newItem
+                        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                    }
 
                     $newItem = @{
                         NodeName = $remoteSQL.OtherNode
