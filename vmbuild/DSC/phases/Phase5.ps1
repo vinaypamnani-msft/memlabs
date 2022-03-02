@@ -326,11 +326,11 @@ Configuration Phase5
         }
 
         ClusterSetOwnerNodes ClusterSetOwnerNodes {
-            ClusterName = $thisVM.ClusterName
+            ClusterName          = $thisVM.ClusterName
             #Nodes                = ($AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName), ($AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName)
-            Nodes       = $thisVM.thisParams.SQLAO.ClusterNodes
-            #PsDscRunAsCredential = $Admincreds
-            DependsOn   = $nextDepend
+            Nodes                = $thisVM.thisParams.SQLAO.ClusterNodes
+            PsDscRunAsCredential = $Admincreds
+            DependsOn            = $nextDepend
         }
         $nextDepend = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
 
@@ -486,15 +486,15 @@ Configuration Phase5
 
         $AOSqlPort = $thisVM.thisParams.SQLAO.SQLAOPort
         SqlAGListener 'AvailabilityGroupListener' {
-            Ensure            = 'Present'
-            ServerName        = $Node.NodeName
-            InstanceName      = $thisVM.sqlInstanceName
-            AvailabilityGroup = $thisVM.thisParams.SQLAO.ClusterNameAoG
-            DHCP              = $false
-            Name              = $thisVM.thisParams.SQLAO.ClusterNameAoG
-            IpAddress         = $thisVM.thisParams.SQLAO.AGIPAddress
-            Port              = $AOSqlPort
-            DependsOn         = $nextDepend
+            Ensure               = 'Present'
+            ServerName           = $Node.NodeName
+            InstanceName         = $thisVM.sqlInstanceName
+            AvailabilityGroup    = $thisVM.thisParams.SQLAO.ClusterNameAoG
+            DHCP                 = $false
+            Name                 = $thisVM.thisParams.SQLAO.ClusterNameAoG
+            IpAddress            = $thisVM.thisParams.SQLAO.AGIPAddress
+            Port                 = $AOSqlPort
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[SqlAGListener]AvailabilityGroupListener'

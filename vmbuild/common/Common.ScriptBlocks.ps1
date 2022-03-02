@@ -368,9 +368,9 @@ $global:VM_Config = {
         $Stop_RunningDSC = {
             # Stop any existing DSC runs
             try {
-                Disable-DscDebug
                 Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
                 Stop-DscConfiguration -Verbose -Force
+                Disable-DscDebug
             }
             catch {
                 Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
