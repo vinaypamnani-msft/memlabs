@@ -254,12 +254,93 @@ function select-SnapshotDomain {
     )
     Write-Host
     Write-Host -ForegroundColor Yellow "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
+    #Invoke-StopVMs -domain $domain
     Select-StopDomain -domain $domain
     get-SnapshotDomain -domain $domain
+
+    #$critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+    #$failures = Invoke-SmartStartVMs -CritList $critlist
+    #if ($failures -ne 0) {
+    #    write-log "$failures VM(s) could not be started" -Failure
+    #}
     Select-StartDomain -domain $domain
 
 }
 
+function Invoke-AutoSnapShotDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
+        [string] $domain,
+        [Parameter(Mandatory = $true, HelpMessage = "Snapshot name (Must Contain MemLabs)")]
+        [string] $comment
+    )
+    Write-Host
+    Write-Host -ForegroundColor Yellow "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
+    Invoke-StopVMs -domain $domain
+    #Select-StopDomain -domain $domain
+    Invoke-SnapshotDomain -domain $domain -comment $comment
+
+    $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+    $failures = Invoke-SmartStartVMs -CritList $critlist
+    if ($failures -ne 0) {
+        write-log "$failures VM(s) could not be started" -Failure
+    }
+    #Select-StartDomain -domain $domain
+}
+
+function Invoke-SnapshotDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
+        [string] $domain,
+        [Parameter(Mandatory = $True, HelpMessage = "Comment")]
+        [string] $comment,
+        [Parameter(Mandatory = $false, HelpMessage = "Quiet Mode")]
+        [string] $quiet = $false
+    )
+
+
+
+    $vms = get-list -type vm -DomainName $domain
+
+    $date = Get-Date -Format "yyyy-MM-dd hh.mmtt"
+    $snapshot = $date + " (MemLabs) " + $comment
+
+    $failures = 0
+    if (-not $quiet) {
+        Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
+        Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
+    }
+    foreach ($vm in $vms) {
+        $complete = $false
+        $tries = 0
+        While ($complete -ne $true) {
+            try {
+                if ($tries -gt 10) {
+                    $failures++
+                    continue
+                }
+                if (-not $quiet) {
+                    Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
+                }
+
+                Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
+                $complete = $true
+                if (-not $quiet) {
+                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete"
+                }
+            }
+            catch {
+                Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
+                write-log "Error: $_" -LogOnly
+                $tries++
+                stop-vm2 -name $vm.VmName
+                Start-Sleep 10
+            }
+        }
+    }
+}
 
 function get-SnapshotDomain {
     [CmdletBinding()]
@@ -270,10 +351,8 @@ function get-SnapshotDomain {
         [string] $comment
     )
     $vms = get-list -type vm -DomainName $domain
-    Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
-    Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
-    $date = Get-Date -Format "yyyy-MM-dd hh.mmtt"
-    $snapshot = $date + " (MemLabs)"
+
+
     $valid = $false
     while (-not $valid) {
         if (-not $comment) {
@@ -288,39 +367,11 @@ function get-SnapshotDomain {
         }
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($comment)) {
-        $snapshot = $snapshot + " " + $comment
-    }
-    foreach ($vm in $vms) {
-        $complete = $false
-        $tries = 0
-        While ($complete -ne $true) {
-            try {
-                if ($tries -gt 10) {
-                    return
-                }
-                Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
-                $json = $snapshot + ".json"
-                $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path $json
-                (Get-VM2 -Name $($vm.VmName)).notes | Out-File $notesFile
-
-
-                Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
-                $complete = $true
-                Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete"
-            }
-            catch {
-                Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
-                write-log "Error: $_" -LogOnly
-                $tries++
-                Start-Sleep 10
-
-            }
-        }
+    $failures = Invoke-SnapshotDomain -domain $domain -comment $comment
+    if ($failures -ne 0) {
+        Write-RedX "$failures VM(s) could not be snapshotted" -Failure
     }
 
-    #write-host
-    #Write-Host "$domain has been CheckPointed"
 }
 
 function select-RestoreSnapshotDomain {
@@ -664,27 +715,12 @@ function Select-StopDomain {
                 }
             }
 
-            foreach ($vm in $vmList) {
-                if ($vm.State -eq "Running") {
-                    $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
-                    Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
-                    stop-vm -VM $VM2 -force -AsJob | Out-Null
-                }
-            }
-            #get-job | wait-job | Out-Null
-            Show-JobsProgress -Activity "Stopping VMs"
-            try {
-                get-job | remove-job | Out-Null
-            }
-            catch {}
-            get-list -type VM -SmartUpdate | out-null
+            Invoke-StopVMs -domain $domain -vmList $vmList
+
             return
         }
         else {
             stop-vm2 $response -force
-            #get-job | wait-job | Out-Null
-            Show-JobsProgress -Activity "Stopping VMs"
-            get-job | remove-job | Out-Null
             get-list -type VM -SmartUpdate | out-null
         }
 

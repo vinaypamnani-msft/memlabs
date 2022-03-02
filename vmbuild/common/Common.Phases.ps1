@@ -341,13 +341,9 @@ function Get-ConfigurationData {
         if ($failures -ne 0) {
             write-log "$failures VM(s) could not be started" -Failure
         }
-
-
-
     }
-}
 
-return $cd
+    return $cd
 }
 
 function Get-Phase2ConfigurationData {

@@ -228,6 +228,9 @@ function Checkpoint-VM2 {
     $vm = Get-VM2 -Name $Name
 
     if ($vm) {
+        $json = $SnapshotName + ".json"
+        $notesFile = Join-Path ($vm).Path $json
+        $vm.notes | Out-File $notesFile
         Checkpoint-VM -VM $vm -SnapshotName $SnapshotName -ErrorAction Stop
     }
     return [System.Management.Automation.Internal.AutomationNull]::Value

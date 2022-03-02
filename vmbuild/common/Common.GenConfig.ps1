@@ -368,6 +368,40 @@ function Invoke-SmartStartVMs {
     return $failures
 }
 
+function Invoke-StopVMs {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [string] $domain,
+        [Parameter(Mandatory = $false, HelpMessage = "List OF VMs objects to stop.  Otherwise the entire domain")]
+        [object[]] $vmList = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Quiet Moden")]
+        [bool] $quiet = $false
+    )
+
+    if (-not $vmList) {
+        $vmList = get-list -type vm -DomainName $domain -SmartUpdate
+    }
+    foreach ($vm in $vmList) {
+        if ($vm.State -eq "Running") {
+            $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+            if (-not $quiet) {
+                Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
+            }
+            stop-vm -VM $VM2 -force -AsJob | Out-Null
+        }
+    }
+
+    Show-JobsProgress -Activity "Stopping VMs"
+
+    try {
+        get-job | remove-job | Out-Null
+    }
+    catch {}
+    get-list -type VM -SmartUpdate | out-null
+}
+
+
 
 Function Show-StatusEraseLine {
     param (
