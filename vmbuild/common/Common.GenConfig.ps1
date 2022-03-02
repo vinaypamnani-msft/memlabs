@@ -518,6 +518,15 @@ function ConvertTo-DeployConfigEx {
     $deployConfigEx = $deployConfig | ConvertTo-Json -depth 5 | ConvertFrom-Json
     foreach ($thisVM in $deployConfigEx.virtualMachines) {
 
+        if (-not $thisVM) {
+            throw "Blank VM returned from deployconfig"
+        }
+
+        if (-not $thisVM.vmName) {
+            write-host "$thisVM"
+            throw "VM with no vmName property found."
+
+        }
         $cm_svc = "cm_svc"
         $accountLists = [pscustomobject]@{
             SQLSysAdminAccounts = @()
