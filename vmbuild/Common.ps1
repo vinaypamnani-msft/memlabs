@@ -626,12 +626,20 @@ function Add-SwitchAndDhcp {
         [switch]$WhatIf
     )
 
-    Write-Log "Creating/verifying whether a Hyper-V switch and DHCP Scopes for '$NetworkName' network exists." -Activity
 
     if ($WhatIf.IsPresent) {
         Write-Log "[What-If] Will create/verify Hyper-V switch and DHCP scopes."
         return $true
     }
+
+
+    get-service "DHCP" | Where-Object {$_.Status -eq 'Stopped'} | start-service
+    $service = get-service "DHCP" | Where-Object {$_.Status -eq 'Stopped'}
+    if ($service) {
+        Write-Log "DHCP Service could not be started." -Failure
+        return $false
+    }
+    Write-Log "Creating/verifying whether a Hyper-V switch and DHCP Scopes for '$NetworkName' network exists." -Activity
 
     $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName
     if (-not $switch) {
