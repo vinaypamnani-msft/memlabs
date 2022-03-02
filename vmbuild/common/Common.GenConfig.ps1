@@ -62,7 +62,9 @@ Function Read-SingleKeyWithTimeout {
         [Parameter(Mandatory = $false, HelpMessage = "Returns the string BACKSPACE on backspace")]
         [switch] $backspace,
         [Parameter(Mandatory = $false, HelpMessage = "Does not flush input buffer")]
-        [switch] $NoFlush
+        [switch] $NoFlush,
+        [Parameter(Mandatory = $false, HelpMessage = "Use ReadHost after keypress")]
+        [bool] $UseReadHost = $false
     )
 
 
@@ -110,6 +112,9 @@ Function Read-SingleKeyWithTimeout {
     While ($secs -le ($timeout * 40)) {
         $timeoutLeft = [Math]::Round(($timeout) - $secs / 40, 0)
         if ([Console]::KeyAvailable) {
+            if ($UseReadHost) {
+                return read-host
+            }
             $key = $host.UI.RawUI.ReadKey()
             $host.ui.RawUI.FlushInputBuffer()
             if ($key.VirtualKeyCode -eq 13) {
@@ -161,9 +166,92 @@ Function Read-SingleKeyWithTimeout {
     }
 
     if (-not $key) {
+        write-host
         return $null
     }
 
+}
+
+function Invoke-AutoSnapShotDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
+        [string] $domain,
+        [Parameter(Mandatory = $true, HelpMessage = "Snapshot name (Must Contain MemLabs)")]
+        [string] $comment
+    )
+
+    #Get Critical Server list.  These VM's should be stopped before snapshot
+    $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+
+    #Stop all VMs in Domain
+    Invoke-StopVMs -domain $domain
+
+    #Take Snapshot
+    $failures = Invoke-SnapshotDomain -domain $domain -comment $comment
+    if ($failures -ne 0) {
+        write-log "$failures VM(s) could not be snapshotted" -Failure
+    }
+
+    #Start VMs in correct order
+    $failures = Invoke-SmartStartVMs -CritList $critlist
+    if ($failures -ne 0) {
+        write-log "$failures VM(s) could not be started" -Failure
+    }
+}
+
+function Invoke-SnapshotDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
+        [string] $domain,
+        [Parameter(Mandatory = $True, HelpMessage = "Comment")]
+        [string] $comment,
+        [Parameter(Mandatory = $false, HelpMessage = "Quiet Mode")]
+        [string] $quiet = $false
+    )
+
+
+
+    $vms = get-list -type vm -DomainName $domain
+
+    $date = Get-Date -Format "yyyy-MM-dd hh.mmtt"
+    $snapshot = $date + " (MemLabs) " + $comment
+
+    $failures = 0
+    if (-not $quiet) {
+        Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
+        Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
+    }
+    foreach ($vm in $vms) {
+        $complete = $false
+        $tries = 0
+        While ($complete -ne $true) {
+            try {
+                if ($tries -gt 10) {
+                    $failures++
+                    continue
+                }
+                if (-not $quiet) {
+                    Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
+                }
+
+                Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
+                $complete = $true
+                if (-not $quiet) {
+                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete"
+                }
+            }
+            catch {
+                Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
+                write-log "Error: $_" -LogOnly
+                $tries++
+                stop-vm2 -name $vm.VmName
+                Start-Sleep 10
+            }
+        }
+    }
+    return $failures
 }
 
 function Get-CriticalVMs {

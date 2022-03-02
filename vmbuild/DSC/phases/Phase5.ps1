@@ -46,6 +46,20 @@ Configuration Phase5
                 DependsOn       = "[WriteStatus]ClusterShare"
             }
 
+            WriteStatus "WaitForDC$($primaryVM.vmName)" {
+                Status    = "Waiting for DC to Complete"
+                DependsOn = $nextDepend
+            }
+
+            WaitForAny "DCComplete$($primaryVM.vmName)" {
+                ResourceName     = "[ADGroup]SQLAOGroup$($primaryVM.vmName)"
+                NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+                RetryIntervalSec = 5
+                RetryCount       = 450
+                Dependson        = $nextDepend
+            }
+            $nextDepend = "[WaitForAny]DCComplete$($primaryVM.vmName)"
+
             File "ClusterWitness$i" {
                 DestinationPath = $primaryVM.thisParams.SQLAO.WitnessLocalPath
                 Type            = 'Directory'
@@ -740,18 +754,19 @@ Configuration Phase5
         }
         $nextDepend = '[xClusterQuorum]ClusterWitness'
 
-        #WriteStatus WaitForDC {
-        #    Status    = "Waiting for DC to Complete"
-        #    DependsOn = $nextDepend
-        #}
+        WriteStatus WaitForDC {
+            Status    = "Waiting for DC to Complete"
+            DependsOn = $nextDepend
+        }
 
-        #WaitForAny DCComplete {
-        #    ResourceName     = '[WriteStatus]Complete'
-        #    NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
-        #    RetryIntervalSec = 5
-        #    RetryCount       = 450
-        #    Dependson        = $nextDepend
-        #}
+        WaitForAny DCComplete {
+            ResourceName     = "[ADGroup]SQLAOGroup$node1"
+            NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+            RetryIntervalSec = 5
+            RetryCount       = 450
+            Dependson        = $nextDepend
+        }
+        $nextDepend = "[WaitForAny]DCComplete"
 
         WriteStatus SqlLogins {
             Status    = "Adding SQL Logins"
@@ -981,7 +996,7 @@ Configuration Phase5
         $i = 0
         foreach ($pNode in $sqlAOPrimaryNodes) {
             $i++
-            ADGroup "SQLAOGroup$i" {
+            ADGroup "SQLAOGroup$($pNode.vmName)" {
                 Ensure      = 'Present'
                 GroupName   = $pNode.thisParams.SQLAO.GroupName
                 GroupScope  = "Global"
@@ -991,7 +1006,7 @@ Configuration Phase5
                 DependsOn   = '[WriteStatus]SQLAOGroup'
             }
 
-            $adGroupDependancy += "[ADGroup]SQLAOGroup$i"
+            $adGroupDependancy += "[ADGroup]SQLAOGroup$($pNode.vmName)"
             #ActiveDirectorySPN "SQLAOSPN$i" {
             #    Key              = "SQLAOSPN$i"
             #    UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount

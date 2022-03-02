@@ -267,80 +267,7 @@ function select-SnapshotDomain {
 
 }
 
-function Invoke-AutoSnapShotDomain {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
-        [string] $domain,
-        [Parameter(Mandatory = $true, HelpMessage = "Snapshot name (Must Contain MemLabs)")]
-        [string] $comment
-    )
-    Write-Host
-    Write-Host -ForegroundColor Yellow "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
-    Invoke-StopVMs -domain $domain
-    #Select-StopDomain -domain $domain
-    Invoke-SnapshotDomain -domain $domain -comment $comment
 
-    $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
-    $failures = Invoke-SmartStartVMs -CritList $critlist
-    if ($failures -ne 0) {
-        write-log "$failures VM(s) could not be started" -Failure
-    }
-    #Select-StartDomain -domain $domain
-}
-
-function Invoke-SnapshotDomain {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
-        [string] $domain,
-        [Parameter(Mandatory = $True, HelpMessage = "Comment")]
-        [string] $comment,
-        [Parameter(Mandatory = $false, HelpMessage = "Quiet Mode")]
-        [string] $quiet = $false
-    )
-
-
-
-    $vms = get-list -type vm -DomainName $domain
-
-    $date = Get-Date -Format "yyyy-MM-dd hh.mmtt"
-    $snapshot = $date + " (MemLabs) " + $comment
-
-    $failures = 0
-    if (-not $quiet) {
-        Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
-        Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
-    }
-    foreach ($vm in $vms) {
-        $complete = $false
-        $tries = 0
-        While ($complete -ne $true) {
-            try {
-                if ($tries -gt 10) {
-                    $failures++
-                    continue
-                }
-                if (-not $quiet) {
-                    Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
-                }
-
-                Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
-                $complete = $true
-                if (-not $quiet) {
-                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete"
-                }
-            }
-            catch {
-                Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
-                write-log "Error: $_" -LogOnly
-                $tries++
-                stop-vm2 -name $vm.VmName
-                Start-Sleep 10
-            }
-        }
-    }
-}
 
 function get-SnapshotDomain {
     [CmdletBinding()]
@@ -747,16 +674,16 @@ function Select-DeleteDomain {
         }
         if ($response -eq "D") {
             Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
-            $response = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180
+            $response2 = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180
             if (-not [String]::IsNullOrWhiteSpace($response)) {
-                if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
+                if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
                     Remove-Domain -DomainName $domain
                     return
                 }
             }
         }
         else {
-            $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $response? (Y/n)" -HideHelp -timeout 180
+            $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $($response)? (Y/n)" -HideHelp -timeout 180
 
             if ($response2 -and ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no")) {
                 continue
@@ -1982,7 +1909,7 @@ function Select-Subnet {
     }
     else {
         $domain = $configToCheck.vmOptions.DomainName
-        return Select-ExistingSubnets -Domain $domain -ConfigToCheck $configToCheck
+        return Select-ExistingSubnets -Domain $domain -ConfigToCheck $configToCheck -CurrentNetworkIsValid:$CurrentNetworkIsValid
     }
 
 
@@ -2018,7 +1945,9 @@ function Select-ExistingSubnets {
         [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
         [String] $SiteCode,
         [Parameter(Mandatory = $false, HelpMessage = "config")]
-        [object] $ConfigToCheck
+        [object] $ConfigToCheck,
+        [Parameter(Mandatory = $false, HelpMessage = "Is the default network a valid choice?")]
+        [bool] $CurrentNetworkIsValid = $true
     )
 
     $valid = $false
@@ -2096,7 +2025,12 @@ function Select-ExistingSubnets {
                 $response = "n"
             }
             else {
-                $response = Get-Menu -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue
+                if ($CurrentNetworkIsValid) {
+                    $response = Get-Menu -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue
+                }
+                else {
+                    $response = Get-Menu -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false
+                }
             }
             write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
             if ([string]::IsNullOrWhiteSpace($response)) {
@@ -2236,7 +2170,9 @@ function Read-Single {
         [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
         [switch] $HideHelp,
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
-        [int] $timeout = 0
+        [int] $timeout = 0,
+        [Parameter(Mandatory = $false, HelpMessage = "Use Read-Host after keypress")]
+        [switch] $useReadHost
     )
     if (-not $HideHelp.IsPresent) {
         write-help
@@ -2248,7 +2184,7 @@ function Read-Single {
         Write-Host "] " -NoNewline
     }
 
-    $response = Read-SingleKeyWithTimeout -timeout $timeout -Prompt ": "
+    $response = Read-SingleKeyWithTimeout -timeout $timeout -Prompt ": " -useReadHost:$useReadHost
     return $response
 }
 
@@ -2279,13 +2215,13 @@ function Read-YesorNoWithTimeout {
 
     $valid = $false
     while (-not $valid) {
-        $response = Read-SingleKeyWithTimeout -timeout $timeout -ValidKeys "Y", "y", "N", "n" -Prompt ": "
-        if ($null -eq $response -or $response -eq 'Y' -or $response -eq 'y' -or $response -eq 'N' -or $response -eq 'n') {
+        $YNresponse = Read-SingleKeyWithTimeout -timeout $timeout -ValidKeys "Y", "y", "N", "n" -Prompt ": "
+        if ($null -eq $YNresponse -or $YNresponse -eq 'Y' -or $YNresponse -eq 'y' -or $YNresponse -eq 'N' -or $YNresponse -eq 'n') {
             $valid = $true
         }
     }
     Write-Host
-    return $response
+    return $YNresponse
 }
 
 # Offers a menu for any array passed in.
@@ -4788,7 +4724,7 @@ function Save-Config {
         }
     }
     $splitpath = Split-Path -Path $fileName -Leaf
-    $response = Read-Host2 -Prompt "Save Filename" -currentValue $splitpath -HideHelp
+    $response = Read-Single -Prompt "Save Filename" -currentValue $splitpath -HideHelp -Timeout 30 -useReadHost
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $filename = Join-Path $configDir $response

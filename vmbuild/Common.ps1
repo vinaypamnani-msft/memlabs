@@ -720,7 +720,7 @@ function Test-NetworkSwitch {
         $success = $false
         while (-not $success) {
             try {
-                Restart-Service RemoteAccess -ErrorAction Stop
+                Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
                 $success = $true
             }
             catch {
@@ -1341,7 +1341,7 @@ function New-VirtualMachine {
             #$currentItem | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value $ip -Force
             #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
             if ($currentItem.OtherNode) {
-                $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75) | Select-Object -Last 2
+                $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75 -WarningAction SilentlyContinue) | Select-Object -Last 2
                 Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
                 $clusterIP = $IPs[0]
                 $AGIP = $IPs[1]
