@@ -138,10 +138,21 @@ function Stop-VM2 {
         [Parameter(Mandatory = $false)]
         [int]$RetrySeconds = 10,
         [Parameter(Mandatory = $false)]
-        [switch]$force
+        [switch]$force,
+        [Parameter(Mandatory = $false)]
+        [switch]$TurnOff
     )
 
     $vm = Get-VM2 -Name $Name
+
+    if ($vm.State -eq "Off") {
+        Write-Log "${Name}: VM is already stopped." -LogOnly
+        if ($Passthru) {
+            return $true
+        }
+        return
+    }
+
     Write-Log "${Name}: Stopping VM" -HostOnly
 
     if ($vm) {
@@ -157,6 +168,14 @@ function Stop-VM2 {
         until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
         if ($StopError.Count -ne 0) {
+            if ($TurnOff) {
+                Stop-VM -VM $vm -TurnOff
+                Start-Sleep -Seconds 5
+                $vm = Get-VM2 -Name $Name
+                if ($vm.State -eq "Off") {
+                    return $true
+                }
+            }
             Write-Log "${Name}: Failed to stop the VM. $StopError" -Warning
             if ($Passthru.IsPresent) {
                 return $false

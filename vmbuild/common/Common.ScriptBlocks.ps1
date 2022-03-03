@@ -1028,9 +1028,7 @@ $global:VM_Config = {
                         Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
                         Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
-                        $vm = Get-VM2 -Name $($currentItem.vmName)
-                        Stop-VM -VM $vm -TurnOff | Out-Null
-                        Start-Sleep -Seconds 5
+                        Stop-VM2 -name $currentItem.vmName -TurnOff
                         Start-VM2 -Name $currentItem.vmName
                         Start-Sleep -Seconds 15
                         $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up

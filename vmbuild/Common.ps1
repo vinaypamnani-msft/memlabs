@@ -1462,11 +1462,6 @@ function Wait-ForVm {
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
-                if ($failures -gt 30) {
-                    stop-vm2 -force -name $VmName
-                    Start-vm2 -name $VmName
-                    $failures = 0
-                }
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
                 if ($failures -gt 20) {
                     Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss")) Failed $($failures) / 30" -Status $originalStatus -PercentComplete $percent
@@ -1479,6 +1474,12 @@ function Wait-ForVm {
                 }
                 else {
                     $failures++
+                }
+                if ($failures -gt 30) {
+                    stop-vm2 -force -name $VmName -TurnOff
+                    Start-vm2 -name $VmName
+                    Start-Sleep -Seconds 15
+                    $failures = 0
                 }
             }
             else {
