@@ -2016,6 +2016,9 @@ class InstallFeatureForSCCM {
     [DscProperty(Mandatory)]
     [string[]] $Role
 
+    [DscProperty(NotConfigurable)]
+    [string] $Version = "2"
+
     [void] Set() {
         $_Role = $this.Role
 
@@ -2042,18 +2045,32 @@ class InstallFeatureForSCCM {
 
         if ($IsServerOS) {
 
+
+
+#
+#
+#
+#   If you add roles here, please update the Version number so existing Machines will get the new roles
+#
+#
+#
+
+
             # Always install BITS
             Install-WindowsFeature BITS, BITS-IIS-Ext
             # Always install IIS
             Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
             Install-WindowsFeature Web-WMI, Web-Metabase
+            Install-WindowsFeature RSAT-AD-PowerShell
+            Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
 
             if ($_Role -notcontains "DomainMember") {
                 Install-WindowsFeature -Name "Rdc"
             }
 
             if ($_Role -contains "DC") {
-                Install-WindowsFeature RSAT-AD-PowerShell
+                #Moved to All Servers
+                #Install-WindowsFeature RSAT-AD-PowerShell
             }
             if ($_Role -contains "SQLAO") {
                 Install-WindowsFeature Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell
@@ -2125,12 +2142,12 @@ class InstallFeatureForSCCM {
             }
         }
 
-        $StatusPath = "$env:windir\temp\InstallFeatureStatus.txt"
+        $StatusPath = "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt"
         "Finished" >> $StatusPath
     }
 
     [bool] Test() {
-        $StatusPath = "$env:windir\temp\InstallFeatureStatus.txt"
+        $StatusPath = "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt"
         if (Test-Path $StatusPath) {
             return $true
         }

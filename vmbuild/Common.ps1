@@ -2083,6 +2083,7 @@ function Set-SupportedOptions {
 
     $roles = @(
         "DC",
+        "BDC",
         "Primary",
         "CAS",
         "Secondary",
@@ -2099,6 +2100,7 @@ function Set-SupportedOptions {
 
     $rolesForExisting = @(
         "CAS",
+        "BDC",
         "Primary",
         "Secondary",
         "PassiveSite",

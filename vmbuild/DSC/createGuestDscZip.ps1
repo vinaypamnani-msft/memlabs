@@ -93,6 +93,7 @@ try {
     $dscRole = "Phase2"
     switch (($role)) {
         "DC" { $dscRole += "DC" }
+        "BDC" { $dscRole += "BDC" }
         "WorkgroupMember" { $dscRole += "WorkgroupMember" }
         "AADClient" { $dscRole += "WorkgroupMember" }
         "InternetClient" { $dscRole += "WorkgroupMember" }

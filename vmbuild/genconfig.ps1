@@ -736,7 +736,7 @@ function get-VMSummary {
     $vms = $Global:Config.virtualMachines
 
     $numVMs = ($vms | Measure-Object).Count
-    $numDCs = ($vms | Where-Object { $_.Role -eq "DC" } | Measure-Object).Count
+    $numDCs = ($vms | Where-Object { $_.Role -in ("DC","BDC") } | Measure-Object).Count
     $numDPMP = ($vms | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $numPri = ($vms | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $numSec = ($vms | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
@@ -960,6 +960,9 @@ function Get-NewMachineName {
     $RoleName = $vm.Role
     if ($Role -eq "OSDClient") {
         $RoleName = "OSD"
+    }
+    if ($Role -eq "BDC") {
+        $RoleName = "DC"
     }
     if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role) -or $Role -eq "WorkgroupMember" -or $Role -eq "AADClient" -or $role -eq "InternetClient") {
         if (($ConfigToCheck.vmOptions.prefix.length) -gt 4) {
@@ -1726,6 +1729,7 @@ function Format-Roles {
     foreach ($role in $Roles) {
         switch ($role) {
             "DC" { $newRoles += "$($role.PadRight($padding))`t[New Domain Controller.. Only 1 allowed per domain!]" }
+            "BDC" { $newRoles += "$($role.PadRight($padding))`t[Backup Domain Controllers.  As many as you want per domain]" }
             "CAS" { $newRoles += "$($role.PadRight($padding))`t[New CAS.. Only 1 allowed per subnet!]" }
             "CAS and Primary" { $newRoles += "$($role.PadRight($padding))`t[New CAS and Primary Site]" }
             "Primary" { $newRoles += "$($role.PadRight($padding))`t[New Primary site (Standalone or join a CAS)]" }
@@ -1733,6 +1737,7 @@ function Format-Roles {
             "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]" }
             "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site]" }
             "DomainMember" { $newRoles += "$($role.PadRight($padding))`t[New VM joined to the domain]" }
+            "SQLAO" { $newRoles += "$($role.PadRight($padding))`t[SQL High Availability Always On Cluster]" }
             "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain]" }
             "DomainMember (Client)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Client OS joined to the domain]" }
             "WorkgroupMember" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access]" }
@@ -2469,6 +2474,7 @@ Function Get-SupportedOperatingSystemsForRole {
     $AllList = $Common.Supported.OperatingSystems
     switch ($role) {
         "DC" { return $ServerList }
+        "BDC" { return $ServerList }
         "CAS" { return $ServerList }
         "CAS and Primary" { return $ServerList }
         "Primary" { return $ServerList }
@@ -3953,7 +3959,7 @@ function Add-NewVMForRole {
     $vprocs = 2
 
     $installSSMS = $false
-    if ($OperatingSystem.Contains("Server") -and ($role -ne "DC")) {
+    if ($OperatingSystem.Contains("Server") -and ($role -notin ("DC", "BDC"))) {
         $memory = "4GB"
         $vprocs = 4
         $installSSMS = $true
@@ -3966,7 +3972,7 @@ function Add-NewVMForRole {
         virtualProcs    = $vprocs
     }
 
-    if ($role -notin ("OSDCLient", "AADJoined", "DC")) {
+    if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC")) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
     }
     $existingPrimary = $null
@@ -4410,7 +4416,7 @@ function Select-VirtualMachines {
                                         $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User%cyan"; "U" = "Remove domainUser from this machine" }
                                     }
                                 }
-                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not ($virtualMachine.Role -eq "DC")) {
+                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not ($virtualMachine.Role -in ("DC","BDC)"))) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         if ($virtualMachine.Role -eq "Secondary") {
                                             $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Use Full SQL for Secondary Site" }

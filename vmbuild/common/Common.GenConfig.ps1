@@ -9,6 +9,7 @@ Function Get-SupportedOperatingSystemsForRole {
     $AllList = $Common.Supported.OperatingSystems
     switch ($role) {
         "DC" { return $ServerList }
+        "BDC" { return $ServerList }
         "CAS" { return $ServerList }
         "CAS and Primary" { return $ServerList }
         "Primary" { return $ServerList }

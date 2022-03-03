@@ -42,7 +42,7 @@ $global:VM_Create = {
         }
 
         # Set domain name, depending on whether we need to create new VM or use existing one
-        if (-not $createVM -or ($currentItem.role -eq "DC") ) {
+        if (-not $createVM -or ($currentItem.role -in ("DC","BDC")) ) {
             $domainName = $deployConfig.parameters.DomainName
         }
         else {
@@ -343,7 +343,7 @@ $global:VM_Config = {
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
         # Set domain name, depending on whether we need to create new VM or use existing one
-        if ($currentItem.hidden -or ($currentItem.role -eq "DC") -or $Phase -gt 2) {
+        if ($currentItem.hidden -or ($currentItem.role -in ("DC","BDC")) -or $Phase -gt 2) {
             $domainName = $deployConfig.parameters.DomainName
         }
         else {
@@ -643,6 +643,7 @@ $global:VM_Config = {
                 # Set current role
                 switch (($currentItem.role)) {
                     "DC" { $dscRole += "DC" }
+                    "BDC" { $dscRole += "BDC" }
                     "WorkgroupMember" { $dscRole += "WorkgroupMember" }
                     "AADClient" { $dscRole += "WorkgroupMember" }
                     "InternetClient" { $dscRole += "WorkgroupMember" }
