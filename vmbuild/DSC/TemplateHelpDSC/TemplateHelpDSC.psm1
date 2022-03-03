@@ -2258,7 +2258,9 @@ class SetupDomain {
     }
 
     [bool] Test() {
+        # This is broken as AD-Domain-Services is installed in SCCMFeature code
         $_DomainFullName = $this.DomainFullName
+
         $_SafemodeAdministratorPassword = $this.SafemodeAdministratorPassword
         $ADInstallState = Get-WindowsFeature AD-Domain-Services
         if (!($ADInstallState.Installed)) {

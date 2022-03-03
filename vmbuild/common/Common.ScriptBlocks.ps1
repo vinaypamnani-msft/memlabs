@@ -859,7 +859,8 @@ $global:VM_Config = {
                     $attempts++
                     $allNodesReady = $true
                     $nonReadyNodes = $nodeList.Clone()
-                    Write-Progress "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $attempts
+                    $percent = [Math]::Min($attempts, 100)
+                    Write-Progress "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
                     foreach ($node in $nonReadyNodes) {
                         $result = Invoke-VmCommand -VmName $node -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
                         if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
@@ -1012,7 +1013,8 @@ $global:VM_Config = {
                     # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
                     if ($failedHeartbeats -gt 10) {
                         try {
-                            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete ($failedHeartbeats / $failedHeartbeatThreshold * 100)
+                            $percent = [Math]::Min(($failedHeartbeats / $failedHeartbeatThreshold * 100), 100)
+                            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete $percent
                         }
                         catch {}
                     }
@@ -1021,7 +1023,7 @@ $global:VM_Config = {
                     $failedHeartbeats = 0
                 }
 
-                if ($failedHeartbeats -gt $failedHeartbeatThreshold) {
+                if ($failedHeartbeats -ge $failedHeartbeatThreshold) {
                     try {
                         Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
                         Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)

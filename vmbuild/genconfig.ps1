@@ -4699,6 +4699,9 @@ function Save-Config {
     $filename = Join-Path $configDir $file
     if ($Global:configfile) {
         $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile).Name)
+        if ($filename.StartsWith("PSTest") -or $filename.StartsWith("CSTest")){
+            return Split-Path -Path $fileName -Leaf
+        }
         $filename = Join-Path $configDir $filename
         $fullFilename = Join-Path $configDir (($Global:configfile).Name)
         $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress) -eq

@@ -851,6 +851,9 @@ function Test-Configuration {
         $i = 8
         foreach ($vm in $deployConfig.virtualMachines) {
             $i++
+            if ($i -ge 35) {
+                $i = 35
+            }
             Write-Progress -Activity "Validating Configuration" -Status "Testing Vm $($vm.vmName)" -PercentComplete $i
             # Supported values
             Test-ValidVmSupported -VM $vm -ConfigObject $deployConfig -ReturnObject $return

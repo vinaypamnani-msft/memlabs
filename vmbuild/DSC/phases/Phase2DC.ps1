@@ -110,14 +110,23 @@
             Status    = "Configuring ADDS and setting up the domain. The computer will reboot a couple of times."
         }
 
-        SetupDomain FirstDS {
-            DependsOn                     = "[InstallFeatureForSCCM]InstallFeature"
-            DomainFullName                = $DomainName
+        #SetupDomain FirstDS {
+        #    DependsOn                     = "[InstallFeatureForSCCM]InstallFeature"
+        #    DomainFullName                = $DomainName
+        #    SafemodeAdministratorPassword = $DomainCreds
+        #}
+
+        ADDomain FirstDS
+        {
+            DomainName                    = $DomainName
+            Credential                    = $DomainCreds
             SafemodeAdministratorPassword = $DomainCreds
+            ForestMode                    = 'WinThreshold'
+            DomainMode                    = 'WinThreshold'
         }
 
         WriteStatus CreateAccounts {
-            DependsOn = "[SetupDomain]FirstDS"
+            DependsOn = "[ADDomain]FirstDS"
             Status    = "Creating user accounts and groups"
         }
 

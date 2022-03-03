@@ -67,7 +67,7 @@ function Start-VM2 {
     $vm = Get-VM2 -Name $Name
 
     if ($vm.State -eq "Running") {
-        Write-Log "${$Name}: VM is already running." -LogOnly
+        Write-Log "${Name}: VM is already running." -LogOnly
         if ($Passthru) {
             return $true
         }
@@ -92,14 +92,14 @@ function Start-VM2 {
         until ($i -gt $retryCount -or $running)
 
         if ($running) {
-            Write-Log "${$Name}: VM was started." -LogOnly
+            Write-Log "${Name}: VM was started." -LogOnly
             if ($Passthru.IsPresent) {
                 return $true
             }
         }
 
         if ($StopError.Count -ne 0) {
-            Write-Log "${$Name}: Failed to start the VM. $StopError" -Warning
+            Write-Log "${Name}: Failed to start the VM. $StopError" -Warning
             if ($Passthru.IsPresent) {
                 return $false
             }
@@ -107,12 +107,12 @@ function Start-VM2 {
         else {
             $vm = Get-VM2 -Name $Name
             if ($vm.State -eq "Running") {
-                Write-Log "${$Name}: VM was started." -LogOnly
+                Write-Log "${Name}: VM was started." -LogOnly
                 if ($Passthru.IsPresent) {
                     return $true
                 }
             }else {
-                Write-Log "${$Name}: VM was not started. Current State $($vm.State)" -Warning
+                Write-Log "${Name}: VM was not started. Current State $($vm.State)" -Warning
                 if ($Passthru.IsPresent) {
                     return $false
                 }
@@ -142,7 +142,7 @@ function Stop-VM2 {
     )
 
     $vm = Get-VM2 -Name $Name
-    Write-Log "${$Name}: Stopping VM" -HostOnly
+    Write-Log "${Name}: Stopping VM" -HostOnly
 
     if ($vm) {
         $i = 0
@@ -157,7 +157,7 @@ function Stop-VM2 {
         until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
         if ($StopError.Count -ne 0) {
-            Write-Log "${$Name}: Failed to stop the VM. $StopError" -Warning
+            Write-Log "${Name}: Failed to stop the VM. $StopError" -Warning
             if ($Passthru.IsPresent) {
                 return $false
             }
