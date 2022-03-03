@@ -701,7 +701,7 @@ function Get-SiteServerForSiteCode {
         }
     }
     $existingVMs = @()
-    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
     if ($existingVMs) {
         if ($type -eq "Name") {
             return ($existingVMs | Select-Object -First 1).vmName
@@ -745,7 +745,7 @@ function Get-VMFromList2 {
         [object] $vmName
     )
 
-    $vm = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $vmName }
+    $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate | Where-Object { $_.vmName -eq $vmName }
     if ($vm) {
         return $vm
     }
@@ -764,7 +764,7 @@ function Get-PrimarySiteServerForSiteCode {
     )
     $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode
     if (-not $SiteServer) {
-        throw "Could not find SiteServer for $SiteCode"
+        throw "Could not find SiteServer for SiteCode: $SiteCode"
     }
     $roleforSite = get-RoleForSitecode -ConfigToCheck $deployConfig -siteCode $SiteCode
     if ($roleforSite -eq "Primary") {
@@ -784,7 +784,7 @@ function Get-PrimarySiteServerForSiteCode {
         $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.parentSiteCode
         if (-not $SiteServer) {
             write-host $SiteServerVM | ConvertTo-Json
-            throw "Secondary: Could not find SiteServer for $($SiteServerVM.parentSiteCode)"
+            throw "Secondary: Could not find SiteServer for SiteCode: $($SiteServerVM.parentSiteCode)"
         }
         if ($type -eq "Name") {
             return $SiteServer
