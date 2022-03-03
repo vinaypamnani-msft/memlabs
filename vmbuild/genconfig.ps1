@@ -3420,6 +3420,15 @@ function Get-AdditionalInformation {
                 $data = $data.PadRight(20) + "(SQL Always On Cluster)"
             }
         }
+        "memory" {
+            #add Available memory
+        }
+        "parentSiteCode" {
+            #list serverName/role
+        }
+        "network" {
+            # List SiteServers
+        }
         default { }
     }
 
