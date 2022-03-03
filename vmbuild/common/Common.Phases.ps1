@@ -341,10 +341,10 @@ function Get-ConfigurationData {
             $OriginalProgressPreference = $Global:ProgressPreference
             try {
                 $Global:ProgressPreference = 'SilentlyContinue'
-                $testNet = Test-NetConnection -ComputerName $dc.NodeName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                $testNet = Test-NetConnection -ComputerName $dc.NodeName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
                 $Global:ProgressPreference = $OriginalProgressPreference
 
-                if (-not $testNet.TcpTestSucceeded) {
+                if (-not $testNet) {
                     Write-Log "[Phase $Phase]: $($dc.NodeName): Could not verify if RDP is enabled. Restarting the computer." -OutputStream -Warning
                     Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
                     Start-Sleep -Seconds 20

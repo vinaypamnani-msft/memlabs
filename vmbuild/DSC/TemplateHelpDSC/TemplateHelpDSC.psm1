@@ -2047,13 +2047,13 @@ class InstallFeatureForSCCM {
 
 
 
-#
-#
-#
-#   If you add roles here, please update the Version number so existing Machines will get the new roles
-#
-#
-#
+            #
+            #
+            #
+            #   If you add roles here, please update the Version number so existing Machines will get the new roles
+            #
+            #
+            #
 
 
             # Always install BITS
@@ -2062,7 +2062,11 @@ class InstallFeatureForSCCM {
             Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
             Install-WindowsFeature Web-WMI, Web-Metabase
             Install-WindowsFeature RSAT-AD-PowerShell
-            Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+            $result = Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+            if ($result.RestartNeeded -eq "Yes") {
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
+            }
 
             if ($_Role -notcontains "DomainMember") {
                 Install-WindowsFeature -Name "Rdc"
