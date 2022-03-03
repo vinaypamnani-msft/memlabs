@@ -96,6 +96,7 @@
             SysvolPath                    = 'C:\Windows\SYSVOL'
             #SiteName                      = 'Europe'
             IsGlobalCatalog               = $true
+            InstallDns                    = $false
 
             DependsOn                     = '[WaitForADDomain]WaitForestAvailability'
         }
