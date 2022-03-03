@@ -736,7 +736,7 @@ function get-VMSummary {
     $vms = $Global:Config.virtualMachines
 
     $numVMs = ($vms | Measure-Object).Count
-    $numDCs = ($vms | Where-Object { $_.Role -in ("DC","BDC") } | Measure-Object).Count
+    $numDCs = ($vms | Where-Object { $_.Role -in ("DC", "BDC") } | Measure-Object).Count
     $numDPMP = ($vms | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
     $numPri = ($vms | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $numSec = ($vms | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
@@ -2749,6 +2749,9 @@ Function Set-SiteServerLocalSql {
     if ($null -ne $virtualMachine.remoteSQLVM) {
         $SQLVM = $virtualMachine.remoteSQLVM
         $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
+        if ($SQLVM.OtherNode) {
+            Remove-VMFromConfig -vmName $SQLVM.OtherNode -Config $global:config
+        }
         Remove-VMFromConfig -vmName $SQLVM -Config $global:config
 
     }
@@ -2793,7 +2796,7 @@ Function Get-remoteSQLVM {
 
     $valid = $false
     while ($valid -eq $false) {
-        $additionalOptions = @{ "L" = "Local SQL" }
+        $additionalOptions = [ordered]@{ "L" = "Local SQL (Installed on Site Server)" }
 
         $validVMs = $Global:Config.virtualMachines | Where-Object { ($_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion) -or ($_.Role -eq "SQLAO" -and $_.OtherNode ) } | Select-Object -ExpandProperty vmName
 
@@ -2812,11 +2815,11 @@ Function Get-remoteSQLVM {
             }
         }
 
-        if (($validVMs | Measure-Object).Count -eq 0) {
-            $additionalOptions += @{ "N" = "Create a New SQL VM" }
-            $additionalOptions += @{ "A" = "Create a New SQL Always On Cluster" }
-        }
-        $result = Get-Menu "Select Remote SQL VM, or Select Local" $($validVMs) $CurrentValue -Test:$false -additionalOptions $additionalOptions
+        #if (($validVMs | Measure-Object).Count -eq 0) {
+        $additionalOptions += [ordered] @{ "N" = "Remote SQL (Create a new SQL VM)" }
+        $additionalOptions += [ordered] @{ "A" = "Remote SQL Always On Cluster (Create a new SQL Cluster)" }
+        #}
+        $result = Get-Menu "Select SQL Options" $($validVMs) $CurrentValue -Test:$false -additionalOptions $additionalOptions
 
         if (-not $result) {
             return
@@ -3395,6 +3398,33 @@ function Get-SortedProperties {
     return $sorted
 }
 
+
+#$TextToDisplay = Get-AdditionalInformation -item $item -data $TextValue[0]
+
+function Get-AdditionalInformation {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Item Name")]
+        [string] $item,
+        [Parameter(Mandatory = $false, HelpMessage = "Raw value")]
+        [string] $data
+    )
+    #$global:config
+
+
+    switch ($item) {
+
+        "RemoteSQLVM" {
+            $remoteSQL = $global:config.virtualMachines | Where-Object {$_.vmName -eq $data}
+            if ($remoteSQL.OtherNode) {
+                $data = $data.PadRight(20) + "(SQL Always On Cluster)"
+            }
+        }
+        default { }
+    }
+
+    return $data
+}
 # Displays a Menu based on a property, offers options in [1], [2],[3] format
 # With additional options passed in via additionalOptions
 function Select-Options {
@@ -3461,7 +3491,8 @@ function Select-Options {
             }
             #$padding = 27 - ($i.ToString().Length)
             $padding = 26
-            Write-Option $i "$($($item).PadRight($padding," "")) = $value"
+            $TextToDisplay = Get-AdditionalInformation -item $item -data $value
+            Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay"
         }
         $fakeNetwork = $null
         if ($isVM) {
@@ -4416,7 +4447,7 @@ function Select-VirtualMachines {
                                         $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User%cyan"; "U" = "Remove domainUser from this machine" }
                                     }
                                 }
-                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not ($virtualMachine.Role -in ("DC","BDC)"))) {
+                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not ($virtualMachine.Role -in ("DC", "BDC)"))) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         if ($virtualMachine.Role -eq "Secondary") {
                                             $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Use Full SQL for Secondary Site" }
@@ -4486,7 +4517,12 @@ function Select-VirtualMachines {
                                 }
                                 else {
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
-                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+                                    if ($virtualMachine.AdditionalDisks.E) {
+                                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
+                                    }
+                                    else {
+                                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+                                    }
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
                                     $virtualMachine.virtualProcs = 4
                                     if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
@@ -4699,7 +4735,7 @@ function Save-Config {
     $filename = Join-Path $configDir $file
     if ($Global:configfile) {
         $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile).Name)
-        if ($filename.StartsWith("PSTest") -or $filename.StartsWith("CSTest")){
+        if ($filename.StartsWith("PSTest") -or $filename.StartsWith("CSTest")) {
             return Split-Path -Path $fileName -Leaf
         }
         $filename = Join-Path $configDir $filename

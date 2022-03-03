@@ -241,6 +241,7 @@ try {
         }
     }
 
+
     $AddedScopes = @($deployConfig.vmOptions.network)
     # Test if hyper-v switch exists, if not create it
     $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
@@ -392,6 +393,9 @@ catch {
     Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json)
 }
 finally {
+    if ($configuration) {
+        Write-Log "Configuration $Configuration has exited."
+    }
     # Ctrl + C brings us here :)
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
