@@ -1453,6 +1453,12 @@ function Wait-ForVm {
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
+
+            $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
+            $stopwatch2.Start()
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $stopwatch2.Stop()
+
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
@@ -1468,7 +1474,12 @@ function Wait-ForVm {
                     Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
                 }
                 Start-Sleep -Seconds 5
-                $failures ++
+                if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
+                    $failures = $failures + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 5, 0))
+                }
+                else {
+                    $failures++
+                }
             }
             else {
                 $failures = 0
