@@ -1216,41 +1216,42 @@ function New-VirtualMachine {
     Write-Log "$VmName`: Enabling Hyper-V Guest Services"
     Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
 
-    $mtx = New-Object System.Threading.Mutex($false, "TPM")
-    write-log "Attempting to acquire 'TPM' Mutex" -LogOnly
-    [void]$mtx.WaitOne()
-    write-log "acquired 'TPM' Mutex" -LogOnly
-    try {
-        if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
-            New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
-            New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-        }
-
-        $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
-        if ($localCASupported -eq 1) {
-            Write-Log "$VmName`: Enabling TPM"
-            $HGOwner = Get-HgsGuardian MemLabsGuardian
-            $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
-            if (-not $KeyProtector -or -not ($KeyProtector.RawData)) {
-                Write-Log "$VmName`: New-HgsKeyProtector failed"
-                return $false
+    if ($Generation -eq "2") {
+        $mtx = New-Object System.Threading.Mutex($false, "TPM")
+        write-log "Attempting to acquire 'TPM' Mutex" -LogOnly
+        [void]$mtx.WaitOne()
+        write-log "acquired 'TPM' Mutex" -LogOnly
+        try {
+            if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
+                New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
             }
-            Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
-            Enable-VMTPM $VmName -ErrorAction Stop ## Only required for Win11
-        }
-        else {
-            Write-Log "$VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
-        }
-    }
-    catch {
-        Write-Log "$VmName`: TPM failed $_"
-        return $false
-    }
-    finally {
-        [void]$mtx.ReleaseMutex()
-        [void]$mtx.Dispose()
-    }
 
+            $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
+            if ($localCASupported -eq 1) {
+                Write-Log "$VmName`: Enabling TPM"
+                $HGOwner = Get-HgsGuardian MemLabsGuardian
+                $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
+                if (-not $KeyProtector -or -not ($KeyProtector.RawData)) {
+                    Write-Log "$VmName`: New-HgsKeyProtector failed"
+                    return $false
+                }
+                Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
+                Enable-VMTPM $VmName -ErrorAction Stop ## Only required for Win11
+            }
+            else {
+                Write-Log "$VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
+            }
+        }
+        catch {
+            Write-Log "$VmName`: TPM failed $_"
+            return $false
+        }
+        finally {
+            [void]$mtx.ReleaseMutex()
+            [void]$mtx.Dispose()
+        }
+    }
     Write-Log "$VmName`: Setting Processor count to $Processors"
     Set-VM -Name $vmName -ProcessorCount $Processors
 
@@ -1465,7 +1466,8 @@ function Wait-ForVm {
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
                 if ($failures -gt 20) {
                     Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss")) Failed $($failures) / 30" -Status $originalStatus -PercentComplete $percent
-                }else{
+                }
+                else {
                     Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
                 }
                 Start-Sleep -Seconds 5
@@ -2329,6 +2331,11 @@ if (-not $Common.Initialized) {
         }
         catch {}
 
+        try {
+            Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse | ForEach-Object { $_.PSChildName }
+            | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 1 }
+        }
+        catch {}
         # Retrieve VM List, and cache results
         $list = Get-List -Type VM -ResetCache
         foreach ($vm in $list) {

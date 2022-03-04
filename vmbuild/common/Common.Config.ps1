@@ -1046,6 +1046,12 @@ function Update-VMInformation {
         }
 
         $vmDomain = $vmNoteObject.domain
+        # Detect if we need to update VM VMName, if VM Note doesn't have vmName prop
+
+        if (-not $vmNoteObject.vmName) {
+            $vmNoteObject | Add-Member -MemberType NoteProperty -Name "vmName" -Value $vm.Name
+            Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+        }
 
         # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
         if ($vmNoteObject.role -in "CAS", "Primary", "PassiveSite") {

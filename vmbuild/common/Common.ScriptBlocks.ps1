@@ -68,12 +68,16 @@ $global:VM_Create = {
             # Create VM
             $vmSwitch = Get-VMSwitch2 -NetworkName $network
 
+            $Generation  = 2
+            if ($currentItem.vmGeneration) {
+                $Generation = $currentItem.vmGeneration
+            }
             $HashArguments = @{
                 VmName          = $currentItem.vmName
                 VmPath          = $virtualMachinePath
                 AdditionalDisks = $currentItem.additionalDisks
                 Memory          = $currentItem.memory
-                Generation      = 2
+                Generation      = $Generation
                 Processors      = $currentItem.virtualProcs
                 SwitchName      = $vmSwitch.Name
                 DeployConfig    = $deployConfig

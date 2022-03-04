@@ -351,7 +351,7 @@ function Get-ConfigurationData {
                 }
             }
             catch {}
-            finally{
+            finally {
                 $Global:ProgressPreference = $OriginalProgressPreference
             }
         }
@@ -384,7 +384,14 @@ function Get-Phase2ConfigurationData {
         )
     }
 
-    return $cd
+    foreach ($vm in $deployConfig.virtualMachines) {
+
+        # Filter out workgroup machines
+        if ($vm.role -notin "WorkgroupMember", "AADClient", "InternetClient", "OSDClient", "DC") {
+            return $cd
+        }
+    }
+    return $null
 }
 
 function Get-Phase3ConfigurationData {
@@ -415,8 +422,11 @@ function Get-Phase3ConfigurationData {
             Role     = $vm.Role
         }
         $cd.AllNodes += $newItem
-        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+        if ($vm.Role -ne "DC") {
+            $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+        }
     }
+
 
     if ($NumberOfNodesAdded -eq 0) {
         return

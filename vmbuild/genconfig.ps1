@@ -3095,6 +3095,12 @@ function Get-AdditionalValidations {
             }
         }
 
+
+        "vmGeneration" {
+            if ($value -notin ("1","2")){
+                $property.$name = "2"
+            }
+        }
         "SqlServiceAccount" {
             if ($property.Role -eq "SQLAO") {
                 $SQLAO = @($property)
@@ -4211,6 +4217,7 @@ function Add-NewVMForRole {
         }
         "OSDClient" {
             $virtualMachine.memory = "2GB"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'vmGeneration' -Value "2"
             $virtualMachine.PsObject.Members.Remove('operatingSystem')
         }
         "DPMP" {
