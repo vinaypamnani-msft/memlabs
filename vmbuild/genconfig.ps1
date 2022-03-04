@@ -1868,8 +1868,8 @@ function Select-Subnet {
         [object] $configToCheck = $global:config,
         [Parameter(Mandatory = $false, HelpMessage = "CurrentNetworkIsValid")]
         [bool] $CurrentNetworkIsValid = $true,
-        [Parameter(Mandatory = $false, HelpMessage = "Current VMName to exclude")]
-        [string] $CurrentVM = $null
+        [Parameter(Mandatory = $false, HelpMessage = "Current VM")]
+        [object] $CurrentVM = $null
     )
 
 
@@ -1950,10 +1950,7 @@ function Get-EnhancedSubnetList {
     else {
         $ListData = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode -and ($_.Role -in $rolesToShow ) } | Group-Object -Property network | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } }
     }
-    #remove
-    #$SubnetList | Out-Host
-    #$ListData | Out-Host
-    #$ConfigToCheck | ConvertTo-Json |Out-Host
+
     foreach ($sb in $SubnetList) {
         if ($sb -eq "Internet" -or ($sb -eq "cluster")) {
             continue
@@ -1993,8 +1990,8 @@ function Select-ExistingSubnets {
         [object] $ConfigToCheck,
         [Parameter(Mandatory = $false, HelpMessage = "Is the default network a valid choice?")]
         [bool] $CurrentNetworkIsValid = $true,
-        [Parameter(Mandatory = $false, HelpMessage = "Current VMName to exclude")]
-        [string] $CurrentVM = $null
+        [Parameter(Mandatory = $false, HelpMessage = "Current VM")]
+        [object] $CurrentVM = $null
     )
 
     $valid = $false
@@ -2010,6 +2007,11 @@ function Select-ExistingSubnets {
             $Role = "Secondary"
         }
     }
+
+    if ($CurrentVM.Role) {
+        $Role = $currentVM.Role
+    }
+
     while ($valid -eq $false) {
         $validEntryFound = $false
         $customOptions = @{ "N" = "add New Subnet to domain" }
@@ -2017,13 +2019,13 @@ function Select-ExistingSubnets {
         $subnetList += Get-NetworkList -DomainName $Domain | Select-Object -Expand Network | Sort-Object | Get-Unique
 
         $subnetListNew = @()
-        if ($Role -eq "Primary" -or $Role -eq "CAS" -or $Role -eq "Secondary") {
+        if ($Role -in ("Primary", "CAS","Secondary")) {
             $SiteServerRole = $true
             foreach ($subnet in $subnetList) {
                 # If a subnet has a Primary or a CAS in it.. we can not add either.
-                $existingRolePri = Get-ExistingForNetwork -Network $subnet -Role Primary -exclude $currentVM
-                $existingRoleCAS = Get-ExistingForNetwork -Network $subnet -Role CAS -exclude $currentVM
-                $existingRoleSec = Get-ExistingForNetwork -Network $subnet -Role Secondary -exclude $currentVM
+                $existingRolePri = Get-ExistingForNetwork -Network $subnet -Role Primary
+                $existingRoleCAS = Get-ExistingForNetwork -Network $subnet -Role CAS
+                $existingRoleSec = Get-ExistingForNetwork -Network $subnet -Role Secondary
                 if ($null -eq $existingRolePri -and $null -eq $existingRoleCAS -and $null -eq $existingRoleSec) {
                     $subnetListNew += $subnet
                 }
@@ -2053,8 +2055,7 @@ function Select-ExistingSubnets {
             if ($subnetListModified.Length -eq 0) {
                 Write-Host
                 Write-Host -ForegroundColor Yellow "No valid subnets for the selected role exists in the domain. Please create a new subnet"
-                #remove
-                Get-PSCallStack | Out-host
+
                 $response = "n"
             }
             else {
@@ -3879,6 +3880,10 @@ function get-VMString {
     $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(16, " ")
     $mem = $($virtualMachine.memory).PadLEft(4, " ")
     $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
+    $Network = "<Default>"
+    if ($virtualMachine.Network) {
+        $Network = $virtualMachine.Network
+    }
     $name += " VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)"
 
     if ($virtualMachine.additionalDisks) {
@@ -3925,6 +3930,7 @@ function get-VMString {
         $name += "$($virtualMachine.sqlInstanceName) ($($virtualMachine.sqlInstanceDir))]"
     }
 
+    $name += " Network [$network]"
     return "$name"
 }
 
@@ -3957,11 +3963,11 @@ function Get-NetworkForVM {
             if ($currentNetwork -in $SiteServers.network) {
                 #Write-host "$CurrentNetwork is in $($SiteServers.network)"
 
-                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false -CurrentVM $vm.VmName
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false -CurrentVM $vm
             }
             else {
                 if (-not $ReturnIfNotNeeded) {
-                    return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm.VmName
+                    return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm
                 }
             }
         }
@@ -3969,11 +3975,11 @@ function Get-NetworkForVM {
             if ($currentNetwork -in $SiteServers.network) {
                 #Write-host "$CurrentNetwork is in $($SiteServers.network)"
 
-                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false -CurrentVM $vm.VmName
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false -CurrentVM $vm
             }
             else {
                 if (-not $ReturnIfNotNeeded) {
-                    return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm.VmName
+                    return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm
                 }
             }
         }
@@ -3983,11 +3989,11 @@ function Get-NetworkForVM {
             if ($currentNetwork -in $SiteServers.network) {
                 #Write-host "$CurrentNetwork is in $($SiteServers.network)"
 
-                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false -CurrentVM $vm.VmName
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$false -CurrentVM $vm
             }
             else {
                 if (-not $ReturnIfNotNeeded) {
-                    return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm.VmName
+                    return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm
                 }
             }
         }
@@ -3999,7 +4005,7 @@ function Get-NetworkForVM {
         }
         Default {
             if (-not $ReturnIfNotNeeded) {
-                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm.VmName
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm
 
             }
         }
