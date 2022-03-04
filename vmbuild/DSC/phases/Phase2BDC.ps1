@@ -74,20 +74,19 @@
         $nextDepend = "[InstallFeatureForSCCM]InstallFeature"
 
         WriteStatus NewDS {
-            DependsOn =  $nextDepend
+            DependsOn = $nextDepend
             Status    = "Configuring ADDS and setting up the domain Controller."
         }
 
-        WaitForADDomain 'WaitForestAvailability'
-        {
-            DomainName = $DomainName
-            Credential = $DomainCreds
-
-            DependsOn  =  $nextDepend
+        WaitForADDomain 'WaitForestAvailability' {
+            DomainName              = $DomainName
+            Credential              = $DomainCreds
+            RestartCount            = 2
+            WaitForValidCredentials = $true
+            DependsOn               = $nextDepend
         }
 
-        ADDomainController 'DomainControllerAllProperties'
-        {
+        ADDomainController 'DomainControllerAllProperties' {
             DomainName                    = $DomainName
             Credential                    = $DomainCreds
             SafeModeAdministratorPassword = $DomainCreds
@@ -118,7 +117,7 @@
         #    DependsOn = $nextDepend
         #    Status    = "Setting Primary DNS, and DNS Forwarders"
         #}
-#
+        #
         #DnsServerForwarder DnsServerForwarder {
         #    DependsOn        = $nextDepend
         #    IsSingleInstance = 'Yes'
@@ -126,7 +125,7 @@
         #    UseRootHint      = $true
         #    EnableReordering = $true
         #}
-#
+        #
         #$nextDepend = "[DnsServerForwarder]DnsServerForwarder"
         if ($ThisVM.InstallCA) {
 
