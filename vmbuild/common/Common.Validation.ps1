@@ -1026,12 +1026,12 @@ function Test-Configuration {
                 Test-ValidRoleDPMP -VM $VM -ReturnObject $return
             }
 
-            if (-not $containsPS) {
-                $existingPS = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "Primary" -SiteCode $DPMPVM.siteCode
-                if (-not $existingPS) {
-                    Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode [$($DPMPVM.siteCode)] was not found." -ReturnObject $return -Warning
-                }
-            }
+            #if (-not $containsPS) {
+            #    $existingPS = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "Primary" -SiteCode $DPMPVM.siteCode
+            #    if (-not $existingPS) {
+            #        Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode [$($DPMPVM.siteCode)] was not found." -ReturnObject $return -Warning
+            #    }
+            #}
 
         }
 

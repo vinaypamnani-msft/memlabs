@@ -2682,7 +2682,7 @@ Function Get-SiteCodeForDPMP {
         }
         $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" } | Select-Object -first 1)
         if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-            $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName)"
+            $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName))"
         }
         if ($Domain) {
             #$siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
@@ -4934,7 +4934,7 @@ if (-not $InternalUseOnly.IsPresent) {
 #================================= NEW LAB SCENERIO ============================================
 if ($InternalUseOnly.IsPresent) {
     $domainExists = Get-List -Type VM -DomainName $Global:Config.vmOptions.domainName
-    if ($domainExists) {
+    if ($domainExists -and ($return.DeployNow)) {
         write-host -ForegroundColor Green "This configuration will make modifications to $($Global:Config.vmOptions.DomainName)"
         Write-OrangePoint -NoIndent "Without a snapshot, if something fails it may not be possible to recover"
         $response = Read-YesorNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (Y/n)" -HideHelp
