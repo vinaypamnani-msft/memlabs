@@ -2017,9 +2017,11 @@ function Select-ExistingSubnets {
         $customOptions = @{ "N" = "add New Subnet to domain" }
         $subnetList = @()
         $subnetList += Get-NetworkList -DomainName $Domain | Select-Object -Expand Network | Sort-Object | Get-Unique
-
+        if ($CurrentNetworkIsValid -and $configToCheck) {
+            $subnetList += $ConfigToCheck.vmOptions.network
+        }
         $subnetListNew = @()
-        if ($Role -in ("Primary", "CAS","Secondary")) {
+        if ($Role -in ("Primary", "CAS", "Secondary")) {
             $SiteServerRole = $true
             foreach ($subnet in $subnetList) {
                 # If a subnet has a Primary or a CAS in it.. we can not add either.
@@ -3097,7 +3099,7 @@ function Get-AdditionalValidations {
 
 
         "vmGeneration" {
-            if ($value -notin ("1","2")){
+            if ($value -notin ("1", "2")) {
                 $property.$name = "2"
             }
         }
@@ -3174,6 +3176,10 @@ function Get-AdditionalValidations {
             }
 
         }
+        "OtherNode" {
+            write-Host "Sorry. OtherNode can not be set manually. Please rename the 2nd node of the cluster to change this property."
+            $property.$name = $currentValue
+        }
         "network" {
             if ($property.Role -eq "SQLAO") {
                 $SQLAO = @($property)
@@ -3184,7 +3190,12 @@ function Get-AdditionalValidations {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
                 }
                 foreach ($sql in $SQLAO) {
-                    $sql.$name = $value
+                    if ($sql.$name) {
+                        $sql.$name = $value
+                    }
+                    else {
+                        $sql | Add-Member -MemberType NoteProperty -Name $name -Value $value -Force
+                    }
                 }
             }
 
@@ -3708,6 +3719,7 @@ function Select-Options {
                             $property.network = $network
                         }
                     }
+                    Get-AdditionalValidations -property $property -name $Name -CurrentValue $value
                     Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
                 }
