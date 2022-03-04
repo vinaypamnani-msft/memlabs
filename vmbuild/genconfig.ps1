@@ -3568,7 +3568,9 @@ function Select-Options {
         if ($isVM) {
             $i++
             $fakeNetwork = $i
-            Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
+            $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
+            #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
+            Write-Option $i "$($("network").PadRight($padding," "")) = $network"
         }
 
         if ($null -ne $additionalOptions) {
