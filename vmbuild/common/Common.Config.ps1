@@ -650,7 +650,9 @@ function Get-ExistingForNetwork {
         [string]$Network,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
         [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember", "Secondary")]
-        [string]$Role
+        [string]$Role,
+        [Parameter(Mandatory = $false, HelpMessage = "VMName to exclude")]
+        [string] $exclude = $null
     )
 
     try {
@@ -658,6 +660,9 @@ function Get-ExistingForNetwork {
         $existingValue = @()
         $vmList = Get-List -Type VM | Where-Object { $_.network -eq $Network }
         foreach ($vm in $vmList) {
+            if ($exclude -and $vm.VmName -eq $exclude) {
+                continue
+            }
             if ($vm.role) {
                 if ($vm.Role.ToLowerInvariant() -eq $Role.ToLowerInvariant()) {
                     $existingValue += $vm.VmName
