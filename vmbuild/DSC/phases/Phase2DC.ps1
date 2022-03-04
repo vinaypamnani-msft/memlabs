@@ -116,8 +116,7 @@
         #    SafemodeAdministratorPassword = $DomainCreds
         #}
 
-        ADDomain FirstDS
-        {
+        ADDomain FirstDS {
             DomainName                    = $DomainName
             Credential                    = $DomainCreds
             SafemodeAdministratorPassword = $DomainCreds
@@ -212,6 +211,17 @@
                 DependsOn   = "[ADReplicationSite]ADSite$($i)"
             }
 
+            ADReplicationSiteLink "HQSiteLink$($i)" {
+                Name                          = "SiteLink Default-First-Site-Name to $($site.SiteCode) 2-way"
+                SitesIncluded                 = @('Default-First-Site-Name', $site.SiteCode)
+                Cost                          = 100
+                ReplicationFrequencyInMinutes = 2
+                Ensure                        = 'Present'
+                OptionChangeNotification = $true
+                OptionTwoWaySync = $true
+                DependsOn   = "[ADReplicationSite]ADSite$($i)"
+            }
+            $adSiteDependency += "[ADReplicationSiteLink]HQSiteLink$($i)"
             $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
         }
 

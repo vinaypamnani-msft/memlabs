@@ -271,7 +271,7 @@ Configuration Phase5
             NodeName             = $node2
             ResourceName         = "[xCluster]JoinSecondNodeToCluster"
             RetryIntervalSec     = 120
-            RetryCount           = 15
+            RetryCount           = 30
             PsDscRunAsCredential = $Admincreds
             DependsOn            = $nextDepend
         }
@@ -301,7 +301,7 @@ Configuration Phase5
             NodeName             = $thisVM.fileServerVM
             ResourceName         = "[WriteStatus]Complete"
             RetryIntervalSec     = 10
-            RetryCount           = 180
+            RetryCount           = 360
             PsDscRunAsCredential = $Admincreds
             DependsOn            = $nextDepend
         }
@@ -315,7 +315,7 @@ Configuration Phase5
             NodeName             = $node2
             ResourceName         = '[xClusterQuorum]ClusterWitness'
             RetryIntervalSec     = 10
-            RetryCount           = 90
+            RetryCount           = 360
             PsDscRunAsCredential = $Admincreds
             DependsOn            = '[xCluster]CreateCluster'
         }
@@ -567,8 +567,8 @@ Configuration Phase5
         WaitForAll AddReplica {
             ResourceName     = '[SqlAGReplica]AddReplica'
             NodeName         = $node2
-            RetryIntervalSec = 2
-            RetryCount       = 450
+            RetryIntervalSec = 4
+            RetryCount       = 900
             Dependson        = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -677,7 +677,7 @@ Configuration Phase5
         xWaitForCluster WaitForCluster {
             Name                 = $Node1VM.ClusterName
             RetryIntervalSec     = 180
-            RetryCount           = 5
+            RetryCount           = 20
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -735,7 +735,7 @@ Configuration Phase5
         WaitForAny FileShareComplete {
             NodeName             = $node1VM.fileServerVM
             ResourceName         = "[WriteStatus]Complete"
-            RetryIntervalSec     = 2
+            RetryIntervalSec     = 5
             RetryCount           = 900
             PsDscRunAsCredential = $Admincreds
             DependsOn            = $nextDepend
@@ -766,7 +766,7 @@ Configuration Phase5
             ResourceName     = "[ADGroup]SQLAOGroup$node1"
             NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
             RetryIntervalSec = 5
-            RetryCount       = 450
+            RetryCount       = 900
             Dependson        = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -859,8 +859,8 @@ Configuration Phase5
 
         SqlWaitForAG 'SQLConfigureAG-WaitAG' {
             Name                 = $node1VM.thisParams.SQLAO.ClusterNameAoG
-            RetryIntervalSec     = 10
-            RetryCount           = 90
+            RetryIntervalSec     = 5
+            RetryCount           = 450
             ServerName           = $node1
             InstanceName         = $node1vm.sqlInstanceName
             Dependson            = '[SqlAlwaysOnService]EnableHADR'
@@ -876,7 +876,7 @@ Configuration Phase5
         WaitForAll AG {
             ResourceName     = '[SqlAGListener]AvailabilityGroupListener'
             NodeName         = $node1
-            RetryIntervalSec = 2
+            RetryIntervalSec = 5
             RetryCount       = 450
             Dependson        = $nextDepend
             PsDscRunAsCredential = $Admincreds
@@ -933,7 +933,7 @@ Configuration Phase5
             WaitForAll RecoveryModel {
                 ResourceName     = '[SqlDatabase]SetRecoveryModel'
                 NodeName         = $node1
-                RetryIntervalSec = 2
+                RetryIntervalSec = 5
                 RetryCount       = 450
                 Dependson        = $nextDepend
                 PsDscRunAsCredential = $Admincreds
@@ -942,7 +942,7 @@ Configuration Phase5
             WaitForAll AddAGDatabaseMemberships {
                 ResourceName     = '[SqlAGDatabase]AddAGDatabaseMemberships'
                 NodeName         = $node1
-                RetryIntervalSec = 2
+                RetryIntervalSec = 5
                 RetryCount       = 450
                 Dependson        = '[WaitForAll]RecoveryModel'
                 PsDscRunAsCredential = $Admincreds

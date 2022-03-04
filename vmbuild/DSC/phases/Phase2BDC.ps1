@@ -114,20 +114,20 @@
         }
         $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall"
 
-        WriteStatus NetworkDNS {
-            DependsOn = $nextDepend
-            Status    = "Setting Primary DNS, and DNS Forwarders"
-        }
-
-        DnsServerForwarder DnsServerForwarder {
-            DependsOn        = $nextDepend
-            IsSingleInstance = 'Yes'
-            IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
-            UseRootHint      = $true
-            EnableReordering = $true
-        }
-
-        $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
+        #WriteStatus NetworkDNS {
+        #    DependsOn = $nextDepend
+        #    Status    = "Setting Primary DNS, and DNS Forwarders"
+        #}
+#
+        #DnsServerForwarder DnsServerForwarder {
+        #    DependsOn        = $nextDepend
+        #    IsSingleInstance = 'Yes'
+        #    IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+        #    UseRootHint      = $true
+        #    EnableReordering = $true
+        #}
+#
+        #$nextDepend = "[DnsServerForwarder]DnsServerForwarder"
         if ($ThisVM.InstallCA) {
 
             WriteStatus ADCS {
