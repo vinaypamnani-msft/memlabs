@@ -1944,19 +1944,24 @@ function Get-EnhancedSubnetList {
 
     $subnetListModified = @()
     $rolesToShow = @("Primary", "CAS", "Secondary")
+
     if ($configToCheck) {
-        $ListData = get-list2 -deployConfig $ConfigToCheck | Where-Object { $null -ne $_.SiteCode -and ($_.Role -in $rolesToShow) } | Group-Object -Property network | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } }
+        $FullList = get-list2 -deployConfig $ConfigToCheck
     }
     else {
-        $ListData = get-list -Type VM -Domain $domain | Where-Object { $null -ne $_.SiteCode -and ($_.Role -in $rolesToShow ) } | Group-Object -Property network | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } }
+        $FullList = get-list -Type VM -Domain $domain
     }
+
+    $ListData = $fullList | Where-Object { $null -ne $_.SiteCode -and ($_.Role -in $rolesToShow ) } | Group-Object -Property network | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } }
+
 
     foreach ($sb in $SubnetList) {
         if ($sb -eq "Internet" -or ($sb -eq "cluster")) {
+            $subnetListModified += $sb
             continue
         }
 
-        $entry = $sb
+        $entry = ""
         $SiteCodes = $ListData | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
 
         if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
@@ -1964,15 +1969,26 @@ function Get-EnhancedSubnetList {
             #$validEntryFound = $true
         }
         else {
-            $entry = "$($sb.PadRight($padding))[$($SiteCodes -join ",")]"
+            $entry = $entry + " [$($SiteCodes -join ",")]"
             #$subnetListModified += "$($sb.PadRight($padding))$($SiteCodes -join ",")"
         }
+        $machines = @()
+        $machines += $FullList | Where-Object { $_.Network -eq $sb }
+
         if ($ConfigToCheck) {
             if ($ConfigToCheck.vmOptions.Network -eq $sb) {
                 $entry = $entry + " <Current Default Network>"
             }
         }
-        $subnetListModified += $entry
+        if ($machines) {
+            $entry = $entry + " [$($machines.vmName -join ",")]"
+        }
+        if ($entry) {
+            $subnetListModified += "$($sb.PadRight($padding))$entry"
+        }
+        else {
+            $subnetListModified += $sb
+        }
     }
 
     return $subnetListModified
@@ -3578,8 +3594,53 @@ function Select-Options {
             }
             #$padding = 27 - ($i.ToString().Length)
             $padding = 26
+            $color = $null
             $TextToDisplay = Get-AdditionalInformation -item $item -data $value
-            Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay"
+            switch ($item) {
+                "vmName" {
+                    $color = "DarkYellow"
+                }
+                "Role" {
+                    $color = "DarkYellow"
+                }
+                "RemoteSQLVM"{
+                    $color = "DarkCyan"
+                }
+                "remoteContentLibVM"{
+                    $color = "DarkCyan"
+                }
+                "OtherNode"{
+                    $color = "DarkCyan"
+                }
+                "FileServerVM"{
+                    $color = "DarkCyan"
+                }
+                "SiteCode"{
+                    $color = "Yellow"
+                }
+                "ParentSiteCode"{
+                    $color = "Yellow"
+                }
+                "SqlVersion" {
+                    $color = "Cyan"
+                }
+                "SqlInstanceName" {
+                    $color = "Cyan"
+                }
+                "SqlInstanceDir" {
+                    $color = "Cyan"
+                }
+
+            }
+            switch ($value) {
+                "True" {
+                    $color = "Green"
+                }
+                "False" {
+                    $color = "Red"
+                }
+            }
+            Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
         }
         $fakeNetwork = $null
         if ($isVM) {
