@@ -247,11 +247,11 @@ function Write-Exception {
     $parentFunctionName = (Get-PSCallStack)[1].FunctionName
     $msg = "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
     [void]$sb.AppendLine($msg)
-    Write-Host $msg -ForegroundColor Red
+    Write-Host2 $msg -ForegroundColor Red
 
     $msg = "`n=== Exception.ScriptStackTrace:`n"
     [void]$sb.AppendLine($msg)
-    Write-Host $msg -ForegroundColor Red
+    Write-Host2 $msg -ForegroundColor Red
     Write-Log -LogOnly $msg -Failure
 
     $msg = $ExceptionInfo.ScriptStackTrace
@@ -261,7 +261,7 @@ function Write-Exception {
 
     $msg = "`n=== Get-PSCallStack:`n"
     [void]$sb.AppendLine($msg)
-    Write-Host $msg -ForegroundColor Red
+    Write-Host2 $msg -ForegroundColor Red
     Write-Log -LogOnly $msg -Failure
 
     $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
@@ -271,7 +271,7 @@ function Write-Exception {
     if ($AdditionalInfo) {
         $msg = "`n=== Additional Information:`n"
         [void]$sb.AppendLine($msg)
-        Write-Host "$msg" -ForegroundColor Red
+        Write-Host2 "$msg" -ForegroundColor Red
         Write-Host "Dumped to $crashFile"
         Write-Log -LogOnly $msg -Failure
         Write-Log -LogOnly  "Dumped to $crashFile" -Failure
@@ -2211,6 +2211,7 @@ Function Set-PS7ProgressWidth {
 ####################
 ### DOT SOURCING ###
 ####################
+. $PSScriptRoot\common\Common.Colors.ps1
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
 . $PSScriptRoot\common\Common.Phases.ps1

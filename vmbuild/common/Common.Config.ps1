@@ -448,7 +448,7 @@ function Get-SQLAOConfig {
     $ClusterName = $PrimaryAO.ClusterName
     $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix, "")
 
-    $ServiceAccount =  $PrimaryAO.SqlServiceAccount
+    $ServiceAccount = $PrimaryAO.SqlServiceAccount
     $AgentAccount = $PrimaryAO.SqlAgentAccount
 
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
@@ -463,12 +463,12 @@ function Get-SQLAOConfig {
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $vm.AGIPAddress -Force
         }
     }
-    if (-not ($PrimaryAO.ClusterIPAddress)){
+    if (-not ($PrimaryAO.ClusterIPAddress)) {
         #throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
     }
 
     $config = [PSCustomObject]@{
-        GroupName                  = $ClusterName+"Group"
+        GroupName                  = $ClusterName + "Group"
         GroupMembers               = @("$($PrimaryAO.vmName)$", "$($SecondAO)$", "$($ClusterName)$")
         GroupMembersFQ             = @("$($netbiosName + "\" + $PrimaryAO.vmName)$", "$($netbiosName + "\" + $SecondAO)$", "$($netbiosName + "\" + $ClusterName)$")
         SqlServiceAccount          = $ServiceAccount
@@ -1427,12 +1427,12 @@ function Test-InProgress {
 
     if ($InProgessVMs.Count -gt 0) {
         Write-Host
-        write-host -ForegroundColor Blue "*************************************************************************************************************************************"
-        write-host -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
+        write-host2 -ForegroundColor Blue "*************************************************************************************************************************************"
+        write-host2 -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
         write-log "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
         write-host
-        write-host -ForegroundColor White "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
-        write-host -ForegroundColor Blue "*************************************************************************************************************************************"
+        write-host2 -ForegroundColor Snow "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
+        write-host2 -ForegroundColor Blue "*************************************************************************************************************************************"
         return $false
     }
 
@@ -1440,6 +1440,49 @@ function Test-InProgress {
 
 }
 
+Function Write-ColorizedBrackets {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string] $text,
+        [Parameter()]
+        [string] $ForegroundColor
+    )
+    while (-not [string]::IsNullOrWhiteSpace($text)) {
+        #write-host $text
+        $indexLeft = $text.IndexOf('[')
+        $indexRight = $text.IndexOf(']')
+        if ($indexRight -eq -1 -and $indexLeft -eq -1) {
+            Write-Host2 -ForegroundColor $color "$text" -NoNewline
+            break
+        }
+        else {
+
+            if ($indexRight -eq -1) {
+                $indexRight = 100000000
+            }
+            if ($indexLeft -eq -1) {
+                $indexLeft = 10000000
+            }
+
+            if ($indexRight -lt $indexLeft) {
+                $text2Display = $text.Substring(0, $indexRight)
+                Write-Host2 -ForegroundColor $color "$text2Display" -NoNewline
+                Write-Host2 -ForegroundColor DimGray "]" -NoNewline
+                $text = $text.Substring($indexRight)
+                $text = $text.Substring(1)
+            }
+            if ($indexLeft -lt $indexRight) {
+                $text2Display = $text.Substring(0, $indexLeft)
+                Write-Host2 -ForegroundColor $color "$text2Display" -NoNewline
+                Write-Host2 -ForegroundColor DimGray "[" -NoNewline
+                $text = $text.Substring($indexLeft)
+                $text = $text.Substring(1)
+            }
+        }
+
+    }
+}
 Function Write-GreenCheck {
     [CmdletBinding()]
     param (
@@ -1453,45 +1496,14 @@ Function Write-GreenCheck {
     $CHECKMARK = ([char]8730)
     $text = $text.Replace("SUCCESS: ", "")
     Write-Host "  [" -NoNewLine
-    Write-Host -ForeGroundColor Green "$CHECKMARK" -NoNewline
+    Write-Host2 -ForeGroundColor LimeGreen "$CHECKMARK" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {
-        while (-not [string]::IsNullOrWhiteSpace($text)) {
-            #write-host $text
-            $indexLeft = $text.IndexOf('[')
-            $indexRight = $text.IndexOf(']')
-            if ($indexRight -eq -1 -and $indexLeft -eq -1) {
-                Write-Host -ForegroundColor $ForegroundColor "$text" -NoNewline
-                break
-            }
-            else {
+        Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text
 
-                if ($indexRight -eq -1) {
-                    $indexRight = 100000000
-                }
-                if ($indexLeft -eq -1) {
-                    $indexLeft = 10000000
-                }
-
-                if ($indexRight -lt $indexLeft) {
-                    $text2Display = $text.Substring(0, $indexRight)
-                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
-                    Write-Host -ForegroundColor DarkGray "]" -NoNewline
-                    $text = $text.Substring($indexRight)
-                    $text = $text.Substring(1)
-                }
-                if ($indexLeft -lt $indexRight) {
-                    $text2Display = $text.Substring(0, $indexLeft)
-                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
-                    Write-Host -ForegroundColor DarkGray "[" -NoNewline
-                    $text = $text.Substring($indexLeft)
-                    $text = $text.Substring(1)
-                }
-            }
-
-        }
-        #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
     }
+    #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
+
     else {
         Write-Host $text -NoNewline
     }
@@ -1512,45 +1524,14 @@ Function Write-RedX {
     )
     $text = $text.Replace("ERROR: ", "")
     Write-Host "  [" -NoNewLine
-    Write-Host -ForeGroundColor Red "x" -NoNewline
+    Write-Host2 -ForeGroundColor Red "x" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {
-        while (-not [string]::IsNullOrWhiteSpace($text)) {
-            #write-host $text
-            $indexLeft = $text.IndexOf('[')
-            $indexRight = $text.IndexOf(']')
-            if ($indexRight -eq -1 -and $indexLeft -eq -1) {
-                Write-Host -ForegroundColor $ForegroundColor "$text" -NoNewline
-                break
-            }
-            else {
+        Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text
 
-                if ($indexRight -eq -1) {
-                    $indexRight = 100000000
-                }
-                if ($indexLeft -eq -1) {
-                    $indexLeft = 10000000
-                }
-
-                if ($indexRight -lt $indexLeft) {
-                    $text2Display = $text.Substring(0, $indexRight)
-                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
-                    Write-Host -ForegroundColor DarkGray "]" -NoNewline
-                    $text = $text.Substring($indexRight)
-                    $text = $text.Substring(1)
-                }
-                if ($indexLeft -lt $indexRight) {
-                    $text2Display = $text.Substring(0, $indexLeft)
-                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
-                    Write-Host -ForegroundColor DarkGray "[" -NoNewline
-                    $text = $text.Substring($indexLeft)
-                    $text = $text.Substring(1)
-                }
-            }
-
-        }
-        #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
     }
+    #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
+
     else {
         Write-Host $text -NoNewline
     }
@@ -1578,43 +1559,10 @@ Function Write-OrangePoint {
         Write-Host "  " -NoNewline
     }
     Write-Host "[" -NoNewLine
-    Write-Host -ForeGroundColor Yellow "!" -NoNewline
+    Write-Host2 -ForeGroundColor Orange "!" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {
-        while (-not [string]::IsNullOrWhiteSpace($text)) {
-            #write-host $text
-            $indexLeft = $text.IndexOf('[')
-            $indexRight = $text.IndexOf(']')
-            if ($indexRight -eq -1 -and $indexLeft -eq -1) {
-                Write-Host -ForegroundColor $ForegroundColor "$text" -NoNewline
-                break
-            }
-            else {
-
-                if ($indexRight -eq -1) {
-                    $indexRight = 100000000
-                }
-                if ($indexLeft -eq -1) {
-                    $indexLeft = 10000000
-                }
-
-                if ($indexRight -lt $indexLeft) {
-                    $text2Display = $text.Substring(0, $indexRight)
-                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
-                    Write-Host -ForegroundColor DarkGray "]" -NoNewline
-                    $text = $text.Substring($indexRight)
-                    $text = $text.Substring(1)
-                }
-                if ($indexLeft -lt $indexRight) {
-                    $text2Display = $text.Substring(0, $indexLeft)
-                    Write-Host -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
-                    Write-Host -ForegroundColor DarkGray "[" -NoNewline
-                    $text = $text.Substring($indexLeft)
-                    $text = $text.Substring(1)
-                }
-            }
-
-        }
+        Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text
         #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
     }
     else {
@@ -1782,9 +1730,9 @@ Function Show-Summary {
 
     if (-not $Common.DevBranch) {
         Write-GreenCheck "Domain Admin account: " -NoNewLine
-        Write-Host -ForegroundColor Green "$($deployConfig.vmOptions.adminName)" -NoNewline
+        Write-Hos2t -ForegroundColor DeepPink "$($deployConfig.vmOptions.adminName)" -NoNewline
         Write-Host " Password: " -NoNewLine
-        Write-Host -ForegroundColor Green "$($Common.LocalAdmin.GetNetworkCredential().Password)"
+        Write-Host2 -ForegroundColor DeepPink "$($Common.LocalAdmin.GetNetworkCredential().Password)"
     }
 
     $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,

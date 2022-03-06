@@ -24,21 +24,21 @@ if (-not $InternalUseOnly.IsPresent) {
 
 $configDir = Join-Path $PSScriptRoot "config"
 
-Write-Host -ForegroundColor Cyan ""
-Write-Host -ForegroundColor Green "New-Lab Configuration generator:"
-Write-Host -ForegroundColor Cyan "You can use this tool to customize your MemLabs deployment."
-Write-Host -ForegroundColor Cyan "Press Ctrl-C to exit without saving."
-Write-Host -ForegroundColor Cyan ""
-Write-Host -ForegroundColor White "Select the " -NoNewline
-Write-Host -ForegroundColor Yellow "numbers or letters" -NoNewline
-Write-Host -ForegroundColor White " on the left side of the options menu to navigate."
+Write-Host2 -ForegroundColor Cyan ""
+Write-Host2 -ForegroundColor SpringGreen "New-Lab Configuration generator:"
+Write-Host2 -ForegroundColor DeepSkyBlue "You can use this tool to customize your MemLabs deployment."
+Write-Host2 -ForegroundColor DeepSkyBlue "Press Ctrl-C to exit without saving."
+Write-Host2 -ForegroundColor DeepSkyBlue ""
+Write-Host2 -ForegroundColor Snow "Select the " -NoNewline
+Write-Host2 -ForegroundColor Yellow "numbers or letters" -NoNewline
+Write-Host2 -ForegroundColor Snow " on the left side of the options menu to navigate."
 function write-help {
-    $color = [System.ConsoleColor]::DarkGray
-    Write-Host -ForegroundColor $color "Press " -NoNewline
-    Write-Host -ForegroundColor Yellow "[Enter]" -NoNewline
-    Write-Host -ForegroundColor $color " to skip a section Press " -NoNewline
-    Write-Host -ForegroundColor Yellow "[Ctrl-C]" -NoNewline
-    Write-Host -ForegroundColor $color " to exit without saving."
+    $color = "DarkGray"
+    Write-Host2 -ForegroundColor $color "Press " -NoNewline
+    Write-Host2 -ForegroundColor Yellow "[Enter]" -NoNewline
+    Write-Host2 -ForegroundColor $color " to skip a section or " -NoNewline
+    Write-Host2 -ForegroundColor Yellow "[Ctrl-C]" -NoNewline
+    Write-Host2 -ForegroundColor $color " to exit without saving."
 }
 
 function Write-Option {
@@ -55,49 +55,16 @@ function Write-Option {
     )
 
     if ($null -eq $color) {
-        $color = [System.ConsoleColor]::Gray
+        $color = "Gainsboro"
     }
     if ($null -eq $color2) {
-        $color2 = [System.ConsoleColor]::White
+        $color2 = "Snow"
     }
     write-host "[" -NoNewline
-    Write-Host -ForegroundColor $color2 $option -NoNewline
+    Write-Host2 -ForegroundColor $color2 $option -NoNewline
     Write-Host "] ".PadRight(4 - $option.Length) -NoNewLine
 
-    while (-not [string]::IsNullOrWhiteSpace($text)) {
-        #write-host $text
-        $indexLeft = $text.IndexOf('[')
-        $indexRight = $text.IndexOf(']')
-        if ($indexRight -eq -1 -and $indexLeft -eq -1) {
-            Write-Host -ForegroundColor $color "$text" -NoNewline
-            break
-        }
-        else {
-
-            if ($indexRight -eq -1) {
-                $indexRight = 100000000
-            }
-            if ($indexLeft -eq -1) {
-                $indexLeft = 10000000
-            }
-
-            if ($indexRight -lt $indexLeft) {
-                $text2Display = $text.Substring(0, $indexRight)
-                Write-Host -ForegroundColor $color "$text2Display" -NoNewline
-                Write-Host -ForegroundColor DarkGray "]" -NoNewline
-                $text = $text.Substring($indexRight)
-                $text = $text.Substring(1)
-            }
-            if ($indexLeft -lt $indexRight) {
-                $text2Display = $text.Substring(0, $indexLeft)
-                Write-Host -ForegroundColor $color "$text2Display" -NoNewline
-                Write-Host -ForegroundColor DarkGray "[" -NoNewline
-                $text = $text.Substring($indexLeft)
-                $text = $text.Substring(1)
-            }
-        }
-
-    }
+    Write-ColorizedBrackets -ForeGroundColor $color $text
     write-host
 }
 
@@ -111,9 +78,9 @@ function Select-ConfigMenu {
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%white%green" }
         }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%cyan"; "3" = "Load saved config from File%gray%green"; }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%Turquoise"; "3" = "Load saved config from File%LightSteelBlue%LightSteelBlue"; }
         if ($Global:common.Devbranch) {
-            $customOptions += [ordered]@{"4" = "Load TEST config from File%gray%yellow"; }
+            $customOptions += [ordered]@{"4" = "Load TEST config from File%DimGray%yellow"; }
         }
         $customOptions += [ordered]@{"*B3" = ""; }
         $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
@@ -121,8 +88,8 @@ function Select-ConfigMenu {
         $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
         $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
         $disk = Get-Volume -DriveLetter E
-        $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%cyan"; }
-        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%gray%green" ; "D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete)%gray%green"; "P" = "Show Passwords" }
+        $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%Turquoise"; }
+        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config%LightSteelBlue%LightSteelBlue" ; "D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete)%LightSteelBlue%LightSteelBlue"; "P" = "Show Passwords" }
 
         $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
 
@@ -130,7 +97,7 @@ function Select-ConfigMenu {
             $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow" }
         }
         Write-Host
-        Write-Host -ForegroundColor cyan "---  Create Config"
+        Write-Host2 -ForegroundColor Turquoise "---  Create Config"
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false
 
         write-Verbose "1 response $response"
@@ -157,7 +124,7 @@ function Select-ConfigMenu {
             "P" {
                 Write-Host
                 Write-Host "Password for all accounts is: " -NoNewline
-                Write-Host -foregroundColor Green "$($Global:Common.LocalAdmin.GetNetworkCredential().Password)"
+                Write-Host2 -foregroundColor SpringGreen "$($Global:Common.LocalAdmin.GetNetworkCredential().Password)"
                 Write-Host
                 get-list -type vm | Where-Object { $_.Role -eq "DC" } | Format-Table domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
             }
@@ -182,7 +149,7 @@ function Select-DomainMenu {
 
     if ($domainList.Count -eq 0) {
         Write-Host
-        Write-Host -ForegroundColor Red "No Domains found. Please delete VM's manually from hyper-v"
+        Write-Host2 -ForegroundColor FireBrick "No Domains found. Please delete VM's manually from hyper-v"
 
         return
     }
@@ -205,12 +172,12 @@ function Select-DomainMenu {
         #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
 
         $customOptions = [ordered]@{
-            "*d1" = "---  VM Management%cyan";
+            "*d1" = "---  VM Management%Turquoise";
             "1"   = "Start VMs in domain%white%green";
             "2"   = "Stop VMs in domain%white%green";
             "3"   = "Compact all VHDX's in domain (requires domain to be stopped)%white%green";
             "*S"  = "";
-            "*S1" = "---  Snapshot Management%cyan"
+            "*S1" = "---  Snapshot Management%Turquoise"
             "S"   = "Snapshot all VM's in domain%white%green"
         }
         $checkPoint = $null
@@ -221,7 +188,7 @@ function Select-DomainMenu {
         if ($checkPoint) {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%white%green"; "X" = "Delete (merge) domain Snapshots%white%green" }
         }
-        $customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%cyan"; "D" = "Delete VMs in Domain%Yellow%Red" }
+        $customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%Turquoise"; "D" = "Delete VMs in Domain%Yellow%Red" }
         $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions
 
         write-Verbose "1 response $response"
@@ -252,7 +219,7 @@ function select-SnapshotDomain {
         [string] $domain
     )
     Write-Host
-    Write-Host -ForegroundColor Yellow "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
+    Write-Host2 -ForegroundColor Orange "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
     #Invoke-StopVMs -domain $domain
     Select-StopDomain -domain $domain
     get-SnapshotDomain -domain $domain
@@ -776,11 +743,11 @@ function Select-MainMenu {
     while ($true) {
         $global:StartOver = $false
         $preOptions = [ordered]@{}
-        $preOptions += [ordered]@{ "*G" = "---  Global Options%cyan%cyan"; "V" = "Global VM Options `t $(get-VMOptionsSummary)%gray%green" }
+        $preOptions += [ordered]@{ "*G" = "---  Global Options%Turquoise%Turquoise"; "V" = "Global VM Options `t $(get-VMOptionsSummary)%LightSteelBlue%LightSteelBlue" }
         if ($Global:Config.cmOptions) {
-            $preOptions += [ordered]@{"C" = "Global CM Options `t $(get-CMOptionsSummary)%gray%green" }
+            $preOptions += [ordered]@{"C" = "Global CM Options `t $(get-CMOptionsSummary)%LightSteelBlue%LightSteelBlue" }
         }
-        $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Virtual Machines%cyan%cyan" }
+        $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Virtual Machines%Turquoise%Turquoise" }
         $customOptions = [ordered]@{}
         #$customOptions += @{"3" = "Virtual Machines `t`t $(get-VMSummary)" }
 
@@ -796,7 +763,7 @@ function Select-MainMenu {
             #write-Option "$i" "$($name)"
         }
 
-        $customOptions += [ordered]@{ "N" = "New Virtual Machine%DarkGreen%Green"; "*D1" = ""; "*D" = "---  Deployment%cyan%cyan"; "!" = "Return to main menu%gray%green"; "S" = "Save Configuration and Exit%gray%green" }
+        $customOptions += [ordered]@{ "N" = "New Virtual Machine%DarkGreen%Green"; "*D1" = ""; "*D" = "---  Deployment%Turquoise%Turquoise"; "!" = "Return to main menu%LightSteelBlue%LightSteelBlue"; "S" = "Save Configuration and Exit%LightSteelBlue%LightSteelBlue" }
         if ($InternalUseOnly.IsPresent) {
             $customOptions += [ordered]@{ "D" = "Deploy Config%Green%Green" }
         }
@@ -1277,7 +1244,7 @@ function select-NewDomainName {
             if ($domain) {
                 if ((get-list -Type UniqueDomain) -contains $domain.ToLowerInvariant()) {
                     Write-Host
-                    Write-Host -ForegroundColor Red "Domain is already in use. Please use the Expand option to expand the domain"
+                    Write-Host2 -ForegroundColor FireBrick "Domain is already in use. Please use the Expand option to expand the domain"
                     continue
                 }
             }
@@ -1309,11 +1276,11 @@ function Select-NewDomainConfig {
     $valid = $false
     while ($valid -eq $false) {
 
-        $customOptions = [ordered]@{ "1" = "CAS and Primary%gray%green"; "2" = "Primary Site only%gray%green"; "3" = "Tech Preview (NO CAS)%red%green" ; "4" = "No ConfigMgr%yellow%green"; }
+        $customOptions = [ordered]@{ "1" = "CAS and Primary%LightSteelBlue%LightSteelBlue"; "2" = "Primary Site only%LightSteelBlue%LightSteelBlue"; "3" = "Tech Preview (NO CAS)%Tomato%Tomato" ; "4" = "No ConfigMgr%Tan%Tan"; }
         $response = $null
         while (-not $response) {
             Write-Host
-            Write-Host -ForegroundColor Yellow "Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
+            Write-Host2 -ForegroundColor Violet "Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
 
             $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions -test:$false
             #if ([string]::IsNullOrWhiteSpace($response)) {
@@ -1580,7 +1547,7 @@ function Show-ExistingNetwork {
 
     if ($domainList.Count -eq 0) {
         Write-Host
-        Write-Host -ForegroundColor Red "No Domains found. Please deploy a new domain"
+        Write-Host2 -ForegroundColor FireBrick "No Domains found. Please deploy a new domain"
 
         return
     }
@@ -1910,22 +1877,22 @@ function Select-Subnet {
 }
 
 function Show-SubnetNote {
-    $noteColor = "cyan"
-    $textColor = "gray"
-    $highlightColor = "darkyellow"
+    $noteColor = "Violet"
+    $textColor = "AntiqueWhite"
+    $highlightColor = "Chartreuse"
     #Get-PSCallStack | out-host
     Write-Host
-    write-host -ForegroundColor $noteColor "Note: " -NoNewline
-    write-host -foregroundcolor $textColor "You can only have 1 " -NoNewLine
-    write-host -ForegroundColor $highlightColor "Primary" -NoNewLine
-    write-host -ForegroundColor $textColor " or " -NoNewline
-    write-host -ForegroundColor $highlightColor "Secondary" -NoNewLine
-    write-host -ForegroundColor $textColor " server per " -NoNewline
-    write-host -ForegroundColor $highlightColor "subnet" -NoNewline
-    write-host -ForegroundColor $textColor "."
-    write-host -ForegroundColor $textColor "   MemLabs automatically configures this subnet as a Boundary Group for the specified SiteCode."
-    write-host -ForegroundColor $textColor "   This limitation exists to prevent overlapping Boundary Groups."
-    write-host -ForegroundColor $textColor "   Subnets without a siteserver do NOT automatically get added to any boundary groups."
+    write-host2 -ForegroundColor $noteColor "Note: " -NoNewline
+    write-host2 -foregroundcolor $textColor "You can only have 1 " -NoNewLine
+    write-host2 -ForegroundColor $highlightColor "Primary" -NoNewLine
+    write-host2 -ForegroundColor $textColor " or " -NoNewline
+    write-host2 -ForegroundColor $highlightColor "Secondary" -NoNewLine
+    write-host2 -ForegroundColor $textColor " server per " -NoNewline
+    write-host2 -ForegroundColor $highlightColor "subnet" -NoNewline
+    write-host2 -ForegroundColor $textColor "."
+    write-host2 -ForegroundColor $textColor "   MemLabs automatically configures this subnet as a Boundary Group for the specified SiteCode."
+    write-host2 -ForegroundColor $textColor "   This limitation exists to prevent overlapping Boundary Groups."
+    write-host2 -ForegroundColor $textColor "   Subnets without a siteserver do NOT automatically get added to any boundary groups."
 
 }
 
@@ -2072,7 +2039,7 @@ function Select-ExistingSubnets {
             }
             if ($subnetListModified.Length -eq 0) {
                 Write-Host
-                Write-Host -ForegroundColor Yellow "No valid subnets for the selected role exists in the domain. Please create a new subnet"
+                Write-Host2 -ForegroundColor Goldenrod "No valid subnets for the selected role exists in the domain. Please create a new subnet"
 
                 $response = "n"
             }
@@ -2205,10 +2172,10 @@ function Read-Host2 {
     if (-not $HideHelp.IsPresent) {
         write-help
     }
-    Write-Host -ForegroundColor Cyan $prompt -NoNewline
+    Write-Host2 -ForegroundColor SkyBlue $prompt -NoNewline
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
         Write-Host " [" -NoNewline
-        Write-Host -ForegroundColor yellow $currentValue -NoNewline
+        Write-Host2 -ForegroundColor PaleGoldenRod $currentValue -NoNewline
         Write-Host "]" -NoNewline
     }
     Write-Host " : " -NoNewline
@@ -2233,10 +2200,10 @@ function Read-Single {
     if (-not $HideHelp.IsPresent) {
         write-help
     }
-    Write-Host -ForegroundColor Cyan $prompt -NoNewline
+    Write-Host2 -ForegroundColor SkyBlue $prompt -NoNewline
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
         Write-Host " [" -NoNewline
-        Write-Host -ForegroundColor yellow $currentValue -NoNewline
+        Write-Host2 -ForegroundColor PaleGoldenRod $currentValue -NoNewline
         Write-Host "] " -NoNewline
     }
 
@@ -2261,10 +2228,10 @@ function Read-YesorNoWithTimeout {
     if (-not $HideHelp.IsPresent) {
         write-help
     }
-    Write-Host -ForegroundColor Cyan $prompt -NoNewline
+    Write-Host2 -ForegroundColor SkyBlue $prompt -NoNewline
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
         Write-Host " [" -NoNewline
-        Write-Host -ForegroundColor yellow $currentValue -NoNewline
+        Write-Host2 -ForegroundColor PaleGoldenRod $currentValue -NoNewline
         Write-Host "] " -NoNewline
     }
 
@@ -2315,8 +2282,8 @@ function Get-Menu {
     if ($null -ne $preOptions) {
         foreach ($item in $preOptions.keys) {
             $value = $preOptions."$($item)"
-            $color1 = "DarkGreen"
-            $color2 = "Green"
+            $color1 = "ForestGreen"
+            $color2 = "DarkSeaGreen"
 
             #Write-Host -ForegroundColor DarkGreen [$_] $value
             if (-not [String]::IsNullOrWhiteSpace($item)) {
@@ -2329,7 +2296,7 @@ function Get-Menu {
                     $color2 = $TextValue[2]
                 }
                 if ($item.StartsWith("*")) {
-                    write-host -ForeGroundColor $color1 $TextValue[0]
+                    write-host2 -ForeGroundColor $color1 $TextValue[0]
                     continue
                 }
                 Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
@@ -2351,8 +2318,8 @@ function Get-Menu {
         foreach ($item in $additionalOptions.keys) {
             $value = $additionalOptions."$($item)"
 
-            $color1 = "DarkGreen"
-            $color2 = "Green"
+            $color1 = "ForestGreen"
+            $color2 = "DarkSeaGreen"
 
             #Write-Host -ForegroundColor DarkGreen [$_] $value
             if (-not [String]::IsNullOrWhiteSpace($item)) {
@@ -2365,7 +2332,7 @@ function Get-Menu {
                     $color2 = $TextValue[2]
                 }
                 if ($item.StartsWith("*")) {
-                    write-host -ForeGroundColor $color1 $TextValue[0]
+                    write-host2 -ForeGroundColor $color1 $TextValue[0]
                     continue
                 }
                 Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
@@ -2530,9 +2497,9 @@ function get-ValidResponse {
             if ($additionalOptions) {
                 $validResponses += $additionalOptions.Keys | Where-Object { -not $_.StartsWith("*") }
             }
-            write-host -ForegroundColor Red "Invalid response '$response'.  " -NoNewline
+            write-host2 -ForegroundColor IndianRed "Invalid response '$response'.  " -NoNewline
             write-host "Valid Responses are: " -NoNewline
-            write-host -ForegroundColor Green "$($validResponses -join ",")"
+            write-host2 -ForegroundColor LimeGreen "$($validResponses -join ",")"
         }
         if ($TestBeforeReturn.IsPresent -and $responseValid) {
             $responseValid = Get-TestResult -SuccessOnError
@@ -3250,7 +3217,7 @@ function Get-AdditionalValidations {
         }
         "installMP" {
             if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -eq "Secondary") {
-                write-host -ForegroundColor Yellow "Can not install an MP for a secondary site"
+                write-host2 -ForegroundColor Orange "Can not install an MP for a secondary site"
                 $property.installMP = $false
             }
             $newName = Get-NewMachineName -vm $property
@@ -3289,9 +3256,9 @@ function Get-AdditionalValidations {
                 $NewSQLVM = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newSQLName }
                 if ($NewSQLVM) {
                     write-host
-                    write-host -ForegroundColor Red "Changing Sitecode would rename SQL VM to " -NoNewline
-                    write-host -ForegroundColor Yellow $($NewSQLVM.vmName) -NoNewline
-                    write-host -ForegroundColor Red " which already exists. Unable to change sitecode."
+                    write-host2 -ForegroundColor OrangeRed "Changing Sitecode would rename SQL VM to " -NoNewline
+                    write-host2 -ForegroundColor Gold $($NewSQLVM.vmName) -NoNewline
+                    write-host2 -ForegroundColor OrangeRed " which already exists. Unable to change sitecode."
                     $property.siteCode = $CurrentValue
                     return
                 }
@@ -3301,9 +3268,9 @@ function Get-AdditionalValidations {
             $NewSSName = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newName }
             if ($NewSSName) {
                 write-host
-                write-host -ForegroundColor Red "Changing Sitecode would rename VM to " -NoNewline
-                write-host -ForegroundColor Yellow $($NewSSName.vmName) -NoNewline
-                write-host -ForegroundColor Red " which already exists. Unable to change sitecode."
+                write-host2 -ForegroundColor OrangeRed "Changing Sitecode would rename VM to " -NoNewline
+                write-host2 -ForegroundColor Gold $($NewSSName.vmName) -NoNewline
+                write-host2 -ForegroundColor OrangeRed " which already exists. Unable to change sitecode."
                 $property.siteCode = $CurrentValue
                 return
             }
@@ -3598,46 +3565,46 @@ function Select-Options {
             $TextToDisplay = Get-AdditionalInformation -item $item -data $value
             switch ($item) {
                 "vmName" {
-                    $color = "DarkYellow"
+                    $color = "Gold"
                 }
                 "Role" {
-                    $color = "DarkYellow"
+                    $color = "Gold"
                 }
-                "RemoteSQLVM"{
-                    $color = "DarkCyan"
+                "RemoteSQLVM" {
+                    $color = "DodgerBlue"
                 }
-                "remoteContentLibVM"{
-                    $color = "DarkCyan"
+                "remoteContentLibVM" {
+                    $color = "DodgerBlue"
                 }
-                "OtherNode"{
-                    $color = "DarkCyan"
+                "OtherNode" {
+                    $color = "DodgerBlue"
                 }
-                "FileServerVM"{
-                    $color = "DarkCyan"
+                "FileServerVM" {
+                    $color = "DodgerBlue"
                 }
-                "SiteCode"{
-                    $color = "Yellow"
+                "SiteCode" {
+                    $color = "LightCoral"
                 }
-                "ParentSiteCode"{
-                    $color = "Yellow"
+                "ParentSiteCode" {
+                    $color = "LightCoral"
                 }
                 "SqlVersion" {
-                    $color = "Cyan"
+                    $color = "LightSeaGreen"
                 }
                 "SqlInstanceName" {
-                    $color = "Cyan"
+                    $color = "LightSeaGreen"
                 }
                 "SqlInstanceDir" {
-                    $color = "Cyan"
+                    $color = "LightSeaGreen"
                 }
 
             }
             switch ($value) {
                 "True" {
-                    $color = "Green"
+                    $color = "LightGreen"
                 }
                 "False" {
-                    $color = "Red"
+                    $color = "FireBrick"
                 }
             }
             Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
@@ -3655,8 +3622,8 @@ function Select-Options {
             foreach ($item in $additionalOptions.keys) {
                 $value = $additionalOptions."$($item)"
 
-                $color1 = "DarkGreen"
-                $color2 = "Green"
+                $color1 = "ForestGreen"
+                $color2 = "DarkSeaGreen"
 
                 #Write-Host -ForegroundColor DarkGreen [$_] $value
                 if (-not [String]::IsNullOrWhiteSpace($item)) {
@@ -3669,7 +3636,7 @@ function Select-Options {
                         $color2 = $TextValue[2]
                     }
                     if ($item.StartsWith("*")) {
-                        write-host -ForegroundColor $color1 $TextValue[0]
+                        write-host2 -ForegroundColor $color1 $TextValue[0]
                         continue
                     }
                     Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
@@ -3769,7 +3736,7 @@ function Select-Options {
                     }
 
                     if ($network -eq $global:config.vmOptions.network) {
-                        write-host -ForegroundColor Yellow "Not changing network as this is the default network."
+                        write-host2 -ForegroundColor Khaki "Not changing network as this is the default network."
                         continue MainLoop
                     }
                     if ($network) {
@@ -3803,7 +3770,7 @@ function Select-Options {
                 "siteCode" {
                     if ($property.role -eq "PassiveSite") {
                         write-host
-                        write-host -ForegroundColor Yellow "siteCode can not be manually modified on a Passive server."
+                        write-host2 -ForegroundColor Khaki "siteCode can not be manually modified on a Passive server."
                         continue MainLoop
                     }
                     if ($property.role -eq "DPMP") {
@@ -3827,11 +3794,11 @@ function Select-Options {
                 "role" {
                     if ($property.role -eq "PassiveSite") {
                         write-host
-                        write-host -ForegroundColor Yellow "role can not be manually modified on a Passive server. Please disable HA or delete the VM."
+                        write-host2 -ForegroundColor Khaki "role can not be manually modified on a Passive server. Please disable HA or delete the VM."
                         continue MainLoop
                     }
                     if (Get-RoleMenu -property $property -name $name -CurrentValue $value) {
-                        Write-Host -ForegroundColor Yellow "VirtualMachine object was re-created with new role. Taking you back to VM Menu."
+                        Write-Host2 -ForegroundColor Khaki "VirtualMachine object was re-created with new role. Taking you back to VM Menu."
                         # VM was deleted.. Lets get outta here.
                         return
                     }
@@ -4410,7 +4377,7 @@ function Add-NewVMForRole {
     }
     #Get-PSCallStack | out-host
     if (-not $Quiet) {
-        Write-Host -ForegroundColor Yellow "New Virtual Machine $machineName ($role) was added"
+        Write-Host2 -ForegroundColor BlueViolet "New Virtual Machine $machineName ($role) was added"
     }
     Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
     if ($ReturnMachineName) {
@@ -4579,14 +4546,14 @@ function Select-VirtualMachines {
                         $newValue = "Start"
                         while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                             Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                            $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%cyan%cyan"; "A" = "Add Additional Disk" }
+                            $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%Turquoise%Turquoise"; "A" = "Add Additional Disk" }
                             if ($null -eq $virtualMachine.additionalDisks) {
                             }
                             else {
                                 $customOptions += [ordered]@{"R" = "Remove Last Additional Disk" }
                             }
                             if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
-                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr%cyan"; "S" = "Configure SQL (Set local or remote [Standalone or Always-On] SQL)" }
+                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr%Turquoise"; "S" = "Configure SQL (Set local or remote [Standalone or Always-On] SQL)" }
                                 $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
                                 if ($PassiveNode) {
                                     $customOptions += [ordered]@{"H" = "Remove High Availibility (HA) - Removes the Passive Site Server" }
@@ -4598,35 +4565,35 @@ function Select-VirtualMachines {
                             else {
                                 if ($virtualMachine.Role -eq "DomainMember") {
                                     if (-not $virtualMachine.domainUser) {
-                                        $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User (This account will be made a local admin)%cyan"; "U" = "Add domain user as admin on this machine" }
+                                        $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User (This account will be made a local admin)%Turquoise"; "U" = "Add domain user as admin on this machine" }
                                     }
                                     else {
-                                        $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User%cyan"; "U" = "Remove domainUser from this machine" }
+                                        $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User%Turquoise"; "U" = "Remove domainUser from this machine" }
                                     }
                                 }
                                 if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not ($virtualMachine.Role -in ("DC", "BDC)"))) {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         if ($virtualMachine.Role -eq "Secondary") {
-                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Use Full SQL for Secondary Site" }
+                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%Turquoise"; "S" = "Use Full SQL for Secondary Site" }
                                         }
                                         else {
-                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "S" = "Add SQL" }
+                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%Turquoise"; "S" = "Add SQL" }
                                         }
                                     }
                                     else {
                                         if ($virtualMachine.Role -eq "Secondary") {
-                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
+                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%Turquoise"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
                                         }
                                         else {
                                             if ($virtualMachine.Role -ne "SQLAO") {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%cyan"; "X" = "Remove SQL" }
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%Turquoise"; "X" = "Remove SQL" }
                                             }
                                         }
                                     }
                                 }
                             }
 
-                            $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%cyan"; "D" = "Delete this VM%Red%Red" }
+                            $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%Turquoise"; "D" = "Delete this VM%Red%Red" }
                             $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $i -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
                             if (([string]::IsNullOrEmpty($newValue))) {
                                 return
@@ -4787,7 +4754,7 @@ function Select-VirtualMachines {
                                     foreach ($passiveVM in $PassiveVMs) {
                                         if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
                                             Write-Host
-                                            write-host -ForegroundColor Yellow "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
+                                            write-host2 -ForegroundColor Khaki "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
                                             $removeVM = $false
                                         }
                                     }
@@ -4797,7 +4764,7 @@ function Select-VirtualMachines {
                                     foreach ($SQLAOVM in $SQLAOVMs) {
                                         if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
                                             Write-Host
-                                            write-host -ForegroundColor Yellow "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
+                                            write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
                                             $removeVM = $false
                                         }
                                     }
@@ -4806,7 +4773,7 @@ function Select-VirtualMachines {
                             if ($virtualMachine.role -eq "SQLAO") {
                                 if (-not ($virtualMachine.OtherNode)) {
                                     Write-Host
-                                    write-host -ForegroundColor Yellow "This VM is Secondary node in a SQLAO cluster. Please delete the Primary node to remove both VMs"
+                                    write-host2 -ForegroundColor Khaki "This VM is Secondary node in a SQLAO cluster. Please delete the Primary node to remove both VMs"
                                     $removeVM = $false
                                 }
                                 else {
@@ -4953,7 +4920,7 @@ do {
         $global:StartOver = $false
         $return.DeployNow = Select-MainMenu
         if ($global:StartOver -eq $true) {
-            Write-Host -ForegroundColor Yellow "Saving Configuration... use ""!"" to return."
+            Write-Host2 -ForegroundColor MediumAquamarine "Saving Configuration... use ""!"" to return."
             $Global:SavedConfig = $global:config
             Write-Host
             break
@@ -4970,15 +4937,15 @@ do {
         }
         else {
             if ($return.DeployNow -eq $false) {
-                write-host -ForegroundColor Red "Configuration is not valid. Saving is not advised. Proceed with caution. Hit CTRL-C to exit.`r`n"
+                write-host2 -ForegroundColor Firebrick "Configuration is not valid. Saving is not advised. Proceed with caution. Hit CTRL-C to exit.`r`n"
                 Write-ValidationMessages -TestObject $c
                 $valid = $true
                 break
             }
             else {
-                Write-Host -ForegroundColor Red "Config file is not valid:`r`n"
+                Write-Host2 -ForegroundColor Red "Config file is not valid:`r`n"
                 Write-ValidationMessages -TestObject $c
-                Write-Host -ForegroundColor Red "`r`nPlease fix the problem(s), or hit CTRL-C to exit."
+                Write-Host2 -ForegroundColor Red "`r`nPlease fix the problem(s), or hit CTRL-C to exit."
             }
         }
 
@@ -4987,7 +4954,7 @@ do {
             Write-Host
             Write-verbose "13"
             if ($return.DeployNow -eq $true) {
-                Write-Host -ForegroundColor Green "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
+                Write-Host2 -ForegroundColor LightGreen "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
             }
             Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
             $response = Read-YesorNoWithTimeout -Prompt "Everything correct? (Y/n)" -HideHelp
@@ -5017,7 +4984,7 @@ if (-not $InternalUseOnly.IsPresent) {
 if ($InternalUseOnly.IsPresent) {
     $domainExists = Get-List -Type VM -DomainName $Global:Config.vmOptions.domainName
     if ($domainExists -and ($return.DeployNow)) {
-        write-host -ForegroundColor Green "This configuration will make modifications to $($Global:Config.vmOptions.DomainName)"
+        write-host2 -ForegroundColor SpringGreen "This configuration will make modifications to $($Global:Config.vmOptions.DomainName)"
         Write-OrangePoint -NoIndent "Without a snapshot, if something fails it may not be possible to recover"
         $response = Read-YesorNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (Y/n)" -HideHelp
         if ([String]::IsNullOrWhiteSpace($response) -or $response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes" ) {

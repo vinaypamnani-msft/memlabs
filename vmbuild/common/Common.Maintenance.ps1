@@ -90,21 +90,21 @@ function Show-FailedDomains {
     $longest = 128
     $longestMinus2 = 126
     Write-Host
-    Write-Host "#".PadRight($longest, "#") -ForegroundColor Yellow
-    Write-Host "# DC Maintenance failed for below domains. This may be because the passwords for the required accounts (listed below) expired. #" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longestMinus2, " ") "#"
+    Write-Host2 "#".PadRight($longest, "#") -ForegroundColor Yellow
+    Write-Host2 "# DC Maintenance failed for below domains. This may be because the passwords for the required accounts (listed below) expired. #" -ForegroundColor Yellow
+    Write-Host2 "#".PadRight($longestMinus2, " ") "#"
     foreach ($line in $dcList) { Write-Host "# $line".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow }
-    Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longestMinus2, " ") "#"
-    Write-Host "# 1. Logon to the affected DC's using Hyper-V console.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# 2. Launch 'AD Users and Computers', and reset the account for the above listed accounts to the desiredPassword.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# 3. Run 'VMBuild.cmd' again.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# If the password hasn't expired/changed, re-run VMBuild.cmd in case there was a transient issue.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# If the issue persists, please report it.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longest, "#") -ForegroundColor Yellow
+    Write-Host2 "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host2 "# Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host2 "#".PadRight($longestMinus2, " ") "#"
+    Write-Host2 "# 1. Logon to the affected DC's using Hyper-V console.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host2 "# 2. Launch 'AD Users and Computers', and reset the account for the above listed accounts to the desiredPassword.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host2 "# 3. Run 'VMBuild.cmd' again.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host2 "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host2 "# If the password hasn't expired/changed, re-run VMBuild.cmd in case there was a transient issue.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host2 "# If the issue persists, please report it.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host2 "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
+    Write-Host2 "#".PadRight($longest, "#") -ForegroundColor Yellow
 
 }
 
