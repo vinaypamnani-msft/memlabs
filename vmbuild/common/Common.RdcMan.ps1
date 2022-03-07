@@ -274,7 +274,7 @@ function New-RDCManFileFromHyperV {
 
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
-            Write-Log "Killing RDCMan, and Deleting $rdcmanfile."
+            Write-Log "Regenerating new MEMLabs.RDG: stopping RDCMan.exe, and Deleting $rdcmanfile."
             Get-Process -Name rdcman -ea Ignore | Stop-Process
             Start-Sleep 1
             Remove-Item $rdcmanfile | out-null
