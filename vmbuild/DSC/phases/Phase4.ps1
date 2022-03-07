@@ -46,50 +46,54 @@ configuration Phase4
         }
 
 
-        $backupSolutionURL  = $ThisVM.thisParams.backupSolutionURL
+        $backupSolutionURL = $ThisVM.thisParams.backupSolutionURL
         $SQLSysAdminAccounts = $ThisVM.thisParams.SQLSysAdminAccounts
         WriteStatus SQLInstallStarted {
             Status = "Preparing to Install SQL '$($ThisVM.sqlVersion)'"
         }
 
         $nextDepend = '[WriteStatus]SQLInstallStarted'
-        if ($sqlUpdateEnabled) {
+        if (-not ($ThisVM.Hidden)) {
+            if ($sqlUpdateEnabled) {
 
-            WriteStatus DownloadSQLCU {
+                WriteStatus DownloadSQLCU {
+                    DependsOn = $nextDepend
+                    Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
+                }
+
+                DownloadFile DownloadSQLCU {
+                    DownloadUrl = $sqlCUURL
+                    FilePath    = $sqlCuDownloadPath
+                    Ensure      = "Present"
+                    DependsOn   = $nextDepend
+                }
+                $nextDepend = '[DownloadFile]DownloadSQLCU'
+            }
+
+
+            WriteStatus InstallSQL {
                 DependsOn = $nextDepend
-                Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
+                Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
             }
 
-            DownloadFile DownloadSQLCU {
-                DownloadUrl = $sqlCUURL
-                FilePath    = $sqlCuDownloadPath
-                Ensure      = "Present"
-                DependsOn   = $nextDepend
+            SqlSetup InstallSQL {
+                InstanceName        = $SQLInstanceName
+                InstanceDir         = $SQLInstanceDir
+                SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
+                Features            = 'SQLENGINE,CONN,BC'
+                SourcePath          = 'C:\temp\SQL'
+                UpdateEnabled       = $sqlUpdateEnabled
+                UpdateSource        = "C:\temp\SQL_CU"
+                SQLSysAdminAccounts = $SQLSysAdminAccounts
+                TcpEnabled          = $true
+                UseEnglish          = $true
+                DependsOn           = '[WriteStatus]InstallSQL'
             }
-            $nextDepend = '[DownloadFile]DownloadSQLCU'
-        }
-
-        WriteStatus InstallSQL {
-            DependsOn = $nextDepend
-            Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
-        }
-
-        SqlSetup InstallSQL {
-            InstanceName        = $SQLInstanceName
-            InstanceDir         = $SQLInstanceDir
-            SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
-            Features            = 'SQLENGINE,CONN,BC'
-            SourcePath          = 'C:\temp\SQL'
-            UpdateEnabled       = $sqlUpdateEnabled
-            UpdateSource        = "C:\temp\SQL_CU"
-            SQLSysAdminAccounts = $SQLSysAdminAccounts
-            TcpEnabled          = $true
-            UseEnglish          = $true
-            DependsOn           = '[WriteStatus]InstallSQL'
+            $nextDepend = "[SqlSetup]InstallSQL"
         }
 
         WriteStatus AddSQLPermissions {
-            DependsOn = "[SqlSetup]InstallSQL"
+            DependsOn = $nextDepend
             Status    = "Adding SQL logins and roles"
         }
 
@@ -108,7 +112,7 @@ configuration Phase4
                 LoginType               = 'WindowsUser'
                 InstanceName            = $SQLInstanceName
                 LoginMustChangePassword = $false
-                DependsOn               = '[WriteStatus]AddSQLPermissions'
+                DependsOn               = $nextDepend
             }
             $sqlDependency += "[SqlLogin]AddSqlLogin$i"
         }
@@ -138,102 +142,105 @@ configuration Phase4
         }
 
         $nextDepend = '[ChangeSqlInstancePort]SqlInstancePort'
-        if ($ThisVM.SqlServiceAccount) {
 
-            WriteStatus SetSQLSPN {
-                DependsOn = $nextDepend
-                Status    = "Removing SQL SPNs for $($thisvm.VmName + "$")"
-            }
+        if (-not ($thisVM.Hidden)) {
+            if ($ThisVM.SqlServiceAccount) {
 
-            $SPNs = @()
-            $SPNs += "MSSQLSvc/" + $thisvm.VmName
-            $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName
-            $port = $ThisVM.thisParams.SqlPort
-            if ($SQLInstanceName -ne "MSSQLSERVER") {
-                $SPNs += "MSSQLSvc/" + $thisvm.VmName + ":" + $SQLInstanceName
-                $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName + ":" + $SQLInstanceName
-
-            }
-            $SPNs += "MSSQLSvc/" + $thisvm.VmName + ":" + $port
-            $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName + ":" + $port
-
-            # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
-            $spnDependency = @($nextDepend)
-            $i = 0
-            foreach ($spn in $SPNs ) {
-                $i++
-
-                ADServicePrincipalName2 "spn$i" {
-                    Ensure               = 'Absent'
-                    ServicePrincipalName = $spn
-                    Account              = $thisvm.VmName + "$"
-                    Dependson            = $nextDepend
+                WriteStatus SetSQLSPN {
+                    DependsOn = $nextDepend
+                    Status    = "Removing SQL SPNs for $($thisvm.VmName + "$")"
                 }
 
-                $spnDependency += "[ADServicePrincipalName2]spn$i"
-            }
+                $SPNs = @()
+                $SPNs += "MSSQLSvc/" + $thisvm.VmName
+                $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName
+                $port = $ThisVM.thisParams.SqlPort
+                if ($SQLInstanceName -ne "MSSQLSERVER") {
+                    $SPNs += "MSSQLSvc/" + $thisvm.VmName + ":" + $SQLInstanceName
+                    $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName + ":" + $SQLInstanceName
 
-            [System.Management.Automation.PSCredential]$sqlUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)", $Admincreds.Password)
-            [System.Management.Automation.PSCredential]$sqlAgentUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)", $Admincreds.Password)
+                }
+                $SPNs += "MSSQLSvc/" + $thisvm.VmName + ":" + $port
+                $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName + ":" + $port
+
+                # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
+                $spnDependency = @($nextDepend)
+                $i = 0
+                foreach ($spn in $SPNs ) {
+                    $i++
+
+                    ADServicePrincipalName2 "spn$i" {
+                        Ensure               = 'Absent'
+                        ServicePrincipalName = $spn
+                        Account              = $thisvm.VmName + "$"
+                        Dependson            = $nextDepend
+                    }
+
+                    $spnDependency += "[ADServicePrincipalName2]spn$i"
+                }
+
+                [System.Management.Automation.PSCredential]$sqlUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)", $Admincreds.Password)
+                [System.Management.Automation.PSCredential]$sqlAgentUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)", $Admincreds.Password)
 
 
-            WriteStatus SetSQLUser {
-                DependsOn =  $spnDependency
-                Status    = "SQL setting new startup user to $($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)"
-            }
-            #Change SQL Service Account
-            SqlServiceAccount 'SetServiceAccountSQL_User' {
-                ServerName     = $thisvm.VmName
-                InstanceName   = $SQLInstanceName
-                ServiceType    = 'DatabaseEngine'
-                ServiceAccount = $sqlUser
-                RestartService = $true
-                DependsOn      = $spnDependency
-                Force          = $false
-            }
-            WriteStatus SetSQLAgentUser {
-                DependsOn =  '[SqlServiceAccount]SetServiceAccountSQL_User'
-                Status    = "SQL setting new agent user to $($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)"
-            }
-            #Change SQL Service Account
-            SqlServiceAccount 'SetServiceAccountAgent_User' {
-                ServerName     = $thisvm.VmName
-                InstanceName   = $SQLInstanceName
-                ServiceType    = 'SQLServerAgent'
-                ServiceAccount = $sqlAgentUser
-                RestartService = $true
-                DependsOn      = '[SqlServiceAccount]SetServiceAccountSQL_User'
-            }
+                WriteStatus SetSQLUser {
+                    DependsOn = $spnDependency
+                    Status    = "SQL setting new startup user to $($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)"
+                }
+                #Change SQL Service Account
+                SqlServiceAccount 'SetServiceAccountSQL_User' {
+                    ServerName     = $thisvm.VmName
+                    InstanceName   = $SQLInstanceName
+                    ServiceType    = 'DatabaseEngine'
+                    ServiceAccount = $sqlUser
+                    RestartService = $true
+                    DependsOn      = $spnDependency
+                    Force          = $false
+                }
+                WriteStatus SetSQLAgentUser {
+                    DependsOn = '[SqlServiceAccount]SetServiceAccountSQL_User'
+                    Status    = "SQL setting new agent user to $($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)"
+                }
+                #Change SQL Service Account
+                SqlServiceAccount 'SetServiceAccountAgent_User' {
+                    ServerName     = $thisvm.VmName
+                    InstanceName   = $SQLInstanceName
+                    ServiceType    = 'SQLServerAgent'
+                    ServiceAccount = $sqlAgentUser
+                    RestartService = $true
+                    DependsOn      = '[SqlServiceAccount]SetServiceAccountSQL_User'
+                    Force          = $false
+                }
 
-            $agentName = if ($SQLInstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + $SQLInstanceName }
+                $agentName = if ($SQLInstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + $SQLInstanceName }
 
-            WriteStatus SetSQLAgentStartup {
-                DependsOn =  '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
-                Status    = "Setting $agentName Service to Automatic Start"
-            }
-            Service 'ChangeStartupAgent' {
-                Name        = $agentName
-                StartupType = "Automatic"
-                State       = "Running"
-                DependsOn   = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
-            }
-            $nextDepend = "[Service]ChangeStartupAgent"
+                WriteStatus SetSQLAgentStartup {
+                    DependsOn = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
+                    Status    = "Setting $agentName Service to Automatic Start"
+                }
+                Service 'ChangeStartupAgent' {
+                    Name        = $agentName
+                    StartupType = "Automatic"
+                    State       = "Running"
+                    DependsOn   = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
+                }
+                $nextDepend = "[Service]ChangeStartupAgent"
 
+            }
+            else {
+                WriteStatus ChangeToLocalSystem {
+                    DependsOn = $nextDepend
+                    Status    = "Configuring SQL services to use LocalSystem"
+                }
+
+                ChangeSQLServicesAccount ChangeToLocalSystem {
+                    SQLInstanceName = $SQLInstanceName
+                    Ensure          = "Present"
+                    DependsOn       = $nextDepend
+                }
+                $nextDepend = '[ChangeSQLServicesAccount]ChangeToLocalSystem'
+            }
         }
-        else {
-            WriteStatus ChangeToLocalSystem {
-                DependsOn = $nextDepend
-                Status    = "Configuring SQL services to use LocalSystem"
-            }
-
-            ChangeSQLServicesAccount ChangeToLocalSystem {
-                SQLInstanceName = $SQLInstanceName
-                Ensure          = "Present"
-                DependsOn       = $nextDepend
-            }
-            $nextDepend = '[ChangeSQLServicesAccount]ChangeToLocalSystem'
-        }
-
 
         WriteStatus DownloadBackupSolution {
             DependsOn = $nextDepend
@@ -287,7 +294,7 @@ configuration Phase4
             TestFilePath     = $AgentJobTest
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
-            DependsOn        =  $nextDepend
+            DependsOn        = $nextDepend
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 

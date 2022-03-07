@@ -1448,7 +1448,9 @@ Function Write-ColorizedBrackets {
         [Parameter()]
         [string] $text,
         [Parameter()]
-        [string] $ForegroundColor
+        [string] $ForegroundColor,
+        [Parameter()]
+        [string] $BracketColor = "DimGray"
     )
     while (-not [string]::IsNullOrWhiteSpace($text)) {
         #write-host $text
@@ -1470,14 +1472,14 @@ Function Write-ColorizedBrackets {
             if ($indexRight -lt $indexLeft) {
                 $text2Display = $text.Substring(0, $indexRight)
                 Write-Host2 -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
-                Write-Host2 -ForegroundColor DimGray "]" -NoNewline
+                Write-Host2 -ForegroundColor $BracketColor "]" -NoNewline
                 $text = $text.Substring($indexRight)
                 $text = $text.Substring(1)
             }
             if ($indexLeft -lt $indexRight) {
                 $text2Display = $text.Substring(0, $indexLeft)
                 Write-Host2 -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
-                Write-Host2 -ForegroundColor DimGray "[" -NoNewline
+                Write-Host2 -ForegroundColor $BracketColor "[" -NoNewline
                 $text = $text.Substring($indexLeft)
                 $text = $text.Substring(1)
             }

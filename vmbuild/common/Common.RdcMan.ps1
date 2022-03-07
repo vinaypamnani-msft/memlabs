@@ -542,10 +542,24 @@ function New-RDCManFileFromHyperV {
     Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
-        Write-Log "Killing RDCMan, if necessary and updating $rdcmanfile." -Success
-        Get-Process -Name rdcman -ea Ignore | Stop-Process
-        Start-Sleep 1
-        $existing.save($rdcmanfile) | Out-Null
+        try {
+
+            $proc = ""
+            $proc = Get-Process -Name rdcman -ea Ignore | Select-Object -First 1
+            if ($proc) {
+                Get-Process -Name rdcman -ea Ignore | Stop-Process
+                $commandLine = $proc.CommandLine
+            }
+            Start-Sleep 1
+            $existing.save($rdcmanfile) | Out-Null
+            Write-GreenCheck "Updated $rdcmanfile. Restarting the process if possible" -Success
+            if ($proc) {
+                Start-Process -WindowStyle Minimized $($commandLine.Trim())
+            }
+        }
+        catch {
+
+        }
     }
     else {
         Write-Log "No Changes. Not updating $rdcmanfile" -Success
