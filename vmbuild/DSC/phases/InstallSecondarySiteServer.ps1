@@ -132,14 +132,19 @@ $Install_Secondary = {
             try {
                 $Date = [DateTime]::Now.AddYears(30)
                 $FileSetting = New-CMInstallationSourceFile -CopyFromParentSiteServer
-                $SQLSetting = New-CMSqlServerSetting -CopySqlServerExpressOnSecondarySite -SqlServerServiceBrokerPort 4022 -SqlServerServicePort 1433
+
                 if ($SecondaryVM.sqlVersion) {
                     if ($SecondaryVM.sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
-                        $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -SqlServerServiceBrokerPort 4022 -SqlServerServicePort $SecondaryVM.thisParams.sqlPort
+                        # New-CMSqlServerSetting does not allow you to specify a port # when using full SQL
+                        #$SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -SqlServerServiceBrokerPort 4022 -SqlServerServicePort $SecondaryVM.thisParams.sqlPort
+                        $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -SqlServerServiceBrokerPort 4022
                     }
                     else {
-                        $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -InstanceName $SecondaryVM.sqlInstanceName -SqlServerServiceBrokerPort 4022 -SqlServerServicePort $SecondaryVM.thisParams.sqlPort
+                        #$SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -InstanceName $SecondaryVM.sqlInstanceName -SqlServerServiceBrokerPort 4022 -SqlServerServicePort $SecondaryVM.thisParams.sqlPort
+                        $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -InstanceName $SecondaryVM.sqlInstanceName -SqlServerServiceBrokerPort 4022
                     }
+                }else {
+                    $SQLSetting = New-CMSqlServerSetting -CopySqlServerExpressOnSecondarySite -SqlServerServiceBrokerPort 4022 -SqlServerServicePort 1433
                 }
 
                 New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `

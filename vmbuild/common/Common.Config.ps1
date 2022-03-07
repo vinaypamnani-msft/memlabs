@@ -692,6 +692,7 @@ function Get-SiteServerForSiteCode {
         [string] $type = "Name"
     )
     if (-not $SiteCode) {
+        throw "SiteCode is NULL"
         return $null
     }
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
@@ -715,6 +716,7 @@ function Get-SiteServerForSiteCode {
             return $existingVMs | Select-Object -First 1
         }
     }
+    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode"
     return $null
 }
 

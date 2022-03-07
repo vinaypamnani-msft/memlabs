@@ -451,7 +451,7 @@ function Get-Phase4ConfigurationData {
     }
 
     $NumberOfNodesAdded = 0
-    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.SqlVersion -or $_.Role -eq "DC" }) {
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { ($_.SqlVersion -and -not ($_.Hidden)) -or $_.Role -eq "DC" }) {
 
         # Filter out workgroup machines
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
@@ -479,7 +479,7 @@ function Get-Phase5ConfigurationData {
         [object]$deployConfig
     )
 
-    $primaryNodes = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
+    $primaryNodes = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not ($_.hidden)  }
     $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
