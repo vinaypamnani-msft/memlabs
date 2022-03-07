@@ -1455,7 +1455,7 @@ Function Write-ColorizedBrackets {
         $indexLeft = $text.IndexOf('[')
         $indexRight = $text.IndexOf(']')
         if ($indexRight -eq -1 -and $indexLeft -eq -1) {
-            Write-Host2 -ForegroundColor $color "$text" -NoNewline
+            Write-Host2 -ForegroundColor $ForegroundColor "$text" -NoNewline
             break
         }
         else {
@@ -1469,14 +1469,14 @@ Function Write-ColorizedBrackets {
 
             if ($indexRight -lt $indexLeft) {
                 $text2Display = $text.Substring(0, $indexRight)
-                Write-Host2 -ForegroundColor $color "$text2Display" -NoNewline
+                Write-Host2 -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
                 Write-Host2 -ForegroundColor DimGray "]" -NoNewline
                 $text = $text.Substring($indexRight)
                 $text = $text.Substring(1)
             }
             if ($indexLeft -lt $indexRight) {
                 $text2Display = $text.Substring(0, $indexLeft)
-                Write-Host2 -ForegroundColor $color "$text2Display" -NoNewline
+                Write-Host2 -ForegroundColor $ForegroundColor "$text2Display" -NoNewline
                 Write-Host2 -ForegroundColor DimGray "[" -NoNewline
                 $text = $text.Substring($indexLeft)
                 $text = $text.Substring(1)
