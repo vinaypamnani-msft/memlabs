@@ -178,7 +178,7 @@ try {
         if ($testConfigResult.Valid -or $phasedRun) {
             # Skip validation in phased run
             $deployConfig = $testConfigResult.DeployConfig
-            Write-GreenCheck "Configuration validated successfully." -ForeGroundColor Green
+            Write-GreenCheck "Configuration validated successfully." -ForeGroundColor SpringGreen
         }
         else {
             Write-Host

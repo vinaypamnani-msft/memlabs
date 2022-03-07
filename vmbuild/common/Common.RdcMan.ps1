@@ -544,7 +544,7 @@ function New-RDCManFileFromHyperV {
     if ($shouldSave) {
         try {
 
-            $proc = ""
+            $proc = $null
             $proc = Get-Process -Name rdcman -ea Ignore | Select-Object -First 1
             if ($proc) {
                 Get-Process -Name rdcman -ea Ignore | Stop-Process
@@ -552,17 +552,17 @@ function New-RDCManFileFromHyperV {
             }
             Start-Sleep 1
             $existing.save($rdcmanfile) | Out-Null
-            Write-GreenCheck "Updated $rdcmanfile. Restarting the process if possible" -Success
+            Write-GreenCheck "Updated $rdcmanfile. Restarting the process if possible" -ForegroundColor ForestGreen
             if ($proc) {
-                Start-Process -WindowStyle Minimized $($commandLine.Trim())
+                Start-Process -WindowStyle Minimized $("C:\tools\RDCMan.exe") -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             }
         }
         catch {
-
+            Write-RedX "Could not update $rdcmanfile."
         }
     }
     else {
-        Write-Log "No Changes. Not updating $rdcmanfile" -Success
+        Write-Log "No Changes. Not updating $rdcmanfile" -Success -Verbose
     }
 }
 

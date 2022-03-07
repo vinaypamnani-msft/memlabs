@@ -286,7 +286,7 @@ function Wait-Phase {
                 }
                 else {
                     if ($line.StartsWith("SUCCESS")) {
-                        Write-GreenCheck $line -ForegroundColor Green
+                        Write-GreenCheck $line -ForegroundColor ForestGreen
                     }
                     else {
                         Write-GreenCheck $line -ForegroundColor White
