@@ -639,7 +639,7 @@ function Add-SwitchAndDhcp {
         Write-Log "DHCP Service could not be started." -Failure
         return $false
     }
-    Write-Log "Creating/verifying whether a Hyper-V switch and DHCP Scopes for '$NetworkName' network exists." -Activity
+    Write-Log "Creating/verifying Hyper-V switch and DHCP Scopes for '$NetworkName' network." -Activity
 
     $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName
     if (-not $switch) {
