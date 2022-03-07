@@ -34,11 +34,16 @@ function Convert-RGBtoAnsi {
         [int]$Blue
     )
     Process {
+        if ($Global:Common.PS7) {
+            $psstyle.Foreground.FromRgb($Red, $Green, $Blue)
+        }else {
+            "$([char]27)[38;2;{0};{1};{2}m" -f $red,$green,$blue
+        }
         <#
         For legacy powershell session you could create a string like this:
         "$([char]27)[38;2;{0};{1};{2}m" -f $red,$green,$blue
         #>
-        $psstyle.Foreground.FromRgb($Red, $Green, $Blue)
+        #$psstyle.Foreground.FromRgb($Red, $Green, $Blue)
     }
 }
 
@@ -50,12 +55,14 @@ function Write-Host2 {
         [string] ${ForegroundColor}
     )
 
-    if ($ForegroundColor) {
-        $ansi = Get-RGB $ForegroundColor | Convert-RGBtoAnsi
-        if ($ansi) {
-            $Object = "$($ansi)$Object$($PSStyle.Reset)"
+    #if ($Global:Common.PS7) {
+        if ($ForegroundColor) {
+            $ansi = Get-RGB $ForegroundColor | Convert-RGBtoAnsi
+            if ($ansi) {
+                $Object = "$($ansi)$Object$($PSStyle.Reset)"
+            }
         }
-    }
+    #}
     if ($NoNewLine) {
         Write-Host $Object -NoNewline
     }
