@@ -50,7 +50,7 @@ function Save-RdcManSettignsFile {
         Write-Log "Could not locate $templatefile" -Failure
         return
     }
-
+    $modified = $false
     # Gets the blank template, or returns the existing settings xml if available.
     $file = $template
     Write-Verbose "Checking for $existingfile"
@@ -61,6 +61,7 @@ function Save-RdcManSettignsFile {
     }
     else {
         write-verbose "Using Template file at $templatefile"
+        $modified = $true
     }
 
     $settings = $file.Settings
@@ -69,16 +70,27 @@ function Save-RdcManSettignsFile {
     $FilesToOpenFromTemplate = $template.Settings.FilesToOpen
 
     $found = $false
-
     #Always update the template so we can use it.
     if ($FilesToOpenFromTemplate.Item -eq "TEMPLATE") {
         $FilesToOpenFromTemplate.Item = $rdcmanfile
         $itemTemplate = $template.Settings.FilesToOpen.SelectSingleNode('./item')
-        $settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName = $env:Username
-        $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain = $env:ComputerName
-        $settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName = ($($env:ComputerName) + "\" + $($env:Username))
+        if ($settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName -ne $env:Username) {
+            $settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName = $env:Username
+            $modified = $true
+        }
+        if ( $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain -ne $env:ComputerName) {
+            $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain = $env:ComputerName
+            $modified = $true
+        }
+        if ($settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName -ne ($($env:ComputerName) + "\" + $($env:Username))) {
+            $settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName = ($($env:ComputerName) + "\" + $($env:Username))
+            $modified = $true
+        }
     }
-    $settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication = "None"
+    if ($settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication -ne "None") {
+        $settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication = "None"
+        $modified = $true
+    }
 
     #FilesToOpen is missing!?
     if ($null -eq $FilesToOpen) {
@@ -86,6 +98,7 @@ function Save-RdcManSettignsFile {
         $newFiles = $FilesToOpenFromTemplate.Clone()
         $FilesToOpen = $file.ImportNode($newFiles, $true)
         $settings.AppendChild($FilesToOpen)
+        $modified = $true
     }
 
     $FilesToOpenCount = 0
@@ -113,12 +126,14 @@ function Save-RdcManSettignsFile {
         $FilesToOpen = $file.ImportNode($newFiles, $true)
 
         $settings.AppendChild($FilesToOpen)
+        $modified = $true
     }
     elseif (-not $found) {
         Write-Verbose ("Adding new entry")
         if ($itemTemplate) {
             $clonedNode = $file.ImportNode($itemTemplate, $true)
             $FilesToOpen.AppendChild($clonedNode)
+            $modified = $true
             #$settings.AppendChild($FilesToOpen)
         }
         else {
@@ -126,18 +141,26 @@ function Save-RdcManSettignsFile {
         }
     }
 
-    Write-Verbose "Stopping RDCMan and Saving $existingfile"
-    Get-Process -Name rdcman -ea Ignore | Stop-Process
-    Start-Sleep 1
-
-    If (-not (test-path $existingfile)) {
-        $existingdir = Split-Path $existingfile
-        if (-not (test-path $existingdir)) {
-            New-Item -ItemType Directory -Force -Path $existingdir | Out-Null
+    if ($modified) {
+        Write-Verbose "Stopping RDCMan and Saving $existingfile"
+        $proc = Get-Process -Name rdcman -ea Ignore
+        $killed = $false
+        if ($proc) {
+            $killed = $true
         }
-    }
-    $file.Save($existingfile)
+        $proc | Stop-Process
+        Start-Sleep 1
 
+        If (-not (test-path $existingfile)) {
+            $existingdir = Split-Path $existingfile
+            if (-not (test-path $existingdir)) {
+                New-Item -ItemType Directory -Force -Path $existingdir | Out-Null
+            }
+        }
+        $file.Save($existingfile)
+        return $killed
+    }
+    return $false
 }
 #
 #function New-RDCManFile {
@@ -539,30 +562,35 @@ function New-RDCManFileFromHyperV {
         [void]$file.AppendChild($findgroup)
     }
 
-    Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
+    $killed = Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
         try {
 
             $proc = $null
+            $commandLine = $null
             $proc = Get-Process -Name rdcman -ea Ignore | Select-Object -First 1
             if ($proc) {
+                $killed = $true
+                $commandLine = ($proc.CommandLine)
                 Get-Process -Name rdcman -ea Ignore | Stop-Process
-                $commandLine = $proc.CommandLine
             }
             Start-Sleep 1
             $existing.save($rdcmanfile) | Out-Null
             Write-GreenCheck "Updated $rdcmanfile. Restarting the process if possible" -ForegroundColor ForestGreen
-            if ($proc) {
-                Start-Process -WindowStyle Minimized $("C:\tools\RDCMan.exe") -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-            }
+
         }
         catch {
-            Write-RedX "Could not update $rdcmanfile."
+            Write-RedX "Could not update $rdcmanfile. $_"
         }
     }
     else {
         Write-Log "No Changes. Not updating $rdcmanfile" -Success -Verbose
+    }
+    if ($killed) {
+
+        Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
+        Start-Process "C:\tools\RDCMan.exe" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
     }
 }
 

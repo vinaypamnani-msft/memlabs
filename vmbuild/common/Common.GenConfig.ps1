@@ -151,7 +151,7 @@ Function Read-SingleKeyWithTimeout {
             }
         }
         if ($Prompt) {
-            switch (($i++ % 64) / 16) {
+            switch (($i++ % 128) / 32) {
                 0 { $charsToDeleteNextTime = Write-Prompt -Color MediumSpringGreen }
                 1 { $charsToDeleteNextTime = Write-Prompt -Color Red }
                 2 { $charsToDeleteNextTime = Write-Prompt -Color Yellow }

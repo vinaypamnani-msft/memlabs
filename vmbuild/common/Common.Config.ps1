@@ -248,10 +248,12 @@ function Add-ExistingVMsToDeployConfig {
     )
 
     # Add exising DC to list
-    $existingDC = $config.parameters.ExistingDCName
-    if ($existingDC) {
-        # create a dummy VM object for the existingDC
-        Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $config
+    if ($config.virtualMachines | Where-Object { $_.role -notin ("OSDClient") }) {
+        $existingDC = $config.parameters.ExistingDCName
+        if ($existingDC) {
+            # create a dummy VM object for the existingDC
+            Add-ExistingVMToDeployConfig -vmName $existingDC -configToModify $config
+        }
     }
 
     # Add CAS to list, when adding primary
