@@ -69,6 +69,7 @@ function Write-Option {
 }
 
 function Select-ConfigMenu {
+    $Global:EnterKey = $false
     while ($true) {
         $customOptions = [ordered]@{ "1" = "Create New Domain%white%green" }
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
@@ -81,6 +82,7 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%Turquoise"; "3" = "Load saved config from File%LightSteelBlue%LightSteelBlue"; }
         if ($Global:common.Devbranch) {
             $customOptions += [ordered]@{"4" = "Load TEST config from File%DimGray%yellow"; }
+            $customOptions += [ordered]@{"E" = "Toggle EnterKey to finalize prompts%DimGray%yellow"; }
         }
         $customOptions += [ordered]@{"*B3" = ""; }
         $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
@@ -117,6 +119,14 @@ function Select-ConfigMenu {
             "!" {
                 $SelectedConfig = $Global:SavedConfig
                 $Global:SavedConfig = $null
+            }
+            "e" {
+                if ($Global:EnterKey -eq $true) {
+                    $Global:EnterKey = $false
+                }
+                else {
+                    $Global:EnterKey = $true
+                }
             }
             "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
             "f" { Select-DeletePending }
@@ -2406,14 +2416,19 @@ function get-ValidResponse {
 
             Write-Verbose "5 else get-ValidResponse max = $max"
             if ($first) {
+                Write-Verbose "6 else get-ValidResponse max = $max"
                 $response = Read-Single -Prompt $prompt $currentValue -timeout:$timeout
             }
             else {
+                Write-Verbose "7 else get-ValidResponse max = $max"
                 $response = $response = Read-SingleKeyWithTimeout -timeout 0
             }
             $first = $false
-            if ($null -eq $response) {
-                return
+            if ([string]::isnullorwhitespace($response)) {
+                Write-Verbose "return null"
+                return $null
+            }else{
+                Write-Verbose "got $response"
             }
             #$response = Read-Host2 -Prompt $prompt $currentValue
             if (($response -as [int]) -is [int]) {

@@ -69,6 +69,9 @@ Function Read-SingleKeyWithTimeout {
     )
 
 
+    if ($Global:EnterKey) {
+        $UseReadHost = $true
+    }
     Function Write-Prompt {
         param (
             [Parameter(Mandatory = $true, HelpMessage = "color")]
