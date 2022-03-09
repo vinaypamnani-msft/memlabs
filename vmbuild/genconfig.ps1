@@ -1422,9 +1422,52 @@ function Select-Config {
 
     while ($responseValid -eq $false) {
         $i = 0
+        $currentVMs = Get-List -type VM
+
+        $maxLength = 40
+        foreach ($file in $files) {
+            $len = $file.Name.Length
+
+            if ($len -gt $maxLength){
+                $maxLength = $len
+            }
+        }
         foreach ($file in $files) {
             $i = $i + 1
-            Write-Option $i $($file.Name)
+            $savedConfigJson = $null
+            $savedNotes = ""
+            $color = "Gainsboro"
+            try {
+                $savedConfigJson = Get-Content $file | ConvertFrom-Json
+
+            }
+            catch {
+                $savedNotes = $_
+            }
+            if ($savedConfigJson) {
+                $Found = 0
+                $notFound = 0
+                foreach ($vm in $savedConfigJson.virtualMachines) {
+                    $vmName = $savedConfigJson.vmOptions.Prefix + $vm.vmName
+                    if ($currentVms.VmName -contains $vmName) {
+                        $Found++
+                    }
+                    else {
+                        $notFound++
+                    }
+                }
+                $savedNotes += "[Already Deployed: $($Found.ToString().PadRight(2))] [Missing: $($notFound.ToString().PadRight(2))] "
+                $savedNotes += "$($savedConfigJson.virtualMachines.VmName -join ", ")"
+
+                if ($found -gt 0){
+                    $color = "LightGreen"
+                    if ($notFound -gt 0){
+                        $color = "Tomato"
+                    }
+                }
+            }
+
+            Write-Option $i $($file.Name.PadRight($maxLength) + " " + $savedNotes) -color $color
         }
         if (-Not $NoMore.IsPresent) {
             Write-Option "M" "Show More (Custom and Previous config files)" -color DarkGreen -Color2 Green
@@ -2427,7 +2470,8 @@ function get-ValidResponse {
             if ([string]::isnullorwhitespace($response)) {
                 Write-Verbose "return null"
                 return $null
-            }else{
+            }
+            else {
                 Write-Verbose "got $response"
             }
             #$response = Read-Host2 -Prompt $prompt $currentValue
