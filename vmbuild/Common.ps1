@@ -75,29 +75,27 @@ function Write-Log {
         $info = $false
         $TextOutput = "  $Text"
         $Text = "SUCCESS: $Text"
-
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Green)
-
+        $HashArguments.Add("ForegroundColor", "Chartreuse")
     }
 
     If ($Activity.IsPresent) {
         $info = $false
         Write-Host
         $Text = "=== $Text`r`n"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
+        $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
     }
 
     If ($SubActivity.IsPresent -and -not $Activity.IsPresent) {
         $info = $false
         $Text = "  === $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Magenta)
+        $HashArguments.Add("ForegroundColor", "LightSkyBlue")
     }
 
     If ($Warning.IsPresent) {
         $info = $false
         $TextOutput = "  WARNING: $Text"
         $Text = "WARNING: $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Yellow)
+        $HashArguments.Add("ForegroundColor", "Yellow")
 
     }
 
@@ -105,7 +103,7 @@ function Write-Log {
         $info = $false
         $TextOutput = "  ERROR: $Text"
         $Text = "ERROR: $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Red)
+        $HashArguments.Add("ForegroundColor", "Red")
 
     }
 
@@ -119,14 +117,13 @@ function Write-Log {
         $info = $false
         Write-Host
         $Text = "  +++ $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
+        $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
     }
 
     if ($info) {
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::White)
+        $HashArguments.Add("ForegroundColor", "White")
         $TextOutput = "  $Text"
         $Text = "INFO: $Text"
-
     }
 
     # Write to output stream
@@ -160,10 +157,10 @@ function Write-Log {
             if ($NoIndent.IsPresent) {
                 $TextOutput = $TextOutput.Trim()
             }
-            Write-Host $TextOutput @HashArguments
+            Write-Host2 $TextOutput @HashArguments
         }
         else {
-            Write-Host $Text @HashArguments
+            Write-Host2 $Text @HashArguments
         }
     }
     $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
