@@ -302,6 +302,8 @@ function Get-File {
         [switch]$ResumeDownload,
         [Parameter(Mandatory = $false)]
         [switch]$UseCDN,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseBITS,
         [Parameter(Mandatory = $false, ParameterSetName = "WhatIf")]
         [switch]$WhatIf
     )
@@ -394,10 +396,15 @@ function Get-File {
         }
 
         if ($Action -eq "Downloading") {
-            $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
-            if (-not $worked) {
-                Write-Log "Failed to download file using curl."
-                return $false
+            if ($UseBITS.IsPresent) {
+                Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+            }
+            else {
+                $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
+                if (-not $worked) {
+                    Write-Log "Failed to download file. using curl"
+                    return $false
+                }
             }
         }
         else {
@@ -1926,6 +1933,143 @@ function Get-StorageConfig {
     }
 }
 
+function Get-Tools {
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Skip Hash Testing of downloaded files.")]
+        [switch]$IgnoreHashFailure,
+        [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
+        [switch]$ForceDownloadFiles,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseCDN,
+        [Parameter(Mandatory = $false)]
+        [switch]$DownloadToolsWithNoHash,
+        [Parameter(Mandatory = $false, HelpMessage = "Inject tools inside all Virtual Machines.")]
+        [switch]$Inject,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    Write-Log "Downloading/Verifying Tools that need to be injected in Virtual Machines..." -Activity
+
+    $allSuccess = $true
+    $toolsToInject = @()
+    foreach ($file in $Common.AzureFileList.Tools) {
+
+        if (-not $file.md5 -and -not $DownloadToolsWithNoHash.IsPresent) { continue }
+
+        $name = $file.Name
+        $url = $file.URL
+        $fileTargetRelative = $file.Target
+        $fileName = Split-Path $url -Leaf
+        $fileNameForDownload = Join-Path "tools" $fileName
+        $downloadPath = Join-Path $Common.AzureToolsPath $fileName
+
+        if (-not $file.IsPublic) {
+            $url = "$($StorageConfig.StorageLocation)/$url"
+        }
+
+        if (-not $file.md5) {
+            Write-Log "Downloading/Verifying '$name'" -SubActivity
+            $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
+        }
+        else {
+            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $file.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+        }
+
+        if (-not $worked) {
+            $allSuccess = $false
+        }
+
+        # Move to staging dir
+        if ($worked) {
+
+            # Create final destination directory, if not present
+            $fileDestination = Join-Path $Common.StagingInjectPath $fileTargetRelative
+            if (-not (Test-Path $fileDestination)) {
+                New-Item -Path (Split-Path $fileDestination -Parent) -ItemType Directory -Force | Out-Null
+            }
+
+            # File downloaded
+            $extractIfZip = $file.ExtractFolderIfZip
+            if (Test-Path $downloadPath) {
+                if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
+                    Write-Log "Extracting $fileName to $fileDestination."
+                    Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                }
+                else {
+                    Write-Log "Copying $fileName to $fileDestination."
+                    Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                }
+                $toolsToInject += $file
+            }
+        }
+    }
+
+    if ($Inject.IsPresent -and $allSuccess) {
+
+        $allVMs = Get-List -Type VM -SmartUpdate
+        foreach ($vm in $allVMs) {
+
+            if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
+            if ($vm.vmbuild -eq $false) { continue } # don't touch VM's we didn't create
+
+            $vmName = $vm.vmName
+            Write-Log "$vmName`: Injecting Tools to C:\tools directory inside the VM" -Activity
+
+            # Get VM Session
+            if ($vm.State -ne "Running") {
+                Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+                continue
+            }
+
+            $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+            if (-not $ps) {
+                Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+                continue
+            }
+
+            foreach ($tool in $toolsToInject) {
+
+                if ($tool.NoUpdate -eq $true) {
+                    Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's marked NoUpdate." -Verbose
+                    continue
+                }
+
+                $toolFileName = Split-Path $tool.url -Leaf
+                $fileTargetRelative = Join-Path $tool.Target $toolFileName
+
+                if ($toolFileName.EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+                    $fileTargetRelative = $tool.Target
+                }
+
+                $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
+                $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
+
+                if ($tool.Name -eq "WMI Explorer") {
+                    $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
+                    $fileTargetRelative = Join-Path $fileTargetRelative "WmiExplorer.exe"
+                }
+
+                Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
+
+                $isContainer = $false
+                if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
+                    $isContainer = $true
+                }
+
+                if ($isContainer) {
+                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf
+                }
+                else {
+                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf
+                }
+            }
+        }
+    }
+
+    return $allSuccess
+}
+
 function Get-FileFromStorage {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Storage File to download.")]
@@ -1941,16 +2085,11 @@ function Get-FileFromStorage {
     )
 
     $imageName = $File.id
-    Write-Log "Downloading/Verifying '$imageName'" -SubActivity
-
-    # What if returns success
-    if ($WhatIf) {
-        return $true
-    }
 
     $success = $true
     $hashAlg = "MD5"
     $i = 0
+
     foreach ($fileItem in $File.filename) {
 
         $isArray = $File.filename -is [array]
@@ -1965,70 +2104,105 @@ function Get-FileFromStorage {
             $fileHash = $File.($hashAlg)
         }
 
-        $imageUrl = "$($StorageConfig.StorageLocation)/$($filename)"
-        $imageFileName = Split-Path $filename -Leaf
-        $localImagePath = Join-Path $Common.AzureFilesPath $filename
-        $localImageHashPath = "$localImagePath.$hashAlg"
+        $fileUrl = "$($StorageConfig.StorageLocation)/$($filename)"
+        $success = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+    }
 
-        $download = $true
-        if (Test-Path $localImagePath) {
+    return $success
+}
 
-            if (Test-Path $localImageHashPath) {
-                # Read hash from local hash file
-                $localFileHash = Get-Content $localImageHashPath
-            }
-            else {
-                # Download if file present, but hashFile isn't there.
-                Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -WhatIf:$WhatIf
+function Get-FileWithHash {
 
-                # Calculate file hash, save to local hash file
-                Write-Log "Calculating $hashAlg hash for $filename in $($Common.AzureFilesPath)..."
-                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
-                $localFileHash = $hashFileResult.Hash
-                $localFileHash | Out-File -FilePath $localImageHashPath -Force
-            }
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "File Name. Relative Path inside azureFiles directory.")]
+        [string]$FileName,
+        [Parameter(Mandatory = $false, HelpMessage = "File Display Name.")]
+        [string]$FileDisplayName,
+        [Parameter(Mandatory = $true, HelpMessage = "File URL.")]
+        [string]$FileUrl,
+        [Parameter(Mandatory = $true, HelpMessage = "Expected File Hash.")]
+        [string]$ExpectedHash,
+        [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
+        [switch]$ForceDownload,
+        [Parameter(Mandatory = $false, HelpMessage = "Ignore Hash Failures on file downloads.")]
+        [switch]$IgnoreHashFailure,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseCDN,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseBITS,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
 
-            if ($localFileHash -eq $fileHash) {
-                Write-Log "Found $filename in $($Common.AzureFilesPath) with expected hash $fileHash."
-                if ($ForceDownloadFiles.IsPresent) {
-                    Write-Log "ForceDownloadFiles switch present. Removing pre-existing $imageFileName file..." -Warning
-                    Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-                }
-                else {
-                    Write-Log "ForceDownloadFiles switch not present. Skip downloading '$imageFileName'." -LogOnly
-                    $download = $false
-                    continue
-                }
-            }
-            else {
-                Write-Log "Found $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $fileHash. Redownloading..."
-                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-                Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
-                $download = $true
-            }
+    $hashAlg = "MD5"
+    $fileNameLeaf = Split-Path $FileName -Leaf
+    $localImagePath = Join-Path $Common.AzureFilesPath $FileName
+    $localImageHashPath = "$localImagePath.$hashAlg"
+
+    $success = $false
+    $download = $true
+
+    Write-Log "Downloading/Verifying '$FileDisplayName'" -SubActivity
+
+    if (Test-Path $localImagePath) {
+
+        if (Test-Path $localImageHashPath) {
+            # Read hash from local hash file
+            $localFileHash = Get-Content $localImageHashPath
+        }
+        else {
+            # Download if file present, but hashFile isn't there.
+            Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Hash Missing. Downloading '$FileName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
+
+            # Calculate file hash, save to local hash file
+            Write-Log "Calculating $hashAlg hash for $FileName in $($Common.AzureFilesPath)..."
+            $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+            $localFileHash = $hashFileResult.Hash
+            $localFileHash | Out-File -FilePath $localImageHashPath -Force
         }
 
-        if ($download) {
-            $worked = Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -WhatIf:$WhatIf
-            if (-not $worked) {
-                $success = $false
+        if ($localFileHash -eq $ExpectedHash) {
+            Write-Log "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
+            if ($ForceDownload.IsPresent) {
+                Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
+                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
             }
             else {
-                # Calculate file hash, save to local hash file
-                Write-Log "Calculating $hashAlg hash for $filename in $($Common.AzureFilesPath)..."
-                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
-                $localFileHash = $hashFileResult.Hash
-                if ($localFileHash -eq $fileHash) {
-                    $localFileHash | Out-File -FilePath $localImageHashPath -Force
+                # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
+                $download = $false
+                $success = $true
+            }
+        }
+        else {
+            Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
+            Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+            Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
+            $download = $true
+        }
+    }
+
+    if ($download) {
+        $worked = Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Downloading '$FileName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
+        if (-not $worked) {
+            $success = $false
+        }
+        else {
+            # Calculate file hash, save to local hash file
+            Write-Log "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
+            $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+            $localFileHash = $hashFileResult.Hash
+            if ($localFileHash -eq $ExpectedHash) {
+                $localFileHash | Out-File -FilePath $localImageHashPath -Force
+                Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
+                $success = $true
+            }
+            else {
+                if ($IgnoreHashFailure) {
+                    $success = $true
                 }
                 else {
-                    if ($IgnoreHashFailure) {
-                        $success = $true
-                    }
-                    else {
-                        Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $fileHash." -Failure
-                        $success = $false
-                    }
+                    Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
+                    $success = $false
                 }
             }
         }
