@@ -1428,7 +1428,7 @@ function Select-Config {
         foreach ($file in $files) {
             $len = $file.Name.Length
 
-            if ($len -gt $maxLength){
+            if ($len -gt $maxLength) {
                 $maxLength = $len
             }
         }
@@ -1456,12 +1456,20 @@ function Select-Config {
                         $notFound++
                     }
                 }
-                $savedNotes += "[Already Deployed: $($Found.ToString().PadRight(2))] [Missing: $($notFound.ToString().PadRight(2))] "
+                $hasDC = $savedConfigJson.virtualMachines | Where-Object { $_.role -eq "DC" }
+
+                $savedNotes += "[Deployed: $($Found.ToString().PadRight(2))] [Missing: $($notFound.ToString().PadRight(2))] "
                 $savedNotes += "$($savedConfigJson.virtualMachines.VmName -join ", ")"
 
-                if ($found -gt 0){
+                if ($hasDC) {
+                    $savedNotes += " [New Domain: $($savedConfigJson.vmoptions.domainName)]"
+                }
+                else {
+                    $savedNotes += " [Existing Domain: $($savedConfigJson.vmoptions.domainName)]"
+                }
+                if ($found -gt 0) {
                     $color = "LightGreen"
-                    if ($notFound -gt 0){
+                    if ($notFound -gt 0) {
                         $color = "Tomato"
                     }
                 }
