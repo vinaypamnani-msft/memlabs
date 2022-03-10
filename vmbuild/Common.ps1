@@ -1935,6 +1935,8 @@ function Get-StorageConfig {
 
 function Get-Tools {
     param (
+        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
+        [string]$VmName,
         [Parameter(Mandatory = $false, HelpMessage = "Skip Hash Testing of downloaded files.")]
         [switch]$IgnoreHashFailure,
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
@@ -2011,7 +2013,13 @@ function Get-Tools {
 
     if ($Inject.IsPresent -and $allSuccess) {
 
-        $allVMs = Get-List -Type VM -SmartUpdate
+        if ($VmName) {
+            $allVMs = Get-List -Type VM -SmartUpdate | Where-Object {$_.vmName -eq $VmName}
+        }
+        else {
+            $allVMs = Get-List -Type VM -SmartUpdate
+        }
+
         foreach ($vm in $allVMs) {
 
             if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
