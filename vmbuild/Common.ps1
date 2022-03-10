@@ -2011,7 +2011,7 @@ function Get-Tools {
 
     if ($Inject.IsPresent -and $allSuccess) {
 
-        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object {$_.vmName -eq "PRO-W22SERVER1" }
+        $allVMs = Get-List -Type VM -SmartUpdate
         foreach ($vm in $allVMs) {
 
             if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
