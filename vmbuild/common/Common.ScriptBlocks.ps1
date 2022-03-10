@@ -42,7 +42,7 @@ $global:VM_Create = {
         }
 
         # Set domain name, depending on whether we need to create new VM or use existing one
-        if (-not $createVM -or ($currentItem.role -in ("DC","BDC")) ) {
+        if (-not $createVM -or ($currentItem.role -in ("DC", "BDC")) ) {
             $domainName = $deployConfig.parameters.DomainName
         }
         else {
@@ -68,7 +68,7 @@ $global:VM_Create = {
             # Create VM
             $vmSwitch = Get-VMSwitch2 -NetworkName $network
 
-            $Generation  = 2
+            $Generation = 2
             if ($currentItem.vmGeneration) {
                 $Generation = $currentItem.vmGeneration
             }
@@ -347,7 +347,7 @@ $global:VM_Config = {
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
         # Set domain name, depending on whether we need to create new VM or use existing one
-        if ($currentItem.hidden -or ($currentItem.role -in ("DC","BDC")) -or $Phase -gt 2) {
+        if ($currentItem.hidden -or ($currentItem.role -in ("DC", "BDC")) -or $Phase -gt 2) {
             $domainName = $deployConfig.parameters.DomainName
         }
         else {
@@ -367,6 +367,14 @@ $global:VM_Config = {
         if (-not $ps) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
             return
+        }
+
+        # inject tools
+        if ($Phase -eq 2) {
+            $injected = Get-Tools -Inject -VmName $currentItem.vmName
+            if (-not $injected) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning
+            }
         }
 
         $Stop_RunningDSC = {

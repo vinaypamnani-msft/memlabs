@@ -104,7 +104,6 @@ function Get-FilesForConfiguration {
         }
     }
 
-
     return $allSuccess
 }
 

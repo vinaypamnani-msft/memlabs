@@ -210,6 +210,12 @@ try {
     Write-Log "Starting deployment. Review VMBuild.$domainName.log"
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
 
+    # Download tools
+    $success = Get-Tools -WhatIf:$WhatIf
+    if (-not $success) {
+        Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
+    }
+
     $runPhase1 = $true
     if (-not $StopPhase -and ($Phase -or $SkipPhase -or $StartPhase)) {
         $runPhase1 = $false
