@@ -2102,16 +2102,21 @@ function Install-Tools {
             Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
 
             try {
+                $progressPref = $ProgressPreference
+                $ProgressPreference = "SilentlyContinue"
                 if ($isContainer) {
-                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf
+                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
                 }
                 else {
-                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf
+                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
                 }
             }
             catch {
-                Write-Log "$vmName`: Failed to inject '$($tool.Name)'. $_"
+                Write-Log "$vmName`: Failed to inject '$($tool.Name)'. $_" -Failure
                 $success = $false
+            }
+            finally {
+                $ProgressPreference = $progressPref
             }
         }
     }
