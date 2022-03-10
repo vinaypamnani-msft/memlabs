@@ -4,6 +4,94 @@ try {
 }
 catch {}
 
+
+function Get-Colors {
+    $colors = [PSCustomObject]@{
+        #--- Create Config"
+        GenConfigHeader            = "Turquoise"
+        # "D" = "Delete this VM"
+        GenConfigDangerous         = "Red"
+        # ---------
+        #[1]  Create New Domain
+        #Green  White
+        GenConfigNormal            = "Gainsboro"
+        GenConfigNormalNumber      = "Snow"
+        # [P]  Show Passwords
+        # DarkSeaGreen     ForestGreen
+        GenConfigDefault           = "ForestGreen"
+        GenConfigDefaultNumber     = "ForestGreen"
+        # [4] Load TEST config from File
+        # Yellow   DimGray
+        GenConfigHidden            = "DimGray"
+        GenConfigHiddenNumber      = "DimGray"
+        # [3] Load saved config from File%
+        GenConfigNonDefault        = "LightSteelBlue"
+        GenConfigNonDefaultNumber  = "LightSteelBlue"
+
+        # [N] New Virtual Machine
+        GenConfigNewVM             = "DarkGreen"
+        GenConfigNewVMNumber       = "Green"
+
+        # [D] Deploy Config
+        GenConfigDeploy            = "Green"
+        GenConfigDeployNumber      = "Green"
+
+        # [3] TechPreview (NO CAS)
+        GenConfigTechPreview       = "Tomato"
+        # [4] No ConfigMgr
+        GenConfigNoCM              = "Tan"
+
+        # ----- Load JSON
+        GenConfigJsonGood          = "LightGreen"
+        GenConfigJsonBad           = "Tomato"
+
+        #Invalid Response 'response' Valid Responses are:'
+        GenConfigInvalidResponse   = "IndianRed"
+        GenConfigValidResponses    = "LimeGreen"
+
+        # ---- VM Properties
+        GenConfigVMName            = "Gold"
+        GenConfigVMRole            = "Gold"
+
+        GenConfigVMRemoteServer    = "DodgerBlue"
+
+        GenConfigSQLProp           = "LightSeaGreen"
+        GenConfigSiteCode          = "LightCoral"
+        GenConfigTrue              = "LightGreen"
+        GenConfigFalse             = "FireBrick"
+
+        # ---- Errors
+        #Configuration is not valid. Saving is not advised. Proceed with caution. Hit CTRL-C to exit
+        GenConfigError1            = "FireBrick"
+        #Please fix the problem(s), or hit CTRL-C to exit.
+        GenConfigError2            = "Red"
+        # Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop
+        GenConfigNotice            = "MediumPurple"
+
+        #Failed VMS
+        #[F] Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow
+
+        GenConfigFailedVM          = "DarkGoldenRod"
+        GenConfigFailedVMNumber    = "DarkGoldenRod"
+
+        # --- Write-Help
+        GenConfigHelp              = "DarkGray"
+        GenConfigHelpHighlight     = "Yellow"
+
+        #Tips
+        #"Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
+        GenConfigTip               = "Violet"
+
+        # Prompt
+        GenConfigPrompt            = "SkyBlue"
+        GenConfigPromptCurrentItem = "PaleGoldenRod"
+
+        # Bracket Color
+        GenConfigBrackets          = "DimGray"
+    }
+    return $colors
+}
+
 function Get-RGB {
     [cmdletbinding()]
     [OutputType("RGB")]
