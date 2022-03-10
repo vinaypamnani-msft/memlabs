@@ -165,7 +165,7 @@ function  Select-NetworkMenu {
     #get-list -type network | out-host
 
     $networks = Get-EnhancedNetworkList
-    ($networks  | Select-Object Network, Domain, SiteCodes, "Virtual Machines"| Format-Table | Out-String).Trim() | out-host
+    ($networks  | Select-Object Network, Domain, SiteCodes, "Virtual Machines" | Format-Table | Out-String).Trim() | out-host
     $customOptions = $null
     $response = Get-Menu -Prompt "Press Enter" -OptionArray $subnetlistEnhanced -AdditionalOptions $customOptions -HideHelp:$true
     if (-not $response) {
@@ -2616,7 +2616,7 @@ function get-ValidResponse {
             }
             else {
                 Write-Verbose "7 else get-ValidResponse max = $max"
-                $response = $response = Read-SingleKeyWithTimeout -timeout 0
+                $response = Read-SingleKeyWithTimeout -timeout 0
             }
             $first = $false
             if ([string]::isnullorwhitespace($response)) {
@@ -2627,24 +2627,26 @@ function get-ValidResponse {
                 Write-Verbose "got $response"
             }
             #$response = Read-Host2 -Prompt $prompt $currentValue
-            if (($response -as [int]) -is [int]) {
-                [int]$testmax = ([string]$response + "0" -as [int])
-                if ([int]$testmax -le [int]$max) {
-                    $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
+            if (-not $Global:EnterKey) {
+                if (($response -as [int]) -is [int]) {
+                    [int]$testmax = ([string]$response + "0" -as [int])
+                    if ([int]$testmax -le [int]$max) {
+                        $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
+                    }
                 }
-            }
-            foreach ($key in $additionalOptions.Keys) {
-                if ($key.length -gt 1 -and ($key.StartsWith($response))) {
-                    $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
-                    break
+                foreach ($key in $additionalOptions.Keys) {
+                    if ($key.length -gt 1 -and ($key.StartsWith($response))) {
+                        $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
+                        break
+                    }
                 }
-            }
-            if ($response2 -eq "BACKSPACE") {
-                $response = $null
-                $response2 = $null
-            }
-            if ($response2) {
-                $response = $response + $response2
+                if ($response2 -eq "BACKSPACE") {
+                    $response = $null
+                    $response2 = $null
+                }
+                if ($response2) {
+                    $response = $response + $response2
+                }
             }
         }
 
