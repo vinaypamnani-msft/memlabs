@@ -1935,12 +1935,12 @@ function Get-StorageConfig {
 
 function Get-Tools {
     param (
-        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
-        [string]$VmName,
         [Parameter(Mandatory = $false, HelpMessage = "Skip Hash Testing of downloaded files.")]
         [switch]$IgnoreHashFailure,
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
         [switch]$ForceDownloadFiles,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
+        [string]$VmName,
         [Parameter(Mandatory = $false)]
         [switch]$UseCDN,
         [Parameter(Mandatory = $false)]
@@ -1953,125 +1953,155 @@ function Get-Tools {
 
     $allSuccess = $true
 
-    if (-not $InJob.IsPresent) {
+    Write-Log "Downloading/Verifying Tools that need to be injected in Virtual Machines..." -Activity
+    foreach ($file in $Common.AzureFileList.Tools) {
 
-        Write-Log "Downloading/Verifying Tools that need to be injected in Virtual Machines..." -Activity
-        foreach ($file in $Common.AzureFileList.Tools) {
+        if (-not $file.md5 -and -not $DownloadToolsWithNoHash.IsPresent) { continue }
 
-            if (-not $file.md5 -and -not $DownloadToolsWithNoHash.IsPresent) { continue }
+        $name = $file.Name
+        $url = $file.URL
+        $fileTargetRelative = $file.Target
+        $fileName = Split-Path $url -Leaf
+        $fileNameForDownload = Join-Path "tools" $fileName
+        $downloadPath = Join-Path $Common.AzureToolsPath $fileName
 
-            $name = $file.Name
-            $url = $file.URL
-            $fileTargetRelative = $file.Target
-            $fileName = Split-Path $url -Leaf
-            $fileNameForDownload = Join-Path "tools" $fileName
-            $downloadPath = Join-Path $Common.AzureToolsPath $fileName
+        if (-not $file.IsPublic) {
+            $url = "$($StorageConfig.StorageLocation)/$url"
+        }
 
-            if (-not $file.IsPublic) {
-                $url = "$($StorageConfig.StorageLocation)/$url"
-            }
+        if (-not $file.md5) {
+            Write-Log "Downloading/Verifying '$name'" -SubActivity
+            $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
+        }
+        else {
+            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $file.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+        }
 
-            if (-not $file.md5) {
-                Write-Log "Downloading/Verifying '$name'" -SubActivity
-                $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
-            }
-            else {
-                $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $file.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
-            }
+        if (-not $worked) {
+            $allSuccess = $false
+        }
 
-            if (-not $worked) {
-                $allSuccess = $false
-            }
+        # Move to staging dir
+        if ($worked) {
 
-            # Move to staging dir
-            if ($worked) {
-
-                # Create final destination directory, if not present
-                $fileDestination = Join-Path $Common.StagingInjectPath $fileTargetRelative
-                if (-not (Test-Path $fileDestination)) {
-                    $folderToCreate = $fileDestination
-                    if ($fileDestination.Contains(".")) {
-                        $folderToCreate = Split-Path $fileDestination -Parent
-                    }
-                    New-Item -Path $folderToCreate -ItemType Directory -Force | Out-Null
+            # Create final destination directory, if not present
+            $fileDestination = Join-Path $Common.StagingInjectPath $fileTargetRelative
+            if (-not (Test-Path $fileDestination)) {
+                $folderToCreate = $fileDestination
+                if ($fileDestination.Contains(".")) {
+                    $folderToCreate = Split-Path $fileDestination -Parent
                 }
+                New-Item -Path $folderToCreate -ItemType Directory -Force | Out-Null
+            }
 
-                # File downloaded
-                $extractIfZip = $file.ExtractFolderIfZip
-                if (Test-Path $downloadPath) {
-                    if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
-                        Write-Log "Extracting $fileName to $fileDestination."
-                        Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
-                    }
-                    else {
-                        Write-Log "Copying $fileName to $fileDestination."
-                        Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
-                    }
+            # File downloaded
+            $extractIfZip = $file.ExtractFolderIfZip
+            if (Test-Path $downloadPath) {
+                if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
+                    Write-Log "Extracting $fileName to $fileDestination."
+                    Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                }
+                else {
+                    Write-Log "Copying $fileName to $fileDestination."
+                    Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
                 }
             }
         }
     }
 
+
+    $injected = $allSuccess
     if ($Inject.IsPresent -and $allSuccess) {
-
-        if ($VmName) {
-            $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
-        }
-        else {
-            $allVMs = Get-List -Type VM -SmartUpdate
+        $HashArguments = @{
+            WhatIf = $WhatIf
+            InstallToolsWithNoHash = $DownloadToolsWithNoHash
         }
 
-        foreach ($vm in $allVMs) {
+        if ($VmName) { $HashArguments.Add("VmName", $VmName) }
 
-            if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
-            if ($vm.vmbuild -eq $false) { continue } # don't touch VM's we didn't create
+        $injected = Install-Tools @HashArguments
 
-            $vmName = $vm.vmName
-            Write-Log "$vmName`: Injecting Tools to C:\tools directory inside the VM" -Activity
+    }
 
-            # Get VM Session
-            if ($vm.State -ne "Running") {
-                Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+    if (-not $Inject.IsPresent) {
+        Write-Host2
+    }
+
+    return $injected
+}
+
+function Install-Tools {
+
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
+        [string]$VmName,
+        [Parameter(Mandatory = $false)]
+        [switch]$InstallToolsWithNoHash,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    if ($VmName) {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    }
+    else {
+        $allVMs = Get-List -Type VM -SmartUpdate
+    }
+
+    $success = $true
+    foreach ($vm in $allVMs) {
+
+        if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
+        if ($vm.vmbuild -eq $false) { continue } # don't touch VM's we didn't create
+
+        $vmName = $vm.vmName
+        Write-Log "$vmName`: Injecting Tools to C:\tools directory inside the VM" -Activity
+
+        # Get VM Session
+        if ($vm.State -ne "Running") {
+            Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+            continue
+        }
+
+        $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+        if (-not $ps) {
+            Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+            continue
+        }
+
+        foreach ($tool in $Common.AzureFileList.Tools) {
+
+            if (-not $tool.md5 -and -not $InstallToolsWithNoHash.IsPresent) { continue }
+
+            if ($tool.NoUpdate -eq $true) {
+                Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's marked NoUpdate." -Verbose
                 continue
             }
 
-            $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
-            if (-not $ps) {
-                Write-Log "$vmName`: Failed to get a session with the VM." -Failure
-                continue
+            $toolFileName = Split-Path $tool.url -Leaf
+            $fileTargetRelative = Join-Path $tool.Target $toolFileName
+
+            if ($toolFileName.EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+                $fileTargetRelative = $tool.Target
             }
 
-            foreach ($tool in $Common.AzureFileList.Tools) {
+            $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
+            $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
 
-                if (-not $tool.md5 -and -not $DownloadToolsWithNoHash.IsPresent) { continue }
+            $isContainer = $false
+            if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
+                $isContainer = $true
+                $fileTargetPathInVM = "C:\tools"
+            }
 
-                if ($tool.NoUpdate -eq $true) {
-                    Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's marked NoUpdate." -Verbose
-                    continue
-                }
+            if ($tool.Name -eq "WMI Explorer") {
+                $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
+                $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
+            }
 
-                $toolFileName = Split-Path $tool.url -Leaf
-                $fileTargetRelative = Join-Path $tool.Target $toolFileName
+            Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
 
-                if ($toolFileName.EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
-                    $fileTargetRelative = $tool.Target
-                }
-
-                $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
-                $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
-
-                if ($tool.Name -eq "WMI Explorer") {
-                    $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
-                    $fileTargetRelative = Join-Path $fileTargetRelative "WmiExplorer.exe"
-                }
-
-                Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
-
-                $isContainer = $false
-                if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
-                    $isContainer = $true
-                }
-
+            try {
                 if ($isContainer) {
                     Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf
                 }
@@ -2079,11 +2109,16 @@ function Get-Tools {
                     Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf
                 }
             }
+            catch {
+                Write-Log "$vmName`: Failed to inject '$($tool.Name)'. $_"
+                $success = $false
+            }
         }
     }
 
     Write-Host2
-    return $allSuccess
+
+    return $success
 }
 
 function Get-FileFromStorage {

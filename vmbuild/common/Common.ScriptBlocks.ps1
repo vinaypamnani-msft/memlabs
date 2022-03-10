@@ -371,7 +371,7 @@ $global:VM_Config = {
 
         # inject tools
         if ($Phase -eq 2) {
-            $injected = Get-Tools -Inject -VmName $currentItem.vmName
+            $injected = Install-Tools -VmName $currentItem.vmName
             if (-not $injected) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning
             }
