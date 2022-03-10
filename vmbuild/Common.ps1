@@ -1951,62 +1951,63 @@ function Get-Tools {
         [switch]$WhatIf
     )
 
-    Write-Log "Downloading/Verifying Tools that need to be injected in Virtual Machines..." -Activity
-
     $allSuccess = $true
-    $toolsToInject = @()
-    foreach ($file in $Common.AzureFileList.Tools) {
 
-        if (-not $file.md5 -and -not $DownloadToolsWithNoHash.IsPresent) { continue }
+    if (-not $InJob.IsPresent) {
 
-        $name = $file.Name
-        $url = $file.URL
-        $fileTargetRelative = $file.Target
-        $fileName = Split-Path $url -Leaf
-        $fileNameForDownload = Join-Path "tools" $fileName
-        $downloadPath = Join-Path $Common.AzureToolsPath $fileName
+        Write-Log "Downloading/Verifying Tools that need to be injected in Virtual Machines..." -Activity
+        foreach ($file in $Common.AzureFileList.Tools) {
 
-        if (-not $file.IsPublic) {
-            $url = "$($StorageConfig.StorageLocation)/$url"
-        }
+            if (-not $file.md5 -and -not $DownloadToolsWithNoHash.IsPresent) { continue }
 
-        if (-not $file.md5) {
-            Write-Log "Downloading/Verifying '$name'" -SubActivity
-            $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
-        }
-        else {
-            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $file.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
-        }
+            $name = $file.Name
+            $url = $file.URL
+            $fileTargetRelative = $file.Target
+            $fileName = Split-Path $url -Leaf
+            $fileNameForDownload = Join-Path "tools" $fileName
+            $downloadPath = Join-Path $Common.AzureToolsPath $fileName
 
-        if (-not $worked) {
-            $allSuccess = $false
-        }
-
-        # Move to staging dir
-        if ($worked) {
-
-            # Create final destination directory, if not present
-            $fileDestination = Join-Path $Common.StagingInjectPath $fileTargetRelative
-            if (-not (Test-Path $fileDestination)) {
-                $folderToCreate = $fileDestination
-                if ($fileDestination.Contains(".")) {
-                    $folderToCreate = Split-Path $fileDestination -Parent
-                }
-                New-Item -Path $folderToCreate -ItemType Directory -Force | Out-Null
+            if (-not $file.IsPublic) {
+                $url = "$($StorageConfig.StorageLocation)/$url"
             }
 
-            # File downloaded
-            $extractIfZip = $file.ExtractFolderIfZip
-            if (Test-Path $downloadPath) {
-                if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
-                    Write-Log "Extracting $fileName to $fileDestination."
-                    Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+            if (-not $file.md5) {
+                Write-Log "Downloading/Verifying '$name'" -SubActivity
+                $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
+            }
+            else {
+                $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $file.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+            }
+
+            if (-not $worked) {
+                $allSuccess = $false
+            }
+
+            # Move to staging dir
+            if ($worked) {
+
+                # Create final destination directory, if not present
+                $fileDestination = Join-Path $Common.StagingInjectPath $fileTargetRelative
+                if (-not (Test-Path $fileDestination)) {
+                    $folderToCreate = $fileDestination
+                    if ($fileDestination.Contains(".")) {
+                        $folderToCreate = Split-Path $fileDestination -Parent
+                    }
+                    New-Item -Path $folderToCreate -ItemType Directory -Force | Out-Null
                 }
-                else {
-                    Write-Log "Copying $fileName to $fileDestination."
-                    Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+
+                # File downloaded
+                $extractIfZip = $file.ExtractFolderIfZip
+                if (Test-Path $downloadPath) {
+                    if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
+                        Write-Log "Extracting $fileName to $fileDestination."
+                        Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                    }
+                    else {
+                        Write-Log "Copying $fileName to $fileDestination."
+                        Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                    }
                 }
-                $toolsToInject += $file
             }
         }
     }
@@ -2014,7 +2015,7 @@ function Get-Tools {
     if ($Inject.IsPresent -and $allSuccess) {
 
         if ($VmName) {
-            $allVMs = Get-List -Type VM -SmartUpdate | Where-Object {$_.vmName -eq $VmName}
+            $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
         }
         else {
             $allVMs = Get-List -Type VM -SmartUpdate
@@ -2040,7 +2041,9 @@ function Get-Tools {
                 continue
             }
 
-            foreach ($tool in $toolsToInject) {
+            foreach ($tool in $Common.AzureFileList.Tools) {
+
+                if (-not $tool.md5 -and -not $DownloadToolsWithNoHash.IsPresent) { continue }
 
                 if ($tool.NoUpdate -eq $true) {
                     Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's marked NoUpdate." -Verbose
@@ -2079,6 +2082,7 @@ function Get-Tools {
         }
     }
 
+    Write-Host2
     return $allSuccess
 }
 
@@ -2463,86 +2467,86 @@ if (-not $Common.Initialized) {
 
     $colors = [PSCustomObject]@{
         #--- Create Config"
-        GenConfigHeader = "Turquoise"
+        GenConfigHeader            = "Turquoise"
         # "D" = "Delete this VM"
-        GenConfigDangerous = "Red"
+        GenConfigDangerous         = "Red"
         # ---------
         #[1]  Create New Domain
         #Green  White
-        GenConfigNormal = "Gainsboro"
-        GenConfigNormalNumber = "Snow"
+        GenConfigNormal            = "Gainsboro"
+        GenConfigNormalNumber      = "Snow"
         # [P]  Show Passwords
         # DarkSeaGreen     ForestGreen
-        GenConfigDefault = "ForestGreen"
-        GenConfigDefaultNumber = "DarkSeaGreen"
+        GenConfigDefault           = "ForestGreen"
+        GenConfigDefaultNumber     = "DarkSeaGreen"
         # [4] Load TEST config from File
         # Yellow   DimGray
-        GenConfigHidden = "DimGray"
-        GenConfigHiddenNumber = "Yellow"
+        GenConfigHidden            = "DimGray"
+        GenConfigHiddenNumber      = "Yellow"
         # [3] Load saved config from File%
-        GenConfigNonDefault = "LightSteelBlue"
-        GenConfigNonDefaultNumber = "LightSteelBlue"
+        GenConfigNonDefault        = "LightSteelBlue"
+        GenConfigNonDefaultNumber  = "LightSteelBlue"
 
         # [N] New Virtual Machine
-        GenConfigNewVM = "DarkGreen"
-        GenConfigNewVMNumber = "Green"
+        GenConfigNewVM             = "DarkGreen"
+        GenConfigNewVMNumber       = "Green"
 
         # [D] Deploy Config
-        GenConfigDeploy = "Green"
-        GenConfigDeployNumber = "Green"
+        GenConfigDeploy            = "Green"
+        GenConfigDeployNumber      = "Green"
 
         # [3] TechPreview (NO CAS)
-        GenConfigTechPreview = "Tomato"
+        GenConfigTechPreview       = "Tomato"
         # [4] No ConfigMgr
-        GenConfigNoCM = "Tan"
+        GenConfigNoCM              = "Tan"
 
         # ----- Load JSON
-        GenConfigJsonGood = "LightGreen"
-        GenConfigJsonBad = "Tomato"
+        GenConfigJsonGood          = "LightGreen"
+        GenConfigJsonBad           = "Tomato"
 
         #Invalid Response 'response' Valid Responses are:'
-        GenConfigInvalidResponse = "IndianRed"
-        GenConfigValidResponses = "LimeGreen"
+        GenConfigInvalidResponse   = "IndianRed"
+        GenConfigValidResponses    = "LimeGreen"
 
         # ---- VM Properties
-        GenConfigVMName = "Gold"
-        GenConfigVMRole = "Gold"
+        GenConfigVMName            = "Gold"
+        GenConfigVMRole            = "Gold"
 
-        GenConfigVMRemoteServer = "DodgerBlue"
+        GenConfigVMRemoteServer    = "DodgerBlue"
 
-        GenConfigSQLProp = "LightSeaGreen"
-        GenConfigSiteCode = "LightCoral"
-        GenConfigTrue = "LightGreen"
-        GenConfigFalse = "FireBrick"
+        GenConfigSQLProp           = "LightSeaGreen"
+        GenConfigSiteCode          = "LightCoral"
+        GenConfigTrue              = "LightGreen"
+        GenConfigFalse             = "FireBrick"
 
         # ---- Errors
         #Configuration is not valid. Saving is not advised. Proceed with caution. Hit CTRL-C to exit
-        GenConfigError1 = "FireBrick"
+        GenConfigError1            = "FireBrick"
         #Please fix the problem(s), or hit CTRL-C to exit.
-        GenConfigError2 = "Red"
+        GenConfigError2            = "Red"
         # Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop
-        GenConfigNotice = "LightGreen"
+        GenConfigNotice            = "LightGreen"
 
         #Failed VMS
         #[F] Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%Yellow%Yellow
 
-        GenConfigFailedVM = "Yellow"
-        GenConfigFailedVMNumber = "Yellow"
+        GenConfigFailedVM          = "Yellow"
+        GenConfigFailedVMNumber    = "Yellow"
 
         # --- Write-Help
-        GenConfigHelp = "DarkGray"
-        GenConfigHelpHighlight = "Yellow"
+        GenConfigHelp              = "DarkGray"
+        GenConfigHelpHighlight     = "Yellow"
 
         #Tips
         #"Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
-        GenConfigTip = "Violet"
+        GenConfigTip               = "Violet"
 
         # Prompt
-        GenConfigPrompt = "SkyBlue"
+        GenConfigPrompt            = "SkyBlue"
         GenConfigPromptCurrentItem = "PaleGoldenRod"
 
         # Bracket Color
-        GenConfigBrackets = "DimGray"
+        GenConfigBrackets          = "DimGray"
     }
 
     $global:Common = [PSCustomObject]@{
