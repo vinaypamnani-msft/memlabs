@@ -1986,7 +1986,11 @@ function Get-Tools {
             # Create final destination directory, if not present
             $fileDestination = Join-Path $Common.StagingInjectPath $fileTargetRelative
             if (-not (Test-Path $fileDestination)) {
-                New-Item -Path (Split-Path $fileDestination -Parent) -ItemType Directory -Force | Out-Null
+                $folderToCreate = $fileDestination
+                if ($fileDestination.Contains(".")) {
+                    $folderToCreate = Split-Path $fileDestination -Parent
+                }
+                New-Item -Path $folderToCreate -ItemType Directory -Force | Out-Null
             }
 
             # File downloaded
@@ -2007,7 +2011,7 @@ function Get-Tools {
 
     if ($Inject.IsPresent -and $allSuccess) {
 
-        $allVMs = Get-List -Type VM -SmartUpdate
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object {$_.vmName -eq "PRO-W22SERVER1" }
         foreach ($vm in $allVMs) {
 
             if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
