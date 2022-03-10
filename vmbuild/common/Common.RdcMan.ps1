@@ -459,7 +459,13 @@ function New-RDCManFileFromHyperV {
                     $name = $vm.LastKnownIP
                 }
                 else {
-                    $displayName = $displayName + "(Missing IP)"
+                    $IP = (get-vm2 -name $vm.Name | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
+                    if ($IP) {
+                        $name = $IP
+                    }
+                    else {
+                        $displayName = $displayName + "(Missing IP)"
+                    }
                 }
             }
             if ($vm.domainUser) {
