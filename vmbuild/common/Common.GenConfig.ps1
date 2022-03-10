@@ -31,7 +31,6 @@ Function Get-SupportedOperatingSystemsForRole {
     return $AllList
 }
 
-
 Function Show-JobsProgress {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Activity Name")]
@@ -122,6 +121,7 @@ Function Read-SingleKeyWithTimeout {
             $key = $host.UI.RawUI.ReadKey()
             $host.ui.RawUI.FlushInputBuffer()
             if ($key.VirtualKeyCode -eq 13) {
+                write-host
                 return $null
             }
             if ($key.VirtualKeyCode -eq 8) {

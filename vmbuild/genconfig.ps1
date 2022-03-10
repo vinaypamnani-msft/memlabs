@@ -79,7 +79,8 @@ function Select-ConfigMenu {
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)"; "3" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"3" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($Global:common.Devbranch) {
             $customOptions += [ordered]@{"4" = "Load TEST config from File%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
             $customOptions += [ordered]@{"E" = "Toggle EnterKey to finalize prompts%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
@@ -92,9 +93,15 @@ function Select-ConfigMenu {
         $disk = Get-Volume -DriveLetter E
         $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{"D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        #$customOptions += [ordered]@{"D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{"T" = "Update Tools (C:\Tools) On all running VMs %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{"P" = "Show Passwords" }
+
+
+        $customOptions += [ordered]@{"*B4" = ""; "*BREAK4" = "---  List Resources%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"V" = "Show Virtual Machines%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"N" = "Show Networks%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"D" = "Show Domains [Start/Stop/Snapshot/Delete]%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
 
         $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
 
@@ -131,9 +138,11 @@ function Select-ConfigMenu {
                     $Global:EnterKey = $true
                 }
             }
+            "v" { Select-VMMenu }
             "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
             "f" { Select-DeletePending }
             "d" { Select-DomainMenu }
+            "n" { Select-NetworkMenu }
             "t" { Get-tools -Inject | out-null }
             "P" {
                 Write-Host
@@ -151,6 +160,67 @@ function Select-ConfigMenu {
     }
 }
 
+
+function  Select-NetworkMenu {
+    #get-list -type network | out-host
+
+    $networks = Get-EnhancedNetworkList
+    ($networks  | Select-Object Network, Domain, SiteCodes, "Virtual Machines"| Format-Table | Out-String).Trim() | out-host
+    $customOptions = $null
+    $response = Get-Menu -Prompt "Press Enter" -OptionArray $subnetlistEnhanced -AdditionalOptions $customOptions -HideHelp:$true
+    if (-not $response) {
+        return
+    }
+}
+function Select-VMMenu {
+
+
+    Write-Verbose "2 Select-VMMenu"
+    while ($true) {
+        Write-Host
+        Write-Host "VM resources:"
+        Write-Host
+        $vms = get-list -type vm
+        if (-not $vms) {
+            return
+        }
+        ($vms | Select-Object VmName, Domain, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
+        #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
+
+        #$customOptions = [ordered]@{
+        #    "*d1" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)";
+        #    "1"   = "Start VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+        #    "2"   = "Stop VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+        #    "3"   = "Compact all VHDX's in domain (requires domain to be stopped)%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+        #    "*S"  = "";
+        #    "*S1" = "---  Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
+        #    "S"   = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+        #}
+
+        #$customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+        $customOptions = $null
+        $response = Get-Menu -Prompt "Press Enter" -AdditionalOptions $customOptions -HideHelp:$true
+
+        write-Verbose "1 response $response"
+        if (-not $response) {
+            return
+        }
+
+        switch ($response.ToLowerInvariant()) {
+            "2" { Select-StopDomain -domain $domain }
+            "1" { Select-StartDomain -domain $domain }
+            "3" { select-OptimizeDomain -domain $domain }
+            "d" {
+                Select-DeleteDomain -domain $domain
+                return
+            }
+            "s" { select-SnapshotDomain -domain $domain }
+            "r" { select-RestoreSnapshotDomain -domain $domain }
+            "x" { select-DeleteSnapshotDomain -domain $domain }
+            Default {}
+        }
+    }
+}
 
 function Select-DomainMenu {
 
@@ -1961,14 +2031,66 @@ function Show-SubnetNote {
 
 }
 
+function Get-EnhancedNetworkList {
+    [CmdletBinding()]
+    param (
+
+    )
+    $subnetList += Get-NetworkList | Select-Object -Expand Network | Sort-Object -Property { [System.Version]$_ } | Get-Unique
+    $FullList = get-list -Type VM
+
+    $rolesToShow = @("Primary", "CAS", "Secondary")
+
+    $ListData = $fullList | Where-Object { $null -ne $_.SiteCode -and ($_.Role -in $rolesToShow ) } | Group-Object -Property network | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } }
+
+    $returnSubnetList = @()
+
+    foreach ($sb in $SubnetList) {
+
+
+        $subnet = [PSCustomObject]@{
+            Network = $sb
+        }
+
+
+        if ($sb -eq "Internet" -or ($sb -eq "cluster")) {
+            $returnSubnetList += $subnet
+            continue
+        }
+
+        $SiteCodes = $ListData | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
+
+        $domainFromSubnet = (((Get-List -type network | Where-Object { $_.network -eq $sb }).domain) -join ",")
+        if ($domainFromSubnet) {
+            $subnet | Add-Member -MemberType NoteProperty -Name "Domain" -Value $domainFromSubnet -Force
+        }
+
+
+        if (-not [string]::IsNullOrWhiteSpace($SiteCodes)) {
+            $subnet | Add-Member -MemberType NoteProperty -Name "SiteCodes" -Value "$($SiteCodes -join ", ")" -Force
+        }
+
+        $machines = @()
+        $machines += $FullList | Where-Object { $_.Network -eq $sb }
+
+
+        if ($machines) {
+            $subnet | Add-Member -MemberType NoteProperty -Name "Virtual Machines" -Value $($machines.vmName -join ", ") -Force
+        }
+        $returnSubnetList += $subnet
+    }
+
+    return $returnSubnetList
+}
+
 function Get-EnhancedSubnetList {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Subnet List")]
         [String[]] $SubnetList,
-        [Parameter(Mandatory = $true, ParameterSetName = "Config", HelpMessage = "config")]
+        [Parameter(Mandatory = $false, HelpMessage = "config object. Overrides -domain")]
         [object] $ConfigToCheck,
-        [Parameter(Mandatory = $true, ParameterSetName = "Domain", HelpMessage = "Domain Name")]
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name")]
         [String] $domain,
         [Parameter(Mandatory = $false, HelpMessage = "padding")]
         [object] $Padding = 20
@@ -1979,9 +2101,15 @@ function Get-EnhancedSubnetList {
 
     if ($configToCheck) {
         $FullList = get-list2 -deployConfig $ConfigToCheck
+        $domain = $ConfigToCheck.vmoptions.DomainName
     }
     else {
-        $FullList = get-list -Type VM -Domain $domain
+        if ($domain) {
+            $FullList = get-list -Type VM -Domain $domain
+        }
+        else {
+            $FullList = get-list -Type VM
+        }
     }
 
     $ListData = $fullList | Where-Object { $null -ne $_.SiteCode -and ($_.Role -in $rolesToShow ) } | Group-Object -Property network | Select-Object Name, @{l = "SiteCode"; e = { $_.Group.SiteCode -join "," } }
@@ -1995,6 +2123,12 @@ function Get-EnhancedSubnetList {
 
         $entry = ""
         $SiteCodes = $ListData | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
+
+
+        if (-not $domain) {
+            $domainFromSubnet = (((Get-List -type network | Where-Object { $_.network -eq $sb }).domain) -join ",")
+            $entry += " [$domainFromSubnet]"
+        }
 
         if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
             #$subnetListModified += "$sb"
@@ -2013,7 +2147,7 @@ function Get-EnhancedSubnetList {
             }
         }
         if ($machines) {
-            $entry = $entry + " [$($machines.vmName -join ",")]"
+            $entry = $entry + " [$($machines.vmName -join ", ")]"
         }
         if ($entry) {
             $subnetListModified += "$($sb.PadRight($padding))$entry"
@@ -2334,7 +2468,9 @@ function Get-Menu {
         [Parameter(Mandatory = $false, HelpMessage = "Split response")]
         [switch] $split,
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
-        [int] $timeout = 0
+        [int] $timeout = 0,
+        [Parameter(Mandatory = $false, HelpMessage = "Hide Help")]
+        [bool] $HideHelp = $false
     )
 
 
@@ -2408,7 +2544,7 @@ function Get-Menu {
     }
     $totalOptions = $preOptions + $additionalOptions
 
-    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout
+    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout -HideHelp:$HideHelp
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $i = 0
@@ -2456,7 +2592,9 @@ function get-ValidResponse {
         [Parameter(Mandatory = $false, HelpMessage = "Run a test-Configuration before exiting")]
         [switch] $TestBeforeReturn,
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
-        [int] $timeout = 0
+        [int] $timeout = 0,
+        [Parameter(Mandatory = $false, HelpMessage = "Hide Help")]
+        [bool] $HideHelp = $false
 
     )
 
@@ -2474,7 +2612,7 @@ function get-ValidResponse {
             Write-Verbose "5 else get-ValidResponse max = $max"
             if ($first) {
                 Write-Verbose "6 else get-ValidResponse max = $max"
-                $response = Read-Single -Prompt $prompt $currentValue -timeout:$timeout
+                $response = Read-Single -Prompt $prompt $currentValue -timeout:$timeout -HideHelp:$HideHelp
             }
             else {
                 Write-Verbose "7 else get-ValidResponse max = $max"
