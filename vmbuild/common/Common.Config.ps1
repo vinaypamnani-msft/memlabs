@@ -1452,7 +1452,7 @@ Function Write-ColorizedBrackets {
         [Parameter()]
         [string] $ForegroundColor,
         [Parameter()]
-        [string] $BracketColor = "DimGray"
+        [string] $BracketColor = $Global:Common.Colors.GenConfigBrackets
     )
     while (-not [string]::IsNullOrWhiteSpace($text)) {
         #write-host $text
