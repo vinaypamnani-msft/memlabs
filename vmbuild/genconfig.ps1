@@ -133,7 +133,6 @@ function Select-ConfigMenu {
             }
             "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
             "f" { Select-DeletePending }
-            "t" { Select-DeletePending }
             "d" { Select-DomainMenu }
             "t" { Get-tools -Inject | out-null }
             "P" {
