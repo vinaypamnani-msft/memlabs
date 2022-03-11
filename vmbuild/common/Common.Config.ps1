@@ -1700,7 +1700,7 @@ Function Show-Summary {
         if ($containsMember) {
             if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
                 foreach ($PSVM in $containsPS) {
-                    Write-GreenCheck "Client Push: Yes $(PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
+                    Write-GreenCheck "Client Push: Yes $($PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
                 }
             }
             else {
