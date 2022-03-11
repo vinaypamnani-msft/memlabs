@@ -763,7 +763,7 @@ function Test-Configuration {
         #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
         #[bool] $fast = $false
     )
-Get-PSCallStack | out-host
+#Get-PSCallStack | out-host
 
     try {
         $return = [PSCustomObject]@{
