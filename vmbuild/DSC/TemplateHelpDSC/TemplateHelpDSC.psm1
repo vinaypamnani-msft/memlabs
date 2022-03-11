@@ -2017,7 +2017,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "2"
+    [string] $Version = "3"
 
     [void] Set() {
         $_Role = $this.Role
@@ -2086,6 +2086,7 @@ class InstallFeatureForSCCM {
                 Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
                 Install-WindowsFeature BITS, BITS-IIS-Ext
                 Install-WindowsFeature -Name "Rdc"
+                Install-WindowsFeature -Name UpdateServices-UI
             }
             if ($_Role -contains "Application Catalog website point") {
                 #IIS
