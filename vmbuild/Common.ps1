@@ -2072,7 +2072,7 @@ function Install-Tools {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
     }
     else {
-        $allVMs = Get-List -Type VM -SmartUpdate
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object {$_.vmbuild -eq $true } | Sort-Object -Property State -Descending
     }
 
     $success = $true
