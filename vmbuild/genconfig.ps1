@@ -3089,13 +3089,13 @@ Function Get-remoteSQLVM {
             }
             "n" {
                 $name = $($property.SiteCode) + "SQL"
-                Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name
+                Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name -network:$property.network
                 Set-SiteServerRemoteSQL $property $name
             }
             "a" {
                 $name1 = $($property.SiteCode) + "SQLAO1"
                 $name2 = $($property.SiteCode) + "SQLAO2"
-                Add-NewVMForRole -Role "SQLAO" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name1 -Name2 $Name2
+                Add-NewVMForRole -Role "SQLAO" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name1 -Name2 $Name2 -network:$property.network
                 Set-SiteServerRemoteSQL $property $name1
             }
             Default {
@@ -4290,6 +4290,8 @@ function Add-NewVMForRole {
         [string] $Name2 = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Parent Side Code if this is a Primary or Secondary in a Hierarchy")]
         [string] $parentSiteCode = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Override Network")]
+        [string] $network = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Site Code if this is a PassiveSite or a DPMP")]
         [string] $SiteCode = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Override default OS")]
@@ -4339,6 +4341,9 @@ function Add-NewVMForRole {
         virtualProcs    = $vprocs
     }
 
+    if ($network) {
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+    }
     if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC")) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
     }
@@ -4414,7 +4419,7 @@ function Add-NewVMForRole {
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
-            if (-not $test) {
+            if (-not $test -and (-not $network)) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
@@ -4431,7 +4436,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            if (-not $test) {
+            if (-not $test -and (-not $network)) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
@@ -4447,7 +4452,7 @@ function Add-NewVMForRole {
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
 
-            if (-not $test) {
+            if (-not $test -and (-not $network)) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
@@ -4558,7 +4563,7 @@ function Add-NewVMForRole {
     }
     if ($Role -eq "SQLAO" -and (-not $secondSQLAO)) {
         write-host "$($virtualMachine.VmName) is the 1st SQLAO"
-        $SQLAONode = Add-NewVMForRole -Role SQLAO -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Name $Name2 -secondSQLAO:$true -Quiet:$Quiet -ReturnMachineName:$true
+        $SQLAONode = Add-NewVMForRole -Role SQLAO -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Name $Name2 -secondSQLAO:$true -Quiet:$Quiet -ReturnMachineName:$true -network:$network
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'OtherNode' -Value $SQLAONode
         if ($test -eq $false ) {
             $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$false
