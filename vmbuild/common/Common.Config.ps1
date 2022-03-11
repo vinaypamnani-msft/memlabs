@@ -1321,6 +1321,9 @@ function Get-List {
                 if ($vm.network) {
                     $network = $vm.network
                 }
+                else {
+                    $network = $DeployConfigClone.vmoptions.network
+                }
                 foreach ($vm2 in $return) {
                     if ($vm2.vmName -eq $vm.vmName) {
                         $vm2.source = "config"

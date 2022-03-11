@@ -1994,7 +1994,7 @@ function Select-Subnet {
         }
         while (-not $network) {
             $subnetlistEnhanced = Get-EnhancedSubnetList -subnetList $subnetlist -ConfigToCheck $configToCheck
-            $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $current
+            $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $current -Split
             if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                 $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
             }
@@ -2100,7 +2100,7 @@ function Get-EnhancedSubnetList {
     $rolesToShow = @("Primary", "CAS", "Secondary")
 
     if ($configToCheck) {
-        $FullList = get-list2 -deployConfig $ConfigToCheck
+        $FullList = get-list2 -deployConfig $ConfigToCheck -SmartUpdate
         $domain = $ConfigToCheck.vmoptions.DomainName
     }
     else {
