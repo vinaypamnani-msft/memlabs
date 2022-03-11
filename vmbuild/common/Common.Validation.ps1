@@ -212,10 +212,10 @@ function Test-ValidVmSupported {
         }
     }
 
-    # Windows 11 TPM - Commented out - Existing config's will fail validation
-    # if ($VM.operatingSystem -like "Windows 11*" -and -not $VM.tpmEnabled) {
-    #     Add-ValidationMessage -Message "VM Validation: [$vmName] does not have TPM enabled (required for Windows 11)." -ReturnObject $ReturnObject -Failure
-    # }
+    # Windows 11 TPM
+    if ($vm.operatingSystem -like "Windows 11*" -and $vm.tpmEnabled -eq $false) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] does not have TPM enabled (required for Windows 11)." -ReturnObject $ReturnObject -Failure
+    }
 
     # Supported DSC Roles for Existing scenario
     if ($configObject.parameters.ExistingDCName) {
