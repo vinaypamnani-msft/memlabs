@@ -116,8 +116,6 @@ function Write-Phase {
 # Main script starts here
 try {
 
-    Write-Log "### START." -Activity
-
     if ($Common.PS7) {
         Write-Host
     }
@@ -125,7 +123,12 @@ try {
         Write-Host ("`r`n" * 6)
     }
 
+    Set-QuickEdit -DisableQuickEdit
+    $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
+
     Start-Maintenance
+
+    Write-Log "### VALIDATE" -Activity
 
     # Get config
     if (-not $Configuration) {
@@ -171,9 +174,6 @@ try {
         return
     }
 
-    Set-QuickEdit -DisableQuickEdit
-    $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
-
     # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
@@ -211,6 +211,8 @@ try {
     $domainName = $deployConfig.vmOptions.domainName
     Write-Log "Starting deployment. Review VMBuild.$domainName.log"
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
+
+    Write-Log "### START DEPLOYMENT (Configuration '$Configuration')" -Activity
 
     # Download tools
     $success = Get-Tools -WhatIf:$WhatIf
