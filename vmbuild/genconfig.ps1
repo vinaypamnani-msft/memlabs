@@ -838,6 +838,22 @@ function Select-MainMenu {
 
         $i = 0
         #$valid = Get-TestResult -SuccessOnError
+
+        $virtualMachines = @()
+
+        # Sort By Role
+        #foreach ($role in $global:Common.Supported.Roles) {
+        #    foreach ($vm in $global:config.virtualMachines){
+        #        if ($vm.Role -eq $role) {
+        #            $virtualMachines += $vm
+        #        }
+        #    }
+        #}
+        $virtualMachines += $global:config.virtualMachines |Where-Object {$_.role -in ("DC","BDC")}
+        $virtualMachines += $global:config.virtualMachines |Where-Object {$_.role -notin ("DC","BDC") }| Sort-Object {$_.vmName}
+
+        $global:config.virtualMachines = $virtualMachines
+
         foreach ($virtualMachine in $global:config.virtualMachines) {
             if ($null -eq $virtualMachine) {
                 $global:config.virtualMachines | convertTo-Json -Depth 5 | out-host

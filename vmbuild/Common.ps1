@@ -2354,18 +2354,19 @@ function Set-SupportedOptions {
     $roles = @(
         "DC",
         "BDC",
-        "Primary",
         "CAS",
+        "Primary",
         "Secondary",
         "PassiveSite",
         "FileServer",
         "DPMP",
+        "SQLAO",
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
         "AADClient",
-        "OSDClient",
-        "SQLAO"
+        "OSDClient"
+
     )
 
     $rolesForExisting = @(

@@ -520,6 +520,7 @@ function ConvertTo-DeployConfigEx {
 
 
     $deployConfigEx = $deployConfig | ConvertTo-Json -depth 5 | ConvertFrom-Json
+
     foreach ($thisVM in $deployConfigEx.virtualMachines) {
 
         if (-not $thisVM) {
