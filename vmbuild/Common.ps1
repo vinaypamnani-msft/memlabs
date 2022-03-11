@@ -1138,6 +1138,8 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $false)]
         [switch]$OSDClient,
         [Parameter(Mandatory = $false)]
+        [switch]$tpmEnabled,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -1220,7 +1222,7 @@ function New-VirtualMachine {
     Write-Log "$VmName`: Enabling Hyper-V Guest Services"
     Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
 
-    if ($Generation -eq "2") {
+    if ($Generation -eq "2" -and $tpmEnabled) {
         $mtx = New-Object System.Threading.Mutex($false, "TPM")
         write-log "Attempting to acquire 'TPM' Mutex" -LogOnly
         [void]$mtx.WaitOne()

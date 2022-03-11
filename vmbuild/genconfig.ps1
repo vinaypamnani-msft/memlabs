@@ -3293,10 +3293,21 @@ function Get-AdditionalValidations {
             }
         }
 
+        "tpmEnabled" {
+            if ($value -eq $false) {
+                if ($property.OperatingSystem -like "*Windows 11*") {
+                    Write-RedX "Windows 11 must include TPM support"
+                    $property.$name = $true
+                }
+            }
+        }
 
         "vmGeneration" {
             if ($value -notin ("1", "2")) {
                 $property.$name = "2"
+            }
+            if ($value -eq "1" -and ($property.tpmEnabled -eq $true)) {
+                Write-OrangePoint "Setting generation to 1 will disable TPM support."
             }
         }
         "SqlServiceAccount" {
@@ -3373,7 +3384,7 @@ function Get-AdditionalValidations {
 
         }
         "OtherNode" {
-            write-Host "Sorry. OtherNode can not be set manually. Please rename the 2nd node of the cluster to change this property."
+           Write-Redx "Sorry. OtherNode can not be set manually. Please rename the 2nd node of the cluster to change this property."
             $property.$name = $currentValue
         }
         "network" {
@@ -3430,7 +3441,7 @@ function Get-AdditionalValidations {
         }
         "installMP" {
             if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -eq "Secondary") {
-                write-host2 -ForegroundColor Orange "Can not install an MP for a secondary site"
+                Write-OrangePoint -ForegroundColor Orange "Can not install an MP for a secondary site"
                 $property.installMP = $false
             }
             $newName = Get-NewMachineName -vm $property
@@ -3604,7 +3615,9 @@ function Get-SortedProperties {
         $sorted += "basePath"
     }
 
-
+    if ($members.Name -contains "domainUser") {
+        $sorted += "domainUser"
+    }
     if ($members.Name -contains "role") {
         $sorted += "role"
     }
@@ -3641,6 +3654,15 @@ function Get-SortedProperties {
     if ($members.Name -contains "remoteContentLibVM") {
         $sorted += "remoteContentLibVM"
     }
+    if ($members.Name -contains "tpmEnabled") {
+        $sorted += "tpmEnabled"
+    }
+    if ($members.Name -contains "InstallSSMS") {
+        $sorted += "InstallSSMS"
+    }
+    if ($members.Name -contains "InstallCA") {
+        $sorted += "InstallCA"
+    }
 
     if ($members.Name -contains "additionalDisks") {
         $sorted += "additionalDisks"
@@ -3650,6 +3672,7 @@ function Get-SortedProperties {
         "vmName" {  }
         "role" {  }
         "memory" { }
+        "domainUser" {}
         "virtualProcs" { }
         "operatingSystem" {  }
         "siteCode" { }
@@ -3666,6 +3689,9 @@ function Get-SortedProperties {
         "basePath" { }
         "remoteSQLVM" {}
         "remoteContentLibVM" {}
+        "tpmEnabled" {}
+        "installSSMS" {}
+        "installCA" {}
 
         Default { $sorted += $_ }
     }
@@ -4339,6 +4365,7 @@ function Add-NewVMForRole {
         operatingSystem = $OperatingSystem
         memory          = $memory
         virtualProcs    = $vprocs
+        tpmEnabled      = $true
     }
 
     if ($network) {
@@ -4360,6 +4387,7 @@ function Add-NewVMForRole {
             $virtualMachine.Memory = "8GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
+            $virtualMachine.tpmEnabled = $false
         }
         "SQLAO" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -4370,6 +4398,7 @@ function Add-NewVMForRole {
             $virtualMachine.Memory = "8GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
+            $virtualMachine.tpmEnabled = $false
 
         }
         "CAS" {
@@ -4462,7 +4491,25 @@ function Add-NewVMForRole {
         "WorkgroupMember" {}
         "InternetClient" {}
         "AADClient" {}
-        "DomainMember" { }
+        "DomainMember" {
+            if ($OperatingSystem -notlike "*Server*"){
+                $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
+                [int]$i = 1
+                $userPrefix = "user"
+                while ($true) {
+                    $preferredUserName = $userPrefix + $i
+                    if ($users -contains $preferredUserName) {
+                        write-log -verbose "$preferredUserName already existsTrying next"
+                        $i++
+                    }
+                    else{
+                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $preferredUserName
+                        break
+                    }
+
+                }
+            }
+        }
         "DomainMember (Server)" { }
         "DomainMember (Client)" {
             if ($OperatingSystem -like "*Server*") {
@@ -4471,6 +4518,23 @@ function Add-NewVMForRole {
             else {
                 $virtualMachine.operatingSystem = $OperatingSystem
             }
+
+            $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
+            [int]$i = 1
+            $userPrefix = "user"
+            while ($true) {
+                $preferredUserName = $userPrefix + $i
+                if ($users -contains $preferredUserName) {
+                    write-log -verbose "$preferredUserName already existsTrying next"
+                    $i++
+                }
+                else{
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $preferredUserName
+                    break
+                }
+
+            }
+
             $virtualMachine.Memory = "2GB"
         }
         "OSDClient" {
@@ -4506,9 +4570,11 @@ function Add-NewVMForRole {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "500GB"; "F" = "200GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine.tpmEnabled = $false
         }
         "DC" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true
+            $virtualMachine.tpmEnabled = $false
         }
     }
 
@@ -4949,7 +5015,8 @@ function Select-VirtualMachines {
                             }
                             if (-not ($newValue -eq "Z")) {
                                 Get-TestResult -SuccessOnError | out-null
-                            }else {
+                            }
+                            else {
                                 break VMLoop
                             }
                         }

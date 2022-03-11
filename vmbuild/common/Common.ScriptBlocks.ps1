@@ -72,6 +72,10 @@ $global:VM_Create = {
             if ($currentItem.vmGeneration) {
                 $Generation = $currentItem.vmGeneration
             }
+            $tpmEnabled = $true
+            if ($currentItem.tpmEnabled) {
+                $tpmEnabled = $currentItem.tpmEnabled
+            }
             $HashArguments = @{
                 VmName          = $currentItem.vmName
                 VmPath          = $virtualMachinePath
@@ -80,6 +84,7 @@ $global:VM_Create = {
                 Generation      = $Generation
                 Processors      = $currentItem.virtualProcs
                 SwitchName      = $vmSwitch.Name
+                tpmEnabled      = $tpmEnabled
                 DeployConfig    = $deployConfig
             }
 
