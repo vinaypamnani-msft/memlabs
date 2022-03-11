@@ -173,13 +173,14 @@ function New-DeployConfig {
             }
         }
 
-        $CSVM = $virtualMachines | Where-Object { $_.role -eq "CAS" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-        if ($CSVM) {
-            # Add prefix to remote SQL
-            if ($CSVM.remoteSQLVM -and -not $CSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-                $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
+        $CSVMs = $virtualMachines | Where-Object { $_.role -eq "CAS" }
+        if ($CSVMs) {
+            foreach ($CSVM in $CSVMs) {
+                # Add prefix to remote SQL
+                if ($CSVM.remoteSQLVM -and -not $CSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+                    $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
+                }
             }
-
             $scenario = "Hierarchy"
         }
 

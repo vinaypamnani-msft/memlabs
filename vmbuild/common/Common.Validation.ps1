@@ -763,6 +763,7 @@ function Test-Configuration {
         #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
         #[bool] $fast = $false
     )
+Get-PSCallStack | out-host
 
     try {
         $return = [PSCustomObject]@{
@@ -922,12 +923,13 @@ function Test-Configuration {
         # ==============
         if ($containsCS) {
             Write-Progress -Activity "Validating Configuration" -Status "Testing CAS" -PercentComplete 39
-            $CSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "CAS" }
-            $vmName = $CSVM.vmName
-            $vmRole = $CSVM.role
+            $CSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "CAS" }
+            foreach ($CSVM in $CSVMs) {
+                $vmName = $CSVM.vmName
+                $vmRole = $CSVM.role
 
-            # Single CAS
-            if (Test-SingleRole -VM $CSVM -ReturnObject $return) {
+                # Single CAS
+                #if (Test-SingleRole -VM $CSVM -ReturnObject $return) {
 
                 # CAS without Primary
                 if (-not $containsPS) {
@@ -937,8 +939,8 @@ function Test-Configuration {
                 # Validate CAS role
                 Test-ValidRoleSiteServer -VM $CSVM -ConfigObject $deployConfig -ReturnObject $return
 
+                #}
             }
-
         }
 
         # Primary Validations
@@ -978,7 +980,7 @@ function Test-Configuration {
 
                 # CAS with Primary, without parentSiteCode
                 if ($containsCS) {
-                    if ($psParentSiteCode -ne $CSVM.siteCode) {
+                    if ($psParentSiteCode -notin $CSVMs.siteCode) {
                         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$psParentSiteCode] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Warning
                     }
                 }

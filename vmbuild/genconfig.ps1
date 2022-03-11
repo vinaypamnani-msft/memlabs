@@ -3384,7 +3384,7 @@ function Get-AdditionalValidations {
 
         }
         "OtherNode" {
-           Write-Redx "Sorry. OtherNode can not be set manually. Please rename the 2nd node of the cluster to change this property."
+            Write-Redx "Sorry. OtherNode can not be set manually. Please rename the 2nd node of the cluster to change this property."
             $property.$name = $currentValue
         }
         "network" {
@@ -3409,21 +3409,24 @@ function Get-AdditionalValidations {
         }
         "vmName" {
 
-            $CASVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
-            $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
+            $CASVMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
+            $PRIVMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
 
             $Passives = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
             $SQLAOs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
             #This is a SQL Server being renamed.  Lets check if we need to update CAS or PRI
             if (($Property.Role -eq "DomainMember") -and ($null -ne $Property.sqlVersion)) {
-                if (($null -ne $PRIVM.remoteSQLVM) -and $PRIVM.remoteSQLVM -eq $CurrentValue) {
-                    $PRIVM.remoteSQLVM = $value
+                foreach ($PRIVM in $PRIVMs) {
+                    if (($null -ne $PRIVM.remoteSQLVM) -and $PRIVM.remoteSQLVM -eq $CurrentValue) {
+                        $PRIVM.remoteSQLVM = $value
+                    }
                 }
-                if (($null -ne $CASVM.remoteSQLVM) -and ($CASVM.remoteSQLVM -eq $CurrentValue)) {
-                    $CASVM.remoteSQLVM = $value
+                foreach ($CASVM in $CASVMs) {
+                    if (($null -ne $CASVM.remoteSQLVM) -and ($CASVM.remoteSQLVM -eq $CurrentValue)) {
+                        $CASVM.remoteSQLVM = $value
+                    }
                 }
             }
-
             if ($Property.Role -eq "FileServer" -and $null -ne $SQLAOs) {
                 foreach ($SQLAO in $SQAOs) {
                     if ($SQLAO.FileServerVM -eq $CurrentValue) {
@@ -3883,10 +3886,13 @@ function Select-Options {
             }
         }
         $response = get-ValidResponse $prompt $i $null $additionalOptions
+
         if ([String]::IsNullOrWhiteSpace($response)) {
             return
         }
-
+        if ($response -is [bool]) {
+            $test = $false
+        }
         $return = $null
         if ($null -ne $additionalOptions) {
             foreach ($item in $($additionalOptions.keys)) {
@@ -4063,7 +4069,14 @@ function Select-Options {
                 Write-Verbose "7 Select-Options"
                 while ($valid -eq $false) {
                     if ($value -is [bool]) {
-                        $response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") -NoNewLine -Test:$false
+                        if ($value -eq $true) {
+                            $response2 = "false"
+                        }
+                        else {
+                            $response2 = "true"
+                        }
+                        $test = $false
+                        #$response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") -NoNewLine -Test:$false
                     }
                     else {
                         $response2 = Read-Host2 -Prompt "Select new Value for $($Name)" $value
@@ -4413,11 +4426,11 @@ function Add-NewVMForRole {
             $virtualMachine.Memory = "12GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
-            $existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
-            $existingPrimaryVM = $ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1
-            if ($existingPrimaryVM) {
-                $existingPrimaryVM | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $newSiteCode -Force
-            }
+            #$existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
+            #$existingPrimaryVM = $ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1
+            #if ($existingPrimaryVM) {
+            #    $existingPrimaryVM | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $newSiteCode -Force
+            #}
             if (-not $test) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig -ReturnIfNotNeeded:$true
                 if ($network) {
@@ -4426,13 +4439,13 @@ function Add-NewVMForRole {
             }
         }
         "Primary" {
-            $existingCAS = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-            if ([string]::IsNullOrWhiteSpace($parentSiteCode)) {
-                $parentSiteCode = $null
-                if ($existingCAS -eq 1) {
-                    $parentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
-                }
-            }
+            #$existingCAS = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
+            #if ([string]::IsNullOrWhiteSpace($parentSiteCode)) {
+            #    $parentSiteCode = $null
+            #    if ($existingCAS -eq 1) {
+            #        $parentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
+            #    }
+            #}
             if ($parentSiteCode) {
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
             }
@@ -4492,7 +4505,7 @@ function Add-NewVMForRole {
         "InternetClient" {}
         "AADClient" {}
         "DomainMember" {
-            if ($OperatingSystem -notlike "*Server*"){
+            if ($OperatingSystem -notlike "*Server*") {
                 $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 [int]$i = 1
                 $userPrefix = "user"
@@ -4502,7 +4515,7 @@ function Add-NewVMForRole {
                         write-log -verbose "$preferredUserName already existsTrying next"
                         $i++
                     }
-                    else{
+                    else {
                         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $preferredUserName
                         break
                     }
@@ -4528,7 +4541,7 @@ function Add-NewVMForRole {
                     write-log -verbose "$preferredUserName already existsTrying next"
                     $i++
                 }
-                else{
+                else {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $preferredUserName
                     break
                 }
@@ -4610,13 +4623,13 @@ function Add-NewVMForRole {
         }
     }
 
-    if ($existingPrimary -eq 0) {
-        Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Quiet:$Quiet
+    if ($role -eq "CAS") {
+        Add-NewVMForRole -Role Primary -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Quiet:$Quiet -parentSiteCode $virtualMachine.SiteCode -network:$virtualMachine.network
     }
 
-    if ($existingPrimary -gt 0) {
-        ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).parentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).siteCode
-    }
+    #if ($existingPrimary -gt 0) {
+    #    ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).parentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).siteCode
+    #}
 
     if ($existingDPMP -eq 0) {
         if (-not $newSiteCode) {
