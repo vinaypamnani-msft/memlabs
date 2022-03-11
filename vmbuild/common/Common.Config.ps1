@@ -131,15 +131,17 @@ function New-DeployConfig {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
         }
 
-        $PSVM = $virtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -First 1 # Bypass failures, validation would fail if we had multiple
-        if ($PSVM) {
-            # Add prefix to remote SQL
-            if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-                $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
-            }
+        $PSVMs = $virtualMachines | Where-Object { $_.role -eq "Primary" }
+        foreach ($PSVM in $PSVMs) {
+            if ($PSVM) {
+                # Add prefix to remote SQL
+                if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+                    $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
+                }
 
-            if ($PSVM.parentSiteCode) {
-                $scenario = "Hierarchy"
+                if ($PSVM.parentSiteCode) {
+                    $scenario = "Hierarchy"
+                }
             }
         }
 
