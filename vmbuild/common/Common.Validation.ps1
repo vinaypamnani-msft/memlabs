@@ -941,13 +941,20 @@ function Test-Configuration {
         if ($containsPS) {
             Write-Progress -Activity "Validating Configuration" -Status "Testing Primary" -PercentComplete 42
             # Validate Primary role
-            $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
-            $vmName = $PSVM.vmName
-            $vmRole = $PSVM.role
-            $psParentSiteCode = $PSVM.parentSiteCode
+            $PSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
 
+<<<<<<< HEAD
             #if (Test-SingleRole -VM $PSVM -ReturnObject $return) {
                 {
+=======
+            # if (Test-SingleRole -VM $PSVM -ReturnObject $return) {
+
+            foreach ($PSVM in $PSVMs) {
+
+                $vmName = $PSVM.vmName
+                $vmRole = $PSVM.role
+                $psParentSiteCode = $PSVM.parentSiteCode
+>>>>>>> 61dd3fc95e244a956e1c7b5f0e29552ba2b45fbd
                 Test-ValidRoleSiteServer -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
 
                 # Valid parent Site Code
@@ -1045,10 +1052,19 @@ function Test-Configuration {
 
         # Primary site without CAS
         if ($deployConfig.parameters.scenario -eq "Hierarchy") {
+<<<<<<< HEAD
             $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
             $existingCS = Get-List2 -DeployConfig $deployConfig -SmartUpdate | Where-Object { $_.role -eq "CAS" -and $_.siteCode -in $PSVM.parentSiteCode }
             if (-not $existingCS) {
                 Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
+=======
+            $PSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
+            foreach ($PSVM in $PSVMs) {
+                $existingCS = Get-List2 -DeployConfig $deployConfig -SmartUpdate | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
+                if (-not $existingCS) {
+                    Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
+                }
+>>>>>>> 61dd3fc95e244a956e1c7b5f0e29552ba2b45fbd
             }
         }
 
