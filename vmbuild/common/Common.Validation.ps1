@@ -946,8 +946,8 @@ function Test-Configuration {
             $vmRole = $PSVM.role
             $psParentSiteCode = $PSVM.parentSiteCode
 
-            if (Test-SingleRole -VM $PSVM -ReturnObject $return) {
-
+            #if (Test-SingleRole -VM $PSVM -ReturnObject $return) {
+                {
                 Test-ValidRoleSiteServer -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
 
                 # Valid parent Site Code
@@ -1046,7 +1046,7 @@ function Test-Configuration {
         # Primary site without CAS
         if ($deployConfig.parameters.scenario -eq "Hierarchy") {
             $PSVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
-            $existingCS = Get-List2 -DeployConfig $deployConfig -SmartUpdate | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
+            $existingCS = Get-List2 -DeployConfig $deployConfig -SmartUpdate | Where-Object { $_.role -eq "CAS" -and $_.siteCode -in $PSVM.parentSiteCode }
             if (-not $existingCS) {
                 Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
             }

@@ -14,6 +14,7 @@ $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CurrentRole = $ThisVM.role
+$psvms = $deployConfig.VirtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.ParentSiteCode -eq $thisVM.SiteCode }
 $PSVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisVM.thisParams.Primary }
 
 # Set Install Dir
@@ -571,37 +572,72 @@ else {
     $Configuration.UpgradeSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
-    if ($PSVM) {
-        # Waiting for PS ready to use
-        $Configuration.PSReadyToUse.Status = 'Running'
-        $Configuration.PSReadyToUse.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    if ($PSVMs) {
 
-        $PSSiteCode = $PSVM.siteCode
-        $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
-        Write-DscStatus "Waiting for Primary site installation to finish"
-        while (!$PSSystemServer) {
-            Write-DscStatus "Waiting for Primary site installation to finish" -NoLog -RetrySeconds 30
-            Start-Sleep -Seconds 30
+        #Set each Primary to Started
+        foreach ($PSVM in $PSVMs) {
+
+            $propName = "PSReadyToUse" + $PSVM.VmName
+            if (-not $Configuration.$propName) {
+                $PSReadytoUse = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
+                $Configuration | Add-Member -MemberType NoteProperty -Name  $propName  -Value  $PSReadytoUse -Force
+
+            }
+            # Waiting for PS ready to use
+            $Configuration.$propName.Status = 'Running'
+            $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+        }
+        #Wait for all Primaries to get added
+        foreach ($PSVM in $PSVMs) {
+
+            $PSSiteCode = $PSVM.siteCode
             $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
+            Write-DscStatus "Waiting for Primary site installation to finish"
+            while (!$PSSystemServer) {
+                Write-DscStatus "Waiting for Primary site installation to finish" -NoLog -RetrySeconds 30
+                Start-Sleep -Seconds 30
+                $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
+            }
         }
 
-        # Wait for replication ready
-        $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
         Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
-        Start-Sleep -Seconds 30
-        while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30
-            Start-Sleep -Seconds 30
-            $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
+
+
+        $waitList = @($PSVMs.vmName)
+
+        while ( $true) {
+            if ($waitlist.Count -eq 0) {
+                break
+            }
+            foreach ($PSVM in $PSVMs) {
+                if ($waitList -notcontains $PSVM.VmName) {
+                    continue
+                }
+                $PSSiteCode = $PSVM.siteCode
+                # Wait for replication ready
+                $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
+                Start-Sleep -Seconds 30
+                if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
+                    Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                    $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
+                }
+                else {
+                    Write-DscStatus "Data Replication Complete. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                    $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
+                    $propName = "PSReadyToUse" + $PSVM.VmName
+                    $Configuration.$propName.Status = 'Completed'
+                    $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+                    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+                }
+            }
         }
 
         Write-DscStatus "Primary installation complete. Replication link is 'Active'."
-
-        # Update Actions file
-        $Configuration.PSReadyToUse.Status = 'Completed'
-        $Configuration.PSReadyToUse.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
     }
 }

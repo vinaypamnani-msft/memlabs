@@ -4806,7 +4806,7 @@ function Select-VirtualMachines {
                                 }
                             }
 
-                            $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete this VM%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+                            $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Delete this VM%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
                             $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $i -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
                             if (([string]::IsNullOrEmpty($newValue))) {
                                 return
@@ -4942,7 +4942,7 @@ function Select-VirtualMachines {
                                     $virtualMachine.psobject.properties.remove('additionalDisks')
                                 }
                             }
-                            if (-not ($newValue -eq "D")) {
+                            if (-not ($newValue -eq "Z")) {
                                 Get-TestResult -SuccessOnError | out-null
                             }
                         }
@@ -4950,7 +4950,7 @@ function Select-VirtualMachines {
                     }
                 }
             }
-            if ($newValue -eq "D") {
+            if ($newValue -eq "Z") {
                 $i = 0
                 $removeVM = $true
                 foreach ($virtualMachine in $global:config.virtualMachines) {

@@ -75,16 +75,21 @@ if (-not $Configuration) {
                     StartTime = ''
                     EndTime   = ''
                 }
-                PSReadytoUse   = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
                 ScriptWorkflow = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
+            }
+            $psvms = $deployConfig.VirtualMachines | Where-Object { $_.Role -eq "Primary" -and ($_.ParentSiteCode -eq $thisVM.SiteCode) }
+            foreach ($psvm in $psvms) {
+                $PSReadytoUse = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
+                $propName = propName = "PSReadyToUse" + $psvm.VmName
+                $Actions.Add($propName, $PSReadytoUse)
             }
         }
         elseif ($CurrentRole -eq "Primary") {

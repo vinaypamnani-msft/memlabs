@@ -401,22 +401,24 @@ function Add-VMToAccountLists {
         return
     }
 
-    if ($thisVM.vmName -eq $VM.vmName) {
-        return
-    }
+    foreach ($vmToAdd in $VM) {
+        if ($thisVM.vmName -eq $vmToAdd.vmName) {
+            continue
+        }
 
-    $DomainName = $deployConfig.parameters.domainName
-    $DName = $DomainName.Split(".")[0]
+        $DomainName = $deployConfig.parameters.domainName
+        $DName = $DomainName.Split(".")[0]
 
-    if ($SQLSysAdminAccounts) {
-        $accountLists.SQLSysAdminAccounts += "$DNAME\$($VM.vmName)$"
-    }
-    if ($LocalAdminAccounts) {
-        $accountLists.LocalAdminAccounts += "$($VM.vmName)$"
-    }
-    if ($WaitOnDomainJoin) {
-        if (-not $VM.hidden) {
-            $accountLists.WaitOnDomainJoin += $VM.vmName
+        if ($SQLSysAdminAccounts) {
+            $accountLists.SQLSysAdminAccounts += "$DNAME\$($vmToAdd.vmName)$"
+        }
+        if ($LocalAdminAccounts) {
+            $accountLists.LocalAdminAccounts += "$($vmToAdd.vmName)$"
+        }
+        if ($WaitOnDomainJoin) {
+            if (-not $vmToAdd.hidden) {
+                $accountLists.WaitOnDomainJoin += $vmToAdd.vmName
+            }
         }
     }
 }

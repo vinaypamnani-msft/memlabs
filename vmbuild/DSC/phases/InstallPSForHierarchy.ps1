@@ -206,8 +206,19 @@ CCARSiteServer=%CASMachineFQDN%
     # Wait for Site ready
     $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
     Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
-    while ($CSConfiguration.$("PSReadytoUse").Status -ne "Completed") {
-        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 30
+    $propName = "PSReadyToUse" + $ThisVm.VmName
+    $i = 0
+    while ($CSConfiguration.$propName.Status -ne "Completed") {
+        if ($i -eq 0) {
+        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 600
+        $i++
+        }
+        else {
+            $i++
+            if ($i -gt 20) {
+                $i = 0
+            }
+        }
         Start-Sleep -Seconds 30
         $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
     }
