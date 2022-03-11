@@ -39,7 +39,9 @@ function Write-Log {
     )
 
     $HashArguments = @{}
+
     $info = $true
+    $logLevel = 1    # 0 = Verbose, 1 = Info, 2 = Warning, 3 = Error
 
     # Get caller function name and add it to Text
     try {
@@ -51,7 +53,6 @@ function Write-Log {
         $caller = "<Script>"
     }
 
-
     if ($caller -eq "<ScriptBlock>") {
         if ($global:ScriptBlockName) {
             $caller = $global:ScriptBlockName
@@ -59,7 +60,7 @@ function Write-Log {
     }
 
     if ($Text -is [string]) { $Text = $Text.ToString().Trim() }
-    $Text = "[$caller] $Text"
+    # $Text = "[$caller] $Text"
 
     if ($ShowNotification.IsPresent) {
         Show-Notification -ToastText $Text
@@ -74,7 +75,7 @@ function Write-Log {
     If ($Success.IsPresent) {
         $info = $false
         $TextOutput = "  $Text"
-        $Text = "SUCCESS: $Text"
+        # $Text = "SUCCESS: $Text"
         $HashArguments.Add("ForegroundColor", "Chartreuse")
     }
 
@@ -93,24 +94,27 @@ function Write-Log {
 
     If ($Warning.IsPresent) {
         $info = $false
+        $logLevel = 2
         $TextOutput = "  WARNING: $Text"
-        $Text = "WARNING: $Text"
+        # $Text = "WARNING: $Text"
         $HashArguments.Add("ForegroundColor", "Yellow")
 
     }
 
     If ($Failure.IsPresent) {
         $info = $false
+        $logLevel = 3
         $TextOutput = "  ERROR: $Text"
-        $Text = "ERROR: $Text"
+        # $Text = "ERROR: $Text"
         $HashArguments.Add("ForegroundColor", "Red")
 
     }
 
     If ($IsVerbose) {
         $info = $false
+        $logLevel = 0
         $TextOutput = "  VERBOSE: $Text"
-        $Text = "VERBOSE: $Text"
+        # $Text = "VERBOSE: $Text"
     }
 
     If ($Highlight.IsPresent) {
@@ -123,7 +127,7 @@ function Write-Log {
     if ($info) {
         $HashArguments.Add("ForegroundColor", "White")
         $TextOutput = "  $Text"
-        $Text = "INFO: $Text"
+        #$Text = "INFO: $Text"
     }
 
     # Write to output stream
@@ -163,9 +167,6 @@ function Write-Log {
             Write-Host2 $Text @HashArguments
         }
     }
-    $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
-    $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss:fff'
-    $Text = "$time [$tid] $Text"
 
     # Write to log, non verbose entries
     $write = $false
@@ -181,12 +182,20 @@ function Write-Log {
     if ($write) {
         $Text = $Text.ToString().Trim()
         try {
-            $Text | Out-File $Common.LogPath -Append -Encoding utf8
+            $CallingFunction = Get-PSCallStack | Select-Object -first 2 | select-object -last 1
+            $context = $CallingFunction.Command
+            $file = $CallingFunction.Location
+            $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+            $date = Get-Date -Format 'MM-dd-yyyy'
+            $time = Get-Date -Format 'HH:mm:ss.fff'
+
+            $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""$logLevel"" thread=""$tid"" file=""$file"">"
+            $logText | Out-File $Common.LogPath -Append -Encoding utf8
         }
         catch {
             try {
                 # Retry once and ignore if failed
-                $Text | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
+                $logText | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
             }
             catch {
                 # ignore
@@ -2559,6 +2568,8 @@ if (-not $Common.Initialized) {
     ### Set supported options
     Write-Progress "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 14
     Set-SupportedOptions
+
+    # Generate cache
     $i = 15
     if (-not $InJob.IsPresent) {
 
@@ -2574,6 +2585,7 @@ if (-not $Common.Initialized) {
             Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse | ForEach-Object { $_.PSChildName } | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 1 }
         }
         catch {}
+
         # Retrieve VM List, and cache results
         $list = Get-List -Type VM -ResetCache
         foreach ($vm in $list) {
@@ -2586,8 +2598,10 @@ if (-not $Common.Initialized) {
             Update-VMInformation -vm $vm2
         }
     }
+
     $i++
     Write-Progress "Loading required modules." -Status "Moving Logs" -PercentComplete $i
+
     # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
     Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
     $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
@@ -2595,8 +2609,19 @@ if (-not $Common.Initialized) {
         Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
     }
+
+    # Starting 3/11/2022, we changed the log format, remove older format logs
+    $logPath = Join-Path $PSScriptRoot "logs"
+    foreach($log in (Get-ChildItem $logPath -Filter *.log )) {
+        $logLine = Get-Content $log.FullName -TotalCount 1
+        if ($logLine -and -not $logLine.StartsWith("<![LOG[")) {
+            Remove-Item -Path $log.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
+
     $i++
     Write-Progress "Loading required modules." -Status "Finalizing" -PercentComplete $i
+
     # Add HGS Registry key to allow local CA Cert
     New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
 

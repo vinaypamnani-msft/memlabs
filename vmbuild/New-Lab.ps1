@@ -116,6 +116,8 @@ function Write-Phase {
 # Main script starts here
 try {
 
+    Write-Log "### START." -Activity
+
     if ($Common.PS7) {
         Write-Host
     }
@@ -150,7 +152,7 @@ try {
 
     # Load config
     if ($Configuration) {
-        Write-Log "### START." -Activity
+
         Write-Log "Validating specified configuration: $Configuration"
         $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
