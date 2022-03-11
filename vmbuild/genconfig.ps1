@@ -4944,6 +4944,8 @@ function Select-VirtualMachines {
                             }
                             if (-not ($newValue -eq "Z")) {
                                 Get-TestResult -SuccessOnError | out-null
+                            }else {
+                                break VMLoop
                             }
                         }
                         break VMLoop
