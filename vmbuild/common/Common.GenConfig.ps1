@@ -700,6 +700,21 @@ function ConvertTo-DeployConfigEx {
                     }
                 }
 
+                # --- ClientPush
+                $thisVMFromList2 = get-list2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $thisVM.vmName }
+                $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true) -and -not ($_.SqlVersion) }
+                $clientPush = @()
+                $clientPush += ($ClientNames | Where-Object { $_.network -eq $thisVMFromList2.network }).vmName
+
+
+                $Secondaries =  get-list2 -deployConfig $deployConfig | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }
+                foreach ($second in $Secondaries) {
+                    $clientPush += ($ClientNames | Where-Object { $_.network -eq $second.network }).vmName
+                }
+                if ($clientPush) {
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "ClientPush" -Value $clientPush -Force
+                }
+
             }
             "Secondary" {
                 $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $thisVM.parentSiteCode }
