@@ -1620,10 +1620,10 @@ Function Show-Summary {
             if ($PS) {
                 foreach ($PSVM in $PS) {
                     if ($PSVM.ParentSiteCode) {
-                        Write-GreenCheck "ConfigMgr Primary server will join a Hierarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
+                        Write-GreenCheck "ConfigMgr Primary server $($PSVM.VMName) will join a Hierarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
                     }
                     else {
-                        Write-GreenCheck "Primary server with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
+                        Write-GreenCheck "Primary server $($PSVM.VMName) with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
                     }
                 }
             }
@@ -1638,8 +1638,10 @@ Function Show-Summary {
             }
             if ($containsPS) {
                 if ($containsPassive) {
-                    $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-                    Write-GreenCheck "(High Availability) ConfigMgr site server in passive mode will be installed for SiteCode(s) $($PassiveVM.SiteCode -Join ',')"
+                    $PassiveVMs = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
+                    foreach ($PassiveVM in $PassiveVMs) {
+                        Write-GreenCheck "(High Availability) ConfigMgr site server in passive mode $($PassiveVM.VMName) will be installed for SiteCode $($PassiveVM.SiteCode -Join ',')"
+                    }
                 }
                 else {
                     Write-RedX "(High Availability) No ConfigMgr site server in passive mode will be installed"
@@ -1697,8 +1699,9 @@ Function Show-Summary {
 
         if ($containsMember) {
             if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                $MemberNames = ($fixedConfig | Where-Object { $_.Role -eq "DomainMember" -and $null -eq $($_.SqlVersion) }).vmName
-                Write-GreenCheck "Client Push: Yes [$($MemberNames -join ",")]"
+                foreach ($PSVM in $containsPS) {
+                    Write-GreenCheck "Client Push: Yes $(PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
+                }
             }
             else {
                 Write-RedX "Client Push: No"
@@ -1732,7 +1735,7 @@ Function Show-Summary {
             Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be joined." -NoNewLine
         }
 
-        Write-Host " [Network $($deployConfig.vmOptions.network)]"
+        Write-Host " [Default Network $($deployConfig.vmOptions.network)]"
         #Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
 
         $totalMemory = $fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum

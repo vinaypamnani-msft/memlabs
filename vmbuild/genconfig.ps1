@@ -56,9 +56,10 @@ function Write-Option {
 
     if ($null -eq $color) {
         $color = $Global:Common.Colors.GenConfigNormal
+        $color2 = $Global:Common.Colors.GenConfigNormalNumber
     }
     if ($null -eq $color2) {
-        $color2 = $Global:Common.Colors.GenConfigNormalNumber
+        $color2 = $color
     }
     write-host "[" -NoNewline
     Write-Host2 -ForegroundColor $color2 $option -NoNewline
@@ -842,8 +843,8 @@ function Select-MainMenu {
                 $global:config.virtualMachines | convertTo-Json -Depth 5 | out-host
             }
             $i = $i + 1
-            $name = Get-VMString $virtualMachine
-            $customOptions += [ordered]@{"$i" = "$name%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $name = Get-VMString -config $global:config -virtualMachine $virtualMachine -colors
+            $customOptions += [ordered]@{"$i" = "$name" }
             #write-Option "$i" "$($name)"
         }
 
@@ -2530,10 +2531,14 @@ function Get-Menu {
 
                 if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
                     $color1 = $TextValue[1]
+                    if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
+                        $color2 = $TextValue[2]
+                    }
+                    else {
+                        $color2 = $color1
+                    }
                 }
-                if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
-                    $color2 = $TextValue[2]
-                }
+
                 if ($item.StartsWith("*")) {
                     write-host2 -ForeGroundColor $color1 $TextValue[0]
                     continue
@@ -3800,6 +3805,7 @@ function Select-Options {
             }
             if ($item -eq "role" -and $value -eq "DC") {
                 $isVM = $false
+
             }
             #$padding = 27 - ($i.ToString().Length)
             $padding = 26
@@ -4173,7 +4179,10 @@ function get-VMString {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VirtualMachine Object from config")]
-        [object] $virtualMachine
+        [object] $config,
+        [object] $virtualMachine,
+        [switch] $colors
+
     )
 
     $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(19, " ")
@@ -4231,6 +4240,83 @@ function get-VMString {
     }
 
     $name += " Network [$network]"
+
+    if ($colors) {
+        switch ($virtualMachine.Role) {
+            "DC" {
+                $color = "%Tomato"
+            }
+            "BDC" {
+                $color = "%Tomato"
+            }
+            "CAS" {
+                $color = "%PaleGreen"
+            }
+            "Primary" {
+                $color = "%LightSkyBlue"
+            }
+            "Secondary" {
+                $color = "%SandyBrown"
+            }
+            "PassiveSite" {
+                $active = Get-ActiveSiteServerForSiteCode -type VM -DeployConfig $config -siteCode $virtualMachine.SiteCode
+                if ($active.Role -eq "Primary"){
+                    $color = "%LightSkyBlue"
+                }
+                else {
+                    $color = "%PaleGreen"
+                }
+                #$color = "%Plum"
+            }
+            "DPMP" {
+                $siteServer = Get-SiteServerForSiteCode -type VM -DeployConfig $config -siteCode $virtualMachine.SiteCode
+                if ($siteServer.Role -eq "Primary"){
+                    $color = "%LightSkyBlue"
+                }
+                else {
+                    $color = "%SandyBrown"
+                }
+            }
+            "SQLAO" {
+                $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+                if (-not $virtualMachine.Othernode) {
+                    $primaryNode = $config.VirtualMachines | Where-Object {$_.OtherNode -eq $virtualMachine.vmName}
+                }
+                else{
+                    $primaryNode = $virtualMachine
+                }
+                $siteVM = $config.VirtualMachines | Where-Object {$_.RemoteSQLVM -eq $primaryNode.vmName}
+                if ($siteVM)
+                {
+                    if ($siteVM.Role -eq "Primary"){
+                        $color = "%LightSkyBlue"
+                    }
+                    else {
+                        $color = "%PaleGreen"
+                    }
+                }
+            }
+            "DomainMember" {
+                $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+                $siteVM = $config.VirtualMachines | Where-Object {$_.RemoteSQLVM -eq $virtualMachine.vmName}
+                if ($siteVM)
+                {
+                    if ($siteVM.Role -eq "Primary"){
+                        $color = "%LightSkyBlue"
+                    }
+                    else {
+                        $color = "%PaleGreen"
+                    }
+                }
+
+            }
+            default {
+                $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+            }
+        }
+        $name = $name + $color
+    }
+
     return "$name"
 }
 
@@ -4760,7 +4846,7 @@ function Select-VirtualMachines {
             #$valid = Get-TestResult -SuccessOnError
             foreach ($virtualMachine in $global:config.virtualMachines) {
                 $i = $i + 1
-                $name = Get-VMString $virtualMachine
+                $name = Get-VMString -virtualMachine $virtualMachine
                 write-Option "$i" "$($name)"
             }
             write-Option -color $Global:Common.Colors.GenConfigNewVM -Color2 $Global:Common.Colors.GenConfigNewVMNumber "N" "New Virtual Machine"
