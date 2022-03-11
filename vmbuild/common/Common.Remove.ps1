@@ -126,9 +126,9 @@ function Remove-Orphaned {
     Write-Log "Detecting orphaned DHCP Scopes" -Activity
     $scopes = Get-DhcpServerv4Scope
     foreach ($scope in $scopes) {
-        $scopeId = $scope.ScopeId.IPAddressToString # This requires us to replace "Internet" with subnet
+        $scopeId = $scope.ScopeId.ToString() # This requires us to replace "Internet" with subnet
         if ($vmNetworksInUse2 -notcontains $scopeId) {
-            $response = Read-Host -Prompt "DHCP Scope '$($scope.Name)' may be orphaned. Delete DHCP Scope? [y/N]"
+            $response = Read-Host -Prompt "DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]"
             if ($response.ToLowerInvariant() -eq "y") {
                 Remove-DhcpScope -ScopeId $scopeId -WhatIf:$WhatIf
             }
