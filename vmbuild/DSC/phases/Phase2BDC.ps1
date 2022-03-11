@@ -83,6 +83,7 @@
             Credential              = $DomainCreds
             RestartCount            = 2
             WaitForValidCredentials = $true
+            WaitTimeout             = 900
             DependsOn               = $nextDepend
         }
 
