@@ -94,18 +94,7 @@ function Test-ValidVmOptions {
     }
     else {
 
-        $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
-        if ($ConfigObject.vmOptions.adminName -match $pattern) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName [$($ConfigObject.vmoptions.adminName)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $ReturnObject -Failure
-        }
-
-        if ($ConfigObject.vmOptions.adminName.Length -gt 64) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName [$($ConfigObject.vmoptions.adminName)] is too long. Must be less than 64 chars" -ReturnObject $ReturnObject -Failure
-        }
-
-        if ($ConfigObject.vmOptions.adminName.Length -lt 3) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.adminName [$($ConfigObject.vmoptions.adminName)] is too short. Must be at least 3 chars" -ReturnObject $ReturnObject -Failure
-        }
+        Test-ValidUserName -name $ConfigObject.vmoptions.adminName -vmName "VM Options"
     }
 
     # network
@@ -181,6 +170,55 @@ function Test-ValidCmOptions {
 
 }
 
+
+function Test-ValidMachineName {
+    param (
+        [string] $name
+    )
+
+    if (-not $VM) {
+        throw "Test-ValidMachineName called without a VMName"
+    }
+
+    write-log "Testing $name" -Verbose
+    $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
+
+    if ($name.Length -gt 15) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Warning
+    }
+
+    if ($name -match $pattern) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters." -ReturnObject $ReturnObject -Failure
+    }
+
+}
+
+function Test-ValidUserName {
+    param (
+        [string] $name,
+        [string] $vmName
+    )
+
+    if (-not $name) {
+        return
+    }
+    if ($name -in "Administrator", "vmBuildAdmin" , "default" , "cm_svc" ,"guest") {
+        Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] can not be a Reserved Name, as these accounts exist by default and can not be added" -ReturnObject $return -Warning
+    }
+    $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
+    if ($name -match $pattern) {
+        Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $return -Failure
+    }
+
+    if ($name.Length -gt 64) {
+        Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] is too long. Must be less than 64 chars" -ReturnObject $return -Failure
+    }
+
+    if ($name.Length -lt 3) {
+        Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] is too short. Must be at least 3 chars" -ReturnObject $return -Failure
+    }
+}
+
 function Test-ValidVmSupported {
     param (
         [object] $VM,
@@ -189,21 +227,15 @@ function Test-ValidVmSupported {
     )
 
     if (-not $VM) {
-        throw
+        throw "No VM provided"
     }
 
     $vmName = $VM.vmName
 
-    # vmName characters
-    if ($vm.vmName.Length -gt 15) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Warning
+    if (-not ($vmName.StartsWith( $($ConfigObject.vmOptions.prefix) ) ) ) {
+        $vmName = $($ConfigObject.vmOptions.prefix) + $vmName
     }
-
-    #prefix + vmName combined name validation
-    $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
-    if ($($ConfigObject.vmOptions.prefix + $vm.vmName) -match $pattern) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters." -ReturnObject $ReturnObject -Failure
-    }
+    Test-ValidMachineName $vmName
 
     # Supported OS
     if ($VM.role -ne "OSDClient") {
@@ -763,7 +795,7 @@ function Test-Configuration {
         #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
         #[bool] $fast = $false
     )
-#Get-PSCallStack | out-host
+    #Get-PSCallStack | out-host
 
     try {
         $return = [PSCustomObject]@{
@@ -897,20 +929,7 @@ function Test-Configuration {
                 }
             }
 
-            if ($vm.domainUser) {
-                $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
-                if ($vm.domainUser -match $pattern) {
-                    Add-ValidationMessage -Message "Domain User Validation: $($vm.vmName) domainUser [$($vm.domainUser)] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $return -Failure
-                }
-
-                if ($vm.domainUser.Length -gt 64) {
-                    Add-ValidationMessage -Message "Domain User Validation: $($vm.vmName) domainUser [$($vm.domainUser)] is too long. Must be less than 64 chars" -ReturnObject $return -Failure
-                }
-
-                if ($vm.domainUser.Length -lt 3) {
-                    Add-ValidationMessage -Message "Domain User Validation: $($vm.vmName) domainUser [$($vm.domainUser)] is too short. Must be at least 3 chars" -ReturnObject $return -Failure
-                }
-            }
+            Test-ValidUserName -name $vm.domainUser -vmname $vm.vmName
 
         }
 
