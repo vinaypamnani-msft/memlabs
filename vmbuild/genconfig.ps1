@@ -849,8 +849,8 @@ function Select-MainMenu {
         #        }
         #    }
         #}
-        $virtualMachines += $global:config.virtualMachines |Where-Object {$_.role -in ("DC","BDC")}
-        $virtualMachines += $global:config.virtualMachines |Where-Object {$_.role -notin ("DC","BDC") }| Sort-Object {$_.vmName}
+        $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -in ("DC", "BDC") }
+        $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -notin ("DC", "BDC") } | Sort-Object { $_.vmName }
 
         $global:config.virtualMachines = $virtualMachines
 
@@ -2895,13 +2895,20 @@ Function Get-SiteCodeForDPMP {
     #Get-PSCallStack | out-host
     while ($valid -eq $false) {
         $siteCodes = @()
-        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } | Select-Object -first 1)
-        if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-            $siteCodes += "$($tempSiteCode.SiteCode) (New Primary Server - $($tempSiteCode.vmName))"
+        $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } )
+        if ($tempSiteCodes) {
+            foreach ($tempSiteCode in $tempSiteCodes) {
+                $siteCodes += "$($tempSiteCode.SiteCode) (New Primary Server - $($tempSiteCode.vmName))"
+            }
         }
-        $tempSiteCode = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" } | Select-Object -first 1)
-        if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-            $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName))"
+        $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" })
+        if ($tempSiteCodes) {
+
+            if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
+                foreach ($tempSiteCode in $tempSiteCodes) {
+                    $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName))"
+                }
+            }
         }
         if ($Domain) {
             #$siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
@@ -4257,6 +4264,33 @@ function get-VMString {
 
     $name += " Network [$network]"
 
+    $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen")
+    $PRIColors = @("%LightSkyBlue", "%CornflowerBlue", "%RoyalBlue", "%SlateBlue", "%DeepSkyBlue")
+    $SECColors = @("%SandyBrown", "%Chocolate", "%Peru", "%RosyBrown", "%DarkGoldenRod", "%Orange")
+
+
+    $ColorMap = New-Object System.Collections.Generic.Dictionary"[String,String]"
+
+
+    $casCount = 0
+    $priCount = 0
+    $secCount = 0
+    foreach ($vm in $config.VirtualMachines) {
+        switch ($vm.Role) {
+            "CAS" {
+                $ColorMap.Add($vm.SiteCode, $CASColors[$casCount])
+                $casCount++
+            }
+            "Primary" {
+                $ColorMap.Add($vm.SiteCode, $PRIColors[$priCount])
+                $priCount++
+            }
+            "Secondary" {
+                $ColorMap.Add($vm.SiteCode, $SECColors[$secCount])
+                $secCount++
+            }
+        }
+    }
     if ($colors) {
         switch ($virtualMachine.Role) {
             "DC" {
@@ -4266,63 +4300,43 @@ function get-VMString {
                 $color = "%Tomato"
             }
             "CAS" {
-                $color = "%PaleGreen"
+                $color = $ColorMap[$($virtualMachine.SiteCode)]
             }
             "Primary" {
-                $color = "%LightSkyBlue"
+                $color = $ColorMap[$($virtualMachine.SiteCode)]
+
             }
             "Secondary" {
-                $color = "%SandyBrown"
+                $color = $ColorMap[$($virtualMachine.SiteCode)]
+
             }
             "PassiveSite" {
-                $active = Get-ActiveSiteServerForSiteCode -type VM -DeployConfig $config -siteCode $virtualMachine.SiteCode
-                if ($active.Role -eq "Primary"){
-                    $color = "%LightSkyBlue"
-                }
-                else {
-                    $color = "%PaleGreen"
-                }
-                #$color = "%Plum"
+                $color = $ColorMap[$($virtualMachine.SiteCode)]
             }
             "DPMP" {
-                $siteServer = Get-SiteServerForSiteCode -type VM -DeployConfig $config -siteCode $virtualMachine.SiteCode
-                if ($siteServer.Role -eq "Primary"){
-                    $color = "%LightSkyBlue"
-                }
-                else {
-                    $color = "%SandyBrown"
-                }
+                $color = $ColorMap[$($virtualMachine.SiteCode)]
             }
             "SQLAO" {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
                 if (-not $virtualMachine.Othernode) {
-                    $primaryNode = $config.VirtualMachines | Where-Object {$_.OtherNode -eq $virtualMachine.vmName}
+                    $primaryNode = $config.VirtualMachines | Where-Object { $_.OtherNode -eq $virtualMachine.vmName }
                 }
-                else{
+                else {
                     $primaryNode = $virtualMachine
                 }
-                $siteVM = $config.VirtualMachines | Where-Object {$_.RemoteSQLVM -eq $primaryNode.vmName}
-                if ($siteVM)
-                {
-                    if ($siteVM.Role -eq "Primary"){
-                        $color = "%LightSkyBlue"
-                    }
-                    else {
-                        $color = "%PaleGreen"
-                    }
+
+                $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName }
+                if ($siteVM) {
+                    $color = $ColorMap[$($siteVM.SiteCode)]
                 }
+
             }
             "DomainMember" {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                $siteVM = $config.VirtualMachines | Where-Object {$_.RemoteSQLVM -eq $virtualMachine.vmName}
-                if ($siteVM)
-                {
-                    if ($siteVM.Role -eq "Primary"){
-                        $color = "%LightSkyBlue"
-                    }
-                    else {
-                        $color = "%PaleGreen"
-                    }
+                $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $virtualMachine.vmName }
+
+                if ($siteVM) {
+                    $color = $ColorMap[$($siteVM.SiteCode)]
                 }
 
             }
