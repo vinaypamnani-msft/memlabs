@@ -4212,11 +4212,11 @@ function get-VMString {
     $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(16, " ")
     $mem = $($virtualMachine.memory).PadLEft(4, " ")
     $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
-    $Network = "<Default>"
+    $Network =$config.vmOptions.Network
     if ($virtualMachine.Network) {
         $Network = $virtualMachine.Network
     }
-    $name += " Network [$network]".PadRight(23, " ")
+    $name += " [$network]".PadRight(17, " ")
 
     $name += " VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)]"
 
@@ -4232,7 +4232,7 @@ function get-VMString {
         if ($virtualMachine.parentSiteCode) {
             $SiteCode += "->$($virtualMachine.parentSiteCode)"
         }
-        $name += "  CM [SiteCode $SiteCode ($($virtualMachine.cmInstallDir))]".PadRight(39, " ")
+        $name += "  CM  [SiteCode $SiteCode ($($virtualMachine.cmInstallDir))]".PadRight(39, " ")
     }
 
     if ($virtualMachine.siteCode -and -not $virtualMachine.cmInstallDir) {
@@ -4240,7 +4240,7 @@ function get-VMString {
         if ($virtualMachine.parentSiteCode) {
             $SiteCode += "->$($virtualMachine.parentSiteCode)"
         }
-        $temp = "  CM [SiteCode $SiteCode]"
+        $temp = "  CM  [SiteCode $SiteCode]"
         if ($virtualMachine.role -eq "DPMP") {
             if ($virtualMachine.installMP) {
                 $temp += " [MP]"
@@ -4267,11 +4267,9 @@ function get-VMString {
         $name += "$($virtualMachine.sqlInstanceName) ($($virtualMachine.sqlInstanceDir))]"
     }
 
-    $name += " Network [$network]"
-
-    $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen")
-    $PRIColors = @("%LightSkyBlue", "%CornflowerBlue", "%RoyalBlue", "%SlateBlue", "%DeepSkyBlue")
-    $SECColors = @("%SandyBrown", "%Chocolate", "%Peru", "%RosyBrown", "%DarkGoldenRod", "%Orange")
+    $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen", "%MediumSeaGreen", "%SpringGreen")
+    $PRIColors = @("%LightSkyBlue", "%CornflowerBlue", "%RoyalBlue", "%SlateBlue", "%DeepSkyBlue", "%Turquoise", "%Cyan")
+    $SECColors = @("%SandyBrown", "%Chocolate", "%Peru", "%DarkGoldenRod", "%Orange", "%RosyBrown", "%SaddleBrown", "%Tan", "%DarkSalmon", "%GoldenRod")
 
 
     $ColorMap = New-Object System.Collections.Generic.Dictionary"[String,String]"
