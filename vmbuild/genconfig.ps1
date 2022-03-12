@@ -166,7 +166,7 @@ function  Select-NetworkMenu {
     #get-list -type network | out-host
 
     $networks = Get-EnhancedNetworkList
-    ($networks  | Select-Object Network, Domain, SiteCodes, "Virtual Machines" | Format-Table | Out-String).Trim() | out-host
+    ($networks | Select-Object Network, Domain, SiteCodes, "Virtual Machines" | Format-Table | Out-String).Trim() | out-host
     $customOptions = $null
     $response = Get-Menu -Prompt "Press Enter" -OptionArray $subnetlistEnhanced -AdditionalOptions $customOptions -HideHelp:$true
     if (-not $response) {
@@ -849,8 +849,8 @@ function Select-MainMenu {
         #        }
         #    }
         #}
-        $virtualMachines += $global:config.virtualMachines |Where-Object {$_.role -in ("DC","BDC")}
-        $virtualMachines += $global:config.virtualMachines |Where-Object {$_.role -notin ("DC","BDC") }| Sort-Object {$_.vmName}
+        $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -in ("DC", "BDC") }
+        $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -notin ("DC", "BDC") } | Sort-Object { $_.vmName }
 
         $global:config.virtualMachines = $virtualMachines
 
@@ -1629,8 +1629,8 @@ function Select-Config {
         $configSelected.cmOptions.PsObject.properties.Remove('installDPMPRoles')
         foreach ($vm in $configSelected.virtualMachines) {
             if ($vm.Role -eq "DPMP") {
-                $vm  | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
-                $vm  | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
+                $vm | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
+                $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
             }
         }
     }
@@ -2075,7 +2075,7 @@ function Get-EnhancedNetworkList {
             continue
         }
 
-        $SiteCodes = $ListData | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
+        $SiteCodes = $ListData | Where-Object { $_.Name -eq $sb } | Select-Object -expand SiteCode
 
         $domainFromSubnet = (((Get-List -type network | Where-Object { $_.network -eq $sb }).domain) -join ",")
         if ($domainFromSubnet) {
@@ -2139,7 +2139,7 @@ function Get-EnhancedSubnetList {
         }
 
         $entry = ""
-        $SiteCodes = $ListData | Where-Object { $_.Name -eq $sb }  | Select-Object -expand SiteCode
+        $SiteCodes = $ListData | Where-Object { $_.Name -eq $sb } | Select-Object -expand SiteCode
 
 
         if (-not $domain) {
@@ -3741,7 +3741,7 @@ function Get-AdditionalInformation {
         "RemoteSQLVM" {
             $remoteSQL = $global:config.virtualMachines | Where-Object { $_.vmName -eq $data }
             if ($remoteSQL.OtherNode) {
-                $data = $data.PadRight(20) + "(SQL Always On Cluster)"
+                $data = $data.PadRight(20) + "[SQL Always On Cluster]"
             }
         }
         "memory" {
@@ -4209,21 +4209,23 @@ function get-VMString {
     if ($virtualMachine.Network) {
         $Network = $virtualMachine.Network
     }
-    $name += " VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)"
+    $name += " Network [$network]".PadRight(23, " ")
 
-    if ($virtualMachine.additionalDisks) {
-        $name += ", $($virtualMachine.additionalDisks.psobject.Properties.Value.count) Extra Disk(s)]"
-    }
-    else {
-        $name += "]"
-    }
+    $name += " VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)]"
+
+    # if ($virtualMachine.additionalDisks) {
+    #     $name += ", $($virtualMachine.additionalDisks.psobject.Properties.Value.count) Extra Disk(s)]"
+    # }
+    # else {
+    #     $name += "]"
+    # }
 
     if ($virtualMachine.siteCode -and $virtualMachine.cmInstallDir) {
         $SiteCode = $virtualMachine.siteCode
         if ($virtualMachine.parentSiteCode) {
             $SiteCode += "->$($virtualMachine.parentSiteCode)"
         }
-        $name += "  CM [SiteCode $SiteCode ($($virtualMachine.cmInstallDir))]"
+        $name += "  CM [SiteCode $SiteCode ($($virtualMachine.cmInstallDir))]".PadRight(39, " ")
     }
 
     if ($virtualMachine.siteCode -and -not $virtualMachine.cmInstallDir) {
@@ -4231,19 +4233,22 @@ function get-VMString {
         if ($virtualMachine.parentSiteCode) {
             $SiteCode += "->$($virtualMachine.parentSiteCode)"
         }
-        $name += "  CM [SiteCode $SiteCode]"
+        $temp = "  CM [SiteCode $SiteCode]"
         if ($virtualMachine.role -eq "DPMP") {
             if ($virtualMachine.installMP) {
-                $name += " [MP]"
+                $temp += " [MP]"
             }
             if ($virtualMachine.installDP) {
-                $name += " [DP]"
+                $temp += " [DP]"
             }
         }
+        $name += $temp.PadRight(39, " ")
     }
 
     if ($virtualMachine.remoteSQLVM) {
-        $name += "  Remote SQL [$($virtualMachine.remoteSQLVM)]"
+        $sqlVM = Get-List2 -DeployConfig $config | Where-Object { $_.vmName -eq $virtualMachine.remoteSQLVM }
+        if ($sqlVM.OtherNode) { $name += "  SQL AO [$($sqlVM.vmName),$($sqlVM.OtherNode)]" }
+        else { $name += "  Remote SQL [$($virtualMachine.remoteSQLVM)]" }
     }
 
     if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
@@ -4254,8 +4259,6 @@ function get-VMString {
         $name += "  SQL [$($virtualMachine.sqlVersion), "
         $name += "$($virtualMachine.sqlInstanceName) ($($virtualMachine.sqlInstanceDir))]"
     }
-
-    $name += " Network [$network]"
 
     if ($colors) {
         switch ($virtualMachine.Role) {
@@ -4276,7 +4279,7 @@ function get-VMString {
             }
             "PassiveSite" {
                 $active = Get-ActiveSiteServerForSiteCode -type VM -DeployConfig $config -siteCode $virtualMachine.SiteCode
-                if ($active.Role -eq "Primary"){
+                if ($active.Role -eq "Primary") {
                     $color = "%LightSkyBlue"
                 }
                 else {
@@ -4286,7 +4289,7 @@ function get-VMString {
             }
             "DPMP" {
                 $siteServer = Get-SiteServerForSiteCode -type VM -DeployConfig $config -siteCode $virtualMachine.SiteCode
-                if ($siteServer.Role -eq "Primary"){
+                if ($siteServer.Role -eq "Primary") {
                     $color = "%LightSkyBlue"
                 }
                 else {
@@ -4296,15 +4299,14 @@ function get-VMString {
             "SQLAO" {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
                 if (-not $virtualMachine.Othernode) {
-                    $primaryNode = $config.VirtualMachines | Where-Object {$_.OtherNode -eq $virtualMachine.vmName}
+                    $primaryNode = $config.VirtualMachines | Where-Object { $_.OtherNode -eq $virtualMachine.vmName }
                 }
-                else{
+                else {
                     $primaryNode = $virtualMachine
                 }
-                $siteVM = $config.VirtualMachines | Where-Object {$_.RemoteSQLVM -eq $primaryNode.vmName}
-                if ($siteVM)
-                {
-                    if ($siteVM.Role -eq "Primary"){
+                $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName }
+                if ($siteVM) {
+                    if ($siteVM.Role -eq "Primary") {
                         $color = "%LightSkyBlue"
                     }
                     else {
@@ -4314,10 +4316,9 @@ function get-VMString {
             }
             "DomainMember" {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                $siteVM = $config.VirtualMachines | Where-Object {$_.RemoteSQLVM -eq $virtualMachine.vmName}
-                if ($siteVM)
-                {
-                    if ($siteVM.Role -eq "Primary"){
+                $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $virtualMachine.vmName }
+                if ($siteVM) {
+                    if ($siteVM.Role -eq "Primary") {
                         $color = "%LightSkyBlue"
                     }
                     else {
@@ -4356,7 +4357,7 @@ function Get-NetworkForVM {
     if ($vm.Network) {
         $currentNetwork = $vm.Network
     }
-    $SiteServers = get-list2 -deployConfig $ConfigToModify  | Where-Object { ($_.Role -eq "Primary" -or $_.Role -eq "Secondary") -and $_.vmName -ne $vm.vmName }
+    $SiteServers = get-list2 -deployConfig $ConfigToModify | Where-Object { ($_.Role -eq "Primary" -or $_.Role -eq "Secondary") -and $_.vmName -ne $vm.vmName }
     #$SiteServers | convertto-Json | Out-Host
     #$ConfigToModify  |convertto-Json | Out-Host
     #$Secondaries = get-list2 -deployConfig $ConfigToModify  | Where-Object {$_.Role -eq "Secondary"}
@@ -4386,7 +4387,7 @@ function Get-NetworkForVM {
             }
         }
         "CAS" {
-            $SiteServers = get-list2 -deployConfig $ConfigToModify  | Where-Object { ($_.Role -eq "Primary" -or $_.Role -eq "Secondary" -or $_.Role -eq "CAS") -and $_.vmName -ne $vm.vmName }
+            $SiteServers = get-list2 -deployConfig $ConfigToModify | Where-Object { ($_.Role -eq "Primary" -or $_.Role -eq "Secondary" -or $_.Role -eq "CAS") -and $_.vmName -ne $vm.vmName }
             $SiteServers = $SiteServers | Where-Object { -not ($_.Role -eq "Primary" -and $_.ParentSiteCode -eq $vm.SiteCode) }
             if ($currentNetwork -in $SiteServers.network) {
                 #Write-host "$CurrentNetwork is in $($SiteServers.network)"
