@@ -362,7 +362,7 @@ function Get-File {
 
     if (-not $Silent) {
         Write-Log "$Action $sourceDisplay to $Destination... "
-        if ($DisplayName) { Write-Log "Get-File: $DisplayName" -LogOnly }
+        if ($DisplayName) { Write-Log "$DisplayName" -LogOnly }
     }
 
     if ($RemoveIfPresent.IsPresent -and (Test-Path $Destination)) {
@@ -1948,14 +1948,16 @@ function Get-Tools {
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Skip Hash Testing of downloaded files.")]
         [switch]$IgnoreHashFailure,
-        [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
+        [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
         [switch]$ForceDownloadFiles,
         [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
         [string]$VmName,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Tool Name.")]
+        [string]$ToolName,
         [Parameter(Mandatory = $false)]
         [switch]$UseCDN,
         [Parameter(Mandatory = $false)]
-        [switch]$DownloadToolsWithNoHash,
+        [switch]$IncludeOptional,
         [Parameter(Mandatory = $false, HelpMessage = "Inject tools inside all Virtual Machines.")]
         [switch]$Inject,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
@@ -1964,28 +1966,39 @@ function Get-Tools {
 
     $allSuccess = $true
 
+    if ($ToolName -and $Common.AzureFileList.Tools.Name -notcontains $ToolName) {
+        Write-Log "Invalid Tool Name ($ToolName) specified." -Warning
+        return $false
+    }
+
+    if ($VmName) {
+        $Inject = $true
+    }
+
     Write-Log "Downloading/Verifying Tools that need to be injected in Virtual Machines..." -Activity
-    foreach ($file in $Common.AzureFileList.Tools) {
+    foreach ($tool in $Common.AzureFileList.Tools) {
 
-        if (-not $file.md5 -and -not $DownloadToolsWithNoHash.IsPresent) { continue }
+        if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-        $name = $file.Name
-        $url = $file.URL
-        $fileTargetRelative = $file.Target
+        if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { continue }
+
+        $name = $tool.Name
+        $url = $tool.URL
+        $fileTargetRelative = $tool.Target
         $fileName = Split-Path $url -Leaf
         $fileNameForDownload = Join-Path "tools" $fileName
         $downloadPath = Join-Path $Common.AzureToolsPath $fileName
 
-        if (-not $file.IsPublic) {
+        if (-not $tool.IsPublic) {
             $url = "$($StorageConfig.StorageLocation)/$url"
         }
 
-        if (-not $file.md5) {
+        if (-not $tool.md5) {
             Write-Log "Downloading/Verifying '$name'" -SubActivity
             $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
         else {
-            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $file.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
 
         if (-not $worked) {
@@ -2006,7 +2019,7 @@ function Get-Tools {
             }
 
             # File downloaded
-            $extractIfZip = $file.ExtractFolderIfZip
+            $extractIfZip = $tool.ExtractFolderIfZip
             if (Test-Path $downloadPath) {
                 if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
                     Write-Log "Extracting $fileName to $fileDestination."
@@ -2024,11 +2037,12 @@ function Get-Tools {
     $injected = $allSuccess
     if ($Inject.IsPresent -and $allSuccess) {
         $HashArguments = @{
-            WhatIf = $WhatIf
-            InstallToolsWithNoHash = $DownloadToolsWithNoHash
+            WhatIf          = $WhatIf
+            IncludeOptional = $IncludeOptional
         }
 
         if ($VmName) { $HashArguments.Add("VmName", $VmName) }
+        if ($ToolName) { $HashArguments.Add("ToolName", $ToolName) }
 
         $injected = Install-Tools @HashArguments
 
@@ -2046,8 +2060,10 @@ function Install-Tools {
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
         [string]$VmName,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional ToolName Name.")]
+        [string]$ToolName,
         [Parameter(Mandatory = $false)]
-        [switch]$InstallToolsWithNoHash,
+        [switch]$IncludeOptional,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
     )
@@ -2056,7 +2072,7 @@ function Install-Tools {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
     }
     else {
-        $allVMs = Get-List -Type VM -SmartUpdate
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object {$_.vmbuild -eq $true } | Sort-Object -Property State -Descending
     }
 
     $success = $true
@@ -2082,52 +2098,13 @@ function Install-Tools {
 
         foreach ($tool in $Common.AzureFileList.Tools) {
 
-            if (-not $tool.md5 -and -not $InstallToolsWithNoHash.IsPresent) { continue }
+            if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-            if ($tool.NoUpdate -eq $true) {
-                Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's marked NoUpdate." -Verbose
-                continue
-            }
+            if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { continue }
 
-            $toolFileName = Split-Path $tool.url -Leaf
-            $fileTargetRelative = Join-Path $tool.Target $toolFileName
-
-            if ($toolFileName.EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
-                $fileTargetRelative = $tool.Target
-            }
-
-            $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
-            $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
-
-            $isContainer = $false
-            if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
-                $isContainer = $true
-                $fileTargetPathInVM = "C:\tools"
-            }
-
-            if ($tool.Name -eq "WMI Explorer") {
-                $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
-                $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
-            }
-
-            Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
-
-            try {
-                $progressPref = $ProgressPreference
-                $ProgressPreference = "SilentlyContinue"
-                if ($isContainer) {
-                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
-                else {
-                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
-            }
-            catch {
-                Write-Log "$vmName`: Failed to inject '$($tool.Name)'. $_" -Failure
+            $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
+            if (-not $worked) {
                 $success = $false
-            }
-            finally {
-                $ProgressPreference = $progressPref
             }
         }
     }
@@ -2135,6 +2112,77 @@ function Install-Tools {
     Write-Host2
 
     return $success
+}
+
+function Copy-ToolToVM {
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "Tool PS Object.")]
+        [object]$Tool,
+        [Parameter(Mandatory = $true, HelpMessage = "VM Name to inject tool in.")]
+        [string]$VMName,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
+    if ($vm.State -ne "Running") {
+        Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+        continue
+    }
+
+    $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+    if (-not $ps) {
+        Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+        return $false
+    }
+
+    if ($tool.NoUpdate -eq $true) {
+        Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's marked NoUpdate." -Verbose
+        return $true
+    }
+
+    $toolFileName = Split-Path $tool.url -Leaf
+    $fileTargetRelative = Join-Path $tool.Target $toolFileName
+
+    if ($toolFileName.EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+        $fileTargetRelative = $tool.Target
+    }
+
+    $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
+    $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
+
+    $isContainer = $false
+    if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
+        $isContainer = $true
+        $fileTargetPathInVM = "C:\tools"
+    }
+
+    if ($tool.Name -eq "WMI Explorer") {
+        $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
+        $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
+    }
+
+    Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
+
+    try {
+        $progressPref = $ProgressPreference
+        $ProgressPreference = "SilentlyContinue"
+        if ($isContainer) {
+            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+        }
+        else {
+            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Log "$vmName`: Failed to inject '$($tool.Name)'. $_" -Failure
+        return $false
+    }
+    finally {
+        $ProgressPreference = $progressPref
+    }
+
+    return $true
 }
 
 function Get-FileFromStorage {
@@ -2612,7 +2660,7 @@ if (-not $Common.Initialized) {
 
     # Starting 3/11/2022, we changed the log format, remove older format logs
     $logPath = Join-Path $PSScriptRoot "logs"
-    foreach($log in (Get-ChildItem $logPath -Filter *.log )) {
+    foreach ($log in (Get-ChildItem $logPath -Filter *.log )) {
         $logLine = Get-Content $log.FullName -TotalCount 1
         if ($logLine -and -not $logLine.StartsWith("<![LOG[")) {
             Remove-Item -Path $log.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue
