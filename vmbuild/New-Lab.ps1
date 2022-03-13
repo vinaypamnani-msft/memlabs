@@ -407,9 +407,12 @@ finally {
     # Ctrl + C brings us here :)
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
+        Write-Log "### $Configuration Terminated" -HostOnly
     }
 
-    Get-Job | Stop-Job
+    if (-not $global:Common.DevBranch) {
+        Get-Job | Stop-Job
+    }
 
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {

@@ -10,6 +10,135 @@ param (
 ### Common Functions ###
 ########################
 
+
+#Main wrapper for Write-Progress.  This allows all params, and catches any errors
+Function Write-Progress2 {
+
+    try {
+        Write-Progress2Impl @Args @PSBoundParameters | out-null
+    }
+    catch {
+
+        write-Log "Write-Progress $args $_"
+    }
+}
+#Sub Wrapper for Write-Progress.  This allows PercentComplete to be modified, and can log the activity in verbose
+#We can also add additional params here if needed. (eg -NoLog)
+Function Write-Progress2Impl {
+    [CmdletBinding(HelpUri = 'https://go.microsoft.com/fwlink/?LinkID=2097036', RemotingCapability = 'None')]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]
+        ${Activity},
+
+        [Parameter(Position = 1)]
+        [ValidateNotNullOrEmpty()]
+        [string]
+        ${Status},
+
+        [Parameter(Position = 2)]
+        [ValidateRange(0, 2147483647)]
+        [int]
+        ${Id},
+
+        #[ValidateRange(-1, 100)]
+        [int]
+        ${PercentComplete},
+
+        [int]
+        ${SecondsRemaining},
+
+        [string]
+        ${CurrentOperation},
+
+        [ValidateRange(-1, 2147483647)]
+        [int]
+        ${ParentId},
+
+        [switch]
+        ${Completed},
+
+        [int]
+        ${SourceId}
+    )
+    dynamicparam {
+
+        try {
+            $targetCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet, $PSBoundParameters)
+            $dynamicParams = @($targetCmd.Parameters.GetEnumerator() | Microsoft.PowerShell.Core\Where-Object { $_.Value.IsDynamic })
+            if ($dynamicParams.Length -gt 0) {
+                $paramDictionary = [Management.Automation.RuntimeDefinedParameterDictionary]::new()
+                foreach ($param in $dynamicParams) {
+                    $param = $param.Value
+
+                    if (-not $MyInvocation.MyCommand.Parameters.ContainsKey($param.Name)) {
+                        $dynParam = [Management.Automation.RuntimeDefinedParameter]::new($param.Name, $param.ParameterType, $param.Attributes)
+                        $paramDictionary.Add($param.Name, $dynParam)
+                    }
+                }
+
+                return $paramDictionary
+            }
+        }
+        catch {
+            throe
+        }
+
+    }
+    begin {
+
+        try {
+            $Percent = $null
+            if ($PSBoundParameters.TryGetValue('PercentComplete', [ref]$Percent)) {
+                if ($Percent -lt 0) {
+                    $Percent = -1
+                }
+                if ($Percent -gt 100) {
+                    $Percent = 100
+                }
+                $PSBoundParameters['PercentComplete'] = $percent
+            }
+            $outBuffer = $null
+            if ($PSBoundParameters.TryGetValue('OutBuffer', [ref]$outBuffer)) {
+                $PSBoundParameters['OutBuffer'] = 1
+            }
+
+            if ($Global:LastStatus -ne $Status) {
+                Write-Log "Write-Status: Activity: $Activity  Status: $Status" -verbose -LogOnly
+                $Global:LastStatus = $Status
+            }
+            $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
+            $scriptCmd = { & $wrappedCmd @PSBoundParameters }
+
+            $steppablePipeline = $scriptCmd.GetSteppablePipeline($myInvocation.CommandOrigin)
+            $steppablePipeline.Begin($PSCmdlet)
+        }
+        catch {
+            throw
+        }
+
+    }
+    process {
+
+        try {
+            $steppablePipeline.Process($_)
+        }
+        catch {
+            throw
+        }
+
+    }
+    end {
+
+        try {
+            $steppablePipeline.End()
+        }
+        catch {
+            throw
+        }
+
+    }
+}
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)]
@@ -132,7 +261,17 @@ function Write-Log {
 
     # Write to output stream
     if ($OutputStream.IsPresent) {
-        Write-Output $TextOutput
+        $Output = [PSCustomObject]@{
+            Text     = $text
+            Loglevel = $logLevel
+        }
+        if ($HashArguments) {
+            foreach ($arg in $HashArguments.Keys) {
+                $Output | Add-Member -MemberType NoteProperty -Name $arg -Value $HashArguments[$arg] -Force
+            }
+        }
+
+        Write-Output $Output
     }
 
     # Write progress if output stream and failure present
@@ -1438,16 +1577,16 @@ function Wait-ForVm {
             try {
                 $vmTest = Get-VM2 -Name $VmName
                 if (-not $vmTest) {
-                    Write-Progress -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+                    Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
                     Write-Log -Failure "Could not find VM $VMName"
                     return
                 }
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
                 try {
-                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete $percent
+                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete $percent
                 }
                 catch {
-                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail vmstate $_"
+                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail vmstate $_"
                 }
                 $ready = $vmTest.State -eq $VmState
                 Start-Sleep -Seconds 5
@@ -1466,10 +1605,10 @@ function Wait-ForVm {
         Write-Log "$VmName`: $originalStatus"
         $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
         try {
-            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
+            Write-Progress2 -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
         }
         catch {
-            Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail OobeComplete $_"
+            Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail OobeComplete $_"
         }
         $readyOobe = $false
         $wwahostrunning = $false
@@ -1491,14 +1630,14 @@ function Wait-ForVm {
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
                 try {
                     if ($failures -gt 20) {
-                        Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss")) Failed $($failures) / 30" -Status $originalStatus -PercentComplete $percent
+                        Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss")) Failed $($failures) / 30" -Status $originalStatus -PercentComplete $percent
                     }
                     else {
-                        Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
+                        Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
                     }
                 }
                 catch {
-                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail failures gt 20 $_"
+                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail failures gt 20 $_"
                 }
                 Start-Sleep -Seconds 5
                 if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
@@ -1526,10 +1665,10 @@ function Wait-ForVm {
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
                 try {
-                Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status -PercentComplete $percent
+                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status -PercentComplete $percent
                 }
                 catch {
-                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail not readyOobe $_"
+                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail not readyOobe $_"
                 }
                 Start-Sleep -Seconds 5
             }
@@ -1537,7 +1676,7 @@ function Wait-ForVm {
             # Wait until \\localhost\c$ is accessible
             if (-not $readySmb -and $readyOobe) {
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "OOBE complete. Checking SMB access" -PercentComplete $percent
+                Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "OOBE complete. Checking SMB access" -PercentComplete $percent
                 Start-Sleep -Seconds 3
                 $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "$VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
@@ -1553,7 +1692,7 @@ function Wait-ForVm {
                     $wwahostrunning = $true
                     Write-Log "$VmName`: OOBE complete. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
                     $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "OOBE complete, and SMB available. Waiting for WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) to stop before continuing" -PercentComplete $percent
+                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "OOBE complete, and SMB available. Waiting for WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) to stop before continuing" -PercentComplete $percent
                     Start-Sleep -Seconds 15
                 }
                 else {
@@ -1566,7 +1705,7 @@ function Wait-ForVm {
             if (-not $wwahostrunning -and $readySmb) {
                 Write-Log "$VmName`: VM is ready. Waiting $WaitSeconds seconds before continuing."
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "VM is ready. Waiting $WaitSeconds seconds before continuing" -PercentComplete $percent
+                Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "VM is ready. Waiting $WaitSeconds seconds before continuing" -PercentComplete $percent
                 Start-Sleep -Seconds $WaitSeconds
                 $ready = $true
             }
@@ -1583,7 +1722,7 @@ function Wait-ForVm {
         $status = "Waiting for OOBE to start "
         Write-Log "$VmName`: $status"
         $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-        Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete $percent
+        Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete $percent
 
         do {
             $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
@@ -1592,7 +1731,7 @@ function Wait-ForVm {
                 $ready = $true
                 Write-Log "$VmName`: OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running" -PercentComplete $percent
+                Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running" -PercentComplete $percent
             }
             else {
                 Write-Log "$VmName`: OOBE hasn't started yet. WWAHost not running."
@@ -1617,7 +1756,7 @@ function Wait-ForVm {
 
         $vmTest = Get-VM2 -Name $VmName
         if (-not $vmTest) {
-            Write-Progress -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+            Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
             Write-Log -Failure "Could not find VM $VMName"
             return
         }
@@ -1625,7 +1764,7 @@ function Wait-ForVm {
         do {
             try {
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $msg -PercentComplete $percent
+                Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $msg -PercentComplete $percent
             }
             catch {}
             Start-Sleep -Seconds 5
@@ -1642,7 +1781,7 @@ function Wait-ForVm {
         }
     }
 
-    Write-Progress -Activity "Waiting for virtual machine" -Status "Wait complete." -Completed
+    Write-Progress2 -Activity "Waiting for virtual machine" -Status "Wait complete." -Completed
 
     if ($ready) {
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: VM is now available." -Success }
@@ -2540,13 +2679,13 @@ Function Set-PS7ProgressWidth {
 if (-not $Common.Initialized) {
 
     # Write progress
-    Write-Progress "Loading required modules." -Status "Please wait..." -PercentComplete 1
+    Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
     $global:vm_remove_list = @()
 
     ###################
     ### GIT BRANCH  ###
     ###################
-    Write-Progress "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
+    Write-Progress2 "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
     write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
     $devBranch = $false
     try {
@@ -2561,7 +2700,7 @@ if (-not $Common.Initialized) {
 
     # PS Version
     $PS7 = $false
-    Write-Progress "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
+    Write-Progress2 "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
     if ($PSVersionTable.PSVersion.Major -eq 7) {
         $PS7 = $true
         $PSStyle.Progress.Style = "`e[38;5;123m"
@@ -2574,7 +2713,7 @@ if (-not $Common.Initialized) {
     # if ($devBranch) {
     #     Set-StrictMode -Version 1.0
     # }
-    Write-Progress "Loading required modules." -Status "Checking Directories" -PercentComplete 5
+    Write-Progress2 "Loading required modules." -Status "Checking Directories" -PercentComplete 5
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
@@ -2582,10 +2721,10 @@ if (-not $Common.Initialized) {
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
     # Get latest hotfix version
-    Write-Progress "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 7
+    Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 7
     $latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
 
-    Write-Progress "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 10
+    Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 10
     # Common global props
 
     $colors = Get-Colors
@@ -2633,11 +2772,11 @@ if (-not $Common.Initialized) {
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access
-    Write-Progress "Loading required modules." -Status "Checking Storage Config" -PercentComplete 12
+    Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 12
     Get-StorageConfig
 
     ### Set supported options
-    Write-Progress "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 14
+    Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 14
     Set-SupportedOptions
 
     # Generate cache
@@ -2664,14 +2803,14 @@ if (-not $Common.Initialized) {
             if ($i -ge 98) {
                 $i = 98
             }
-            Write-Progress "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
+            Write-Progress2 "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
             $vm2 = Get-VM -id $vm.vmId
             Update-VMInformation -vm $vm2
         }
     }
 
     $i++
-    Write-Progress "Loading required modules." -Status "Moving Logs" -PercentComplete $i
+    Write-Progress2 "Loading required modules." -Status "Moving Logs" -PercentComplete $i
 
     # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
     Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
@@ -2691,12 +2830,12 @@ if (-not $Common.Initialized) {
     }
 
     $i++
-    Write-Progress "Loading required modules." -Status "Finalizing" -PercentComplete $i
+    Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
 
     # Add HGS Registry key to allow local CA Cert
     New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
 
     # Write progress
-    Write-Progress "Loading required modules." -Completed
+    Write-Progress2 "Loading required modules." -Completed
 
 }

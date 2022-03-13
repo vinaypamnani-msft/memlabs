@@ -1699,8 +1699,14 @@ Function Show-Summary {
 
         if ($containsMember) {
             if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                foreach ($PSVM in $containsPS) {
-                    Write-GreenCheck "Client Push: Yes $($PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
+                $PSVMs = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
+                foreach ($PSVM in $PSVMs) {
+                    if ($PSVM.thisParams.ClientPush) {
+                        Write-GreenCheck "Client Push: Yes $($PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
+                    }
+                    else {
+                        Write-OrangePoint "Client Push is enabled for $($PSVM.VMname) , but no eligible clients found"
+                    }
                 }
             }
             else {

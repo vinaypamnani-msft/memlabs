@@ -38,7 +38,7 @@ function Write-JobProgress {
 
                     # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                 }
-                Write-Progress -Id $Job.Id -Activity "$jobName2`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
+                Write-Progress2 -Id $Job.Id -Activity "$jobName2`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
             }
             catch {
                 Write-Log "[$jobName] Exception during job progress reporting. $vmName; $roleName; $AdditionalData. $_" -Verbose
@@ -172,7 +172,7 @@ function Start-PhaseJobs {
             else {
                 if ($Phase -eq 1) {
                     # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
-                    $global:vm_remove_list += $jobName
+                    $global:vm_remove_list += ($jobName -split " ")[0]
                 }
             }
         }
@@ -248,10 +248,10 @@ function Wait-Phase {
             $FailRetry = $FailRetry + 1
             if ($FailRetry -gt 30) {
                 $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
-                $jobJson = $job | convertTo-Json -depth 5
+                $jobJson = $job | convertTo-Json -depth 5 -WarningAction SilentlyContinue
                 Write-Log "[Phase $Phase] Job failed: $jobJson" -LogOnly
                 Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red
-                Write-Progress -Id $job.Id -Activity $job.Name -Completed
+                Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
                 $jobs.Remove($job)
                 $return.Failed++
             }
@@ -263,34 +263,36 @@ function Wait-Phase {
 
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
             if (-not $jobOutput) {
+                $jobError = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
                 $jobName = $job | Select-Object -ExpandProperty Name
-                Write-RedX "[Phase $Phase] Job $jobName completed with no output" -ForegroundColor Red
-                $jobJson = $job | ConvertTo-Json -Depth 5
+                if ($jobError) {
+                    Write-RedX "[Phase $Phase] Job $jobName completed with error: $jobError" -ForegroundColor Red
+                }
+                else {
+                    Write-RedX "[Phase $Phase] Job $jobName completed with no output" -ForegroundColor Red
+                }
+                $jobJson = $job | ConvertTo-Json -Depth 5 -WarningAction SilentlyContinue
                 write-log -LogOnly $jobJson
                 $return.Failed++
             }
-
+            #$logLevel = 1    # 0 = Verbose, 1 = Info, 2 = Warning, 3 = Error
             $incrementCount = $true
-            foreach ($line in $jobOutput) {
+            foreach ($OutputObject in $jobOutput) {
+                $line = $OutputObject.text
                 $line = $line.ToString().Trim()
 
-                if ($line.StartsWith("ERROR")) {
-                    Write-RedX $line -ForegroundColor Red
+                if ($OutputObject.LogLevel -eq 3) {
+                    Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
                     if ($incrementCount) {
                         $return.Failed++
                     }
                 }
-                elseif ($line.StartsWith("WARNING")) {
-                    Write-OrangePoint $line -ForegroundColor Yellow
+                elseif ($OutputObject.LogLevel -eq 2) {
+                    Write-OrangePoint $line -ForegroundColor $OutputObject.ForegroundColor
                     if ($incrementCount) { $return.Warning++ }
                 }
                 else {
-                    if ($line.StartsWith("SUCCESS")) {
-                        Write-GreenCheck $line -ForegroundColor ForestGreen
-                    }
-                    else {
-                        Write-GreenCheck $line -ForegroundColor White
-                    }
+                    Write-GreenCheck $line -ForegroundColor $OutputObject.ForegroundColor
                     # Assume no error/warning was a success
                     if ($incrementCount) { $return.Success++ }
                 }
@@ -298,7 +300,7 @@ function Wait-Phase {
                 $incrementCount = $false
             }
 
-            Write-Progress -Id $job.Id -Activity $job.Name -Completed
+            Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
             $jobs.Remove($job)
         }
 
@@ -345,7 +347,7 @@ function Get-ConfigurationData {
                 $Global:ProgressPreference = $OriginalProgressPreference
 
                 if (-not $testNet) {
-                    Write-Log "[Phase $Phase]: $($dc.NodeName): Could not verify if RDP is enabled. Restarting the computer." -OutputStream -Warning
+                    Write-Log "[Phase $Phase]: $($dc.NodeName): Could not verify if RDP is enabled. Restarting the computer." -Warning
                     Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
                     Start-Sleep -Seconds 20
                 }
@@ -479,7 +481,7 @@ function Get-Phase5ConfigurationData {
         [object]$deployConfig
     )
 
-    $primaryNodes = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not ($_.hidden)  }
+    $primaryNodes = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not ($_.hidden) }
     $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }

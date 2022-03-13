@@ -806,7 +806,7 @@ function Test-Configuration {
             Warnings     = 0
             Problems     = 0
         }
-        Write-Progress -Activity "Validating Configuration" -Status "Testing Filepath" -PercentComplete 1
+        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Filepath" -PercentComplete 1
         if ($FilePath) {
             try {
                 $configObject = Get-Content $FilePath -Force | ConvertFrom-Json
@@ -815,7 +815,7 @@ function Test-Configuration {
                 $return.Message = "Failed to load $FilePath as JSON. Please check if the config is valid or create a new one using genconfig.ps1"
                 $return.Problems += 1
                 $return.Failures += 1
-                Write-Progress -Activity "Validating Configuration" -Status "Validation in progress" -Completed
+                Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
                 return $return
             }
         }
@@ -829,7 +829,7 @@ function Test-Configuration {
                 $return.Message = "Failed to load Config as JSON. Please check if the config is valid or create a new one using genconfig.ps1"
                 $return.Problems += 1
                 $return.Failures += 1
-                Write-Progress -Activity "Validating Configuration" -Status "Validation in progress" -Completed
+                Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
                 return $return
             }
         }
@@ -845,14 +845,14 @@ function Test-Configuration {
         # }
 
         # Get deployConfig without existing VM's for validation
-        Write-Progress -Activity "Validating Configuration" -Status "Creating DeployConfig" -PercentComplete 5
+        Write-Progress2 -Activity "Validating Configuration" -Status "Creating DeployConfig" -PercentComplete 5
         $deployConfig = New-DeployConfig -configObject $configObject
 
         if ($deployConfig.virtualMachines.Count -eq 0) {
             $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
             $return.Problems += 1
             #$return.Failures += 1
-            Write-Progress -Activity "Validating Configuration" -Status "Validation in progress" -Completed
+            Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
             return $return
         }
 
@@ -872,7 +872,7 @@ function Test-Configuration {
 
         # VM Options
         # ===========
-        Write-Progress -Activity "Validating Configuration" -Status "Testing Vm Options" -PercentComplete 7
+        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Vm Options" -PercentComplete 7
         Test-ValidVmOptions -ConfigObject $deployConfig -ReturnObject $return
 
         # CM Options
@@ -880,7 +880,7 @@ function Test-Configuration {
 
         # CM Version
         if ($needCMOptions) {
-            Write-Progress -Activity "Validating Configuration" -Status "Testing CM Options" -PercentComplete 8
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing CM Options" -PercentComplete 8
             Test-ValidCmOptions -ConfigObject $deployConfig -ReturnObject $return
         }
 
@@ -892,7 +892,7 @@ function Test-Configuration {
             if ($i -ge 35) {
                 $i = 35
             }
-            Write-Progress -Activity "Validating Configuration" -Status "Testing Vm $($vm.vmName)" -PercentComplete $i
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Vm $($vm.vmName)" -PercentComplete $i
             # Supported values
             Test-ValidVmSupported -VM $vm -ConfigObject $deployConfig -ReturnObject $return
 
@@ -935,13 +935,13 @@ function Test-Configuration {
 
         # DC Validation
         # ==============
-        Write-Progress -Activity "Validating Configuration" -Status "Testing DC" -PercentComplete 35
+        Write-Progress2 -Activity "Validating Configuration" -Status "Testing DC" -PercentComplete 35
         Test-ValidRoleDC -ConfigObject $deployConfig -ReturnObject $return
 
         # CAS Validations
         # ==============
         if ($containsCS) {
-            Write-Progress -Activity "Validating Configuration" -Status "Testing CAS" -PercentComplete 39
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing CAS" -PercentComplete 39
             $CSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "CAS" }
             foreach ($CSVM in $CSVMs) {
                 $vmName = $CSVM.vmName
@@ -965,7 +965,7 @@ function Test-Configuration {
         # Primary Validations
         # ==============
         if ($containsPS) {
-            Write-Progress -Activity "Validating Configuration" -Status "Testing Primary" -PercentComplete 42
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Primary" -PercentComplete 42
             # Validate Primary role
             $PSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
 
@@ -1010,7 +1010,7 @@ function Test-Configuration {
         # Secondary Validations
         # ======================
         if ($containsSecondary) {
-            Write-Progress -Activity "Validating Configuration" -Status "Testing Secondary" -PercentComplete 45
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Secondary" -PercentComplete 45
             $SecondaryVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
 
             #if (Test-SingleRole -VM $SecondaryVMs -ReturnObject $return) {
@@ -1027,7 +1027,7 @@ function Test-Configuration {
         # Passive Validations
         # ===================
         if ($containsPassive) {
-            Write-Progress -Activity "Validating Configuration" -Status "Testing Passive" -PercentComplete 50
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Passive" -PercentComplete 50
             $passiveVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
 
             foreach ($VM in $passiveVM) {
@@ -1038,7 +1038,7 @@ function Test-Configuration {
 
         # FileServer Validations
         # ======================
-        Write-Progress -Activity "Validating Configuration" -Status "Testing FileServer" -PercentComplete 55
+        Write-Progress2 -Activity "Validating Configuration" -Status "Testing FileServer" -PercentComplete 55
         $FSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "FileServer" }
         foreach ($FSVM in $FSVMs) {
             Test-ValidRoleFileServer -VM $FSVM -ReturnObject $return
@@ -1047,7 +1047,7 @@ function Test-Configuration {
         # DPMP Validations
         # =================
         if ($containsDPMP) {
-            Write-Progress -Activity "Validating Configuration" -Status "Testing DPMP" -PercentComplete 60
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing DPMP" -PercentComplete 60
             $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
 
             foreach ($VM in $DPMPVM) {
@@ -1065,7 +1065,7 @@ function Test-Configuration {
 
         # Role Conflicts
         # ==============
-        Write-Progress -Activity "Validating Configuration" -Status "Testing Roles" -PercentComplete 65
+        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Roles" -PercentComplete 65
         # CAS/Primary must include DC
         if (($containsCS -or $containsPS) -and -not $deployConfig.parameters.DCName ) {
             Add-ValidationMessage -Message "Role Conflict: CAS or Primary role specified but a new/existing DC was not found; CAS/Primary roles require a DC." -ReturnObject $return -Warning
@@ -1089,7 +1089,7 @@ function Test-Configuration {
 
         # Total Memory
         # =============
-        Write-Progress -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
+        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
         $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
         $totalMemory = $totalMemory.Sum / 1GB
         $availableMemory = Get-AvailableMemoryGB
@@ -1105,7 +1105,7 @@ function Test-Configuration {
         # =============
 
         # Names in deployment
-        Write-Progress -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 80
+        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 80
         $vmInDeployment = $deployConfig.virtualMachines.vmName
         $unique1 = $vmInDeployment | Select-Object -Unique
         $compare = Compare-Object -ReferenceObject $vmInDeployment -DifferenceObject $unique1
@@ -1115,7 +1115,7 @@ function Test-Configuration {
         }
 
         # Names in domain
-        Write-Progress -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
+        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
         $allVMs = Get-List -Type VM -SmartUpdate | Select-Object -Expand VmName
         $all = $allVMs + $vmInDeployment
         $unique2 = $all | Select-Object -Unique
@@ -1127,7 +1127,7 @@ function Test-Configuration {
         }
 
         # Add existing VM's
-        Write-Progress -Activity "Validating Configuration" -Status "Adding Existing" -PercentComplete 90
+        Write-Progress2 -Activity "Validating Configuration" -Status "Adding Existing" -PercentComplete 90
         Add-ExistingVMsToDeployConfig -config $deployConfig
 
         # Add thisParams
@@ -1137,13 +1137,13 @@ function Test-Configuration {
         # Return if validation failed
         if ($return.Problems -ne 0) {
             $return.Message = $return.Message.ToString().Trim()
-            Write-Progress -Activity "Validating Configuration" -Status "Validation in progress" -Completed
+            Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
             return $return
         }
 
         # everything is good
         $return.Valid = $true
-        Write-Progress -Activity "Validating Configuration" -Status "Validation in progress" -Completed
+        Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
         return $return
     }
     catch {
@@ -1151,10 +1151,10 @@ function Test-Configuration {
         $return.Problems += 1
         #$return.Failures += 1
         Write-Exception -ExceptionInfo $_
-        Write-Progress -Activity "Validating Configuration"  -Completed
+        Write-Progress2 -Activity "Validating Configuration"  -Completed
         return $return
     }
     finally {
-        Write-Progress -Activity "Validating Configuration"  -Completed
+        Write-Progress2 -Activity "Validating Configuration"  -Completed
     }
 }

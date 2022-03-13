@@ -277,7 +277,7 @@ $global:VM_Create = {
         if ($currentItem.sqlVersion -and $createVM) {
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying SQL installation files to the VM."
-            Write-Progress -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed
+            Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed
 
             # Determine which SQL version files should be used
             $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
@@ -420,7 +420,7 @@ $global:VM_Config = {
                     if ($started) {
                         $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
                         if ($oobeStarted) {
-                            Write-Progress -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
+                            Write-Progress2 -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
                         }
                         else {
@@ -775,7 +775,8 @@ $global:VM_Config = {
                     AllNodes = @()
                 }
 
-                foreach ($node in $ConfigurationData.AllNodes) {
+                foreach ($node in $ConfigurationData.AllNodes | where-object { $_ }) {
+                #foreach ($node in $ConfigurationData.AllNodes) {
                     $cd.AllNodes += $node
                 }
 
@@ -877,7 +878,7 @@ $global:VM_Config = {
                     $allNodesReady = $true
                     $nonReadyNodes = $nodeList.Clone()
                     $percent = [Math]::Min($attempts, 100)
-                    Write-Progress "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
+                    Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
                     foreach ($node in $nonReadyNodes) {
                         $result = Invoke-VmCommand -VmName $node -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
                         if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
@@ -931,11 +932,11 @@ $global:VM_Config = {
         $noStatus = $true
         try {
             $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" `
-                -Status "Ready and Waiting for job progress" `-PercentComplete $percent
+            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" `
+                -Status "Ready and Waiting for job progress" -PercentComplete $percent
         }
         catch {
-            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed 1 $_"
+            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed 1 $_"
         }
         $dscStatusPolls = 0
         $failCount = 0
@@ -1034,10 +1035,10 @@ $global:VM_Config = {
                     if ($failedHeartbeats -gt 10) {
                         try {
                             $percent = [Math]::Min(($failedHeartbeats / $failedHeartbeatThreshold * 100), 100)
-                            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete $percent
+                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete $percent
                         }
                         catch {
-                            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed fhb gt 10 $_"
+                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed fhb gt 10 $_"
                         }
                     }
                 }
@@ -1050,20 +1051,20 @@ $global:VM_Config = {
                         Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
                         $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
 
-                        Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete $percent
+                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete $percent
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
                         Stop-VM2 -name $currentItem.vmName -TurnOff
 
-                        Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, VM Stopped" -PercentComplete $percent
+                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, VM Stopped" -PercentComplete $percent
                         Start-VM2 -Name $currentItem.vmName
-                        Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, VM Started" -PercentComplete $percent
+                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, VM Started" -PercentComplete $percent
                         Start-Sleep -Seconds 15
                         $state = Get-VM2 -Name $currentItem.vmName
-                        Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, VM Current State: $($state.state) " -PercentComplete $percent
+                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, VM Current State: $($state.state) " -PercentComplete $percent
                         $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
                     }
                     catch {
-                        Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to restart hung VM $_"
+                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to restart hung VM $_"
                     }
                 }
 
@@ -1113,7 +1114,7 @@ $global:VM_Config = {
                                 }
                                 try {
                                     $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                                    Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $logEntry -PercentComplete $percent
+                                    Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $logEntry -PercentComplete $percent
                                 }
                                 catch {}
                             }
@@ -1125,10 +1126,10 @@ $global:VM_Config = {
                         # Write progress
                         try {
                             $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -PercentComplete $percent
+                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -PercentComplete $percent
                         }
                         catch {
-                            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed skipprogress $_"
+                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed skipprogress $_"
                         }
                     }
 
@@ -1159,9 +1160,9 @@ $global:VM_Config = {
                     if ($noStatus) {
                         try {
                             $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for job progress" -PercentComplete $percent
+                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for job progress" -PercentComplete $percent
                         }
-                        catch { Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed noStatus $_"}
+                        catch { Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed noStatus $_" }
                     }
                 }
 
@@ -1170,7 +1171,7 @@ $global:VM_Config = {
         catch {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
-            Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed end $_"
+            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed end $_"
             return
         }
 
@@ -1206,12 +1207,13 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -OutputStream -Failure
         }
         else {
-            Write-Progress "$($currentItem.role) Configuration completed successfully. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -Completed
+            Write-Progress2 "$($currentItem.role) Configuration completed successfully. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -Completed
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Configuration completed successfully for $($currentItem.role)." -OutputStream -Success
         }
     }
     catch {
-        Write-Progress "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed end2 $_"
+        Write-Progress2 "Exception Occurred" -Status "Failed end2 $_"
+        Write-Exception -ExceptionInfo $_
         Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
     }

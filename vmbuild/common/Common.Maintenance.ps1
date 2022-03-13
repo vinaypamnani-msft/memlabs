@@ -20,7 +20,7 @@ function Start-Maintenance {
     }
 
     $progressId = Get-Random
-    Write-Progress -Id $progressId -Activity $text -Status "Please wait..." -PercentComplete 0
+    Write-Progress2 -Id $progressId -Activity $text -Status "Please wait..." -PercentComplete 0
 
     $i = 0
     $countWorked = $countFailed = $countSkipped = 0
@@ -29,7 +29,7 @@ function Start-Maintenance {
     $failedDomains = @()
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
         $i++
-        Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
+        Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         $worked = Start-VMMaintenance -VMName $vm.vmName
         if ($worked) { $countWorked++ } else {
             $failedDomains += $vm.domain
@@ -54,7 +54,7 @@ function Start-Maintenance {
     # Perform maintenance on other VM's
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
         $i++
-        Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
+        Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         if ($vm.domain -in $criticalDomains) {
             Write-Log "$($vm.vmName)`: Maintenance skipped, DC maintenance failed." -Highlight
             $countSkipped++
@@ -71,7 +71,7 @@ function Start-Maintenance {
     }
 
     Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -Activity
-    Write-Progress -Id $progressId -Activity $text -Completed
+    Write-Progress2 -Id $progressId -Activity $text -Completed
 }
 
 function Show-FailedDomains {
