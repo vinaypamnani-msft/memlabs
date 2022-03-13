@@ -4267,8 +4267,8 @@ function get-VMString {
         $name += "$($virtualMachine.sqlInstanceName) ($($virtualMachine.sqlInstanceDir))]"
     }
 
-    $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen", "%MediumSeaGreen", "%SpringGreen")
-    $PRIColors = @("%LightSkyBlue", "%CornflowerBlue", "%RoyalBlue", "%SlateBlue", "%DeepSkyBlue", "%Turquoise", "%Cyan")
+    $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen", "%MediumSeaGreen", "%SpringGreen", "%Lime", "%LimeGreen")
+    $PRIColors = @("%LightSkyBlue", "%CornflowerBlue", "%RoyalBlue", "%SlateBlue", "%DeepSkyBlue", "%Turquoise", "%Cyan", "%MediumTurquoise", "%Aquamarine", "%SteelBlue", "%Blue")
     $SECColors = @("%SandyBrown", "%Chocolate", "%Peru", "%DarkGoldenRod", "%Orange", "%RosyBrown", "%SaddleBrown", "%Tan", "%DarkSalmon", "%GoldenRod")
 
 
@@ -4281,15 +4281,30 @@ function get-VMString {
     foreach ($vm in $config.VirtualMachines) {
         switch ($vm.Role) {
             "CAS" {
+                try{
                 $ColorMap.Add($vm.SiteCode, $CASColors[$casCount])
+                }
+                catch {
+                    $ColorMap.Add($vm.SiteCode, "HotPink")
+                }
                 $casCount++
             }
             "Primary" {
+                try{
                 $ColorMap.Add($vm.SiteCode, $PRIColors[$priCount])
+                }
+                catch{
+                    $ColorMap.Add($vm.SiteCode, "HotPink")
+                }
                 $priCount++
             }
             "Secondary" {
+                try{
                 $ColorMap.Add($vm.SiteCode, $SECColors[$secCount])
+                }
+                catch {
+                    $ColorMap.Add($vm.SiteCode, "HotPink")
+                }
                 $secCount++
             }
         }

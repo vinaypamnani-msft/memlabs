@@ -1443,7 +1443,12 @@ function Wait-ForVm {
                     return
                 }
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete $percent
+                try {
+                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete $percent
+                }
+                catch {
+                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail vmstate $_"
+                }
                 $ready = $vmTest.State -eq $VmState
                 Start-Sleep -Seconds 5
             }
@@ -1460,7 +1465,12 @@ function Wait-ForVm {
         $originalStatus = "Waiting for OOBE to complete. "
         Write-Log "$VmName`: $originalStatus"
         $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-        Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
+        try {
+            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
+        }
+        catch {
+            Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail OobeComplete $_"
+        }
         $readyOobe = $false
         $wwahostrunning = $false
         $readySmb = $false
@@ -1479,11 +1489,16 @@ function Wait-ForVm {
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                if ($failures -gt 20) {
-                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss")) Failed $($failures) / 30" -Status $originalStatus -PercentComplete $percent
+                try {
+                    if ($failures -gt 20) {
+                        Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss")) Failed $($failures) / 30" -Status $originalStatus -PercentComplete $percent
+                    }
+                    else {
+                        Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
+                    }
                 }
-                else {
-                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
+                catch {
+                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail failures gt 20 $_"
                 }
                 Start-Sleep -Seconds 5
                 if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
@@ -1510,7 +1525,12 @@ function Wait-ForVm {
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
                 $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
+                try {
                 Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status -PercentComplete $percent
+                }
+                catch {
+                    Write-Progress -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail not readyOobe $_"
+                }
                 Start-Sleep -Seconds 5
             }
 
@@ -1658,74 +1678,91 @@ function Invoke-VmCommand {
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
-
-    # Set display name for logging
-    if (-not $DisplayName) {
-        $DisplayName = $ScriptBlock
-    }
-
-    # WhatIf
-    if ($WhatIf.IsPresent) {
-        Write-Log "WhatIf: Will run '$DisplayName' inside '$VmName'"
-        return $true
-    }
-
-    # Fatal failure
-    if ($null -eq $Common.LocalAdmin) {
-        Write-Log "$VmName`: Skip running '$DisplayName' since Local Admin creds not available" -Failure
-        return $false
-    }
-
-    # Log entry
-    if (-not $SuppressLog) {
-        Write-Log "$VmName`: Running '$DisplayName'" -Verbose
-    }
-
-    # Create return object
-    $return = [PSCustomObject]@{
-        CommandResult     = $false
-        ScriptBlockFailed = $false
-        ScriptBlockOutput	= $null
-    }
-
-    # Prepare args
-    $HashArguments = @{
-        ScriptBlock = $ScriptBlock
-    }
-
-    if ($ArgumentList) {
-        $HashArguments.Add("ArgumentList", $ArgumentList)
-    }
-
-    # Get VM Session
-    $ps = $null
-    if ($VmDomainAccount) {
-        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError
-    }
-
-    if (-not $ps) {
-        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
-    }
-
-    $failed = $null -eq $ps
-
-    # Run script block inside VM
-    if (-not $failed) {
-        try {
-            $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+    try {
+        # Set display name for logging
+        if (-not $DisplayName) {
+            $DisplayName = $ScriptBlock
         }
-        catch {
-            $failed = $true
-            if (-not $SuppressLog) {
-                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $_" -Failure
-                Write-Log "$($_.ScriptStackTrace)" -LogOnly
+
+        # WhatIf
+        if ($WhatIf.IsPresent) {
+            Write-Log "WhatIf: Will run '$DisplayName' inside '$VmName'"
+            return $true
+        }
+
+        # Fatal failure
+        if ($null -eq $Common.LocalAdmin) {
+            Write-Log "$VmName`: Skip running '$DisplayName' since Local Admin creds not available" -Failure
+            return $false
+        }
+
+        # Log entry
+        if (-not $SuppressLog) {
+            Write-Log "$VmName`: Running '$DisplayName'" -Verbose
+        }
+
+        # Create return object
+        $return = [PSCustomObject]@{
+            CommandResult     = $false
+            ScriptBlockFailed = $false
+            ScriptBlockOutput	= $null
+        }
+
+        # Prepare args
+        $HashArguments = @{
+            ScriptBlock = $ScriptBlock
+        }
+
+        if ($ArgumentList) {
+            $HashArguments.Add("ArgumentList", $ArgumentList)
+        }
+
+        # Get VM Session
+        $ps = $null
+        if ($VmDomainAccount) {
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError
+        }
+
+        if (-not $ps) {
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
+        }
+
+        $failed = $null -eq $ps
+
+        # Run script block inside VM
+        if (-not $failed) {
+            try {
+                $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
             }
-        }
-        if ($CommandReturnsBool) {
-            if ($($return.ScriptBlockOutput) -ne $true) {
-                Write-Log "Output was: $($return.ScriptBlockOutput)" -Warning
+            catch {
                 $failed = $true
-                $return.ScriptBlockFailed = $true
+                if (-not $SuppressLog) {
+                    Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $_" -Failure
+                    Write-Log "$($_.ScriptStackTrace)" -LogOnly
+                }
+            }
+            if ($CommandReturnsBool) {
+                if ($($return.ScriptBlockOutput) -ne $true) {
+                    Write-Log "Output was: $($return.ScriptBlockOutput)" -Warning
+                    $failed = $true
+                    $return.ScriptBlockFailed = $true
+                    if ($Err2.Count -ne 0) {
+                        $failed = $true
+                        $return.ScriptBlockFailed = $true
+                        if (-not $SuppressLog) {
+                            if ($Err2.Count -eq 1) {
+                                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
+                            }
+                            else {
+                                $msg = @()
+                                foreach ($failMsg in $Err2) { $msg += $failMsg }
+                                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
+                            }
+                        }
+                    }
+                }
+            }
+            else {
                 if ($Err2.Count -ne 0) {
                     $failed = $true
                     $return.ScriptBlockFailed = $true
@@ -1743,37 +1780,23 @@ function Invoke-VmCommand {
             }
         }
         else {
-            if ($Err2.Count -ne 0) {
-                $failed = $true
-                $return.ScriptBlockFailed = $true
-                if (-not $SuppressLog) {
-                    if ($Err2.Count -eq 1) {
-                        Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
-                    }
-                    else {
-                        $msg = @()
-                        foreach ($failMsg in $Err2) { $msg += $failMsg }
-                        Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
-                    }
-                }
+            $return.ScriptBlockFailed = $true
+            # Uncomment when debugging, this is called many times while waiting for VM to be ready
+            # Write-Log "Invoke-VmCommand: $VmName`: Failed to get VM Session." -Failure -LogOnly
+            # return $return
+        }
+
+        # Set Command Result state in return object
+        if (-not $failed) {
+            $return.CommandResult = $true
+            if (-not $SuppressLog) {
+                Write-Log "$VmName`: Successfully ran '$DisplayName'" -LogOnly -Verbose
             }
         }
     }
-    else {
-        $return.ScriptBlockFailed = $true
-        # Uncomment when debugging, this is called many times while waiting for VM to be ready
-        # Write-Log "Invoke-VmCommand: $VmName`: Failed to get VM Session." -Failure -LogOnly
-        # return $return
+    catch {
+        Write-Log "$VmName`: Exception $_"
     }
-
-    # Set Command Result state in return object
-    if (-not $failed) {
-        $return.CommandResult = $true
-        if (-not $SuppressLog) {
-            Write-Log "$VmName`: Successfully ran '$DisplayName'" -LogOnly -Verbose
-        }
-    }
-
     return $return
 
 }
@@ -2072,7 +2095,7 @@ function Install-Tools {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
     }
     else {
-        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object {$_.vmbuild -eq $true } | Sort-Object -Property State -Descending
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
     }
 
     $success = $true

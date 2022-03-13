@@ -595,7 +595,7 @@ function New-RDCManFileFromHyperV {
     }
     if ($killed) {
 
-        Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
+        #Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
         Start-Process "C:\tools\RDCMan.exe" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
     }
 }

@@ -104,7 +104,7 @@ SMSInstallDir=%InstallDir%
 SDKServer=%MachineFQDN%
 RoleCommunicationProtocol=HTTPorHTTPS
 ClientsUsePKICertificate=0
-PrerequisiteComp=0
+PrerequisiteComp=1
 PrerequisitePath=C:\%CM%\REdist
 MobileDeviceLanguage=0
 AdminConsole=1
@@ -185,14 +185,55 @@ SysCenterId=
         $cmini = $cmini.Replace('%SQLInstance%', $tinstance)
     }
 
+    # Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log
+    Write-DscStatusSetup
+
+    #Setup Downloader
+    $CMSetupDL = "c:\$CM\SMSSETUP\BIN\X64\Setupdl.exe"
+    $CMRedist = "C:\$CM\REdist"
+    $CMLog = "C:\ConfigMgrSetup.log"
+    $success = 0
+    $fail = 0
+
+    Write-DscStatus "Starting Pre-Req Download using $CMSetupDL /NOUI $CMRedist"
+
+    # We require 2 success entries in a row
+    while ($success -le 1) {
+
+        #Start Setupdl.exe, and wait for it to exit
+        Start-Process -Filepath ($CMSetupDL) -ArgumentList ('/NOUI ' + $CMRedist ) -wait
+
+        #Just to make sure the log is flushed.
+        start-sleep -seconds 5
+
+        #Get the last line of the log.  Assumption: No other components are writing to the log at this time.
+        $LogLine = Get-Content -Path $CMLog -Tail 1
+
+        #Check for success indicator.
+        if ($LogLine -and $LogLine.Contains("INFO: Setup downloader") -and $LogLine.Contains("FINISHED")) {
+            $success++
+            Write-DscStatus "Pre-Req downloading complete Success Count $success out of 2."
+        }
+        else { #If we didnt find it, increment fail count, and bail after 10 fails
+            $success = 0
+            $fail++
+            if ($fail -ge 10) {
+                Write-DscStatus "Pre-Req Downloading failed after 10 tries. see $CMLog"
+                # Set Status to not 'Running' so it can run again.
+                $Configuration.InstallSCCM.Status = 'Failed'
+                $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+                Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+                return
+            }
+            Write-DscStatus "Pre-Req downloading Failed. Try $fail out of 10 See $CMLog for progress"
+        }
+    }
     # Create ini
     $cmini > $CMINIPath
 
     # Install CM
     $CMInstallationFile = "c:\$CM\SMSSETUP\BIN\X64\Setup.exe"
 
-    # Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log
-    Write-DscStatusSetup
 
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
 
