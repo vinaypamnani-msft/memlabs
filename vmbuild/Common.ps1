@@ -74,7 +74,7 @@ function Write-Log {
 
     If ($Success.IsPresent) {
         $info = $false
-        $TextOutput = "  $Text"
+        $TextOutput = "  SUCCESS: $Text"
         # $Text = "SUCCESS: $Text"
         $HashArguments.Add("ForegroundColor", "Chartreuse")
     }
@@ -132,7 +132,7 @@ function Write-Log {
 
     # Write to output stream
     if ($OutputStream.IsPresent) {
-        Write-Output $Text
+        Write-Output $TextOutput
     }
 
     # Write progress if output stream and failure present
