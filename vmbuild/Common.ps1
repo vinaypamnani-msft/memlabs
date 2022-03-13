@@ -81,7 +81,7 @@ Function Write-Progress2Impl {
             }
         }
         catch {
-            throe
+            throw
         }
 
     }
