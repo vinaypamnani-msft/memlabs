@@ -482,8 +482,6 @@ function Get-Phase5ConfigurationData {
     )
 
     $primaryNodes = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not ($_.hidden) }
-    $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
-    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
 
 

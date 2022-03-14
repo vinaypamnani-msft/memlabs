@@ -328,8 +328,6 @@ function get-SnapshotDomain {
         [Parameter(Mandatory = $false, HelpMessage = "Comment")]
         [string] $comment
     )
-    $vms = get-list -type vm -DomainName $domain
-
 
     $valid = $false
     while (-not $valid) {
@@ -826,6 +824,7 @@ function get-VMSummary {
 
 function Select-MainMenu {
     while ($true) {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope='Function')]
         $global:StartOver = $false
         $preOptions = [ordered]@{}
         $preOptions += [ordered]@{ "*G" = "---  Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
@@ -2252,7 +2251,6 @@ function Select-ExistingSubnets {
     }
 
     while ($valid -eq $false) {
-        $validEntryFound = $false
         $customOptions = @{ "N" = "add New Subnet to domain" }
         $subnetList = @()
         $subnetList += Get-NetworkList -DomainName $Domain | Select-Object -Expand Network | Sort-Object | Get-Unique
@@ -2274,7 +2272,6 @@ function Select-ExistingSubnets {
         }
         else {
             $subnetListNew = $subnetList
-            $validEntryFound = $true
         }
 
         if ($configToCheck) {
@@ -4566,7 +4563,7 @@ function Add-NewVMForRole {
     if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC")) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
     }
-    $existingPrimary = $null
+
     $existingDPMP = $null
     $NewFSServer = $null
     switch ($Role) {

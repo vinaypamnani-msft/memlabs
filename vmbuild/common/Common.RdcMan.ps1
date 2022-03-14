@@ -57,7 +57,6 @@ function Save-RdcManSettignsFile {
     if (Test-Path $existingfile) {
         [xml]$file = Get-Content -Path $existingfile
         write-verbose "Found existing file at $existingfile"
-        $existingIsPresent = $true
     }
     else {
         write-verbose "Using Template file at $templatefile"
@@ -574,11 +573,9 @@ function New-RDCManFileFromHyperV {
         try {
 
             $proc = $null
-            $commandLine = $null
             $proc = Get-Process -Name rdcman -ea Ignore | Select-Object -First 1
             if ($proc) {
                 $killed = $true
-                $commandLine = ($proc.CommandLine)
                 Get-Process -Name rdcman -ea Ignore | Stop-Process
             }
             Start-Sleep 1
