@@ -77,7 +77,7 @@ Function Select-ToolsMenu {
     $response = Get-Menu -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false
 
     switch ($response.ToLowerInvariant()) {
-        "t" { Get-tools -Inject | out-null }
+        "u" { Get-tools -Inject | out-null }
         "o" {
             $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name
             $tool = Get-Menu -Prompt "Select Optional tool to Install" -OptionArray $opt -NoNewLine -test:$false
