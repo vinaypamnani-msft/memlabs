@@ -712,6 +712,7 @@ function ConvertTo-DeployConfigEx {
                 foreach ($second in $Secondaries) {
                     $clientPush += ($ClientNames | Where-Object { $_.network -eq $second.network }).vmName
                 }
+                $clientPush = ($clientPush | Where-Object ($_ -and $_.Trim()) | select-object -unique)
                 if ($clientPush) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "ClientPush" -Value $clientPush -Force
                 }

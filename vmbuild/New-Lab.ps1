@@ -291,6 +291,13 @@ try {
         }
     }
 
+    get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' } | start-service
+    $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
+    if ($service) {
+        Write-Log "DHCPServer Service could not be started." -Failure
+        return $false
+    }
+
     # Remove existing jobs
     $existingJobs = Get-Job
     if ($existingJobs) {

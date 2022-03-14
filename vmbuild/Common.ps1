@@ -1666,6 +1666,7 @@ function Wait-ForVm {
         $readySmb = $false
 
         $failures = 0
+        $maxFailures = ([int]$TimeoutMinutes*3)
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
@@ -1679,8 +1680,8 @@ function Wait-ForVm {
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
                 try {
-                    if ($failures -gt 20) {
-                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus -failcount $failures -failcountMax 30
+                    if ($failures -gt ([int]$TimeoutMinutes*2)) {
+                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus -failcount $failures -failcountMax $maxFailures
                     }
                     else {
                         Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus
@@ -1696,7 +1697,7 @@ function Wait-ForVm {
                 else {
                     $failures++
                 }
-                if ($failures -gt 30) {
+                if ($failures -ge $maxFailures) {
                     stop-vm2 -force -name $VmName -TurnOff
                     start-sleep -seconds 8
                     Start-vm2 -name $VmName
@@ -1706,6 +1707,7 @@ function Wait-ForVm {
             }
             else {
                 $failures = 0
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $($originalStatus+": "+ $out.ScriptBlockOutput)
             }
 
             # Wait until OOBE is ready
