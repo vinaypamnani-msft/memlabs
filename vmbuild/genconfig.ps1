@@ -84,7 +84,7 @@ Function Select-ToolsMenu {
             if (-not $tool) {
                 return
             }
-            $customOptions2 = [ordered]@{"A" = "All VMs listed above" }
+            $customOptions2 = [ordered]@{"A" = "All VMs" }
             $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName
             $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false
             if (-not $vmName) {
