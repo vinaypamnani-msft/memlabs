@@ -934,7 +934,9 @@ function Get-ValidSubnets {
         [Parameter(Mandatory = $false, HelpMessage = "Allow Existing")]
         [bool] $AllowExisting = $true,
         [Parameter(Mandatory = $false, HelpMessage = "Networks to Exclude")]
-        [object] $excludeList = @()
+        [object] $excludeList = @(),
+        [Parameter(Mandatory = $false, HelpMessage = "VM to Check")]
+        [object] $vmToCheck = $null
 
     )
 
@@ -953,6 +955,34 @@ function Get-ValidSubnets {
     }
 
     $subnetlist = @()
+    if ($vmToCheck) {
+        foreach ($vm in $configToCheck.virtualMachines) {
+            if ($vm.network) {
+                if ($vm.network -in $usedSubnets) {
+                    continue
+                }
+                if ($vm.network -in $subnetList) {
+                    continue
+                }
+            }
+            switch ($vmToCheck.Role) {
+                "Primary" {
+                    if ($vm.Role -in ("Primary", "Secondary")) {
+                        continue
+                    }
+                }
+                "Secondary" {
+                    if ($vm.Role -in ("Primary", "Secondary")) {
+                        continue
+                    }
+                }
+                Default {
+                    $subnetList += $vm.network
+                }
+            }
+        }
+    }
+
     for ($i = 1; $i -lt 254; $i++) {
         $newSubnet = "192.168." + $i + ".0"
         $found = $false
@@ -1000,7 +1030,7 @@ function Get-ValidSubnets {
             }
         }
     }
-    return $subnetlist
+    return $subnetlist | Where-Object {$_}
 }
 
 function Get-NewMachineName {
@@ -1995,10 +2025,20 @@ function Select-Subnet {
     #Get-PSCallStack | out-host
     if ($configToCheck.virtualMachines.role -contains "DC") {
         if ($CurrentNetworkIsValid) {
-            $subnetlist = Get-ValidSubnets
+            if ($CurrentVM) {
+                $subnetlist = Get-ValidSubnets -ConfigToCheck $configToCheck -vmToCheck $CurrentVM
+            }
+            else {
+                $subnetlist = Get-ValidSubnets
+            }
         }
         else {
-            $subnetlist = Get-ValidSubnets -ConfigToCheck $configToCheck -AllowExisting:$false
+            if ($CurrentVM) {
+                $subnetlist = Get-ValidSubnets -ConfigToCheck $configToCheck -vmToCheck $CurrentVM
+            }
+            else {
+                $subnetlist = Get-ValidSubnets -ConfigToCheck $configToCheck -AllowExisting:$false
+            }
         }
         $customOptions = @{ "C" = "Custom Subnet" }
         $network = $null
@@ -2276,7 +2316,12 @@ function Select-ExistingSubnets {
 
             if ($response -and ($response.ToLowerInvariant() -eq "n")) {
                 if ($SiteServerRole -and $ConfigToCheck) {
-                    $subnetList = Get-ValidSubnets -configToCheck $ConfigToCheck -excludeList $subnetList
+                    if ($currentVM) {
+                        $subnetList = Get-ValidSubnets -configToCheck $ConfigToCheck -excludeList $subnetList -vmToCheck $currentVM
+                    }
+                    else {
+                        $subnetList = Get-ValidSubnets -configToCheck $ConfigToCheck -excludeList $subnetList
+                    }
                 }
                 else {
                     $subnetlist = Get-ValidSubnets
@@ -4212,7 +4257,7 @@ function get-VMString {
     $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(16, " ")
     $mem = $($virtualMachine.memory).PadLEft(4, " ")
     $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
-    $Network =$config.vmOptions.Network
+    $Network = $config.vmOptions.Network
     if ($virtualMachine.Network) {
         $Network = $virtualMachine.Network
     }
@@ -4281,8 +4326,8 @@ function get-VMString {
     foreach ($vm in $config.VirtualMachines) {
         switch ($vm.Role) {
             "CAS" {
-                try{
-                $ColorMap.Add($vm.SiteCode, $CASColors[$casCount])
+                try {
+                    $ColorMap.Add($vm.SiteCode, $CASColors[$casCount])
                 }
                 catch {
                     $ColorMap.Add($vm.SiteCode, "HotPink")
@@ -4290,17 +4335,17 @@ function get-VMString {
                 $casCount++
             }
             "Primary" {
-                try{
-                $ColorMap.Add($vm.SiteCode, $PRIColors[$priCount])
+                try {
+                    $ColorMap.Add($vm.SiteCode, $PRIColors[$priCount])
                 }
-                catch{
+                catch {
                     $ColorMap.Add($vm.SiteCode, "HotPink")
                 }
                 $priCount++
             }
             "Secondary" {
-                try{
-                $ColorMap.Add($vm.SiteCode, $SECColors[$secCount])
+                try {
+                    $ColorMap.Add($vm.SiteCode, $SECColors[$secCount])
                 }
                 catch {
                     $ColorMap.Add($vm.SiteCode, "HotPink")

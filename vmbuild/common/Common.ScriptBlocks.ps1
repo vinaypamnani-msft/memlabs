@@ -931,12 +931,10 @@ $global:VM_Config = {
 
         $noStatus = $true
         try {
-            $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" `
-                -Status "Ready and Waiting for job progress" -PercentComplete $percent
+            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
         }
         catch {
-            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed 1 $_"
+
         }
         $dscStatusPolls = 0
         $failCount = 0
@@ -1034,11 +1032,10 @@ $global:VM_Config = {
                     # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
                     if ($failedHeartbeats -gt 10) {
                         try {
-                            $percent = [Math]::Min(($failedHeartbeats / $failedHeartbeatThreshold * 100), 100)
-                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Trying to retrieve job status from VM, attempt $failedHeartbeats/$failedHeartbeatThreshold" -PercentComplete $percent
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Trying to retrieve job status from VM" -failcount $failedHeartbeats -failcountMax $failedHeartbeatThreshold
                         }
                         catch {
-                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed fhb gt 10 $_"
+
                         }
                     }
                 }
@@ -1049,22 +1046,23 @@ $global:VM_Config = {
                 if ($failedHeartbeats -ge $failedHeartbeatThreshold) {
                     try {
                         Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
-                        $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
 
-                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, forcefully restarting the VM" -PercentComplete $percent
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, forcefully restarting the VM" -failcount $failedHeartbeats -failcountMax $failedHeartbeatThreshold
+
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
                         Stop-VM2 -name $currentItem.vmName -TurnOff
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Stopped"
 
-                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, VM Stopped" -PercentComplete $percent
                         Start-VM2 -Name $currentItem.vmName
-                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, VM Started" -PercentComplete $percent
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Started"
+
                         Start-Sleep -Seconds 15
                         $state = Get-VM2 -Name $currentItem.vmName
-                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to retrieve job status from VM, VM Current State: $($state.state) " -PercentComplete $percent
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Current State: $($state.state)"
                         $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
                     }
                     catch {
-                        Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed to restart hung VM $_"
+
                     }
                 }
 
@@ -1113,8 +1111,8 @@ $global:VM_Config = {
                                     write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Failed SubString for ConfigMgrSetup.log in for line $logEntry : $_"
                                 }
                                 try {
-                                    $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                                    Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $logEntry -PercentComplete $percent
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $logentry
+
                                 }
                                 catch {}
                             }
@@ -1125,11 +1123,10 @@ $global:VM_Config = {
                     if (-not $skipProgress) {
                         # Write progress
                         try {
-                            $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -PercentComplete $percent
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $status.ScriptBlockOutput
                         }
                         catch {
-                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed skipprogress $_"
+
                         }
                     }
 
@@ -1159,10 +1156,9 @@ $global:VM_Config = {
                 else {
                     if ($noStatus) {
                         try {
-                            $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for job progress" -PercentComplete $percent
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress"
                         }
-                        catch { Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed noStatus $_" }
+                        catch { }
                     }
                 }
 
@@ -1171,7 +1167,7 @@ $global:VM_Config = {
         catch {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
-            Write-Progress2 "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Failed end $_"
+            Write-Progress2 "Exception" -Status "Failed end $_"
             return
         }
 

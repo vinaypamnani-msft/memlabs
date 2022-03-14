@@ -280,7 +280,7 @@ function Wait-Phase {
             foreach ($OutputObject in $jobOutput) {
                 $line = $OutputObject.text
                 $line = $line.ToString().Trim()
-
+                write-log -logonly $line
                 if ($OutputObject.LogLevel -eq 3) {
                     Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
                     if ($incrementCount) {

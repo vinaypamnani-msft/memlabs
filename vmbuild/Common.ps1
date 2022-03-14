@@ -10,6 +10,40 @@ param (
 ### Common Functions ###
 ########################
 
+Function Write-ProgressElapsed {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$StopWatch,
+        [Parameter(Mandatory = $true)]
+        [object]$TimeSpan,
+        [Parameter(Mandatory = $true)]
+        [String]$text,
+        [Parameter(Mandatory = $false)]
+        [switch]$showTimeout,
+        [Parameter(Mandatory = $false)]
+        [int]$FailCount,
+        [Parameter(Mandatory = $false)]
+        [int]$FailCountMax
+
+
+    )
+    try {
+        $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
+        $msg = ""
+        if ($showTimeout) {
+            $msg = "Waiting $TimeSpan minutes. "
+        }
+        $msg = $msg + "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))"
+        if ($FailCount) {
+            $msg = $msg + " Failed $FailCount / $FailCountMax"
+        }
+        Write-Progress2 $msg -Status $text -PercentComplete $percent
+    }
+    catch {
+        Write-Exception $_
+        Write-Progress2 "Exception" -Status $_
+    }
+}
 
 #Main wrapper for Write-Progress.  This allows all params, and catches any errors
 Function Write-Progress2 {
@@ -18,7 +52,6 @@ Function Write-Progress2 {
         Write-Progress2Impl @Args @PSBoundParameters | out-null
     }
     catch {
-
         write-Log "Write-Progress $args $_"
     }
 }
@@ -785,10 +818,10 @@ function Add-SwitchAndDhcp {
     }
 
 
-    get-service "DHCP" | Where-Object { $_.Status -eq 'Stopped' } | start-service
-    $service = get-service "DHCP" | Where-Object { $_.Status -eq 'Stopped' }
+    get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' } | start-service
+    $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
     if ($service) {
-        Write-Log "DHCP Service could not be started." -Failure
+        Write-Log "DHCPServer Service could not be started." -Failure
         return $false
     }
     Write-Log "Creating/verifying Hyper-V switch and DHCP Scopes for '$NetworkName' network." -Activity
@@ -952,15 +985,34 @@ function Test-DHCPScope {
     $DHCPScopeEnd = $network + ".199"
 
     # Create scope, if needed
+    $maxRetries = 3
+    $retry = 0
     if ($createScope) {
-        Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction SilentlyContinue
-        $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction SilentlyContinue
-        if ($scope) {
-            Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
-        }
-        else {
-            Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
-            return $false
+        while (-not $scope) {
+            try {
+                if ($retry -gt 0) {
+                    if ($retry -ge $maxRetries) {
+                        Write-Log "Max Retries Exceeded. Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
+                        return $false
+                    }
+                    Stop-Service "DHCPServer" -force
+                    start-sleep -seconds 5
+                    start-service "DHCPServer"
+                    start-Sleep -seconds 5
+                }
+                $retry++
+                Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction Stop
+                $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction Stop
+                if ($scope) {
+                    Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
+                }
+                else {
+                    Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
+                }
+            }
+            catch {
+                Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
+            }
         }
 
 
@@ -1311,7 +1363,7 @@ function New-VirtualMachine {
         Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is present."
         if ($vmTest.State -ne "Off") {
             Write-Log "$VmName`: Turning the VM off forcefully..."
-            $vmTest | Stop-VM -TurnOff -Force
+            $vmTest | Stop-VM -TurnOff -Force -WarningAction SilentlyContinu
         }
         $vmTest | Remove-VM -Force
         Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
@@ -1581,12 +1633,12 @@ function Wait-ForVm {
                     Write-Log -Failure "Could not find VM $VMName"
                     return
                 }
-                $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
+
                 try {
-                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete $percent
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)"
                 }
                 catch {
-                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail vmstate $_"
+
                 }
                 $ready = $vmTest.State -eq $VmState
                 Start-Sleep -Seconds 5
@@ -1603,12 +1655,11 @@ function Wait-ForVm {
     if ($OobeComplete.IsPresent) {
         $originalStatus = "Waiting for OOBE to complete. "
         Write-Log "$VmName`: $originalStatus"
-        $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
         try {
-            Write-Progress2 -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
+            Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus
         }
         catch {
-            Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail OobeComplete $_"
+
         }
         $readyOobe = $false
         $wwahostrunning = $false
@@ -1627,17 +1678,16 @@ function Wait-ForVm {
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
-                $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
                 try {
                     if ($failures -gt 20) {
-                        Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss")) Failed $($failures) / 30" -Status $originalStatus -PercentComplete $percent
+                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus -failcount $failures -failcountMax 30
                     }
                     else {
-                        Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $originalStatus -PercentComplete $percent
+                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus
                     }
                 }
                 catch {
-                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail failures gt 20 $_"
+
                 }
                 Start-Sleep -Seconds 5
                 if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
@@ -1648,8 +1698,9 @@ function Wait-ForVm {
                 }
                 if ($failures -gt 30) {
                     stop-vm2 -force -name $VmName -TurnOff
+                    start-sleep -seconds 8
                     Start-vm2 -name $VmName
-                    Start-Sleep -Seconds 15
+                    Start-Sleep -Seconds 8
                     $failures = 0
                 }
             }
@@ -1663,20 +1714,19 @@ function Wait-ForVm {
                 $status = $originalStatus
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
-                $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
                 try {
-                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status -PercentComplete $percent
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
                 }
                 catch {
-                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "Fail not readyOobe $_"
+
                 }
                 Start-Sleep -Seconds 5
             }
 
             # Wait until \\localhost\c$ is accessible
             if (-not $readySmb -and $readyOobe) {
-                $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "OOBE complete. Checking SMB access" -PercentComplete $percent
+
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE complete. Checking SMB access"
                 Start-Sleep -Seconds 3
                 $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "$VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
@@ -1691,8 +1741,7 @@ function Wait-ForVm {
                 if ($wwahost.ScriptBlockOutput) {
                     $wwahostrunning = $true
                     Write-Log "$VmName`: OOBE complete. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
-                    $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                    Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "OOBE complete, and SMB available. Waiting for WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) to stop before continuing" -PercentComplete $percent
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text  "OOBE complete, and SMB available. Waiting for WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) to stop before continuing"
                     Start-Sleep -Seconds 15
                 }
                 else {
@@ -1704,8 +1753,7 @@ function Wait-ForVm {
             # OOBE and SMB ready, buffer wait to ensure we're at login screen. Bad things happen if you reboot the machine before it really finished OOBE.
             if (-not $wwahostrunning -and $readySmb) {
                 Write-Log "$VmName`: VM is ready. Waiting $WaitSeconds seconds before continuing."
-                $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "VM is ready. Waiting $WaitSeconds seconds before continuing" -PercentComplete $percent
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is ready. Waiting $WaitSeconds seconds before continuing"
                 Start-Sleep -Seconds $WaitSeconds
                 $ready = $true
             }
@@ -1721,8 +1769,7 @@ function Wait-ForVm {
     if ($OobeStarted.IsPresent) {
         $status = "Waiting for OOBE to start "
         Write-Log "$VmName`: $status"
-        $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-        Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete $percent
+        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
 
         do {
             $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
@@ -1730,8 +1777,7 @@ function Wait-ForVm {
             if ($wwahost.ScriptBlockOutput) {
                 $ready = $true
                 Write-Log "$VmName`: OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
-                $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running" -PercentComplete $percent
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running"
             }
             else {
                 Write-Log "$VmName`: OOBE hasn't started yet. WWAHost not running."
@@ -1763,8 +1809,7 @@ function Wait-ForVm {
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
         do {
             try {
-                $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
-                Write-Progress2 -Activity  "Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $msg -PercentComplete $percent
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
             }
             catch {}
             Start-Sleep -Seconds 5

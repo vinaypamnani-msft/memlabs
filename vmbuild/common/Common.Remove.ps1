@@ -52,7 +52,7 @@ function Remove-VirtualMachine {
         }
 
         if ($vmTest.State -ne "Off") {
-            $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf
+            $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinu
         }
 
         $cachediskFile = Join-Path $global:common.CachePath ($($vm.vmID).toString() + ".disk.json")

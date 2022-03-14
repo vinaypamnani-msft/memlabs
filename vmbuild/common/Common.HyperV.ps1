@@ -82,7 +82,7 @@ function Start-VM2 {
             if ($i -gt 1) {
                 Start-Sleep -Seconds $RetrySeconds
             }
-            Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue
+            Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinu
             $vm = Get-VM2 -Name $Name
             if ($vm.State -eq "Running") {
                 $running = $true
@@ -162,7 +162,7 @@ function Stop-VM2 {
         if ($vm) {
             $i = 0
             if ($TurnOff) {
-                Stop-VM -VM $vm -TurnOff
+                Stop-VM -VM $vm -TurnOff -force:$force -WarningAction SilentlyContinu
                 start-sleep -seconds 5
             }
             do {
@@ -170,13 +170,13 @@ function Stop-VM2 {
                 if ($i -gt 1) {
                     Start-Sleep -Seconds $RetrySeconds
                 }
-                Stop-VM -VM $vm -force:$force -ErrorVariable StopError -ErrorAction SilentlyContinue
+                Stop-VM -VM $vm -force:$force -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinu
             }
             until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
             if ($StopError.Count -ne 0) {
                 if ($TurnOff) {
-                    Stop-VM -VM $vm -TurnOff
+                    Stop-VM -VM $vm -TurnOff -force:$force -WarningAction SilentlyContinu
                     Start-Sleep -Seconds 5
                     $vm = Get-VM2 -Name $Name
                     if ($vm.State -eq "Off") {
