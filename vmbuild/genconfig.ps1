@@ -113,7 +113,6 @@ Function Select-ToolsMenu {
                 }
             }
 
-            Get-tools -Inject | out-null
         }
         "o" {
             $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name
