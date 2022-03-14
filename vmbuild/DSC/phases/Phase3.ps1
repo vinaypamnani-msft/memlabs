@@ -88,6 +88,8 @@ configuration Phase3
 
         if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "PassiveSite") {
 
+            $prevDepend = $nextDepend
+
             WriteStatus ADKInstall {
                 DependsOn = $nextDepend
                 Status    = "Downloading and installing ADK"
@@ -117,7 +119,7 @@ configuration Phase3
                 DownloadSCCM DownLoadSCCM {
                     CM        = $CM
                     Ensure    = "Present"
-                    DependsOn = "[WriteStatus]DownLoadSCCM"
+                    DependsOn = $prevDepend
                 }
 
                 FileReadAccessShare CMSourceSMBShare {
@@ -125,8 +127,8 @@ configuration Phase3
                     Path      = "c:\$CM"
                     DependsOn = "[DownLoadSCCM]DownLoadSCCM"
                 }
-
-                $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
+                $nextDepend = @($nextDepend, "[FileReadAccessShare]CMSourceSMBShare")
+                #$nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
             }
         }
 

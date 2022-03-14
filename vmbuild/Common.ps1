@@ -1925,6 +1925,7 @@ function Invoke-VmCommand {
                 if (-not $SuppressLog) {
                     Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $_" -Failure
                     Write-Log "$($_.ScriptStackTrace)" -LogOnly
+                    Write-Exception -ExceptionInfo $_
                 }
             }
             if ($CommandReturnsBool) {

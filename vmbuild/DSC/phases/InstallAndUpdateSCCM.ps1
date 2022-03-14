@@ -235,6 +235,11 @@ SysCenterId=
     $CMInstallationFile = "c:\$CM\SMSSETUP\BIN\X64\Setup.exe"
 
 
+    Write-DscStatus "Starting Install of CM from $CMInstallationFile"
+    start-sleep -seconds 4
+
+    Write-DscStatusSetup
+
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
 
     Write-DscStatus "Installation finished."

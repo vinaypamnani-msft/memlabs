@@ -887,6 +887,7 @@ $global:VM_Config = {
                         }
                         else {
                             $nodeList.Remove($node) | Out-Null
+                            Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent
                         }
                     }
 
