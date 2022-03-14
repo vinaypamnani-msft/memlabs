@@ -71,13 +71,13 @@ function Write-Option {
 
 Function Select-ToolsMenu {
 
-    $customOptions = [ordered]@{"U" = "Update Tools On all Currently Running VMs (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-    $customOptions += [ordered]@{"O" = "Install Optional Tools (eg Windbg)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions = [ordered]@{"1" = "Update Tools On all Currently Running VMs (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{"2" = "Install Optional Tools (eg Windbg)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
 
     $response = Get-Menu -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false
 
     switch ($response.ToLowerInvariant()) {
-        "u" {
+        "1" {
             $customOptions2 = [ordered]@{"A" = "All Tools" }
             $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name
             $tool = Get-Menu -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false
@@ -114,7 +114,7 @@ Function Select-ToolsMenu {
             }
 
         }
-        "o" {
+        "2" {
             $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name
             $tool = Get-Menu -Prompt "Select Optional tool to Install" -OptionArray $opt -NoNewLine -test:$false
             if (-not $tool) {
