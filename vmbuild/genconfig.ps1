@@ -79,7 +79,7 @@ Function Select-ToolsMenu {
     switch ($response.ToLowerInvariant()) {
         "u" {
             $customOptions2 = [ordered]@{"A" = "All Tools" }
-            $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false } | Select-Object -ExpandProperty Name
+            $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name
             $tool = Get-Menu -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false
             if (-not $tool) {
                 return
