@@ -77,22 +77,31 @@ Function Select-ToolsMenu {
     $response = Get-Menu -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false
 
     switch ($response.ToLowerInvariant()) {
-        "t" {Get-tools -Inject | out-null }
+        "t" { Get-tools -Inject | out-null }
         "o" {
-            $opt = $Common.AzureFileList.Tools | Where-Object {$_.Optional -eq $true} | Select-Object -ExpandProperty Name
+            $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name
             $tool = Get-Menu -Prompt "Select Optional tool to Install" -OptionArray $opt -NoNewLine -test:$false
             if (-not $tool) {
                 return
             }
-            $runningVMs = get-list -type vm | Where-Object {$_.State -eq "Running" } | Select-Object -ExpandProperty vmName
-            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -NoNewLine -test:$false
+            $customOptions2 = [ordered]@{"A" = "All VMs listed above" }
+            $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName
+            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false
             if (-not $vmName) {
                 return
             }
-            Get-Tools -ToolName $tool -vmName $vmName
+            if ($vmName -eq "A") {
+                foreach ($vmName in $runningVMs) {
+                    Get-Tools -ToolName $tool -vmName $vmName
 
-         }
-        default {return}
+                }
+            }
+            else {
+                Get-Tools -ToolName $tool -vmName $vmName
+            }
+
+        }
+        default { return }
     }
 }
 
@@ -851,7 +860,7 @@ function get-VMSummary {
 
 function Select-MainMenu {
     while ($true) {
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope='Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
         $preOptions = [ordered]@{}
         $preOptions += [ordered]@{ "*G" = "---  Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
@@ -1056,7 +1065,7 @@ function Get-ValidSubnets {
             }
         }
     }
-    return $subnetlist | Where-Object {$_}
+    return $subnetlist | Where-Object { $_ }
 }
 
 function Get-NewMachineName {
