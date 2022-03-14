@@ -77,7 +77,44 @@ Function Select-ToolsMenu {
     $response = Get-Menu -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false
 
     switch ($response.ToLowerInvariant()) {
-        "u" { Get-tools -Inject | out-null }
+        "u" {
+            $customOptions2 = [ordered]@{"A" = "All Tools" }
+            $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false } | Select-Object -ExpandProperty Name
+            $tool = Get-Menu -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false
+            if (-not $tool) {
+                return
+            }
+            $customOptions2 = [ordered]@{"A" = "All VMs listed above" }
+            $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName
+            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false
+            if (-not $vmName) {
+                return
+            }
+
+            #All VMs
+            if ($vmName -eq "A") {
+                if ($tool -eq "A") {
+                    #All Tools
+                    Get-tools -Inject | out-null
+                }
+                else {
+                    #Specific Tool
+                    Get-Tools -Inject -ToolName $tool
+                }
+            } #Specific VM
+            else {
+                if ($tool -eq "A") {
+                    #all Tools
+                    Get-Tools -vmName $vmName
+                }
+                else {
+                    #Specific Tool
+                    Get-Tools -vmName $vmName -ToolName $tool
+                }
+            }
+
+            Get-tools -Inject | out-null
+        }
         "o" {
             $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name
             $tool = Get-Menu -Prompt "Select Optional tool to Install" -OptionArray $opt -NoNewLine -test:$false
