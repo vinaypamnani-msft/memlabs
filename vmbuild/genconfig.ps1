@@ -69,6 +69,33 @@ function Write-Option {
     write-host
 }
 
+Function Select-ToolsMenu {
+
+    $customOptions = [ordered]@{"U" = "Update Tools On all Currently Running VMs (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{"O" = "Install Optional Tools (eg Windbg)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+
+    $response = Get-Menu -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false
+
+    switch ($response.ToLowerInvariant()) {
+        "t" {Get-tools -Inject | out-null }
+        "o" {
+            $opt = $Common.AzureFileList.Tools | Where-Object {$_.Optional -eq $true} | Select-Object -ExpandProperty Name
+            $tool = Get-Menu -Prompt "Select Optional tool to Install" -OptionArray $opt -NoNewLine -test:$false
+            if (-not $tool) {
+                return
+            }
+            $runningVMs = get-list -type vm | Where-Object {$_.State -eq "Running" } | Select-Object -ExpandProperty vmName
+            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -NoNewLine -test:$false
+            if (-not $vmName) {
+                return
+            }
+            Get-Tools -ToolName $tool -vmName $vmName
+
+         }
+        default {return}
+    }
+}
+
 function Select-ConfigMenu {
     $Global:EnterKey = $false
     while ($true) {
@@ -95,7 +122,7 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         #$customOptions += [ordered]@{"D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{"T" = "Update Tools (C:\Tools) On all running VMs %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"T" = "Update or Install Optional Tools (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{"P" = "Show Passwords" }
 
 
@@ -144,7 +171,7 @@ function Select-ConfigMenu {
             "f" { Select-DeletePending }
             "d" { Select-DomainMenu }
             "n" { Select-NetworkMenu }
-            "t" { Get-tools -Inject | out-null }
+            "t" { Select-ToolsMenu }
             "P" {
                 Write-Host
                 Write-Host "Password for all accounts is: " -NoNewline
