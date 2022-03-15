@@ -9,6 +9,7 @@ param (
                 $FakeBoundParameters
             )
             $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config" -Filter *.json | Sort-Object $_.LastWriteTime -Descending
+            if ($WordToComplete) { $ConfigPaths = $ConfigPaths | Where-Object { $_.Name.StartsWith($WordToComplete) } }
             $ConfigNames = ForEach ($Path in $ConfigPaths) {
                 if ($Path.Name -eq "_storageConfig.json") { continue }
                 If (Test-Path $Path) {
