@@ -1713,9 +1713,22 @@ function Select-Config {
        #}
     }
     #$Global:configfile = $files[[int]$response - 1]
-    Write-GreenCheck "Loaded Configuration: $response"
-    $Global:configfile = $files | Where-Object {$_.Name -eq $response} |Select-Object -First 1
-    $configSelected = Get-Content $Global:configfile -Force | ConvertFrom-Json
+
+    #$Global:configfile = $files | Where-Object {$_.Name -eq $response} |Select-Object -First 1
+    $UserConfig = Get-UserConfiguration -Configuration $response
+    if ($userConfig.Loaded) {
+        Write-GreenCheck "Loaded Configuration: $response" -NoIndent
+    }
+    else {
+        Write-Redx "Failed to load Configuration: $($UserConfig.ConfigPath)" -NoIndent
+        return
+     }
+    $Global:configfile = $UserConfig.ConfigPath
+
+
+    $configSelected = $UserConfig.config
+    #$configSelected = Get-Content $Global:configfile -Force | ConvertFrom-Json
+
     if ($null -ne $configSelected.vmOptions.domainAdminName) {
         if ($null -eq ($configSelected.vmOptions.adminName)) {
             $configSelected.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configSelected.vmOptions.domainAdminName
@@ -2762,6 +2775,7 @@ function get-ValidResponse {
                 }
                 if ($response2) {
                     $response = $response + $response2
+                    write-host
                 }
             }
         }

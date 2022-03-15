@@ -9,9 +9,10 @@ function Get-UserConfiguration {
     )
 
     $return = [PSCustomObject]@{
-        Loaded  = $false
-        Config  = $null
-        Message = $null
+        Loaded     = $false
+        Config     = $null
+        Message    = $null
+        ConfigPath = $null
     }
 
     # Add extension
@@ -22,17 +23,37 @@ function Get-UserConfiguration {
     # Get deployment configuration
     $configPath = Join-Path $Common.ConfigPath $Configuration
     if (-not (Test-Path $configPath)) {
-        $sampleConfigPath = Join-Path $Common.ConfigPath "tests\$Configuration"
-        if (-not (Test-Path $sampleConfigPath)) {
-            $return.Message = "Get-UserConfiguration: $Configuration not found in $configPath or $sampleConfigPath. Please create the config manually or use genconfig.ps1, and try again."
+        $testConfigPath = Join-Path $Common.ConfigPath "tests\$Configuration"
+        if (-not (Test-Path $testConfigPath)) {
+            $return.Message = "Get-UserConfiguration: $Configuration not found in $configPath or $testConfigPath. Please create the config manually or use genconfig.ps1, and try again."
             return $return
         }
-        $configPath = $sampleConfigPath
+        $configPath = $testConfigPath
     }
 
     try {
         Write-Log "Loading $configPath." -LogOnly
+        $return.ConfigPath = $configPath
         $config = Get-Content $configPath -Force | ConvertFrom-Json
+
+        #Apply Fixes to Config
+
+        if ($null -ne $config.vmOptions.domainAdminName) {
+            if ($null -eq ($config.vmOptions.adminName)) {
+                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName
+            }
+            $config.vmOptions.PsObject.properties.Remove('domainAdminName')
+        }
+        if ($null -ne $config.cmOptions.installDPMPRoles) {
+            $config.cmOptions.PsObject.properties.Remove('installDPMPRoles')
+            foreach ($vm in $config.virtualMachines) {
+                if ($vm.Role -eq "DPMP") {
+                    $vm | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
+                    $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
+                }
+            }
+        }
+
         $return.Loaded = $true
         $return.Config = $config
         return $return
@@ -1504,11 +1525,16 @@ Function Write-GreenCheck {
         [Parameter()]
         [switch] $NoNewLine,
         [Parameter()]
+        [switch] $NoIndent,
+        [Parameter()]
         [string] $ForegroundColor
     )
     $CHECKMARK = ([char]8730)
     $text = $text.Replace("SUCCESS: ", "")
-    Write-Host "  [" -NoNewLine
+    if (-not $NoIndent) {
+        Write-Host "  " -NoNewline
+    }
+    Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor LimeGreen "$CHECKMARK" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {
@@ -1533,10 +1559,15 @@ Function Write-RedX {
         [Parameter()]
         [switch] $NoNewLine,
         [Parameter()]
+        [switch] $NoIndent,
+        [Parameter()]
         [string] $ForegroundColor
     )
     $text = $text.Replace("ERROR: ", "")
-    Write-Host "  [" -NoNewLine
+    if (-not $NoIndent) {
+        Write-Host "  " -NoNewline
+    }
+    Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor Red "x" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {
