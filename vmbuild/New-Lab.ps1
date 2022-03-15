@@ -176,6 +176,7 @@ try {
         Write-Log "Validating specified configuration: $Configuration"
         $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
+            Write-GreenCheck "Loaded Configuration: $Configuration"
             $userConfig = $configResult.Config
         }
         else {
