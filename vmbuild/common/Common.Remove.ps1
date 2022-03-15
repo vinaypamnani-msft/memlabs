@@ -106,7 +106,7 @@ function Remove-Orphaned {
 
         if (-not $vm.Domain) {
             # Prompt for delete, likely no json object in vm notes
-            $response = Read-Host -Prompt "VM $($vm.VmName) may be orphaned. Delete? [y/N]"
+            $response = Read-YesorNoWithTimeout -Prompt "VM $($vm.VmName) may be orphaned. Delete? [y/N]" -HideHelp
             if ($response.ToLowerInvariant() -eq "y") {
                 Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
             }
@@ -128,7 +128,7 @@ function Remove-Orphaned {
     foreach ($scope in $scopes) {
         $scopeId = $scope.ScopeId.ToString() # This requires us to replace "Internet" with subnet
         if ($vmNetworksInUse2 -notcontains $scopeId) {
-            $response = Read-Host -Prompt "DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]"
+            $response = Read-YesorNoWithTimeout -Prompt "DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -HideHelp
             if ($response.ToLowerInvariant() -eq "y") {
                 Remove-DhcpScope -ScopeId $scopeId -WhatIf:$WhatIf
             }
@@ -148,7 +148,7 @@ function Remove-Orphaned {
         }
 
         if (-not $inUse) {
-            $response = Read-Host -Prompt "Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]"
+            $response = Read-YesorNoWithTimeout -Prompt "Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -HideHelp
             if ($response.ToLowerInvariant() -eq "y") {
                 Remove-VMSwitch2 -NetworkName $switch.Name
             }

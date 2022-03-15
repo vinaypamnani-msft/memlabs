@@ -32,14 +32,7 @@ Write-Host2 -ForegroundColor DeepSkyBlue ""
 Write-Host2 -ForegroundColor Snow "Select the " -NoNewline
 Write-Host2 -ForegroundColor Yellow "numbers or letters" -NoNewline
 Write-Host2 -ForegroundColor Snow " on the left side of the options menu to navigate."
-function write-help {
-    $color = $Global:Common.Colors.GenConfigHelp
-    Write-Host2 -ForegroundColor $color "Press " -NoNewline
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
-    Write-Host2 -ForegroundColor $color " to skip a section or " -NoNewline
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-    Write-Host2 -ForegroundColor $color " to exit without saving."
-}
+
 
 function Write-Option {
     [CmdletBinding()]
@@ -2541,41 +2534,6 @@ function Read-Single {
     return $response
 }
 
-function Read-YesorNoWithTimeout {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
-        [string] $prompt,
-        [Parameter(Mandatory = $false, HelpMessage = "shows current value in []")]
-        [string] $currentValue,
-        [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
-        [switch] $HideHelp,
-        [Parameter(Mandatory = $false, HelpMessage = "Timeout")]
-        [int] $timeout = 10
-
-    )
-
-    if (-not $HideHelp.IsPresent) {
-        write-help
-    }
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
-    if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
-        Write-Host " [" -NoNewline
-        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPromptCurrentItem $currentValue -NoNewline
-        Write-Host "] " -NoNewline
-    }
-
-
-    $valid = $false
-    while (-not $valid) {
-        $YNresponse = Read-SingleKeyWithTimeout -timeout $timeout -ValidKeys "Y", "y", "N", "n" -Prompt ": "
-        if ($null -eq $YNresponse -or $YNresponse -eq 'Y' -or $YNresponse -eq 'y' -or $YNresponse -eq 'N' -or $YNresponse -eq 'n') {
-            $valid = $true
-        }
-    }
-    Write-Host
-    return $YNresponse
-}
 
 # Offers a menu for any array passed in.
 # This is used for Sql Versions, Roles, Etc
