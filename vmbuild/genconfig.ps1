@@ -1625,11 +1625,13 @@ function Select-Config {
             $color = $Global:Common.Colors.GenConfigNormal
             try {
                 $savedConfigJson = Get-Content $file | ConvertFrom-Json
-
             }
             catch {
                 $savedNotes = $_
             }
+
+            $savedNotes = "[" + $file.LastWriteTime.GetDateTimeFormats()[2] + "]"
+
             if ($savedConfigJson) {
                 $Found = 0
                 $notFound = 0
@@ -5353,8 +5355,8 @@ function Save-Config {
     }
 
     $file += "$($config.virtualMachines.Count)VMs"
-    $date = Get-Date -Format "yyyy-MM-dd"
-    $file = $date + "-" + $file
+    #$date = Get-Date -Format "yyyy-MM-dd"
+    #$file = $date + "-" + $file
 
     $filename = Join-Path $configDir $file
     if ($Global:configfile) {
