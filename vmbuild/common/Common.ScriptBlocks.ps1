@@ -101,8 +101,8 @@ $global:VM_Create = {
 
             $created = New-VirtualMachine @HashArguments
 
-            if (-not $created) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM was not created. Check vmbuild logs." -Failure -OutputStream -HostOnly
+            if (-not ($created -eq $true)) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM was not created. Check vmbuild logs. $created" -Failure -OutputStream -HostOnly
                 return
             }
 
@@ -776,7 +776,7 @@ $global:VM_Config = {
                 }
 
                 foreach ($node in $ConfigurationData.AllNodes | where-object { $_ }) {
-                #foreach ($node in $ConfigurationData.AllNodes) {
+                    #foreach ($node in $ConfigurationData.AllNodes) {
                     $cd.AllNodes += $node
                 }
 
@@ -1193,6 +1193,14 @@ $global:VM_Config = {
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
             }
+
+            $disable_StickyKeys = {
+                Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
+                Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
+                Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_StickyKeys -DisplayName "Disable StickyKeys"
         }
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed

@@ -1363,11 +1363,11 @@ function New-VirtualMachine {
         Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is present."
         if ($vmTest.State -ne "Off") {
             Write-Log "$VmName`: Turning the VM off forcefully..."
-            $vmTest | Stop-VM -TurnOff -Force -WarningAction SilentlyContinu
+            $vmTest | Stop-VM -TurnOff -Force -WarningAction SilentlyContinue
         }
         $vmTest | Remove-VM -Force
         Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
-        Remove-Item -Path $($vmTest.Path) -Force -Recurse
+        Remove-Item -Path $($vmTest.Path) -Force -Recurse | out-null
         Write-Log "$VmName`: Purge complete."
         Get-List -FlushCache | Out-Null # flush cache
     }
@@ -1381,7 +1381,7 @@ function New-VirtualMachine {
     $VmSubPath = Join-Path $VmPath $VmName
     if (Test-Path -Path $VmSubPath) {
         Write-Log "$VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
-        Remove-Item -Path $VmSubPath -Force -Recurse
+        Remove-Item -Path $VmSubPath -Force -Recurse | out-null
         Write-Log "$VmName`: Purge complete." -Verbose
     }
 
@@ -1420,7 +1420,7 @@ function New-VirtualMachine {
     }
 
     Write-Log "$VmName`: Enabling Hyper-V Guest Services"
-    Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
+    Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | out-null
 
     if ($Generation -eq "2" -and $tpmEnabled) {
         $mtx = New-Object System.Threading.Mutex($false, "TPM")
@@ -1429,7 +1429,7 @@ function New-VirtualMachine {
         write-log "acquired 'TPM' Mutex" -LogOnly
         try {
             if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
-                New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
+                New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates | out-null
                 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
             }
 
@@ -1442,8 +1442,8 @@ function New-VirtualMachine {
                     Write-Log "$VmName`: New-HgsKeyProtector failed"
                     return $false
                 }
-                Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
-                Enable-VMTPM $VmName -ErrorAction Stop ## Only required for Win11
+                Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData | out-null
+                Enable-VMTPM $VmName -ErrorAction Stop | out-null ## Only required for Win11
             }
             else {
                 Write-Log "$VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
@@ -1459,14 +1459,14 @@ function New-VirtualMachine {
         }
     }
     Write-Log "$VmName`: Setting Processor count to $Processors"
-    Set-VM -Name $vmName -ProcessorCount $Processors
+    Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
     Write-Log "$VmName`: Adding virtual disk $osDiskPath"
-    Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0
+    Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | out-null
 
 
     Write-Log "$VmName`: Adding a DVD drive"
-    Add-VMDvdDrive -VMName $VmName
+    Add-VMDvdDrive -VMName $VmName | out-null
 
 
     Write-Log "$VmName`: Changing boot order"
@@ -1484,8 +1484,8 @@ function New-VirtualMachine {
             $newDiskName = "$VmName`_$label`_$count.vhdx"
             $newDiskPath = Join-Path $vm.Path $newDiskName
             Write-Log "$VmName`: Adding $newDiskPath"
-            New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic
-            Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath
+            New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic |out-null
+            Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath |out-null
             $count++
         }
     }
@@ -1493,18 +1493,18 @@ function New-VirtualMachine {
     # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
     if ($null -ne $f_file) {
         if (-not $OSDClient.IsPresent) {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net
+            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net | out-null
         }
         else {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd
+            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd | out-null
         }
     }
     else {
         if (-not $OSDClient.IsPresent) {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net
+            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net | out-null
         }
         else {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd
+            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
         }
     }
 
@@ -1517,38 +1517,48 @@ function New-VirtualMachine {
 
     if ($SwitchName2) {
 
-        $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
-
-
-        $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
-        if (-not ($dc.network)) {
-            $dns = $DeployConfig.vmOptions.network.Substring(0, $DeployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
-        }
-        else {
-            $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
-        }
-
-
-        if (-not $dns) {
-            write-Log -Failure "Could not determine DNS for cluster network"
-            return $false
-        }
-
         $mtx = New-Object System.Threading.Mutex($false, "GetIP")
         write-log "Attempting to acquire 'GetIP' Mutex" -LogOnly
         [void]$mtx.WaitOne()
         write-log "acquired 'GetIP' Mutex" -LogOnly
         try {
+
+            write-log "$VmName`: Adding 2nd NIC attached to $SwitchName2" -LogOnly
+            $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
+            write-log "$VmName`: NIC added MAC: $($vmnet.MacAddress)" -LogOnly
+
+            if (-not $($vmnet.MacAddress)) {
+                start-sleep -Seconds 60
+                if (-not $($vmnet.MacAddress)) {
+                    write-log "$VmName`: 2nd NIC does not have a MAC address: $($vmnet)" -Failure
+                    return $false
+                }
+            }
+
+            $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
+            if (-not ($dc.network)) {
+                $dns = $DeployConfig.vmOptions.network.Substring(0, $DeployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
+            }
+            else {
+                $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
+            }
+
+
+            if (-not $dns) {
+                write-Log -Failure "$VmName`:Could not determine DNS for cluster network"
+                return $false
+            }
+
             $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0"
             Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
             try {
-                Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop
-                Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop
-                Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -ErrorAction Stop
-                Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -ErrorAction Stop
+                Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
+                Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -ErrorAction Stop | out-null
+                Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -ErrorAction Stop | out-null
             }
             catch {
-                write-log -failure "Failed to reserve IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
+                write-log -failure "$VmName`:Failed to reserve IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
                 Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
                 return $false
             }
@@ -1557,15 +1567,27 @@ function New-VirtualMachine {
             #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
             if ($currentItem.OtherNode) {
                 $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75 -WarningAction SilentlyContinue) | Select-Object -Last 2
-                Write-Log "SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
+                Write-Log "$VmName`: SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
                 $clusterIP = $IPs[0]
                 $AGIP = $IPs[1]
 
-                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue
-                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue
+                write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
+
+                if (-not $clusterIP -or -not $AGIP){
+                    write-log -failure "$VmName`:Failed to acquire Clueter or AGIP for SQLAO"
+                    return $false
+                }
+
+                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
+                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue | out-null
                 $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
                 $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
             }
+        }
+        catch {
+            Write-Exception $_
+            Write-Log "$vmName`: Failed adding 2nd NIC $_"
+            return $false
         }
         finally {
             [void]$mtx.ReleaseMutex()
@@ -1666,7 +1688,7 @@ function Wait-ForVm {
         $readySmb = $false
 
         $failures = 0
-        $maxFailures = ([int]$TimeoutMinutes*3)
+        $maxFailures = ([int]$TimeoutMinutes * 3)
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
@@ -1680,7 +1702,7 @@ function Wait-ForVm {
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
                 try {
-                    if ($failures -gt ([int]$TimeoutMinutes*2)) {
+                    if ($failures -gt ([int]$TimeoutMinutes * 2)) {
                         Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus -failcount $failures -failcountMax $maxFailures
                     }
                     else {
@@ -1707,7 +1729,7 @@ function Wait-ForVm {
             }
             else {
                 $failures = 0
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $($originalStatus+": "+ $out.ScriptBlockOutput)
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $($originalStatus + ": " + $out.ScriptBlockOutput)
             }
 
             # Wait until OOBE is ready
@@ -2774,6 +2796,11 @@ if (-not $Common.Initialized) {
 
     Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 10
     # Common global props
+
+    #disable Sticky Keys
+    Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
+    Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
+    Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
 
     $colors = Get-Colors
 

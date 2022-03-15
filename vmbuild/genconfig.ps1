@@ -5360,16 +5360,21 @@ function Save-Config {
 
     $filename = Join-Path $configDir $file
     if ($Global:configfile) {
-        $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile).Name)
+        write-host $Global:configfile
+        $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile))
         if ($filename.StartsWith("PSTest") -or $filename.StartsWith("CSTest")) {
-            return Split-Path -Path $fileName -Leaf
+            #return Split-Path -Path $fileName -Leaf
+            Write-Log -HostOnly -Verbose "(1)Returning File: $fileName"
+            return $fileName
         }
-        $filename = Join-Path $configDir $filename
+        #$filename = Join-Path $configDir $filename
         $fullFilename = $Global:configfile
         $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress) -eq
                 ($config | ConvertTo-Json -Depth 5 -Compress)
         if ($contentEqual) {
-            return Split-Path -Path $fileName -Leaf
+             #return Split-Path -Path $fileName -Leaf
+             Write-Log -HostOnly -Verbose "(2)Returning File: $fileName"
+             return $fileName
         }
         else {
             # Write-Host "Content Not Equal"
@@ -5377,8 +5382,8 @@ function Save-Config {
             # ($config | ConvertTo-Json -Depth 5) | out-host
         }
     }
-    $splitpath = Split-Path -Path $fileName -Leaf
-    $response = Read-Single -Prompt "Save Filename" -currentValue $splitpath -HideHelp -Timeout 30 -useReadHost
+    #$splitpath = Split-Path -Path $fileName -Leaf
+    $response = Read-Single -Prompt "Save Filename" -currentValue $filename -HideHelp -Timeout 30 -useReadHost
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $filename = Join-Path $configDir $response
@@ -5393,7 +5398,9 @@ function Save-Config {
     Write-Host "Saved to $filename"
     Write-Host
     Write-Verbose "11"
-    return Split-Path -Path $fileName -Leaf
+    $filename = Split-Path -Path $fileName -Leaf
+    Write-Log -HostOnly -Verbose "Returning File: $fileName"
+    return $filename
 }
 
 # Automatically update DSC.Zip
@@ -5476,6 +5483,7 @@ do {
 } while ($null -ne $Global:SavedConfig -and $global:StartOver -eq $true)
 
 $return.ConfigFileName = Save-Config $Global:Config
+
 
 if (-not $InternalUseOnly.IsPresent) {
     Write-Host "You may deploy this configuration by running the following command:"
