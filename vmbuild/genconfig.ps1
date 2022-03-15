@@ -1611,7 +1611,8 @@ function Select-Config {
 
         $maxLength = 40
         foreach ($file in $files) {
-            $len = $file.Name.Length
+            $filename = [System.Io.Path]::GetFileNameWithoutExtension($file.Name)
+            $len = $filename.Length
 
             if ($len -gt $maxLength) {
                 $maxLength = $len
@@ -1659,7 +1660,8 @@ function Select-Config {
                     }
                 }
             }
-            $optionArray += $($file.Name.PadRight($maxLength) + " " + $savedNotes) + "%$color"
+            $filename = [System.Io.Path]::GetFileNameWithoutExtension($file.Name)
+            $optionArray += $($filename.PadRight($maxLength) + " " + $savedNotes) + "%$color"
 
         }
 
@@ -1669,52 +1671,7 @@ function Select-Config {
         if (-not $response) {
             return
         }
-       #Write-Host
-       #Write-Verbose "3 Select-Config"
-       #$response = Read-Host2 -Prompt "Which config do you want to load"
-       #if (-not $response) {
-       #    $response = ""
-       #}
-       #try {
-       #    if ([int]$response -is [int]) {
-       #        if ([int]$response -le [int]$i -and [int]$response -gt 0 ) {
-       #            $responseValid = $true
-       #        }
-       #    }
-       #}
-       #catch {}
-       #if (-Not $NoMore.IsPresent) {
-       #    if ($response.ToLowerInvariant() -eq "m") {
-       #        $configSelected = Select-Config $configDir -NoMore
-       #        if (-not ($null -eq $configSelected)) {
-       #            return $configSelected
-       #        }
-       #        $i = 0
-       #        foreach ($file in $files) {
-       #            $i = $i + 1
-       #            write-Host "[$i] $($file.Name)"
-       #        }
-       #        if (-Not $NoMore.IsPresent) {
-       #            Write-Option "M" "Show More (Custom and Previous config files)" -color DarkGreen -Color2 Green
-       #            Write-Option "E" "Expand existing network" -color DarkGreen -Color2 Green
-       #        }
-       #    }
-       #    if ($response.ToLowerInvariant() -eq "e") {
-       #        $newConfig = Show-ExistingNetwork
-       #        if ($newConfig) {
-       #            return $newConfig
-       #        }
-       #    }
-       #}
-       #else {
-       #    if ($response -eq "") {
-       #        return $null
-       #    }
-       #}
     }
-    #$Global:configfile = $files[[int]$response - 1]
-
-    #$Global:configfile = $files | Where-Object {$_.Name -eq $response} |Select-Object -First 1
     $UserConfig = Get-UserConfiguration -Configuration $response
     if ($userConfig.Loaded) {
         Write-GreenCheck "Loaded Configuration: $response" -NoIndent
@@ -1722,7 +1679,7 @@ function Select-Config {
     else {
         Write-Redx "Failed to load Configuration: $($UserConfig.ConfigPath)" -NoIndent
         return
-     }
+    }
     $Global:configfile = $UserConfig.ConfigPath
 
 
@@ -2758,7 +2715,7 @@ function get-ValidResponse {
                     [int]$testmax = ([string]$response + "0" -as [int])
                     Write-Verbose "Testing $testmax -le $max"
                     if ([int]$testmax -le [int]$max) {
-                       # Write-Verbose "Reading Another Key"
+                        # Write-Verbose "Reading Another Key"
                         $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
                         #Write-Verbose "Next Key was '$response2'"
                     }
