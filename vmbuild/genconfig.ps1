@@ -1604,7 +1604,7 @@ function Select-Config {
         $files = $files | sort-Object -Property Name
     }
     $responseValid = $false
-
+    $optionArray = @()
     while ($responseValid -eq $false) {
         $i = 0
         $currentVMs = Get-List -type VM
@@ -1659,59 +1659,62 @@ function Select-Config {
                     }
                 }
             }
-
-            Write-Option $i $($file.Name.PadRight($maxLength) + " " + $savedNotes) -color $color
-        }
-        if (-Not $NoMore.IsPresent) {
-            Write-Option "M" "Show More (Custom and Previous config files)" -color DarkGreen -Color2 Green
-            Write-Option "E" "Expand existing network" -color DarkGreen -Color2 Green
+            $optionArray += $($file.Name.PadRight($maxLength) + " " + $savedNotes) + "%$color"
 
         }
 
-        Write-Host
-        Write-Verbose "3 Select-Config"
-        $response = Read-Host2 -Prompt "Which config do you want to load"
+        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -split
+
+        $responseValid = $true
         if (-not $response) {
-            $response = ""
+            return
         }
-        try {
-            if ([int]$response -is [int]) {
-                if ([int]$response -le [int]$i -and [int]$response -gt 0 ) {
-                    $responseValid = $true
-                }
-            }
-        }
-        catch {}
-        if (-Not $NoMore.IsPresent) {
-            if ($response.ToLowerInvariant() -eq "m") {
-                $configSelected = Select-Config $configDir -NoMore
-                if (-not ($null -eq $configSelected)) {
-                    return $configSelected
-                }
-                $i = 0
-                foreach ($file in $files) {
-                    $i = $i + 1
-                    write-Host "[$i] $($file.Name)"
-                }
-                if (-Not $NoMore.IsPresent) {
-                    Write-Option "M" "Show More (Custom and Previous config files)" -color DarkGreen -Color2 Green
-                    Write-Option "E" "Expand existing network" -color DarkGreen -Color2 Green
-                }
-            }
-            if ($response.ToLowerInvariant() -eq "e") {
-                $newConfig = Show-ExistingNetwork
-                if ($newConfig) {
-                    return $newConfig
-                }
-            }
-        }
-        else {
-            if ($response -eq "") {
-                return $null
-            }
-        }
+       #Write-Host
+       #Write-Verbose "3 Select-Config"
+       #$response = Read-Host2 -Prompt "Which config do you want to load"
+       #if (-not $response) {
+       #    $response = ""
+       #}
+       #try {
+       #    if ([int]$response -is [int]) {
+       #        if ([int]$response -le [int]$i -and [int]$response -gt 0 ) {
+       #            $responseValid = $true
+       #        }
+       #    }
+       #}
+       #catch {}
+       #if (-Not $NoMore.IsPresent) {
+       #    if ($response.ToLowerInvariant() -eq "m") {
+       #        $configSelected = Select-Config $configDir -NoMore
+       #        if (-not ($null -eq $configSelected)) {
+       #            return $configSelected
+       #        }
+       #        $i = 0
+       #        foreach ($file in $files) {
+       #            $i = $i + 1
+       #            write-Host "[$i] $($file.Name)"
+       #        }
+       #        if (-Not $NoMore.IsPresent) {
+       #            Write-Option "M" "Show More (Custom and Previous config files)" -color DarkGreen -Color2 Green
+       #            Write-Option "E" "Expand existing network" -color DarkGreen -Color2 Green
+       #        }
+       #    }
+       #    if ($response.ToLowerInvariant() -eq "e") {
+       #        $newConfig = Show-ExistingNetwork
+       #        if ($newConfig) {
+       #            return $newConfig
+       #        }
+       #    }
+       #}
+       #else {
+       #    if ($response -eq "") {
+       #        return $null
+       #    }
+       #}
     }
-    $Global:configfile = $files[[int]$response - 1]
+    #$Global:configfile = $files[[int]$response - 1]
+    Write-GreenCheck "Loaded Configuration: $response"
+    $Global:configfile = $files | Where-Object {$_.Name -eq $response} |Select-Object -First 1
     $configSelected = Get-Content $Global:configfile -Force | ConvertFrom-Json
     if ($null -ne $configSelected.vmOptions.domainAdminName) {
         if ($null -eq ($configSelected.vmOptions.adminName)) {
@@ -2601,9 +2604,25 @@ function Get-Menu {
     $i = 0
 
     foreach ($option in $OptionArray) {
-        $i = $i + 1
         if (-not [String]::IsNullOrWhiteSpace($option)) {
-            Write-Option $i $option
+            $i = $i + 1
+            $item = $option
+            $color1 = $Global:Common.Colors.GenConfigNormal
+            $color2 = $Global:Common.Colors.GenConfigNormalNumber
+            if (-not [String]::IsNullOrWhiteSpace($item)) {
+                $TextValue = $item -split "%"
+
+                if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
+                    $color1 = $TextValue[1]
+                    if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
+                        $color2 = $TextValue[2]
+                    }
+                    else {
+                        $color2 = $color1
+                    }
+                }
+                Write-Option $i $TextValue[0] -color $color1 -Color2 $color2
+            }
         }
     }
 
@@ -2722,9 +2741,13 @@ function get-ValidResponse {
             #$response = Read-Host2 -Prompt $prompt $currentValue
             if (-not $Global:EnterKey) {
                 if (($response -as [int]) -is [int]) {
+
                     [int]$testmax = ([string]$response + "0" -as [int])
+                    Write-Verbose "Testing $testmax -le $max"
                     if ([int]$testmax -le [int]$max) {
+                       # Write-Verbose "Reading Another Key"
                         $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
+                        #Write-Verbose "Next Key was '$response2'"
                     }
                 }
                 foreach ($key in $additionalOptions.Keys) {

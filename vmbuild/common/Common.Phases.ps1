@@ -334,7 +334,24 @@ function Get-ConfigurationData {
         "3" { $cd = Get-Phase3ConfigurationData -deployConfig $deployConfig }
         "4" { $cd = Get-Phase4ConfigurationData -deployConfig $deployConfig }
         "5" { $cd = Get-Phase5ConfigurationData -deployConfig $deployConfig }
-        "6" { $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig }
+        "6" {
+            $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig
+            if ($cd) {
+                $autoSnapshotName = "MemLabs Phase6 AutoSnapshot"
+                $snapshot = $null
+                $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
+                if ($dc) {
+                    $snapshot = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*$autoSnapshotName*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
+                }
+
+                if (-not $snapshot) {
+                    $response = Read-YesorNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp
+                    if (-not ($response -eq "n")) {
+                        Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment "MemLabs Phase6 AutoSnapshot"
+                    }
+                }
+            }
+        }
         Default { return }
     }
     if ($global:Common.VerboseEnabled) {
