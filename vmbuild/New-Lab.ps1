@@ -141,11 +141,9 @@ try {
     }
 
     Set-QuickEdit -DisableQuickEdit
-    $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
+    # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
     Start-Maintenance
-
-    Write-Log "### VALIDATE" -Activity
 
     # Get config
     if (-not $Configuration) {
@@ -169,6 +167,8 @@ try {
 
         $Configuration = $result.ConfigFileName
     }
+
+    Write-Log "### VALIDATE" -Activity
 
     # Load config
     if ($Configuration) {
