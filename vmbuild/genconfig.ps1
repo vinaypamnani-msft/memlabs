@@ -5365,7 +5365,7 @@ function Save-Config {
             return Split-Path -Path $fileName -Leaf
         }
         $filename = Join-Path $configDir $filename
-        $fullFilename = Join-Path $configDir (($Global:configfile).Name)
+        $fullFilename = $Global:configfile
         $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress) -eq
                 ($config | ConvertTo-Json -Depth 5 -Compress)
         if ($contentEqual) {
