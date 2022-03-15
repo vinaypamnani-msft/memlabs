@@ -1,6 +1,22 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
+    [ArgumentCompleter( {
+            param ( $CommandName,
+                $ParameterName,
+                $WordToComplete,
+                $CommandAst,
+                $FakeBoundParameters
+            )
+            $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config" -Filter *.json
+            $ConfigNames = ForEach ($Path in $ConfigPaths) {
+                if ($Path.Name -eq "_storageConfig.json") { continue }
+                If (Test-Path $Path) {
+                    (Get-ChildItem $Path).BaseName
+                }
+            }
+            return [string[]] $ConfigNames
+        })]
     [string]$Configuration,
     [Parameter(Mandatory = $false, HelpMessage = "Download all files required by the specified config without deploying any VMs.")]
     [switch]$DownloadFilesOnly,
@@ -177,7 +193,7 @@ try {
     # Determine if we need to run Phase 1
     $runPhase1 = $false
     $existingVMs = Get-List -Type VM -SmartUpdate
-    $newVMs = $userConfig.virtualMachines | Where-Object {$userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName}
+    $newVMs = $userConfig.virtualMachines | Where-Object { $userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName }
     if ($newVMs.Count -gt 0) {
         $runPhase1 = $true
     }
