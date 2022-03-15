@@ -124,6 +124,7 @@ function Start-PhaseJobs {
     $global:vm_remove_list = @()
     $maxVmNameLength = 0
     $maxRoleNameLength = 0
+    $existingVMs = Get-List -Type VM -SmartUpdate
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
         # Don't touch non-hidden VM's in Phase 0
@@ -133,6 +134,11 @@ function Start-PhaseJobs {
 
         # Don't touch hidden VM's in Phase 1
         if ($Phase -eq 1 -and $currentItem.hidden) {
+            continue
+        }
+
+        # Skip Phase 1 for machines that exist - should never hit this
+        if ($Phase -eq 1 -and $currentItem.vmName -in $existingVMs.vmName) {
             continue
         }
 

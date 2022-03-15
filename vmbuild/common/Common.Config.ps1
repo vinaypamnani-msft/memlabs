@@ -1444,10 +1444,10 @@ function Test-InProgress {
         write-host
         write-host2 -ForegroundColor Snow "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
         write-host2 -ForegroundColor Blue "*************************************************************************************************************************************"
-        return $false
+        return $true
     }
 
-    return $true
+    return $false
 
 }
 

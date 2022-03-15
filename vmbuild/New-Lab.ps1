@@ -174,10 +174,18 @@ try {
         return
     }
 
+    # Determine if we need to run Phase 1
+    $runPhase1 = $false
+    $existingVMs = Get-List -Type VM -SmartUpdate
+    $newVMs = $userConfig.virtualMachines | Where-Object {$userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName}
+    if ($newVMs.Count -gt 0) {
+        $runPhase1 = $true
+    }
+
     # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
-        if ($testConfigResult.Valid -or $phasedRun) {
+        if ($testConfigResult.Valid -or $runPhase1 -eq $false) {
             # Skip validation in phased run
             $deployConfig = $testConfigResult.DeployConfig
             Write-GreenCheck "Configuration validated successfully." -ForeGroundColor SpringGreen
@@ -199,8 +207,9 @@ try {
     }
 
     # Skip if any VM in progress
-    if ($phasedRun -and (Test-InProgress -DeployConfig $deployConfig)) {
-        #    return
+    if ($runPhase1 -and (Test-InProgress -DeployConfig $deployConfig)) {
+        Write-Host
+        return
     }
 
     # Timer
@@ -220,13 +229,6 @@ try {
         Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
     }
 
-    $runPhase1 = $true
-    if (-not $StopPhase -and ($Phase -or $SkipPhase -or $StartPhase)) {
-        $runPhase1 = $false
-    }
-    if ($StopPhase -and ($Phase -or $SkipPhase -or $StartPhase)) {
-        $runPhase1 = $false
-    }
     if ($runPhase1) {
         # Download required files
         $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
@@ -251,9 +253,8 @@ try {
         }
     }
 
-
-    $AddedScopes = @($deployConfig.vmOptions.network)
     # Test if hyper-v switch exists, if not create it
+    $AddedScopes = @($deployConfig.vmOptions.network)
     $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
     if (-not $worked) {
         return
@@ -335,22 +336,13 @@ try {
     # Define phases
     $start = 1
     $maxPhase = 6
-    $runPhase1 = $true
-    if (-not $StopPhase -and ($Phase -or $SkipPhase -or $StartPhase)) {
-        $runPhase1 = $false
-    }
-    if ($StopPhase -and ($Phase -or $SkipPhase -or $StartPhase)) {
-        $runPhase1 = $false
-    }
-
-    # Run Phases
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
             Write-Phase -Phase $i
 
             if ($i -eq 1 -and -not $runPhase1) {
-                Write-OrangePoint "Skipped Phase $i because Phase options were specified." -ForegroundColor Yellow -WriteLog
+                Write-OrangePoint "[Phase $i] Not Applicable. Skipping." -ForegroundColor Yellow -WriteLog
                 continue
             }
 
@@ -415,6 +407,7 @@ finally {
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
         Write-Log "### $Configuration Terminated" -HostOnly
+        Write-Host
     }
 
     if (-not $global:Common.DevBranch) {
@@ -451,5 +444,3 @@ finally {
     # Set quick edit back
     Set-QuickEdit
 }
-
-Write-Host
