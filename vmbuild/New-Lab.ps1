@@ -8,7 +8,7 @@ param (
                 $CommandAst,
                 $FakeBoundParameters
             )
-            $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config" -Filter *.json
+            $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config" -Filter *.json | Sort-Object $_.LastWriteTime -Descending
             $ConfigNames = ForEach ($Path in $ConfigPaths) {
                 if ($Path.Name -eq "_storageConfig.json") { continue }
                 If (Test-Path $Path) {
