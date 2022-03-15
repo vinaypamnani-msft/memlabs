@@ -22,8 +22,8 @@ function Get-Colors {
         GenConfigDefaultNumber     = "ForestGreen"
         # [4] Load TEST config from File
         # Yellow   DimGray
-        GenConfigHidden            = "DimGray"
-        GenConfigHiddenNumber      = "DimGray"
+        GenConfigHidden            = "RosyBrown"
+        GenConfigHiddenNumber      = "RosyBrown"
         # [3] Load saved config from File%
         GenConfigNonDefault        = "LightSteelBlue"
         GenConfigNonDefaultNumber  = "LightSteelBlue"
