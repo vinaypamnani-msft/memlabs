@@ -1630,7 +1630,7 @@ function Select-Config {
                 $savedNotes = $_
             }
 
-            $savedNotes = "[" + $file.LastWriteTime.GetDateTimeFormats()[2] + "]"
+            $savedNotes = "[" + $file.LastWriteTime.GetDateTimeFormats()[2].PadLeft(8) + "]"
 
             if ($savedConfigJson) {
                 $Found = 0
