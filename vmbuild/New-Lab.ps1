@@ -310,6 +310,7 @@ try {
         }
     }
 
+    #Make sure DHCP is still running
     get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' } | start-service
     $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
     if ($service) {
@@ -440,6 +441,7 @@ finally {
 
     # Delete in progress or failed VM's
     if ($global:vm_remove_list.Count -gt 0) {
+        Get-Job | Stop-Job
         Write-Host
         if ($NewLabsuccess) {
             Write-Log "Phase 1 encountered failures. Removing all VM's created in Phase 1." -Warning

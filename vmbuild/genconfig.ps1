@@ -1047,7 +1047,10 @@ function Get-ValidSubnets {
         }
     }
 
-    for ($i = 1; $i -lt 254; $i++) {
+    $usedSubnets += $subnetList
+    $addedsubnets = 0
+
+    for ($i = 1; $i -lt 200; $i++) {
         $newSubnet = "192.168." + $i + ".0"
         $found = $false
         if ($usedSubnets -contains $newSubnet) {
@@ -1056,7 +1059,8 @@ function Get-ValidSubnets {
         }
         if (-not $found) {
             $subnetlist += $newSubnet
-            if ($subnetlist.Count -gt 2) {
+            $addedsubnets++
+            if ($addedsubnets -gt 2) {
                 break
             }
 
@@ -1064,7 +1068,7 @@ function Get-ValidSubnets {
 
     }
 
-    for ($i = 1; $i -lt 254; $i++) {
+    for ($i = 1; $i -lt 200; $i++) {
         $newSubnet = "172.16." + $i + ".0"
         $found = $false
         if ($usedSubnets -contains $newSubnet) {
@@ -1073,14 +1077,15 @@ function Get-ValidSubnets {
         }
         if (-not $found) {
             $subnetlist += $newSubnet
-            if ($subnetlist.Count -gt 5) {
+            $addedsubnets++
+            if ($addedsubnets -gt 5) {
                 break
             }
 
         }
     }
 
-    for ($i = 1; $i -lt 254; $i++) {
+    for ($i = 1; $i -lt 200; $i++) {
         $newSubnet = "10.0." + $i + ".0"
         $found = $false
         if ($usedSubnets -contains $newSubnet) {
@@ -1089,7 +1094,8 @@ function Get-ValidSubnets {
         }
         if (-not $found) {
             $subnetlist += $newSubnet
-            if ($subnetlist.Count -gt 8) {
+            $addedsubnets++
+            if ($addedsubnets -gt 8) {
                 break
             }
         }
@@ -5070,22 +5076,26 @@ function Select-VirtualMachines {
                                         $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Remove domainUser from this machine" }
                                     }
                                 }
-                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server") -and -not ($virtualMachine.Role -in ("DC", "BDC)"))) {
-                                    if ($null -eq $virtualMachine.sqlVersion) {
-                                        if ($virtualMachine.Role -eq "Secondary") {
-                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
+                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
+
+
+                                    if ($virtualMachine.Role -notin ("DC", "BDC")) {
+                                        if ($null -eq $virtualMachine.sqlVersion) {
+                                            if ($virtualMachine.Role -eq "Secondary") {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
+                                            }
+                                            else {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
+                                            }
                                         }
                                         else {
-                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
-                                        }
-                                    }
-                                    else {
-                                        if ($virtualMachine.Role -eq "Secondary") {
-                                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
-                                        }
-                                        else {
-                                            if ($virtualMachine.Role -ne "SQLAO") {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
+                                            if ($virtualMachine.Role -eq "Secondary") {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
+                                            }
+                                            else {
+                                                if ($virtualMachine.Role -ne "SQLAO") {
+                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
+                                                }
                                             }
                                         }
                                     }
@@ -5372,9 +5382,9 @@ function Save-Config {
         $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress) -eq
                 ($config | ConvertTo-Json -Depth 5 -Compress)
         if ($contentEqual) {
-             #return Split-Path -Path $fileName -Leaf
-             Write-Log -HostOnly -Verbose "(2)Returning File: $fileName"
-             return $fileName
+            #return Split-Path -Path $fileName -Leaf
+            Write-Log -HostOnly -Verbose "(2)Returning File: $fileName"
+            return $fileName
         }
         else {
             # Write-Host "Content Not Equal"
@@ -5382,11 +5392,16 @@ function Save-Config {
             # ($config | ConvertTo-Json -Depth 5) | out-host
         }
     }
-    #$splitpath = Split-Path -Path $fileName -Leaf
+    if ($fileName.contains(":")) {
+        $fileName = Split-Path -Path $fileName -Leaf
+    }
     $response = Read-Single -Prompt "Save Filename" -currentValue $filename -HideHelp -Timeout 30 -useReadHost
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $filename = Join-Path $configDir $response
+    }
+    else {
+        $filename = Join-Path $configDir $filename
     }
 
     if (!$filename.EndsWith(".json")) {

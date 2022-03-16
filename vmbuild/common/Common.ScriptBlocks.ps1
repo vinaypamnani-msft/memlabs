@@ -642,7 +642,7 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
         }
-
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Previous DSC status cleared"
         $DSC_CreateSingleConfig = {
             param($DscFolder)
 
@@ -864,8 +864,8 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on the DC."
         }
         else {
-
             if ($multiNodeDsc) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) Starting"
                 # Check if DSC_Status.txt file has been removed on all nodes before continuing. This is to ensure that Stop-Dsc doesn't run after DC has started DSC.
                 $nodeList = New-Object System.Collections.ArrayList
                 $nonReadyNodes = New-Object System.Collections.ArrayList
@@ -887,20 +887,34 @@ $global:VM_Config = {
                         }
                         else {
                             $nodeList.Remove($node) | Out-Null
+                            if ($nodeList.Count -eq 0) {
+                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -status "All nodes are ready" -PercentComplete 100
+                                $allNodesReady = $true
+                            }
                             Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent
                         }
                     }
 
-                    Start-Sleep -Seconds 3
+                    Start-Sleep -Seconds 6
                 } until ($allNodesReady -or $attempts -ge 100)
-            }
 
+                if (-not $allNodesReady) {
+                    Write-Progress2 "Failed waiting on VMs [$($nodeList -join ',')].  Please cancel and retry this phase."
+                    write-log "[Phase $Phase]: Node [$($nodeList -join ',')] is NOT ready after 100 attempts." -failure -OutputStream
+                    return $false
+                }
+
+            }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished waiting on all nodes"
+
+            Write-Progress2 "Starting DSC" -status "Invoking DSC_CreateConfig" -PercentComplete 0
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
 
+            Write-Progress2 "Starting DSC" -status "Invoking DSC_StartConfig" -PercentComplete 50
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Start-Sleep -Seconds 15
@@ -912,6 +926,7 @@ $global:VM_Config = {
                     return
                 }
             }
+            Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -PercentComplete 100
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration."
         }
 
@@ -926,11 +941,15 @@ $global:VM_Config = {
 
         $complete = $false
         $previousStatus = ""
+        $currentStatus = $null
         $suppressNoisyLogging = $Common.VerboseEnabled -eq $false
-        $failedHeartbeats = 0
-        $failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
+        [int]$failedHeartbeats = 0
+        [int]$failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
 
         $noStatus = $true
+
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
+
         try {
             Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
         }
@@ -938,7 +957,7 @@ $global:VM_Config = {
 
         }
         $dscStatusPolls = 0
-        $failCount = 0
+        [int]$failCount = 0
         try {
             do {
 
@@ -960,6 +979,12 @@ $global:VM_Config = {
                     } -SuppressLog:$suppressNoisyLogging
 
                     if ($dscStatus.ScriptBlockFailed) {
+                        if ($currentStatus) {
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $($currentStatus + "... ")
+                        }
+                        else {
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC In Progress. No Status. "
+                        }
                         # This cmd fails when DSC is running, so it's 'good'
                     }
                     else {
@@ -975,7 +1000,11 @@ $global:VM_Config = {
                                 if ($errorObject.FullyQualifiedErrorId -ne "NonTerminatingErrorFromProvider") {
                                     $msg = "$errorResourceId`: $($errorObject.FullyQualifiedErrorId) $($errorObject.Exception.Message)"
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Failure -OutputStream
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg"
                                     $failure = $true
+                                }
+                                else {
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC is attempting to restart"
                                 }
                             }
 
@@ -985,21 +1014,25 @@ $global:VM_Config = {
                                 # This condition is expected, and we are actually rebooting.
                                 if ($($dscStatus.ScriptBlockOutput.Error) -like "*Machine reboot failed*") {
                                     #If we dont reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC is attempting to reboot"
                                     continue
                                 }
                                 if ($($dscStatus.ScriptBlockOutput.Error) -like "*Could not find mandatory property*") {
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)"
                                     $failure = $true
                                 }
 
                                 if ($($dscStatus.ScriptBlockOutput.Error) -like "*Compilation errors occurred*") {
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Failure -OutputStream
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)"
                                     $failure = $true
                                 }
 
                                 if ($($dscStatus.ScriptBlockOutput.Error) -ne $lasterror) {
-                                    $failCount = 0
+                                    [int]$failCount = 0
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Warning -OutputStream
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text  "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)"
                                 }
                                 $failCount++
                                 if ($failCount -gt 100) {
@@ -1009,6 +1042,7 @@ $global:VM_Config = {
                                 $lasterror = $($dscStatus.ScriptBlockOutput.Error)
                             }
                             if ($dscStatus.ScriptBlockOutput.Status -eq "Failure" -and $failure) {
+                                Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC has encountered unrecoverable errors"
                                 return
                             }
                         }
@@ -1021,14 +1055,13 @@ $global:VM_Config = {
                 $stopwatch2.Start()
                 $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
                 $stopwatch2.Stop()
-                Start-Sleep -Seconds 3
 
-                if ($status.ScriptBlockFailed) {
+                if (-not $status -or ($status.ScriptBlockFailed)) {
                     if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
-                        $failedHeartbeats = $failedHeartbeats + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 5, 0))
+                        [int]$failedHeartbeats = [int]$failedHeartbeats + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 5, 0))
                     }
                     else {
-                        $failedHeartbeats++
+                        [int]$failedHeartbeats++
                     }
                     # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
                     if ($failedHeartbeats -gt 10) {
@@ -1036,12 +1069,13 @@ $global:VM_Config = {
                             Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Trying to retrieve job status from VM" -failcount $failedHeartbeats -failcountMax $failedHeartbeatThreshold
                         }
                         catch {
-
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "$_"
                         }
                     }
                 }
                 else {
-                    $failedHeartbeats = 0
+                    start-sleep -seconds 3
+                    [int]$failedHeartbeats = 0
                 }
 
                 if ($failedHeartbeats -ge $failedHeartbeatThreshold) {
@@ -1063,7 +1097,8 @@ $global:VM_Config = {
                         $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
                     }
                     catch {
-
+                        Write-Log -Failure "$_"
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "$_"
                     }
                 }
 
@@ -1079,7 +1114,7 @@ $global:VM_Config = {
                                 $currentStatusTrimmed = $currentStatus.Substring(0, $currentStatus.IndexOf("; checking again in "))
                             }
                             catch {
-                                write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Failed SubString for checking again for $currentStatus in: $_"
+                                write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Failed SubString for checking again for $currentStatus in: $_" -failure
                             }
                         }
                         else {
@@ -1095,6 +1130,7 @@ $global:VM_Config = {
                         $previousStatus = $currentStatus
                     }
 
+                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $currentStatus
                     # Special case to write log ConfigMgrSetup.log entries in progress
                     $skipProgress = $false
                     $setupPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
@@ -1161,6 +1197,10 @@ $global:VM_Config = {
                         }
                         catch { }
                     }
+                    else {
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $currentStatus
+                    }
+
                 }
 
             } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))

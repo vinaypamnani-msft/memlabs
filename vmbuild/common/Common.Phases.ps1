@@ -359,6 +359,13 @@ function Get-ConfigurationData {
     }
 
     if ($cd) {
+
+        $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+        $failures = Invoke-SmartStartVMs -CritList $critlist
+        if ($failures -ne 0) {
+            write-log "$failures VM(s) could not be started" -Failure
+        }
+
         $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
 
         $dc = $cd.AllNodes | Where-Object { $_.Role -eq "DC" }
@@ -380,14 +387,6 @@ function Get-ConfigurationData {
                 $Global:ProgressPreference = $OriginalProgressPreference
             }
         }
-
-
-        $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
-        $failures = Invoke-SmartStartVMs -CritList $critlist
-        if ($failures -ne 0) {
-            write-log "$failures VM(s) could not be started" -Failure
-        }
-
 
     }
 

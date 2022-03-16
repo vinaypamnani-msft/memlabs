@@ -2426,7 +2426,7 @@ class ClusterRemoveUnwantedIPs {
         try {
             $_ClusterName = $this.ClusterName
             $valid = $false
-            $failCount = 0
+            [int]$failCount = 0
             $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
             if ($Cluster) {
                 $valid = $true
@@ -2470,7 +2470,7 @@ class ClusterRemoveUnwantedIPs {
         try {
             $_ClusterName = $this.ClusterName
             $valid = $false
-            $failCount = 0
+            [int]$failCount = 0
             $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
             if ($Cluster) {
                 $valid = $true

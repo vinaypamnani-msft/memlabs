@@ -255,7 +255,7 @@ function Add-RemoteSQLVMToDeployConfig {
         [bool] $hidden = $true
     )
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
-    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName
+    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$false
     if ($remoteSQLVM.OtherNode) {
         Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.OtherNode -configToModify $configToModify -hidden:$hidden
     }
@@ -270,6 +270,9 @@ function Add-ExistingVMsToDeployConfig {
         [object] $config
     )
 
+    #Update Cache
+    get-list -type vm -SmartUpdate | out-null
+
     # Add exising DC to list
     if ($config.virtualMachines | Where-Object { $_.role -notin ("OSDClient") }) {
         $existingDC = $config.parameters.ExistingDCName
@@ -283,7 +286,7 @@ function Add-ExistingVMsToDeployConfig {
     $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
     foreach ($PriVM in $PriVMS) {
         if ($PriVM.parentSiteCode) {
-            $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode -type VM
+            $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode -type VM -SmartUpdate:$false
             if ($CAS) {
                 Add-ExistingVMToDeployConfig -vmName $CAS.vmName -configToModify $config
                 if ($CAS.RemoteSQLVM) {
@@ -296,7 +299,7 @@ function Add-ExistingVMsToDeployConfig {
     # Add Primary to list, when adding DPMP
     $DPMPs = $config.virtualMachines | Where-Object { $_.role -eq "DPMP" }
     foreach ($dpmp in $DPMPS) {
-        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode
+        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -SmartUpdate:$false
         if ($DPMPPrimary) {
             Add-ExistingVMToDeployConfig -vmName $DPMPPrimary -configToModify $config
         }
@@ -317,9 +320,9 @@ function Add-ExistingVMsToDeployConfig {
     # Add Primary to list, when adding Passive
     $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
     foreach ($PassiveVM in $PassiveVMs) {
-        $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode
+        $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
         if ($ActiveNode) {
-            $ActiveNodeVM = Get-VMFromList2 -deployConfig $config -vmName $ActiveNode
+            $ActiveNodeVM = Get-VMFromList2 -deployConfig $config -vmName $ActiveNode -SmartUpdate:$false
             if ($ActiveNodeVM) {
                 if ($ActiveNodeVM.remoteSQLVM) {
                     Add-RemoteSQLVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
@@ -332,7 +335,7 @@ function Add-ExistingVMsToDeployConfig {
     # Add Primary to list, when adding Secondary
     $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
     foreach ($Secondary in $Secondaries) {
-        $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM
+        $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM -SmartUpdate:$false
         if ($primary) {
             Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
             if ($primary.RemoteSQLVM) {
@@ -716,7 +719,9 @@ function Get-SiteServerForSiteCode {
         [object] $SiteCode,
         [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
         [ValidateSet("Name", "VM")]
-        [string] $type = "Name"
+        [string] $type = "Name",
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true
     )
     if (-not $SiteCode) {
         throw "SiteCode is NULL"
@@ -734,7 +739,7 @@ function Get-SiteServerForSiteCode {
         }
     }
     $existingVMs = @()
-    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
     if ($existingVMs) {
         if ($type -eq "Name") {
             return ($existingVMs | Select-Object -First 1).vmName
@@ -776,10 +781,12 @@ function Get-VMFromList2 {
         [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
         [object] $deployConfig,
         [Parameter(Mandatory = $true, HelpMessage = "vmName")]
-        [object] $vmName
+        [object] $vmName,
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true
     )
 
-    $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate | Where-Object { $_.vmName -eq $vmName }
+    $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate:$SmartUpdate | Where-Object { $_.vmName -eq $vmName }
     if ($vm) {
         return $vm
     }
@@ -792,11 +799,13 @@ function Get-PrimarySiteServerForSiteCode {
         [object] $deployConfig,
         [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
         [object] $SiteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true,
         [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
         [ValidateSet("Name", "VM")]
         [string] $type = "Name"
     )
-    $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode
+    $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode -SmartUpdate:$SmartUpdate
     if (-not $SiteServer) {
         throw "Could not find SiteServer for SiteCode: $SiteCode"
     }
@@ -806,16 +815,16 @@ function Get-PrimarySiteServerForSiteCode {
             return $SiteServer
         }
         else {
-            return Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode -type VM
+            return Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode -type VM -SmartUpdate:$false
         }
     }
     if ($roleforSite -eq "Secondary") {
-        $SiteServerVM = Get-VMFromList2 -deployConfig $deployConfig -vmName $SiteServer
+        $SiteServerVM = Get-VMFromList2 -deployConfig $deployConfig -vmName $SiteServer -SmartUpdate:$false
         if (-not $SiteServer) {
             write-host $SiteServerVM | ConvertTo-Json
             throw "Could not find VM $SiteServer"
         }
-        $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.parentSiteCode
+        $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.parentSiteCode  -SmartUpdate:$false
         if (-not $SiteServer) {
             write-host $SiteServerVM | ConvertTo-Json
             throw "Secondary: Could not find SiteServer for SiteCode: $($SiteServerVM.parentSiteCode)"
@@ -824,7 +833,7 @@ function Get-PrimarySiteServerForSiteCode {
             return $SiteServer
         }
         else {
-            return Get-VMFromList2 -deployConfig $deployConfig -vmName $SiteServer
+            return Get-VMFromList2 -deployConfig $deployConfig -vmName $SiteServer  -SmartUpdate:$false
         }
     }
 }

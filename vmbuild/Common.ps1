@@ -21,9 +21,9 @@ Function Write-ProgressElapsed {
         [Parameter(Mandatory = $false)]
         [switch]$showTimeout,
         [Parameter(Mandatory = $false)]
-        [int]$FailCount,
+        [string]$FailCount,
         [Parameter(Mandatory = $false)]
-        [int]$FailCountMax
+        [string]$FailCountMax
 
 
     )
@@ -935,26 +935,8 @@ function Test-NetworkSwitch {
     }
 }
 
-function Test-DHCPScope {
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]
-        [string]$ScopeID,
-        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope Name.")]
-        [string]$ScopeName,
-        [Parameter(Mandatory = $false, HelpMessage = "DHCP Domain Name option.")]
-        [string]$DomainName,
-        [Parameter(Mandatory = $false, HelpMessage = "Override DNS Server")]
-        [string]$DNSServer
-    )
 
-    # Define Lease Time
-    $leaseTimespan = New-TimeSpan -Days 16
-    $DomainScope = $true
-    if (-not $DomainName) {
-        $leaseTimespan = New-TimeSpan -Days 365
-        $DomainScope = $false
-    }
-
+function Start-DHCP {
     # Install DHCP, if not found
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
@@ -967,99 +949,191 @@ function Test-DHCPScope {
         }
     }
 
-    # Check if scope exists
-    $createScope = $false
-    $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
-    if ($scope) {
-        Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+    if ($dhcp.Status -ne 'Running') {
+        start-service "DHCPServer"
+        start-sleep -seconds 5
     }
-    else {
-        $createScope = $true
+    $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
+    if ($dhcp.Status -ne 'Running') {
+        return $false
     }
+    return $true
+}
 
-    # Define scope options
-    $network = $ScopeID.Substring(0, $ScopeID.LastIndexOf("."))
-    $DHCPDNSAddress = $network + ".1"
-    $DHCPDefaultGateway = $network + ".200"
-    $DHCPScopeStart = $network + ".20"
-    $DHCPScopeEnd = $network + ".199"
+function Test-DHCPScope {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]
+        [string]$ScopeID,
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope Name.")]
+        [string]$ScopeName,
+        [Parameter(Mandatory = $false, HelpMessage = "DHCP Domain Name option.")]
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "Override DNS Server")]
+        [string]$DNSServer
+    )
+    try {
 
-    # Create scope, if needed
-    $maxRetries = 3
-    $retry = 0
-    if ($createScope) {
-        while (-not $scope) {
-            try {
-                if ($retry -gt 0) {
-                    if ($retry -ge $maxRetries) {
-                        Write-Log "Max Retries Exceeded. Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
-                        return $false
-                    }
-                    Stop-Service "DHCPServer" -force
-                    start-sleep -seconds 5
-                    start-service "DHCPServer"
-                    start-Sleep -seconds 5
-                }
-                $retry++
-                Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction Stop
-                $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction Stop
-                if ($scope) {
-                    Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
-                }
-                else {
-                    Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
-                }
-            }
-            catch {
-                Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
-            }
+        write-log -logonly "Test-DHCPScope called with ScopeID: $ScopeID ScopeName: $ScopeName DomainName: $DomainName DNSSERVER: $DNSServer"
+        # Define Lease Time
+        $leaseTimespan = New-TimeSpan -Days 16
+        $DomainScope = $true
+        if (-not $DomainName) {
+            $leaseTimespan = New-TimeSpan -Days 365
+            $DomainScope = $false
         }
 
+        # Install DHCP, if not found
 
-        try {
-            if (-not $DomainScope) {
-                if ($ScopeName -eq "cluster") {
-                    $HashArguments = @{
-                        ScopeId = $ScopeID
-                        Router  = $DHCPDefaultGateway
-                    }
-                }
-                else {
-                    $HashArguments = @{
-                        ScopeId   = $ScopeID
-                        Router    = $DHCPDefaultGateway
-                        DnsServer = @("4.4.4.4", "8.8.8.8")
-                    }
-                }
+
+        $dhcp = Start-DHCP
+        if (-not $dhcp) {
+            Write-Log "DHCP Could not be started" -Failure
+            return $false
+        }
+
+        # Define scope options
+        $DHCPDNSAddress = $null
+        $network = $ScopeID.Substring(0, $ScopeID.LastIndexOf("."))
+        if ($ScopeName -notin ("cluster", "Internet")) {
+            if ($DNSServer) {
+                $DHCPDNSAddress = $DNSServer
             }
             else {
                 $DC = get-list -type VM -domain $DomainName | Where-Object { $_.Role -eq "DC" }
                 if ($DC) {
                     $DHCPDNSAddress = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
                 }
-                if ($DNSServer) {
-                    $DHCPDNSAddress = $DNSServer
+                else {
+                    $DHCPDNSAddress = $network + ".1"
                 }
-                $HashArguments = @{
-                    ScopeId    = $ScopeID
-                    Router     = $DHCPDefaultGateway
-                    DnsDomain  = $DomainName
-                    WinsServer = $DHCPDNSAddress
-                    DnsServer  = $DHCPDNSAddress
+            }
+        }
+
+
+        # Check if scope exists
+        $createScope = $true
+        $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
+        if ($scope) {
+            if ($DHCPDNSAddress) {
+                $scopeOptions = get-DhcpServerv4OptionValue -scopeID $scopeID -ErrorAction SilentlyContinue
+                $currentDNS = ($scopeOptions | Where-Object OptionID -eq 6).Value
+                if ($currentDNS -ne $DHCPDNSAddress) {
+                    Write-Log "'$ScopeID ($ScopeName)' scope does not match preferred DNS server"
+                    $createScope = $true
+                }
+                else {
+                    Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+                    $createScope = $false
+                }
+            }
+            else {
+                Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+                $createScope = $false
+            }
+        }
+        else {
+            Write-Log "'$ScopeID ($ScopeName)' scope is not present in DHCP. Creating new scope"
+            $createScope = $true
+        }
+
+        $dhcp = Start-DHCP
+        if (-not $dhcp) {
+            Write-Log "DHCP Could not be started" -Failure
+            return $false
+        }
+
+        if ($scope -and $createScope) {
+            Remove-DhcpServerv4Scope -scopeID $scopeID -force
+        }
+
+        $dhcp = Start-DHCP
+        if (-not $dhcp) {
+            Write-Log "DHCP Could not be started" -Failure
+            return $false
+        }
+
+        $DHCPDefaultGateway = $network + ".200"
+        $DHCPScopeStart = $network + ".20"
+        $DHCPScopeEnd = $network + ".199"
+
+        # Create scope, if needed
+        $maxRetries = 3
+        $retry = 0
+        if ($createScope) {
+
+            Write-Log "Creating '$ScopeID ($ScopeName)' scope with DHCPDefaultGateway: $DHCPDefaultGateway DHCPScopeStart: $DHCPScopeStart DHCPScopeEnd: $DHCPScopeEnd DNSServer: $DHCPDNSAddress "
+            while (-not $scope) {
+                try {
+                    if ($retry -gt 0) {
+                        if ($retry -ge $maxRetries) {
+                            Write-Log "Max Retries Exceeded. Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
+                            return $false
+                        }
+                        $dhcp = Start-DHCP
+                        if (-not $dhcp) {
+                            Write-Log "DHCP Could not be started" -Failure
+                            return $false
+                        }
+                    }
+                    $retry++
+                    Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction Stop
+                    $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction Stop
+                    if ($scope) {
+                        Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
+                    }
+                    else {
+                        Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
+                    }
+                }
+                catch {
+                    Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
                 }
             }
 
-            Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
-            Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
-            return $true
+
+            try {
+                if (-not $DomainScope) {
+                    if ($ScopeName -eq "cluster") {
+                        $HashArguments = @{
+                            ScopeId = $ScopeID
+                            Router  = $DHCPDefaultGateway
+                        }
+                    }
+                    else {
+                        $HashArguments = @{
+                            ScopeId   = $ScopeID
+                            Router    = $DHCPDefaultGateway
+                            DnsServer = @("4.4.4.4", "8.8.8.8")
+                        }
+                    }
+                }
+                else {
+                    $HashArguments = @{
+                        ScopeId    = $ScopeID
+                        Router     = $DHCPDefaultGateway
+                        DnsDomain  = $DomainName
+                        WinsServer = $DHCPDNSAddress
+                        DnsServer  = $DHCPDNSAddress
+                    }
+                }
+
+                Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
+                Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
+                return $true
+            }
+            catch {
+                Write-Log "Failed to add/update scope options for '$ScopeID ($ScopeName)' scope in DHCP. $_" -Failure
+                Write-Log "$($_.ScriptStackTrace)" -LogOnly
+                return $false
+            }
         }
-        catch {
-            Write-Log "Failed to add/update scope options for '$ScopeID ($ScopeName)' scope in DHCP. $_" -Failure
-            Write-Log "$($_.ScriptStackTrace)" -LogOnly
-            return $false
-        }
+        return $true
     }
-    return $true
+    catch {
+        Write-Log $_
+        Write-Exception -ExceptionInfo $_
+        return $false
+    }
 }
 
 function New-VmNote {
@@ -1343,260 +1417,267 @@ function New-VirtualMachine {
         [switch]$WhatIf
     )
 
-    # WhatIf
-    if ($WhatIf) {
-        Write-Log "WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName, ForceNew: $ForceNew"
-        return $true
-    }
-
-    Write-Log "$VmName`: Creating Virtual Machine"
-
-    # Test if source file exists
-    if (-not (Test-Path $SourceDiskPath) -and (-not $OSDClient.IsPresent)) {
-        Write-Log "$VmName`: $SourceDiskPath not found. Cannot create new VM."
-        return $false
-    }
-
-    # VM Exists
-    $vmTest = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
-    if ($vmTest -and $ForceNew.IsPresent) {
-        Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is present."
-        if ($vmTest.State -ne "Off") {
-            Write-Log "$VmName`: Turning the VM off forcefully..."
-            $vmTest | Stop-VM -TurnOff -Force -WarningAction SilentlyContinue
-        }
-        $vmTest | Remove-VM -Force
-        Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
-        Remove-Item -Path $($vmTest.Path) -Force -Recurse | out-null
-        Write-Log "$VmName`: Purge complete."
-        Get-List -FlushCache | Out-Null # flush cache
-    }
-
-    if ($vmTest -and -not $ForceNew.IsPresent) {
-        Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is NOT present. Exit."
-        return $false
-    }
-
-    # Make sure Existing VM Path is gone!
-    $VmSubPath = Join-Path $VmPath $VmName
-    if (Test-Path -Path $VmSubPath) {
-        Write-Log "$VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
-        Remove-Item -Path $VmSubPath -Force -Recurse | out-null
-        Write-Log "$VmName`: Purge complete." -Verbose
-    }
-
-    # Create new VM
     try {
-        $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
-    }
-    catch {
-        Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
-        Write-Log "$($_.ScriptStackTrace)" -LogOnly
-        return $false
-    }
+        # WhatIf
+        if ($WhatIf) {
+            Write-Log "WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName, ForceNew: $ForceNew"
+            return $true
+        }
 
-    # Add VMNote as soon as VM is created
-    if ($DeployConfig) {
-        New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
-    }
+        Write-Log "$VmName`: Creating Virtual Machine"
 
-    # Copy sysprepped image to VM location
-    $osDiskName = "$($VmName)_OS.vhdx"
-    $osDiskPath = Join-Path $vm.Path $osDiskName
-
-    if (-not $OSDClient.IsPresent) {
-        $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
-        if (-not $worked) {
-            Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+        # Test if source file exists
+        if (-not (Test-Path $SourceDiskPath) -and (-not $OSDClient.IsPresent)) {
+            Write-Log "$VmName`: $SourceDiskPath not found. Cannot create new VM."
             return $false
         }
-    }
-    else {
-        $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
-        if (-not $worked) {
-            Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+
+        # VM Exists
+        $vmTest = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+        if ($vmTest -and $ForceNew.IsPresent) {
+            Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is present."
+            if ($vmTest.State -ne "Off") {
+                Write-Log "$VmName`: Turning the VM off forcefully..."
+                $vmTest | Stop-VM -TurnOff -Force -WarningAction SilentlyContinue
+            }
+            $vmTest | Remove-VM -Force
+            Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
+            Remove-Item -Path $($vmTest.Path) -Force -Recurse | out-null
+            Write-Log "$VmName`: Purge complete."
+            Get-List -FlushCache | Out-Null # flush cache
+        }
+
+        if ($vmTest -and -not $ForceNew.IsPresent) {
+            Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is NOT present. Exit."
             return $false
         }
-    }
 
-    Write-Log "$VmName`: Enabling Hyper-V Guest Services"
-    Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | out-null
+        # Make sure Existing VM Path is gone!
+        $VmSubPath = Join-Path $VmPath $VmName
+        if (Test-Path -Path $VmSubPath) {
+            Write-Log "$VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
+            Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+            Write-Log "$VmName`: Purge complete." -Verbose
+        }
 
-    if ($Generation -eq "2" -and $tpmEnabled) {
-        $mtx = New-Object System.Threading.Mutex($false, "TPM")
-        write-log "Attempting to acquire 'TPM' Mutex" -LogOnly
-        [void]$mtx.WaitOne()
-        write-log "acquired 'TPM' Mutex" -LogOnly
+        # Create new VM
         try {
-            if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
-                New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates | out-null
-                New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-
-            $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
-            if ($localCASupported -eq 1) {
-                Write-Log "$VmName`: Enabling TPM"
-                $HGOwner = Get-HgsGuardian MemLabsGuardian
-                $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
-                if (-not $KeyProtector -or -not ($KeyProtector.RawData)) {
-                    Write-Log "$VmName`: New-HgsKeyProtector failed"
-                    return $false
-                }
-                Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData | out-null
-                Enable-VMTPM $VmName -ErrorAction Stop | out-null ## Only required for Win11
-            }
-            else {
-                Write-Log "$VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
-            }
+            $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
         }
         catch {
-            Write-Log "$VmName`: TPM failed $_"
+            Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
+            Write-Log "$($_.ScriptStackTrace)" -LogOnly
             return $false
         }
-        finally {
-            [void]$mtx.ReleaseMutex()
-            [void]$mtx.Dispose()
+
+        # Add VMNote as soon as VM is created
+        if ($DeployConfig) {
+            New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
-    }
-    Write-Log "$VmName`: Setting Processor count to $Processors"
-    Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
-    Write-Log "$VmName`: Adding virtual disk $osDiskPath"
-    Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | out-null
+        # Copy sysprepped image to VM location
+        $osDiskName = "$($VmName)_OS.vhdx"
+        $osDiskPath = Join-Path $vm.Path $osDiskName
 
-
-    Write-Log "$VmName`: Adding a DVD drive"
-    Add-VMDvdDrive -VMName $VmName | out-null
-
-
-    Write-Log "$VmName`: Changing boot order"
-    $f = Get-VM2 -Name $VmName | Get-VMFirmware
-    $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
-    $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
-    $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
-    $f_dvd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.DvdDrive] }
-
-    # Add additional disks
-    if ($AdditionalDisks) {
-        $count = 0
-        $label = "DATA"
-        foreach ($disk in $AdditionalDisks.psobject.properties) {
-            $newDiskName = "$VmName`_$label`_$count.vhdx"
-            $newDiskPath = Join-Path $vm.Path $newDiskName
-            Write-Log "$VmName`: Adding $newDiskPath"
-            New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic |out-null
-            Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath |out-null
-            $count++
-        }
-    }
-
-    # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
-    if ($null -ne $f_file) {
         if (-not $OSDClient.IsPresent) {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net | out-null
-        }
-        else {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd | out-null
-        }
-    }
-    else {
-        if (-not $OSDClient.IsPresent) {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net | out-null
-        }
-        else {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
-        }
-    }
-
-    Write-Log "$VmName`: Starting virtual machine"
-    $started = Start-VM2 -Name $VmName -Passthru
-    if (-not $started) {
-        Write-Log "$VmName`: VM Not Started."
-        return $false
-    }
-
-    if ($SwitchName2) {
-
-        $mtx = New-Object System.Threading.Mutex($false, "GetIP")
-        write-log "Attempting to acquire 'GetIP' Mutex" -LogOnly
-        [void]$mtx.WaitOne()
-        write-log "acquired 'GetIP' Mutex" -LogOnly
-        try {
-
-            write-log "$VmName`: Adding 2nd NIC attached to $SwitchName2" -LogOnly
-            $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
-            write-log "$VmName`: NIC added MAC: $($vmnet.MacAddress)" -LogOnly
-
-            if (-not $($vmnet.MacAddress)) {
-                start-sleep -Seconds 60
-                if (-not $($vmnet.MacAddress)) {
-                    write-log "$VmName`: 2nd NIC does not have a MAC address: $($vmnet)" -Failure
-                    return $false
-                }
-            }
-
-            $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
-            if (-not ($dc.network)) {
-                $dns = $DeployConfig.vmOptions.network.Substring(0, $DeployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
-            }
-            else {
-                $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
-            }
-
-
-            if (-not $dns) {
-                write-Log -Failure "$VmName`:Could not determine DNS for cluster network"
+            $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
+            if (-not $worked) {
+                Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
                 return $false
             }
+        }
+        else {
+            $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
+            if (-not $worked) {
+                Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+                return $false
+            }
+        }
 
-            $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0"
-            Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+        Write-Log "$VmName`: Enabling Hyper-V Guest Services"
+        Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | out-null
+
+        if ($Generation -eq "2" -and $tpmEnabled) {
+            $mtx = New-Object System.Threading.Mutex($false, "TPM")
+            write-log "Attempting to acquire 'TPM' Mutex" -LogOnly
+            [void]$mtx.WaitOne()
+            write-log "acquired 'TPM' Mutex" -LogOnly
             try {
-                Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
-                Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -ErrorAction Stop | out-null
-                Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -ErrorAction Stop | out-null
+                if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
+                    New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates | out-null
+                    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+
+                $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
+                if ($localCASupported -eq 1) {
+                    Write-Log "$VmName`: Enabling TPM"
+                    $HGOwner = Get-HgsGuardian MemLabsGuardian
+                    $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
+                    if (-not $KeyProtector -or -not ($KeyProtector.RawData)) {
+                        Write-Log "$VmName`: New-HgsKeyProtector failed"
+                        return $false
+                    }
+                    Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData | out-null
+                    Enable-VMTPM $VmName -ErrorAction Stop | out-null ## Only required for Win11
+                }
+                else {
+                    Write-Log "$VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
+                }
             }
             catch {
-                write-log -failure "$VmName`:Failed to reserve IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
-                Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
+                Write-Log "$VmName`: TPM failed $_"
                 return $false
             }
-            $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
-            #$currentItem | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value $ip -Force
-            #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
-            if ($currentItem.OtherNode) {
-                $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75 -WarningAction SilentlyContinue) | Select-Object -Last 2
-                Write-Log "$VmName`: SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
-                $clusterIP = $IPs[0]
-                $AGIP = $IPs[1]
+            finally {
+                [void]$mtx.ReleaseMutex()
+                [void]$mtx.Dispose()
+            }
+        }
+        Write-Log "$VmName`: Setting Processor count to $Processors"
+        Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
-                write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
+        Write-Log "$VmName`: Adding virtual disk $osDiskPath"
+        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | out-null
 
-                if (-not $clusterIP -or -not $AGIP){
-                    write-log -failure "$VmName`:Failed to acquire Clueter or AGIP for SQLAO"
+
+        Write-Log "$VmName`: Adding a DVD drive"
+        Add-VMDvdDrive -VMName $VmName | out-null
+
+
+        Write-Log "$VmName`: Changing boot order"
+        $f = Get-VM2 -Name $VmName | Get-VMFirmware
+        $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
+        $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
+        $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
+        $f_dvd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.DvdDrive] }
+
+        # Add additional disks
+        if ($AdditionalDisks) {
+            $count = 0
+            $label = "DATA"
+            foreach ($disk in $AdditionalDisks.psobject.properties) {
+                $newDiskName = "$VmName`_$label`_$count.vhdx"
+                $newDiskPath = Join-Path $vm.Path $newDiskName
+                Write-Log "$VmName`: Adding $newDiskPath"
+                New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic | out-null
+                Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath | out-null
+                $count++
+            }
+        }
+
+        # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
+        if ($null -ne $f_file) {
+            if (-not $OSDClient.IsPresent) {
+                Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net | out-null
+            }
+            else {
+                Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd | out-null
+            }
+        }
+        else {
+            if (-not $OSDClient.IsPresent) {
+                Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net | out-null
+            }
+            else {
+                Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
+            }
+        }
+
+        Write-Log "$VmName`: Starting virtual machine"
+        $started = Start-VM2 -Name $VmName -Passthru
+        if (-not $started) {
+            Write-Log "$VmName`: VM Not Started."
+            return $false
+        }
+
+        if ($SwitchName2) {
+
+            $mtx = New-Object System.Threading.Mutex($false, "GetIP")
+            write-log "Attempting to acquire 'GetIP' Mutex" -LogOnly
+            [void]$mtx.WaitOne()
+            write-log "acquired 'GetIP' Mutex" -LogOnly
+            try {
+
+                write-log "$VmName`: Adding 2nd NIC attached to $SwitchName2" -LogOnly
+                $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
+                write-log "$VmName`: NIC added MAC: $($vmnet.MacAddress)" -LogOnly
+
+                if (-not $($vmnet.MacAddress)) {
+                    start-sleep -Seconds 60
+                    if (-not $($vmnet.MacAddress)) {
+                        write-log "$VmName`: 2nd NIC does not have a MAC address: $($vmnet)" -Failure
+                        return $false
+                    }
+                }
+
+                $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
+                if (-not ($dc.network)) {
+                    $dns = $DeployConfig.vmOptions.network.Substring(0, $DeployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
+                }
+                else {
+                    $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
+                }
+
+
+                if (-not $dns) {
+                    write-Log -Failure "$VmName`:Could not determine DNS for cluster network"
                     return $false
                 }
 
-                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
-                Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue | out-null
-                $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
-                $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
-            }
-        }
-        catch {
-            Write-Exception $_
-            Write-Log "$vmName`: Failed adding 2nd NIC $_"
-            return $false
-        }
-        finally {
-            [void]$mtx.ReleaseMutex()
-            [void]$mtx.Dispose()
-        }
-        New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
-    }
+                $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0"
+                Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                try {
+                    Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -ErrorAction Stop | out-null
+                }
+                catch {
+                    write-log -failure "$VmName`:Failed to reserve IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
+                    Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
+                    return $false
+                }
+                $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
+                #$currentItem | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value $ip -Force
+                #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
+                if ($currentItem.OtherNode) {
+                    $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75 -WarningAction SilentlyContinue) | Select-Object -Last 2
+                    Write-Log "$VmName`: SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
+                    $clusterIP = $IPs[0]
+                    $AGIP = $IPs[1]
 
-    return $true
+                    write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
+
+                    if (-not $clusterIP -or -not $AGIP) {
+                        write-log -failure "$VmName`:Failed to acquire Clueter or AGIP for SQLAO"
+                        return $false
+                    }
+
+                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
+                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue | out-null
+                    $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
+                    $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
+                }
+            }
+            catch {
+                Write-Exception $_
+                Write-Log "$vmName`: Failed adding 2nd NIC $_"
+                return $false
+            }
+            finally {
+                [void]$mtx.ReleaseMutex()
+                [void]$mtx.Dispose()
+            }
+            New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+        }
+
+        return $true
+    }
+    catch {
+        Write-Exception $_
+        Write-Log "Create VM failed with $_"
+        return $false
+    }
 }
 
 function Get-AvailableMemoryGB {
@@ -1623,7 +1704,7 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false, ParameterSetName = "VmTestPath")]
         [string]$PathToVerify,
         [Parameter(Mandatory = $false)]
-        [int]$TimeoutMinutes = 10,
+        [int]$TimeoutMinutes = 20,
         [Parameter(Mandatory = $false)]
         [int]$WaitSeconds = 10,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
@@ -1675,7 +1756,7 @@ function Wait-ForVm {
     }
 
     if ($OobeComplete.IsPresent) {
-        $originalStatus = "Waiting for OOBE to complete. "
+        $originalStatus = "Waiting for OOBE to complete for $vmName "
         Write-Log "$VmName`: $originalStatus"
         try {
             Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus
@@ -1687,8 +1768,8 @@ function Wait-ForVm {
         $wwahostrunning = $false
         $readySmb = $false
 
-        $failures = 0
-        $maxFailures = ([int]$TimeoutMinutes * 3)
+        [int]$failures = 0
+        [int]$maxFailures = ([int]$TimeoutMinutes * 4)
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
@@ -1714,22 +1795,23 @@ function Wait-ForVm {
                 }
                 Start-Sleep -Seconds 5
                 if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
-                    $failures = $failures + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 5, 0))
+                    [int]$failures = $failures + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 5, 0))
                 }
                 else {
-                    $failures++
+                    [int]$failures++
                 }
                 if ($failures -ge $maxFailures) {
                     stop-vm2 -force -name $VmName -TurnOff
                     start-sleep -seconds 8
                     Start-vm2 -name $VmName
                     Start-Sleep -Seconds 8
-                    $failures = 0
+                    [int]$failures = 0
                 }
             }
             else {
-                $failures = 0
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $($originalStatus + ": " + $out.ScriptBlockOutput)
+                [int]$failures = 0
+                $text = $($originalStatus + ": " + $out.ScriptBlockOutput)
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $text
             }
 
             # Wait until OOBE is ready
@@ -1825,6 +1907,10 @@ function Wait-ForVm {
         }
 
         $vmTest = Get-VM2 -Name $VmName
+        if ($vmTest.State -ne "Running") {
+            start-vm2 -name $vmName
+            start-sleep -seconds 30
+        }
         if (-not $vmTest) {
             Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
             Write-Log -Failure "Could not find VM $VMName"
@@ -1836,6 +1922,13 @@ function Wait-ForVm {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
             }
             catch {}
+            $vmTest = Get-VM2 -Name $VmName
+            if ($vmTest.State -ne "Running") {
+                stop-vm2 -name $vmName
+                start-sleep -seconds 30
+                start-vm2 -name $vmName
+                start-sleep -seconds 30
+            }
             Start-Sleep -Seconds 5
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
@@ -1850,13 +1943,14 @@ function Wait-ForVm {
         }
     }
 
-    Write-Progress2 -Activity "Waiting for virtual machine" -Status "Wait complete." -Completed
+
 
     if ($ready) {
+        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Wait complete." -Completed
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: VM is now available." -Success }
     }
-
-    if (-not $ready) {
+    else {
+        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Timer expired while waiting for VM" -Completed
         Write-Log "$VmName`: Timer expired while waiting for VM" -Warning
     }
 
@@ -2750,6 +2844,9 @@ if (-not $Common.Initialized) {
 
     # Write progress
     Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
+    get-job | Stop-Job | out-null
+    get-job | Remove-Job | out-null
+
     $global:vm_remove_list = @()
 
     ###################

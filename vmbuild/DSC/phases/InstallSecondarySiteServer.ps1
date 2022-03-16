@@ -28,7 +28,7 @@ if (-not $SiteCode) {
     return
 }
 
-$failCount = 0
+[int]$failCount = 0
 $success = $false
 while ($success -eq $false) {
 

@@ -437,7 +437,7 @@ function Invoke-SmartStartVMs {
     $worked = $true
     $failures = 0
     if ($NonCriticalOnly) {
-        foreach ($vm in $crit.NONCRIT) {
+        foreach ($vm in $CritList.NONCRIT) {
             $worked = invoke-StartVM -vm $vm -quiet:$quiet
             if (-not $worked) {
                 $failures++
@@ -447,7 +447,7 @@ function Invoke-SmartStartVMs {
     }
 
     if ($CritList.DC) {
-        foreach ($dc in $crit.DC) {
+        foreach ($dc in $CritList.DC) {
             $worked = invoke-StartVM -vm $dc -quiet:$quiet -wait $waitSecondsDC
             if (-not $worked) {
                 $failures++
@@ -457,7 +457,7 @@ function Invoke-SmartStartVMs {
     }
 
     if ($CritList.FS) {
-        foreach ($fs in $crit.FS) {
+        foreach ($fs in $CritList.FS) {
             $worked = invoke-StartVM -vm $fs -quiet:$quiet -wait $waitSeconds
             if (-not $worked) {
                 $failures++
@@ -466,7 +466,7 @@ function Invoke-SmartStartVMs {
         start-sleep $waitSeconds
     }
     if ($CritList.SQL) {
-        foreach ($sql in $crit.SQL) {
+        foreach ($sql in $CritList.SQL) {
             $worked = invoke-StartVM -vm $sql -quiet:$quiet -wait $waitSeconds
             if (-not $worked) {
                 $failures++
@@ -476,7 +476,7 @@ function Invoke-SmartStartVMs {
     }
 
     if ($CritList.CAS) {
-        foreach ($ss in $crit.CAS) {
+        foreach ($ss in $CritList.CAS) {
             $worked = invoke-StartVM -vm $ss -quiet:$quiet -wait $waitSeconds
             if (-not $worked) {
                 $failures++
@@ -486,7 +486,7 @@ function Invoke-SmartStartVMs {
     }
 
     if ($CritList.PRI) {
-        foreach ($ss in $crit.PRI) {
+        foreach ($ss in $CritList.PRI) {
             $worked = invoke-StartVM -vm $ss -quiet:$quiet -wait $waitSeconds
             if (-not $worked) {
                 $failures++
@@ -495,7 +495,7 @@ function Invoke-SmartStartVMs {
         start-sleep $waitSeconds
     }
     if ($CriticalOnly -eq $false) {
-        foreach ($vm in $crit.NONCRIT) {
+        foreach ($vm in $CritList.NONCRIT) {
             $worked = invoke-StartVM -vm $vm -quiet:$quiet
             if (-not $worked) {
                 $failures++
@@ -552,7 +552,7 @@ Function Show-StatusEraseLine {
         Write-Host "  " -NoNewline
     }
     Write-Host $data -NoNewline
-    start-Sleep -seconds 2 | out-null
+    #start-Sleep -seconds 2 | out-null
     Write-Host "`r" -NoNewline
     #Write-GreenCheck "Check Point Complete for ADA-DC1" -ForeGroundColor Green
 }
