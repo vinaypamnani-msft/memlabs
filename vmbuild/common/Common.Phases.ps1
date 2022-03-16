@@ -2,6 +2,10 @@
 function Write-JobProgress {
     param($Job, $AdditionalData)
 
+
+
+    $latestActivity = $null
+    $latestStatus = $null
     #Make sure the first child job exists
     if ($null -ne $Job.ChildJobs[0].Progress) {
         #Extracts the latest progress of the job and writes the progress
@@ -12,7 +16,7 @@ function Write-JobProgress {
             $latestActivity = $lastProgress | Select-Object -expand Activity;
             $latestStatus = $lastProgress | Select-Object -expand StatusDescription;
             $jobName = $job.Name
-            $latestActivity = $latestActivity.Replace("$jobName`: ", "")
+            $latestActivity = $latestActivity.Replace("$jobName`: ", "").Trim()
         }
 
         if ($latestActivity -and $latestStatus) {
@@ -38,10 +42,10 @@ function Write-JobProgress {
 
                     # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                 }
-                Write-Progress2 -Id $Job.Id -Activity "$jobName2`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
+                Write-Progress2 -Activity "$jobName2`: $latestActivity" -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete;
             }
             catch {
-                Write-Log "[$jobName] Exception during job progress reporting. $vmName; $roleName; $AdditionalData. $_" -Verbose
+                Write-Log "[$jobName] Exception during job progress reporting. $vmName; $roleName; $AdditionalData. $_" -Verbose -failure
             }
         }
     }
@@ -311,7 +315,7 @@ function Wait-Phase {
         }
 
         # Sleep
-        Start-Sleep -Seconds 1
+        Start-Sleep -Milliseconds 10
 
     } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
     return $return

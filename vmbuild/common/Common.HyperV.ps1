@@ -83,11 +83,11 @@ function Start-VM2 {
             do {
                 $i++
                 if ($i -gt 1) {
-                    write-progress2 "Start VM" -Status "Retry Start VM"  -force
+                    write-progress2 "Start VM" -Status "Retry Start VM $Name"  -force
                     Start-Sleep -Seconds $RetrySeconds
                 }
                 else {
-                    write-progress2 "Start VM" -Status "Starting VM"  -force
+                    write-progress2 "Start VM" -Status "Starting VM $Name"  -force
                 }
                 Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinu
                 $vm = Get-VM2 -Name $Name
@@ -138,7 +138,7 @@ function Start-VM2 {
         Write-Exception -ExceptionInfo $_
     }
     finally {
-        write-progress2 "Start VM" -Status "Started VM" -force -Completed
+        write-progress2 "Start VM" -Status "Started VM $Name" -force -Completed
         $Global:ProgressPreference = $OriginalProgressPreference
     }
 }

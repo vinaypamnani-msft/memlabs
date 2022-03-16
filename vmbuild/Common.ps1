@@ -1451,6 +1451,7 @@ function New-VirtualMachine {
 
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
+    $Activity = "Creating Virtual Machine"
     try {
         # WhatIf
         if ($WhatIf) {
@@ -1458,7 +1459,7 @@ function New-VirtualMachine {
             return $true
         }
 
-        $Activity = "Creating Virtual Machine"
+
         Write-Log "$VmName`: $Activity"
         Write-Progress2 $Activity -Status "Starting" -percentcomplete 0 -force
         # Test if source file exists
@@ -1494,7 +1495,7 @@ function New-VirtualMachine {
             Remove-Item -Path $VmSubPath -Force -Recurse | out-null
             Write-Log "$VmName`: Purge complete." -Verbose
         }
-        Write-Progress2 $Activity -Status "Creating VM" -percentcomplete 5 -force
+        Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
         # Create new VM
         try {
             $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
@@ -1504,7 +1505,7 @@ function New-VirtualMachine {
             Write-Log "$($_.ScriptStackTrace)" -LogOnly
             return $false
         }
-        Write-Progress2 $Activity -Status "VM Created" -percentcomplete 30 -force
+        Write-Progress2 $Activity -Status "Hyper-V VM Object created.. Waiting for Disk Creation" -percentcomplete 30 -force
         # Add VMNote as soon as VM is created
         if ($DeployConfig) {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
@@ -1522,6 +1523,7 @@ function New-VirtualMachine {
             }
         }
         else {
+            Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
             $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
             if (-not $worked) {
                 Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
@@ -1575,7 +1577,7 @@ function New-VirtualMachine {
         Write-Log "$VmName`: Setting Processor count to $Processors"
         Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
-        Write-Progress2 $Activity -Status "Adding Virtual Disks" -percentcomplete 65 -force
+        Write-Progress2 $Activity -Status "Adding C: Drive to VM" -percentcomplete 65 -force
         Write-Log "$VmName`: Adding virtual disk $osDiskPath"
         Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | out-null
 
@@ -1623,7 +1625,7 @@ function New-VirtualMachine {
                 Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
             }
         }
-        Write-Progress2 $Activity -Status "Starting VM" -percentcomplete 90 -force
+        Write-Progress2 $Activity -Status "Starting VM" -percentcomplete 86 -force
         Write-Log "$VmName`: Starting virtual machine"
         $started = Start-VM2 -Name $VmName -Passthru
         if (-not $started) {
@@ -1632,13 +1634,13 @@ function New-VirtualMachine {
         }
 
         if ($SwitchName2) {
-            Write-Progress2 $Activity -Status "SQLAO: Adding 2nd NIC" -percentcomplete 95 -force
+            Write-Progress2 $Activity -Status "SQLAO: Waiting to add 2nd NIC" -percentcomplete 90 -force
             $mtx = New-Object System.Threading.Mutex($false, "GetIP")
             write-log "Attempting to acquire 'GetIP' Mutex" -LogOnly
             [void]$mtx.WaitOne()
             write-log "acquired 'GetIP' Mutex" -LogOnly
             try {
-
+                Write-Progress2 $Activity -Status "SQLAO: Adding 2nd NIC" -percentcomplete 95 -force
                 write-log "$VmName`: Adding 2nd NIC attached to $SwitchName2" -LogOnly
                 $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
                 write-log "$VmName`: NIC added MAC: $($vmnet.MacAddress)" -LogOnly
@@ -1701,6 +1703,8 @@ function New-VirtualMachine {
                 }
             }
             catch {
+                Write-Progress2 $Activity -Status "SQLAO: $_" -percentcomplete 99 -force
+                Start-Sleep -seconds 5
                 Write-Exception $_
                 Write-Log "$vmName`: Failed adding 2nd NIC $_"
                 return $false
@@ -1710,17 +1714,22 @@ function New-VirtualMachine {
                 [void]$mtx.Dispose()
             }
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+            Write-Progress2 $Activity -Status "SQLAO: 2nd NIC Added" -percentcomplete 100 -force
         }
-        Write-Progress2 $Activity -Status "VM Created" -percentcomplete 100 -Completed -force
+        Write-Progress2 $Activity -Status "VM Created in Hyper-V successfully" -percentcomplete 100 -force
+        #sleep so the monitoring thread sees the completed event
+        start-sleep -Seconds 10
         return $true
     }
     catch {
         Write-Exception $_
-        Write-Progress2 $Activity -Status $_ -percentcomplete 100 -Completed -force
+        Write-Progress2 $Activity -Status $_ -percentcomplete 100 -force
+        Start-Sleep -seconds 5
         Write-Log "Create VM failed with $_"
         return $false
     }
     finally {
+        Write-Progress2 $Activity -Status "VM Created in Hyper-V successfully" -percentcomplete 100 -force -Completed
         $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
