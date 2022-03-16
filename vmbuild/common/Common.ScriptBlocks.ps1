@@ -340,6 +340,7 @@ $global:VM_Config = {
             return
         }
 
+        $Activity = "Configure VM Phase $Phase"
         # Params for child script blocks
         $DscFolder = "phases"
 
@@ -367,7 +368,7 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
             return
         }
-
+        Write-Progress2 $Activity -Status "Waiting for OOBE" -percentcomplete 0 -force
         # Get VM Session
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
@@ -378,7 +379,8 @@ $global:VM_Config = {
 
         # inject tools
         if ($Phase -eq 2) {
-            $injected = Install-Tools -VmName $currentItem.vmName
+            Write-Progress2 $Activity -Status "Injecting Tools" -percentcomplete 10 -force
+            $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress
             if (-not $injected) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning
             }
@@ -396,7 +398,7 @@ $global:VM_Config = {
                 Stop-DscConfiguration -Verbose -Force
             }
         }
-
+        Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 20 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
         if ($result.ScriptBlockFailed) {
@@ -439,17 +441,18 @@ $global:VM_Config = {
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -UpdateVersion
             return
         }
-
+        Write-Progress2 $Activity -Status "Enable PS-Remoting" -percentcomplete 25 -force
         # Enable PS Remoting on client OS before starting DSC. Ignore failures, this will work but reports a failure...
         if ($currentItem.operatingSystem -notlike "*SERVER*") {
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures."
         }
-
+        Write-Progress2 $Activity -Status "Upgrading Modules" -percentcomplete 30 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Detect if modules need to be updated."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue } -DisplayName "DSC: Detect modules."
         $guestZipHash = $result.ScriptBlockOutput.Hash
 
         # Copy DSC files
+        Write-Progress2 $Activity -Status "Copying DSC files to the VM." -percentcomplete 35 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force }
         if ($result.ScriptBlockFailed) {
@@ -517,7 +520,7 @@ $global:VM_Config = {
         $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
 
         if ($dscZipHash -ne $guestZipHash) {
-
+            Write-Progress2 $Activity -Status "Expanding Modules" -percentcomplete 40 -force
             # Extract DSC modules
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -DisplayName "Expand_Archive ScriptBlock"
@@ -525,7 +528,7 @@ $global:VM_Config = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
-
+            Write-Progress2 $Activity -Status "Installing Modules" -percentcomplete 55 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Installing DSC Modules."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -DisplayName "DSC: Install Modules"
             if ($result.ScriptBlockFailed) {
@@ -637,7 +640,7 @@ $global:VM_Config = {
             catch {
             }
         }
-
+        Write-Progress2 $Activity -Status "Clearing DSC Status" -percentcomplete 65 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Clearing previous DSC status"
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
@@ -864,8 +867,10 @@ $global:VM_Config = {
 
         if ($skipStartDsc) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on the DC."
+            Write-Progress2 $Activity -Status "Waiting for DC to start DSC" -percentcomplete 75 -force
         }
         else {
+            Write-Progress2 $Activity -Status "Starting DSC" -percentcomplete 75 -force
             if ($multiNodeDsc) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) Starting"
                 # Check if DSC_Status.txt file has been removed on all nodes before continuing. This is to ensure that Stop-Dsc doesn't run after DC has started DSC.

@@ -1972,6 +1972,7 @@ function Wait-ForVm {
         }
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
         do {
+            Start-Sleep -Seconds 5
             try {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
             }
@@ -1983,11 +1984,11 @@ function Wait-ForVm {
                 start-vm2 -name $vmName
                 start-sleep -seconds 30
             }
-            Start-Sleep -Seconds 5
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
             $ready = $true -eq $out.ScriptBlockOutput
+            Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
 
@@ -2444,6 +2445,8 @@ function Install-Tools {
         [string]$ToolName,
         [Parameter(Mandatory = $false)]
         [switch]$IncludeOptional,
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowProgress,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
     )
@@ -2478,9 +2481,15 @@ function Install-Tools {
 
         foreach ($tool in $Common.AzureFileList.Tools) {
 
+
+
             if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
             if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { continue }
+
+            if ($ShowProgress) {
+                Write-Progress2 "Injecting tools" -Status "Injecting $tool to $VmName"
+            }
 
             $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
             if (-not $worked) {
@@ -2491,6 +2500,9 @@ function Install-Tools {
 
     Write-Host2
 
+    if ($ShowProgress) {
+        Write-Progress2 "Injecting tools" -Status "Done" -Completed
+    }
     return $success
 }
 
