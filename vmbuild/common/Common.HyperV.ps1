@@ -64,67 +64,82 @@ function Start-VM2 {
         [int]$RetrySeconds = 60
     )
 
-    $vm = Get-VM2 -Name $Name
+    $OriginalProgressPreference = $Global:ProgressPreference
+    $Global:ProgressPreference = 'SilentlyContinue'
+    try {
+        $vm = Get-VM2 -Name $Name
 
-    if ($vm.State -eq "Running") {
-        Write-Log "${Name}: VM is already running." -LogOnly
-        if ($Passthru) {
-            return $true
-        }
-        return
-    }
-
-    if ($vm) {
-        $i = 0
-        $running = $false
-        do {
-            $i++
-            if ($i -gt 1) {
-                Start-Sleep -Seconds $RetrySeconds
-            }
-            Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinu
-            $vm = Get-VM2 -Name $Name
-            if ($vm.State -eq "Running") {
-                $running = $true
-            }
-        }
-
-        until ($i -gt $retryCount -or $running)
-
-        if ($running) {
-            Write-Log "${Name}: VM was started." -LogOnly
-            if ($Passthru.IsPresent) {
+        if ($vm.State -eq "Running") {
+            Write-Log "${Name}: VM is already running." -LogOnly
+            if ($Passthru) {
                 return $true
             }
+            return
         }
 
-        if ($StopError.Count -ne 0) {
-            Write-Log "${Name}: Failed to start the VM. $StopError" -Warning
-            if ($Passthru.IsPresent) {
-                return $false
+        if ($vm) {
+            $i = 0
+            $running = $false
+            do {
+                $i++
+                if ($i -gt 1) {
+                    write-progress2 "Start VM" -Status "Retry Start VM"  -force
+                    Start-Sleep -Seconds $RetrySeconds
+                }
+                else {
+                    write-progress2 "Start VM" -Status "Starting VM"  -force
+                }
+                Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinu
+                $vm = Get-VM2 -Name $Name
+                if ($vm.State -eq "Running") {
+                    $running = $true
+                }
             }
-        }
-        else {
-            $vm = Get-VM2 -Name $Name
-            if ($vm.State -eq "Running") {
+
+            until ($i -gt $retryCount -or $running)
+
+            if ($running) {
                 Write-Log "${Name}: VM was started." -LogOnly
                 if ($Passthru.IsPresent) {
                     return $true
                 }
             }
-            else {
-                Write-Log "${Name}: VM was not started. Current State $($vm.State)" -Warning
+
+            if ($StopError.Count -ne 0) {
+                Write-Log "${Name}: Failed to start the VM. $StopError" -Warning
                 if ($Passthru.IsPresent) {
                     return $false
                 }
             }
+            else {
+                $vm = Get-VM2 -Name $Name
+                if ($vm.State -eq "Running") {
+                    Write-Log "${Name}: VM was started." -LogOnly
+                    if ($Passthru.IsPresent) {
+                        return $true
+                    }
+                }
+                else {
+                    Write-Log "${Name}: VM was not started. Current State $($vm.State)" -Warning
+                    if ($Passthru.IsPresent) {
+                        return $false
+                    }
+                }
+            }
+        }
+        else {
+            Write-Log "$Name`: VM was not found in Hyper-V." -Warning
+            if ($Passthru.IsPresent) {
+                return $false
+            }
         }
     }
-    else {
-        Write-Log "$Name`: VM was not found in Hyper-V." -Warning
-        if ($Passthru.IsPresent) {
-            return $false
-        }
+    catch {
+        Write-Exception -ExceptionInfo $_
+    }
+    finally {
+        write-progress2 "Start VM" -Status "Started VM" -force -Completed
+        $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
 function Stop-VM2 {

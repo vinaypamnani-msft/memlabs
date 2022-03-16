@@ -92,7 +92,10 @@ Function Write-Progress2Impl {
         ${Completed},
 
         [int]
-        ${SourceId}
+        ${SourceId},
+
+        [switch]
+        ${force}
     )
     dynamicparam {
 
@@ -136,6 +139,15 @@ Function Write-Progress2Impl {
                 $PSBoundParameters['OutBuffer'] = 1
             }
 
+            $forcevalue = $null
+            if ($force -or $PSBoundParameters.TryGetValue('force', [ref]$forcevalue)) {
+                $PSBoundParameters.remove("force")
+                $force = $true
+                $OriginalProgressPreference = $Global:ProgressPreference
+                $Global:ProgressPreference = 'Continue'
+                Write-Log "Write-Status: Force is true" -verbose -LogOnly
+            }
+
             if ($Global:LastStatus -ne $Status) {
                 Write-Log "Write-Status: Activity: $Activity  Status: $Status" -verbose -LogOnly
                 $Global:LastStatus = $Status
@@ -149,15 +161,30 @@ Function Write-Progress2Impl {
         catch {
             throw
         }
+        finally {
+            if ($force) {
+                $Global:ProgressPreference = $OriginalProgressPreference
+            }
+        }
 
     }
     process {
 
         try {
+            if ($force) {
+                $OriginalProgressPreference = $Global:ProgressPreference
+                $Global:ProgressPreference = 'Continue'
+                Write-Log "Write-Status: Force2 is true" -verbose -LogOnly
+            }
             $steppablePipeline.Process($_)
         }
         catch {
             throw
+        }
+        finally {
+            if ($force) {
+                $Global:ProgressPreference = $OriginalProgressPreference
+            }
         }
 
     }
@@ -547,6 +574,8 @@ function Get-File {
         New-Item -Path $destinationDirectory -ItemType Directory -Force | Out-Null
     }
 
+    $OriginalProgressPreference = $Global:ProgressPreference
+    $Global:ProgressPreference = 'Continue'
     try {
         $i = 0
         $timedOut = $false
@@ -603,8 +632,10 @@ function Get-File {
         Write-Log "$Action $sourceDisplay failed. Error: $($_.ScriptStackTrace)" -LogOnly
         return $false
     }
+    finally {
+        $Global:ProgressPreference = $OriginalProgressPreference
+    }
 }
-
 function Start-CurlTransfer {
     [CmdletBinding()]
     param (
@@ -1056,6 +1087,7 @@ function Test-DHCPScope {
         $DHCPScopeStart = $network + ".20"
         $DHCPScopeEnd = $network + ".199"
 
+        $scope = $null
         # Create scope, if needed
         $maxRetries = 3
         $retry = 0
@@ -1417,6 +1449,8 @@ function New-VirtualMachine {
         [switch]$WhatIf
     )
 
+    $OriginalProgressPreference = $Global:ProgressPreference
+    $Global:ProgressPreference = 'SilentlyContinue'
     try {
         # WhatIf
         if ($WhatIf) {
@@ -1424,11 +1458,12 @@ function New-VirtualMachine {
             return $true
         }
 
-        Write-Log "$VmName`: Creating Virtual Machine"
-
+        $Activity = "Creating Virtual Machine"
+        Write-Log "$VmName`: $Activity"
+        Write-Progress2 $Activity -Status "Starting" -percentcomplete 0 -force
         # Test if source file exists
         if (-not (Test-Path $SourceDiskPath) -and (-not $OSDClient.IsPresent)) {
-            Write-Log "$VmName`: $SourceDiskPath not found. Cannot create new VM."
+            Write-Log "$VmName`: $SourceDiskPath not found. Cannot create new VM." -failure -OutputStream
             return $false
         }
 
@@ -1459,7 +1494,7 @@ function New-VirtualMachine {
             Remove-Item -Path $VmSubPath -Force -Recurse | out-null
             Write-Log "$VmName`: Purge complete." -Verbose
         }
-
+        Write-Progress2 $Activity -Status "Creating VM" -percentcomplete 5 -force
         # Create new VM
         try {
             $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
@@ -1469,7 +1504,7 @@ function New-VirtualMachine {
             Write-Log "$($_.ScriptStackTrace)" -LogOnly
             return $false
         }
-
+        Write-Progress2 $Activity -Status "VM Created" -percentcomplete 30 -force
         # Add VMNote as soon as VM is created
         if ($DeployConfig) {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
@@ -1495,14 +1530,17 @@ function New-VirtualMachine {
         }
 
         Write-Log "$VmName`: Enabling Hyper-V Guest Services"
+        Write-Progress2 $Activity -Status "Enabling Hyper-V Guest Services" -percentcomplete 35 -force
         Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | out-null
 
         if ($Generation -eq "2" -and $tpmEnabled) {
             $mtx = New-Object System.Threading.Mutex($false, "TPM")
+            Write-Progress2 $Activity -Status "Waiting to install TPM" -percentcomplete 40 -force
             write-log "Attempting to acquire 'TPM' Mutex" -LogOnly
             [void]$mtx.WaitOne()
             write-log "acquired 'TPM' Mutex" -LogOnly
             try {
+                Write-Progress2 $Activity -Status "Installing TPM" -percentcomplete 50 -force
                 if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
                     New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates | out-null
                     New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
@@ -1533,17 +1571,19 @@ function New-VirtualMachine {
                 [void]$mtx.Dispose()
             }
         }
+        Write-Progress2 $Activity -Status "Setting Processors" -percentcomplete 60 -force
         Write-Log "$VmName`: Setting Processor count to $Processors"
         Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
+        Write-Progress2 $Activity -Status "Adding Virtual Disks" -percentcomplete 65 -force
         Write-Log "$VmName`: Adding virtual disk $osDiskPath"
         Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | out-null
 
-
+        Write-Progress2 $Activity -Status "Adding DVD disk to VM" -percentcomplete 70 -force
         Write-Log "$VmName`: Adding a DVD drive"
         Add-VMDvdDrive -VMName $VmName | out-null
 
-
+        Write-Progress2 $Activity -Status "Changing Boot Order" -percentcomplete 75 -force
         Write-Log "$VmName`: Changing boot order"
         $f = Get-VM2 -Name $VmName | Get-VMFirmware
         $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
@@ -1555,6 +1595,7 @@ function New-VirtualMachine {
         if ($AdditionalDisks) {
             $count = 0
             $label = "DATA"
+            Write-Progress2 $Activity -Status "Adding Additional Disks" -percentcomplete 80 -force
             foreach ($disk in $AdditionalDisks.psobject.properties) {
                 $newDiskName = "$VmName`_$label`_$count.vhdx"
                 $newDiskPath = Join-Path $vm.Path $newDiskName
@@ -1564,7 +1605,7 @@ function New-VirtualMachine {
                 $count++
             }
         }
-
+        Write-Progress2 $Activity -Status "Setting Firmware" -percentcomplete 85 -force
         # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
         if ($null -ne $f_file) {
             if (-not $OSDClient.IsPresent) {
@@ -1582,7 +1623,7 @@ function New-VirtualMachine {
                 Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
             }
         }
-
+        Write-Progress2 $Activity -Status "Starting VM" -percentcomplete 90 -force
         Write-Log "$VmName`: Starting virtual machine"
         $started = Start-VM2 -Name $VmName -Passthru
         if (-not $started) {
@@ -1591,7 +1632,7 @@ function New-VirtualMachine {
         }
 
         if ($SwitchName2) {
-
+            Write-Progress2 $Activity -Status "SQLAO: Adding 2nd NIC" -percentcomplete 95 -force
             $mtx = New-Object System.Threading.Mutex($false, "GetIP")
             write-log "Attempting to acquire 'GetIP' Mutex" -LogOnly
             [void]$mtx.WaitOne()
@@ -1670,13 +1711,17 @@ function New-VirtualMachine {
             }
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
-
+        Write-Progress2 $Activity -Status "VM Created" -percentcomplete 100 -Completed -force
         return $true
     }
     catch {
         Write-Exception $_
+        Write-Progress2 $Activity -Status $_ -percentcomplete 100 -Completed -force
         Write-Log "Create VM failed with $_"
         return $false
+    }
+    finally {
+        $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
 

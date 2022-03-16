@@ -38,7 +38,7 @@
         </redirectDrivesList>
         <redirectPrinters>True</redirectPrinters>
         <redirectPorts>True</redirectPorts>
-        <redirectSmartCards>True</redirectSmartCards>
+        <redirectSmartCards>False</redirectSmartCards>
         <redirectPnpDevices>True</redirectPnpDevices>
       </localResources>
       <smartGroup>
