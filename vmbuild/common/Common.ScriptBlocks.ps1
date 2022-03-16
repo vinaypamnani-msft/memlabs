@@ -101,6 +101,7 @@ $global:VM_Create = {
 
             $created = New-VirtualMachine @HashArguments
 
+
             if (-not ($created -eq $true)) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM was not created. Check vmbuild logs. $created" -Failure -OutputStream -HostOnly
                 return
@@ -111,7 +112,8 @@ $global:VM_Create = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
                 return
             }
-
+            Write-Progress2 "Waiting for OOBE" -Status "Starting" -percentcomplete 0 -force
+            start-sleep -seconds 3
             # Wait for VM to finish OOBE
             $oobeTimeout = 15
             if ($deployConfig.virtualMachines.Count -gt 5) {
