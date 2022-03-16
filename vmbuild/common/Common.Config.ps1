@@ -1245,10 +1245,11 @@ function Get-List {
     )
 
     #Get-PSCallStack | out-host
-    $mtx = New-Object System.Threading.Mutex($false, "GetList")
-    write-log "Attempting to acquire 'GetList' Mutex" -LogOnly -Verbose
+    $mutexName = "GetList" + $pid
+    $mtx = New-Object System.Threading.Mutex($false, $mutexName)
+    write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly -Verbose
     [void]$mtx.WaitOne()
-    write-log "acquired 'GetList' Mutex" -LogOnly -Verbose
+    write-log "acquired '$mutexName' Mutex" -LogOnly -Verbose
     try {
 
         if ($FlushCache.IsPresent) {

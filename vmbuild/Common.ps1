@@ -1536,11 +1536,12 @@ function New-VirtualMachine {
         Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | out-null
 
         if ($Generation -eq "2" -and $tpmEnabled) {
-            $mtx = New-Object System.Threading.Mutex($false, "TPM")
+            $mutexName = "TPM"
+            $mtx = New-Object System.Threading.Mutex($false, $mutexName)
             Write-Progress2 $Activity -Status "Waiting to install TPM" -percentcomplete 40 -force
-            write-log "Attempting to acquire 'TPM' Mutex" -LogOnly
+            write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly
             [void]$mtx.WaitOne()
-            write-log "acquired 'TPM' Mutex" -LogOnly
+            write-log "acquired '$mutexName' Mutex" -LogOnly
             try {
                 Write-Progress2 $Activity -Status "Installing TPM" -percentcomplete 50 -force
                 if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
@@ -2960,11 +2961,6 @@ if (-not $Common.Initialized) {
     Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 10
     # Common global props
 
-    #disable Sticky Keys
-    Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
-    Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
-    Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
-
     $colors = Get-Colors
 
     $global:Common = [PSCustomObject]@{
@@ -3014,12 +3010,17 @@ if (-not $Common.Initialized) {
     Get-StorageConfig
 
     ### Set supported options
-    Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 14
+    Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13
     Set-SupportedOptions
 
     # Generate cache
-    $i = 15
+    $i = 14
     if (-not $InJob.IsPresent) {
+
+        #disable Sticky Keys
+        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
+        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
+        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
 
         try {
             if ($global:common.CachePath) {
@@ -3035,6 +3036,7 @@ if (-not $Common.Initialized) {
         catch {}
 
         # Retrieve VM List, and cache results
+        Write-Progress2 "Loading required modules." -Status "Reset Cache" -PercentComplete $i
         $list = Get-List -Type VM -ResetCache
         foreach ($vm in $list) {
             $i++
@@ -3045,34 +3047,34 @@ if (-not $Common.Initialized) {
             $vm2 = Get-VM -id $vm.vmId
             Update-VMInformation -vm $vm2
         }
-    }
 
-    $i++
-    Write-Progress2 "Loading required modules." -Status "Moving Logs" -PercentComplete $i
 
-    # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
-    Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
-    $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
-    if (Test-Path $oldCrashPath) {
-        Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
-    }
+        $i++
+        Write-Progress2 "Loading required modules." -Status "Moving Logs" -PercentComplete $i
 
-    # Starting 3/11/2022, we changed the log format, remove older format logs
-    $logPath = Join-Path $PSScriptRoot "logs"
-    foreach ($log in (Get-ChildItem $logPath -Filter *.log )) {
-        $logLine = Get-Content $log.FullName -TotalCount 1
-        if ($logLine -and -not $logLine.StartsWith("<![LOG[")) {
-            Remove-Item -Path $log.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue
+        # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
+        Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
+        $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
+        if (Test-Path $oldCrashPath) {
+            Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
         }
+
+        # Starting 3/11/2022, we changed the log format, remove older format logs
+        $logPath = Join-Path $PSScriptRoot "logs"
+        foreach ($log in (Get-ChildItem $logPath -Filter *.log )) {
+            $logLine = Get-Content $log.FullName -TotalCount 1
+            if ($logLine -and -not $logLine.StartsWith("<![LOG[")) {
+                Remove-Item -Path $log.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        }
+
+        $i++
+        Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
+
+        # Add HGS Registry key to allow local CA Cert
+        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
     }
-
-    $i++
-    Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
-
-    # Add HGS Registry key to allow local CA Cert
-    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-
     # Write progress
     Write-Progress2 "Loading required modules." -Completed
 
