@@ -986,8 +986,8 @@ $global:VM_Config = {
                     } -SuppressLog:$suppressNoisyLogging
 
                     if ($dscStatus.ScriptBlockFailed) {
-                        if ($currentStatus) {
-                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $($currentStatus + "... ")
+                        if ($currentStatus -is [string]) {
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $($currentStatus.Trim() + "... ")
                         }
                         else {
                             Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC In Progress. No Status. "
