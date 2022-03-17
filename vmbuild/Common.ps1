@@ -1588,7 +1588,7 @@ function New-VirtualMachine {
         Write-Log "$VmName`: Setting Processor count to $Processors"
         Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
-        Write-Progress2 $Activity -Status "Adding C: Drive to VM" -percentcomplete 65 -force
+        Write-Progress2 $Activity -Status "Adding OS Disk to VM" -percentcomplete 65 -force
         Write-Log "$VmName`: Adding virtual disk $osDiskPath"
         Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | out-null
 
