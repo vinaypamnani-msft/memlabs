@@ -2469,7 +2469,7 @@ function Read-Host2 {
         [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
         [string] $prompt,
         [Parameter(Mandatory = $false, HelpMessage = "shows current value in []")]
-        [string] $currentValue,
+        [string] $currentValue = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
         [switch] $HideHelp
     )
@@ -5511,8 +5511,8 @@ if ($InternalUseOnly.IsPresent) {
     if ($domainExists -and ($return.DeployNow)) {
         write-host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "This configuration will make modifications to $($Global:Config.vmOptions.DomainName)"
         Write-OrangePoint -NoIndent "Without a snapshot, if something fails it may not be possible to recover"
-        $response = Read-YesorNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (Y/n)" -HideHelp
-        if ([String]::IsNullOrWhiteSpace($response) -or $response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes" ) {
+        $response = Read-YesorNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (y/N)" -HideHelp
+        if (-not [String]::IsNullOrWhiteSpace($response) -and $response.ToLowerInvariant() -eq "y") {
             Select-StopDomain -domain $Global:Config.vmOptions.DomainName -response "C"
             $filename = $splitpath = Split-Path -Path $return.ConfigFileName -Leaf
             $comment = [System.Io.Path]::GetFileNameWithoutExtension($filename)

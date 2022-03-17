@@ -255,8 +255,8 @@ function Invoke-SnapshotDomain {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
         [string] $domain,
-        [Parameter(Mandatory = $True, HelpMessage = "Comment")]
-        [string] $comment,
+        [Parameter(Mandatory = $false, HelpMessage = "Comment")]
+        [string] $comment = "",
         [Parameter(Mandatory = $false, HelpMessage = "Quiet Mode")]
         [string] $quiet = $false
     )
