@@ -2310,13 +2310,40 @@ function Get-StorageConfig {
         $username = "vmbuildadmin"
         $item = $Common.AzureFileList.OS | Where-Object { $_.id -eq $username }
         $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)?$($StorageConfig.StorageToken)"
-        $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
+        $filePath = Join-Path $PSScriptRoot "cache\$username.txt"
+        if (Test-Path $filePath -PathType leaf) {
+            $response = Get-Content $filePath
+        }
+        else {
+            $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
+            if ($response) {
+                $response | Out-file $filePath -Force
+            }
+            else {
+                start-sleep -seconds 60
+                $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
+                if (-not $response) {
+                    $Common.FatalError = "Could not download default credentials from azure. Please check your token"
+                }
+            }
+
+        }
+
         $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
+        if (-not $s) {
+            start-sleep -seconds 60
+            $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
+            $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
+            if (-not $s) {
+                $Common.FatalError = "Could not download default credentials from azure. Please check your token"
+            }
+        }
         $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
 
     }
     catch {
         $Common.FatalError = "Storage Config found, but storage access failed. $_"
+        Write-Exception -ExceptionInfo $_
         Write-Host $_.ScriptStackTrace | Out-Host
     }
     finally {
