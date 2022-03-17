@@ -358,66 +358,6 @@ class WriteEvent {
             if (-not $this.FileName) {
                 # For named-file, caller must ensure file exists with required nodes.
                 [hashtable]$Actions = @{
-                    MachineJoinDomain       = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    CSJoinDomain            = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    PSJoinDomain            = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DPMPJoinDomain          = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DomainMemberJoinDomain  = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DelegateControl         = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    SCCMinstall             = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DPMPFinished            = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DomainMemberFinished    = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    PassiveReady            = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    ReadyForPrimary         = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    WorkgroupMemberFinished = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
                     ConfigurationFinished   = @{
                         Status    = 'NotStart'
                         StartTime = ''

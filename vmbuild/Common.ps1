@@ -2515,7 +2515,7 @@ function Install-Tools {
 
         foreach ($tool in $Common.AzureFileList.Tools) {
 
-
+            if ($tool.NoUpdate) { continue }
 
             if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 

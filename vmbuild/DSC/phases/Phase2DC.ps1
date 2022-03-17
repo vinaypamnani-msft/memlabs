@@ -122,6 +122,7 @@
             SafemodeAdministratorPassword = $DomainCreds
             ForestMode                    = 'WinThreshold'
             DomainMode                    = 'WinThreshold'
+            DependsOn                     = "[WriteStatus]FirstDS"
         }
 
         WriteStatus CreateAccounts {
@@ -217,9 +218,9 @@
                 Cost                          = 100
                 ReplicationFrequencyInMinutes = 2
                 Ensure                        = 'Present'
-                OptionChangeNotification = $true
-                OptionTwoWaySync = $true
-                DependsOn   = "[ADReplicationSite]ADSite$($i)"
+                OptionChangeNotification      = $true
+                OptionTwoWaySync              = $true
+                DependsOn                     = "[ADReplicationSite]ADSite$($i)"
             }
             $adSiteDependency += "[ADReplicationSiteLink]HQSiteLink$($i)"
             $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"

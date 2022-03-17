@@ -18,12 +18,11 @@
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
-    $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # This VM
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
-
+    $PDC = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -71,7 +70,22 @@
             Role      = 'DC'
             DependsOn = "[SetCustomPagingFile]PagingSettings"
         }
+
         $nextDepend = "[InstallFeatureForSCCM]InstallFeature"
+
+        WriteStatus WaitDomain {
+            DependsOn = $nextDepend
+            Status    = "Waiting for domain to be ready"
+        }
+
+        WaitForDomainReady WaitForDomain {
+            DependsOn  = "[WriteStatus]WaitDomain"
+            Ensure     = "Present"
+            DomainName = $DomainName
+            DCName     = $PDC.vmName
+        }
+
+        $nextDepend = "[WaitForDomainReady]WaitForDomain"
 
         WriteStatus NewDS {
             DependsOn = $nextDepend
@@ -97,11 +111,10 @@
             #SiteName                      = 'Europe'
             IsGlobalCatalog               = $true
             InstallDns                    = $false
-
             DependsOn                     = '[WaitForADDomain]WaitForestAvailability'
         }
-        $nextDepend = '[ADDomainController]DomainControllerAllProperties'
 
+        $nextDepend = '[ADDomainController]DomainControllerAllProperties'
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
             DependsOn = $nextDepend
@@ -112,22 +125,8 @@
             Name      = "DC"
             Role      = "DC"
         }
-        $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall"
 
-        #WriteStatus NetworkDNS {
-        #    DependsOn = $nextDepend
-        #    Status    = "Setting Primary DNS, and DNS Forwarders"
-        #}
-        #
-        #DnsServerForwarder DnsServerForwarder {
-        #    DependsOn        = $nextDepend
-        #    IsSingleInstance = 'Yes'
-        #    IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
-        #    UseRootHint      = $true
-        #    EnableReordering = $true
-        #}
-        #
-        #$nextDepend = "[DnsServerForwarder]DnsServerForwarder"
+        $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall"
         if ($ThisVM.InstallCA) {
 
             WriteStatus ADCS {
