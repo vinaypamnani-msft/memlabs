@@ -1835,8 +1835,6 @@ function Wait-ForVm {
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
 
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
-
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
                 try {
                     if ($failures -gt ([int]$TimeoutMinutes * 2)) {
@@ -1850,8 +1848,8 @@ function Wait-ForVm {
 
                 }
                 Start-Sleep -Seconds 5
-                if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
-                    [int]$failures = $failures + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 5, 0))
+                if ($stopwatch2.elapsed.TotalSeconds -gt 15) {
+                    [int]$failures = $failures + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 15, 0))
                 }
                 else {
                     [int]$failures++
@@ -2912,8 +2910,6 @@ if (-not $Common.Initialized) {
 
     # Write progress
     Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
-    get-job | Stop-Job | out-null
-    get-job | Remove-Job | out-null
 
     $global:vm_remove_list = @()
 
