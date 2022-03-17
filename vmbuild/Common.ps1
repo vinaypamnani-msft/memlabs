@@ -2325,20 +2325,18 @@ function Get-StorageConfig {
                 if (-not $response) {
                     $Common.FatalError = "Could not download default credentials from azure. Please check your token"
                 }
+                $response = $response.Content.Trim()
             }
 
         }
+        if ($response) {
+            $s = ConvertTo-SecureString $response -AsPlainText -Force
+            $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
 
-        $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
-        if (-not $s) {
-            start-sleep -seconds 60
-            $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
-            $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
-            if (-not $s) {
-                $Common.FatalError = "Could not download default credentials from azure. Please check your token"
-            }
         }
-        $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
+        else {
+            $Common.FatalError = "Admin file from azure is empty"
+        }
 
     }
     catch {
