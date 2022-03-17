@@ -235,7 +235,7 @@ function Invoke-AutoSnapShotDomain {
     $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
 
     #Stop all VMs in Domain
-    Invoke-StopVMs -domain $domain
+    Invoke-StopVMs -domain $domain -quiet
 
     #Take Snapshot
     $failures = Invoke-SnapshotDomain -domain $domain -comment $comment
