@@ -126,8 +126,8 @@ Function Write-Progress2Impl {
         try {
             $Percent = $null
             if ($PSBoundParameters.TryGetValue('PercentComplete', [ref]$Percent)) {
-                if ($Percent -lt 0) {
-                    $Percent = -1
+                if ($Percent -le 1) {
+                    $Percent = 1
                 }
                 if ($Percent -gt 100) {
                     $Percent = 100
@@ -183,6 +183,14 @@ Function Write-Progress2Impl {
             if ($Status) {
                 $Status = $Status.Trim()
             }
+
+            if ($PercentComplete -le 1) {
+                $PercentComplete = 1
+            }
+            if ($PercentComplete -ge 100) {
+                $PercentComplete = 99
+            }
+
             $steppablePipeline.Process($_)
         }
         catch {
