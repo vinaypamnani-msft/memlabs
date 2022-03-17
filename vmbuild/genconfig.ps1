@@ -397,7 +397,8 @@ function get-SnapshotDomain {
     $valid = $false
     while (-not $valid) {
         if (-not $comment) {
-            $comment = Read-Host2 -Prompt "Snapshot Comment (Optional) []" $splitpath -HideHelp
+            $comment = Read-Single -timeout 30 -Prompt "Snapshot Comment (Optional) []" -useReadHost
+            #$comment = Read-Host2 -Prompt "Snapshot Comment (Optional) []" $splitpath -HideHelp
         }
         if (-not [string]::IsNullOrWhiteSpace($comment) -and $comment -match "^[\\\/\:\*\?\<\>\|]*$") {
             Write-Host "$comment contains invalid characters"
