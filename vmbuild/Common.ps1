@@ -152,6 +152,7 @@ Function Write-Progress2Impl {
                 Write-Log "Write-Status: Activity: $Activity  Status: $Status" -verbose -LogOnly
                 $Global:LastStatus = $Status
             }
+
             $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
             $scriptCmd = { & $wrappedCmd @PSBoundParameters }
 
@@ -175,6 +176,12 @@ Function Write-Progress2Impl {
                 $OriginalProgressPreference = $Global:ProgressPreference
                 $Global:ProgressPreference = 'Continue'
                 Write-Log "Write-Status: Force2 is true" -verbose -LogOnly
+            }
+            if ($Activity) {
+                $Activity =$Activity.Trim()
+            }
+            if ($Status) {
+                $Status = $Status.Trim()
             }
             $steppablePipeline.Process($_)
         }

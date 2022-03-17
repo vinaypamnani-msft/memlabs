@@ -910,7 +910,9 @@ $global:VM_Config = {
                                 Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -status "All nodes are ready" -PercentComplete 100
                                 $allNodesReady = $true
                             }
-                            Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent
+                            else {
+                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent
+                            }
                         }
                     }
 
@@ -1150,7 +1152,6 @@ $global:VM_Config = {
                         $previousStatus = $currentStatus
                     }
 
-                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $currentStatus
                     # Special case to write log ConfigMgrSetup.log entries in progress
                     $skipProgress = $false
                     $setupPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
