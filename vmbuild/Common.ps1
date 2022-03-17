@@ -53,14 +53,14 @@ Function Write-Progress2 {
     $setCursorTop = "$esc[0;0H"
 
     try {
-        write-host -NoNewline "$hideCursor"
+        # write-host -NoNewline "$hideCursor"
         Write-Progress2Impl @Args @PSBoundParameters | out-null
     }
     catch {
         write-Log "Write-Progress $args $_"
     }
     finally {
-        write-host -NoNewline "$showCursor"
+#         write-host -NoNewline "$showCursor"
     }
 }
 #Sub Wrapper for Write-Progress.  This allows PercentComplete to be modified, and can log the activity in verbose
