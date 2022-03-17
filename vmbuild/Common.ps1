@@ -2317,7 +2317,7 @@ function Get-StorageConfig {
         else {
             $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
             if ($response) {
-                $response | Out-file $filePath -Force
+                $response.Content.Trim()  | Out-file $filePath -Force
             }
             else {
                 start-sleep -seconds 60
