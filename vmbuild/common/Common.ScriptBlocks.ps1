@@ -19,6 +19,12 @@ $global:VM_Create = {
             return
         }
 
+        # Validate token exists
+        if ($Common.FatalError) {
+            Write-Log "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
+            return
+        }
+
         # Params for child script blocks
         $createVM = $true
         if ($currentItem.hidden -eq $true) { $createVM = $false }
@@ -337,6 +343,12 @@ $global:VM_Config = {
 
         if (-not ($Common.LogPath)) {
             Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
+            return
+        }
+
+        # Validate token exists
+        if ($Common.FatalError) {
+            Write-Log "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
             return
         }
 

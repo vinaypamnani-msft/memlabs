@@ -2313,26 +2313,28 @@ function Get-StorageConfig {
         $filePath = Join-Path $PSScriptRoot "cache\$username.txt"
         if (Test-Path $filePath -PathType leaf) {
             $response = Get-Content $filePath
+            $response = $response.Trim()
         }
         else {
             $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
             if ($response) {
-                $response.Content.Trim()  | Out-file $filePath -Force
+                $response.Content.Trim() | Out-file $filePath -Force
             }
             else {
                 start-sleep -seconds 60
                 $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
                 if (-not $response) {
                     $Common.FatalError = "Could not download default credentials from azure. Please check your token"
+                    return
                 }
-                $response = $response.Content.Trim()
+                $response.Content.Trim() | Out-file $filePath -Force
             }
-
+            $response = $response.Content.Trim()
         }
+
         if ($response) {
             $s = ConvertTo-SecureString $response -AsPlainText -Force
             $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
-
         }
         else {
             $Common.FatalError = "Admin file from azure is empty"
@@ -2340,7 +2342,7 @@ function Get-StorageConfig {
 
     }
     catch {
-        $Common.FatalError = "Storage Config found, but storage access failed. $_"
+        $Common.FatalError = "Storage Access failed. $_"
         Write-Exception -ExceptionInfo $_
         Write-Host $_.ScriptStackTrace | Out-Host
     }
