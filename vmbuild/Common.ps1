@@ -129,8 +129,8 @@ Function Write-Progress2Impl {
                 if ($Percent -le 1) {
                     $Percent = 1
                 }
-                if ($Percent -gt 100) {
-                    $Percent = 100
+                if ($Percent -ge 100) {
+                    $Percent = 99
                 }
                 $PSBoundParameters['PercentComplete'] = $percent
             }
