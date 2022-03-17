@@ -289,6 +289,9 @@ function Wait-Phase {
             $incrementCount = $true
             foreach ($OutputObject in $jobOutput) {
                 $line = $OutputObject.text
+                if (-not $line) {
+                    continue
+                }
                 $line = $line.ToString().Trim()
                 write-log -logonly $line
                 if ($OutputObject.LogLevel -eq 3) {

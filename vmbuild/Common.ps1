@@ -1668,9 +1668,10 @@ function New-VirtualMachine {
                     return $false
                 }
 
-                $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0"
+                $ip = $null
                 Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
                 try {
+                    $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
                     Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                     Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
                     Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -ErrorAction Stop | out-null
@@ -2489,7 +2490,7 @@ function Install-Tools {
             if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { continue }
 
             if ($ShowProgress) {
-                Write-Progress2 "Injecting tools" -Status "Injecting $tool to $VmName"
+                Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
             }
 
             $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
