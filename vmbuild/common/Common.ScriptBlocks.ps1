@@ -1070,6 +1070,7 @@ $global:VM_Config = {
                     else {
                         [int]$failedHeartbeats++
                     }
+                    start-sleep -Seconds 10
                     # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
                     if ($failedHeartbeats -gt 10) {
                         try {
