@@ -78,10 +78,12 @@ $global:VM_Create = {
             if ($currentItem.vmGeneration) {
                 $Generation = $currentItem.vmGeneration
             }
+
             $tpmEnabled = $true
             if ($currentItem.tpmEnabled) {
                 $tpmEnabled = $currentItem.tpmEnabled
             }
+
             $HashArguments = @{
                 VmName          = $currentItem.vmName
                 VmPath          = $virtualMachinePath
@@ -106,7 +108,6 @@ $global:VM_Create = {
             }
 
             $created = New-VirtualMachine @HashArguments
-
 
             if (-not ($created -eq $true)) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM was not created. Check vmbuild logs. $created" -Failure -OutputStream -HostOnly
@@ -279,8 +280,6 @@ $global:VM_Create = {
             }
         }
 
-
-
         # Copy SQL files to VM
         if ($currentItem.sqlVersion -and $createVM) {
 
@@ -353,6 +352,7 @@ $global:VM_Config = {
         }
 
         $Activity = "Configure VM Phase $Phase"
+
         # Params for child script blocks
         $DscFolder = "phases"
 
@@ -374,18 +374,19 @@ $global:VM_Config = {
             $domainName = "WORKGROUP"
         }
 
-        # Verify again that VM is connectable, in case DSC caused a reboot
-        $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
-        if (-not $connected) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
-            return
-        }
-        Write-Progress2 $Activity -Status "Waiting for OOBE" -percentcomplete 0 -force
         # Get VM Session
+        Write-Progress2 $Activity -Status "Establishing a connection with the VM" -percentcomplete 0 -force
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
         if (-not $ps) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
+            return
+        }
+
+        # Verify again that VM is connectable, in case DSC caused a reboot
+        $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
+        if (-not $connected) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
             return
         }
 
@@ -410,6 +411,7 @@ $global:VM_Config = {
                 Stop-DscConfiguration -Verbose -Force
             }
         }
+
         Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 20 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
@@ -453,11 +455,13 @@ $global:VM_Config = {
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -UpdateVersion
             return
         }
+
         Write-Progress2 $Activity -Status "Enable PS-Remoting" -percentcomplete 25 -force
         # Enable PS Remoting on client OS before starting DSC. Ignore failures, this will work but reports a failure...
         if ($currentItem.operatingSystem -notlike "*SERVER*") {
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures."
         }
+
         Write-Progress2 $Activity -Status "Upgrading Modules" -percentcomplete 30 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Detect if modules need to be updated."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue } -DisplayName "DSC: Detect modules."
@@ -643,15 +647,14 @@ $global:VM_Config = {
 
             # Do some cleanup after we re-worked folder structure
             try {
-                Remove-Item -Path "C:\staging\DSC\configmgr\modules" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
-                Remove-Item -Path "C:\staging\DSC\configmgr\TemplateHelpDSC" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
-                Remove-Item -Path "C:\staging\DSC\configmgr\DSC.zip" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+                Remove-Item -Path "C:\staging\DSC\configmgr" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
                 Remove-Item -Path "C:\staging\DSC\createGuestDscZip.ps1" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
                 Remove-Item -Path "C:\staging\DSC\DummyConfig.ps1" -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
             }
             catch {
             }
         }
+
         Write-Progress2 $Activity -Status "Clearing DSC Status" -percentcomplete 65 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Clearing previous DSC status"
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
@@ -659,7 +662,7 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
             return
         }
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Previous DSC status cleared"
+
         $DSC_CreateSingleConfig = {
             param($DscFolder)
 
@@ -970,13 +973,8 @@ $global:VM_Config = {
         $noStatus = $true
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
+        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
 
-        try {
-            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
-        }
-        catch {
-
-        }
         $dscStatusPolls = 0
         [int]$failCount = 0
         try {
@@ -1159,64 +1157,64 @@ $global:VM_Config = {
                         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content "C:\ConfigMgrSetup.log" -tail 1 } -SuppressLog
                         if (-not $result.ScriptBlockFailed) {
                             $logEntry = $result.ScriptBlockOutput
+                            $skipProgress = $true
                             if (-not [string]::IsNullOrWhiteSpace($logEntry)) {
                                 try {
-                                    if ($logEntry.Contains("$")) {
+                                    if ($logEntry -is [string] -and $logEntry.Contains("$")) {
                                         $logEntry = "ConfigMgrSetup.log: " + $logEntry.Substring(0, $logEntry.IndexOf("$"))
                                     }
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $logEntry
                                 }
                                 catch {
                                     write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Failed SubString for ConfigMgrSetup.log in for line $logEntry : $_"
                                 }
-                                try {
-                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $logentry
-
-                                }
-                                catch {}
                             }
-                            $skipProgress = $true
                         }
                     }
 
                     if (-not $skipProgress) {
                         # Write progress
-                        try {
-                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $status.ScriptBlockOutput
-                        }
-                        catch {
-
-                        }
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $status.ScriptBlockOutput
                     }
 
                     # Check if complete
                     $complete = $status.ScriptBlockOutput -eq "Complete!"
+
+                    $bailEarly = $false
                     if ($complete) {
                         #~~===================== Failed Configuration Manager Server Setup =====================
                         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup" -Context 0, 0 } -SuppressLog
                         if ($result.ScriptBlockOutput.Line) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
-                            return
+                            $failEntry = $result.ScriptBlockOutput.Line
+                            $bailEarly = $true
                         }
                     }
+
                     # ~Setup has encountered fatal errors
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "~Setup has encountered fatal errors" -Context 0, 0 } -SuppressLog
                     if ($result.ScriptBlockOutput.Line) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
-                        return
+                        $failEntry = $result.ScriptBlockOutput.Line
+                        $bailEarly = $true
                     }
+
                     #ERROR: Computer account doesn't have admininstrative rights to the SQL Server~
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ERROR: Computer account doesn't have admininstrative rights to the SQL Server~" -Context 0, 0 } -SuppressLog
                     if ($result.ScriptBlockOutput.Line) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $($result.ScriptBlockOutput.Line) Please Check C:\ConfigMgrSetup.log." -Failure -OutputStream
+                        $failEntry = $result.ScriptBlockOutput.Line
+                        $bailEarly = $true
+                    }
+
+                    if ($bailEarly) {
+                        if ($failEntry -is [string] -and $failEntry.Contains("$")) {
+                            $failEntry = $failEntry.Substring(0, $failEntry.IndexOf("$"))
+                        }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $failEntry. Check C:\ConfigMgrSetup.log for more." -Failure -OutputStream
                         return
                     }
                 }
                 else {
                     if ($noStatus) {
-                        try {
-                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress"
-                        }
-                        catch { }
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress"
                     }
                     else {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $currentStatus

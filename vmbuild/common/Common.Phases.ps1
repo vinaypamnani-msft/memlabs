@@ -77,7 +77,7 @@ function Start-Phase {
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
-        Write-Log "`n [Phase $Phase] Not Applicable. Skipping."
+        Write-OrangePoint "[Phase $Phase] Not Applicable. Skipping." -ForegroundColor Yellow -WriteLog
         return $true
     }
 

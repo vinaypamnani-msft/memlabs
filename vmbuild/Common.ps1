@@ -1502,6 +1502,7 @@ function New-VirtualMachine {
             Remove-Item -Path $VmSubPath -Force -Recurse | out-null
             Write-Log "$VmName`: Purge complete." -Verbose
         }
+
         Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
         # Create new VM
         try {
@@ -1512,7 +1513,8 @@ function New-VirtualMachine {
             Write-Log "$($_.ScriptStackTrace)" -LogOnly
             return $false
         }
-        Write-Progress2 $Activity -Status "Hyper-V VM Object created.. Waiting for Disk Creation" -percentcomplete 30 -force
+
+        Write-Progress2 $Activity -Status "Hyper-V VM Object created. Waiting for Disk Creation" -percentcomplete 30 -force
         # Add VMNote as soon as VM is created
         if ($DeployConfig) {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
@@ -1545,12 +1547,12 @@ function New-VirtualMachine {
         if ($Generation -eq "2" -and $tpmEnabled) {
             $mutexName = "TPM"
             $mtx = New-Object System.Threading.Mutex($false, $mutexName)
-            Write-Progress2 $Activity -Status "Waiting to install TPM" -percentcomplete 40 -force
+            Write-Progress2 $Activity -Status "Waiting to enable TPM" -percentcomplete 40 -force
             write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly
             [void]$mtx.WaitOne()
             write-log "acquired '$mutexName' Mutex" -LogOnly
             try {
-                Write-Progress2 $Activity -Status "Installing TPM" -percentcomplete 50 -force
+                Write-Progress2 $Activity -Status "Enabling TPM" -percentcomplete 50 -force
                 if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
                     New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates | out-null
                     New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
@@ -1581,6 +1583,7 @@ function New-VirtualMachine {
                 [void]$mtx.Dispose()
             }
         }
+
         Write-Progress2 $Activity -Status "Setting Processors" -percentcomplete 60 -force
         Write-Log "$VmName`: Setting Processor count to $Processors"
         Set-VM -Name $vmName -ProcessorCount $Processors | out-null
@@ -1615,6 +1618,7 @@ function New-VirtualMachine {
                 $count++
             }
         }
+
         Write-Progress2 $Activity -Status "Setting Firmware" -percentcomplete 85 -force
         # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
         if ($null -ne $f_file) {
@@ -1633,6 +1637,7 @@ function New-VirtualMachine {
                 Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
             }
         }
+
         Write-Progress2 $Activity -Status "Starting VM" -percentcomplete 86 -force
         Write-Log "$VmName`: Starting virtual machine"
         $started = Start-VM2 -Name $VmName -Passthru
@@ -1689,6 +1694,7 @@ function New-VirtualMachine {
                     Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
                     return $false
                 }
+
                 $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
                 #$currentItem | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value $ip -Force
                 #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
@@ -1722,23 +1728,22 @@ function New-VirtualMachine {
                 [void]$mtx.ReleaseMutex()
                 [void]$mtx.Dispose()
             }
+
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
             Write-Progress2 $Activity -Status "SQLAO: 2nd NIC Added" -percentcomplete 100 -force
         }
-        Write-Progress2 $Activity -Status "VM Created in Hyper-V successfully" -percentcomplete 100 -force
-        #sleep so the monitoring thread sees the completed event
-        start-sleep -Seconds 10
+
+        Write-Progress2 $Activity -Status "VM Created in Hyper-V successfully" -percentcomplete 100 -force -Completed
         return $true
     }
     catch {
         Write-Exception $_
-        Write-Progress2 $Activity -Status $_ -percentcomplete 100 -force
-        Start-Sleep -seconds 5
+        Write-Progress2 $Activity -Status $_ -percentcomplete 100 -force -Completed
+        Start-Sleep -Seconds 3
         Write-Log "Create VM failed with $_"
         return $false
     }
     finally {
-        Write-Progress2 $Activity -Status "VM Created in Hyper-V successfully" -percentcomplete 100 -force -Completed
         $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
