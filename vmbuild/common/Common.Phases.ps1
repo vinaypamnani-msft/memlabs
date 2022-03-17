@@ -3,51 +3,58 @@ function Write-JobProgress {
     param($Job, $AdditionalData)
 
 
-
-    $latestActivity = $null
-    $latestStatus = $null
-    #Make sure the first child job exists
-    if ($null -ne $Job.ChildJobs[0].Progress) {
-        #Extracts the latest progress of the job and writes the progress
-        $latestPercentComplete = 0
-        $lastProgress = $Job.ChildJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
-        if ($lastProgress) {
-            $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
-            $latestActivity = $lastProgress | Select-Object -expand Activity;
-            $latestStatus = $lastProgress | Select-Object -expand StatusDescription;
-            $jobName = $job.Name
-            $latestActivity = $latestActivity.Replace("$jobName`: ", "").Trim()
-        }
-
-        if ($latestActivity -and $latestStatus) {
-            #When adding multiple progress bars, a unique ID must be provided. Here I am providing the JobID as this
-            if ($latestPercentComplete -gt 0 -and $latestPercentComplete -lt 101) {
-
+    try {
+        $latestActivity = $null
+        $latestStatus = $null
+        #Make sure the first child job exists
+        if ($null -ne $Job.ChildJobs[0].Progress) {
+            #Extracts the latest progress of the job and writes the progress
+            $latestPercentComplete = 0
+            $lastProgress = $Job.ChildJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
+            if ($lastProgress) {
+                $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
+                $latestActivity = $lastProgress | Select-Object -expand Activity;
+                $latestStatus = $lastProgress | Select-Object -expand StatusDescription;
+                $jobName = $job.Name
+                $latestActivity = $latestActivity.Replace("$jobName`: ", "").Trim()
             }
-            else {
-                $latestPercentComplete = 0
-            }
-            try {
-                $padding = 0
-                $jobName2 = "  $($jobName.PadRight($padding," "))"
 
-                if ($Common.PS7) {
-                    if ($AdditionalData) {
-                        $padding1 = $AdditionalData.MaxVmNameLength
-                        $padding2 = $AdditionalData.MaxRoleNameLength
-                        $vmName = ($jobName -split " ")[0]
-                        $roleName = ($jobName -split " ")[1]
-                        $jobName2 = "  $($vmName.PadRight($padding1," ")) $($roleName.PadRight($padding2," "))"
-                    }
+            if ($latestActivity -and $latestStatus) {
+                #When adding multiple progress bars, a unique ID must be provided. Here I am providing the JobID as this
+                if ($latestPercentComplete -gt 0 -and $latestPercentComplete -lt 101) {
 
-                    # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                 }
-                Write-Progress2 -Activity "$jobName2`: $latestActivity" -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete;
-            }
-            catch {
-                Write-Log "[$jobName] Exception during job progress reporting. $vmName; $roleName; $AdditionalData. $_" -Verbose -failure
+                else {
+                    $latestPercentComplete = 0
+                }
+                try {
+                    $padding = 0
+                    $jobName2 = "  $($jobName.PadRight($padding," "))"
+
+                    if ($Common.PS7) {
+                        if ($AdditionalData) {
+                            $padding1 = $AdditionalData.MaxVmNameLength
+                            $padding2 = $AdditionalData.MaxRoleNameLength
+                            $vmName = ($jobName -split " ")[0]
+                            $roleName = ($jobName -split " ")[1]
+                            $jobName2 = "  $($vmName.PadRight($padding1," ")) $($roleName.PadRight($padding2," "))"
+                        }
+
+                        # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
+                    }
+                    Write-Progress2 -Activity "$jobName2`: $latestActivity" -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete;
+                    start-sleep -Milliseconds 200
+                }
+                catch {
+                    Write-Log "[$jobName] Exception during job progress reporting. $vmName; $roleName; $AdditionalData. $_" -failure
+                }
             }
         }
+    }
+    catch {
+        Write-Log "[$jobName] Exception during job progress reporting. $vmName; $roleName; $AdditionalData. $_" -failure
+    }
+    finally {
     }
 }
 

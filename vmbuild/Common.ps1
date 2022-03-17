@@ -47,12 +47,20 @@ Function Write-ProgressElapsed {
 
 #Main wrapper for Write-Progress.  This allows all params, and catches any errors
 Function Write-Progress2 {
+    $esc = [char]27
+    $hideCursor = "$esc[?25l"
+    $showCursor = "$esc[?25h"
+    $setCursorTop = "$esc[0;0H"
 
     try {
+        write-host -NoNewline "$hideCursor"
         Write-Progress2Impl @Args @PSBoundParameters | out-null
     }
     catch {
         write-Log "Write-Progress $args $_"
+    }
+    finally {
+        write-host -NoNewline "$showCursor"
     }
 }
 #Sub Wrapper for Write-Progress.  This allows PercentComplete to be modified, and can log the activity in verbose
@@ -178,7 +186,7 @@ Function Write-Progress2Impl {
                 Write-Log "Write-Status: Force2 is true" -verbose -LogOnly
             }
             if ($Activity) {
-                $Activity =$Activity.Trim()
+                $Activity = $Activity.Trim()
             }
             if ($Status) {
                 $Status = $Status.Trim()
