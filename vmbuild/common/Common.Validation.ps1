@@ -1077,19 +1077,38 @@ function Test-Configuration {
         }
 
         # Primary site without CAS
-        if ($deployConfig.parameters.scenario -eq "Hierarchy") {
-            $PSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
-            foreach ($PSVM in $PSVMs) {
-                $existingCS = Get-List2 -DeployConfig $deployConfig -SmartUpdate | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
-                if (-not $existingCS) {
-                    Add-ValidationMessage -Message "Role Conflict: Deployment requires a CAS, which was not found." -ReturnObject $return -Warning
-                }
+        $PSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.parentSiteCode }
+        foreach ($PSVM in $PSVMs) {
+            $existingCS = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
+            if (-not $existingCS) {
+                Add-ValidationMessage -Message "Role Conflict: $($PSVM.vmName) with parentSiteCode $($PSVM.parentSiteCode) requires a CAS, which was not found." -ReturnObject $return -Warning
+            }
+        }
+
+        # Secondary site without parent
+        $SSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+        foreach ($SSVM in $SSVMs) {
+            $existingPS = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $SSVM.parentSiteCode }
+            if (-not $existingPS) {
+                Add-ValidationMessage -Message "Role Conflict: $($SSVM.vmName) with parentSiteCode [$($SSVM.parentSiteCode)] requires a Primary, which was not found." -ReturnObject $return -Warning
             }
         }
 
         # tech preview and hierarchy
-        if ($deployConfig.parameters.scenario -eq "Hierarchy" -and $deployConfig.cmOptions.version -eq "tech-preview") {
-            Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with a Hierarchy; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
+        if ($deployConfig.cmOptions.version -eq "tech-preview") {
+            $anyPS = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "Primary" }
+            if($anyPS.Count -gt 1) {
+                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with more than one Primary; Tech Preview doesn't support support multiple sites." -ReturnObject $return -Warning
+            }
+            if ($anyPS.Count -eq 1) {
+                if ($anyPS.parentSiteCode) {
+                    Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with a parent Site Code [$($anyPS.parentSiteCode)]; Tech Preview doesn't support support a Hierarchy." -ReturnObject $return -Warning
+                }
+            }
+            $anyCS = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "CAS" }
+            if ($anyCS) {
+                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with a CAS; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
+            }
         }
 
         # Total Memory
@@ -1098,7 +1117,6 @@ function Test-Configuration {
         $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
         $totalMemory = $totalMemory.Sum / 1GB
         $availableMemory = Get-AvailableMemoryGB
-
 
         if ($totalMemory -gt $availableMemory) {
             if (-not $enableDebug) {

@@ -144,8 +144,6 @@ function New-DeployConfig {
             $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
 
-        $scenario = "Standalone"
-
         # add prefix to vm names
         $virtualMachines = $configObject.virtualMachines
         foreach ($item in $virtualMachines) {
@@ -158,10 +156,6 @@ function New-DeployConfig {
                 # Add prefix to remote SQL
                 if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
                     $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
-                }
-
-                if ($PSVM.parentSiteCode) {
-                    $scenario = "Hierarchy"
                 }
             }
         }
@@ -202,7 +196,6 @@ function New-DeployConfig {
                     $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
                 }
             }
-            $scenario = "Hierarchy"
         }
 
         # create params object
@@ -216,7 +209,6 @@ function New-DeployConfig {
         $params = [PSCustomObject]@{
             DomainName      = $configObject.vmOptions.domainName
             DCName          = $DCName
-            Scenario        = $scenario
             ExistingDCName  = $existingDCName
             ThisMachineName = $null
         }
