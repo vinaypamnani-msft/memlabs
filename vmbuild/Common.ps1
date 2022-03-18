@@ -1311,7 +1311,7 @@ function Get-VMNote {
             return $vmNoteObject
         }
         else {
-            Write-Log "$VMName`: VM Properties do not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
+            Write-Log "$VMName`: VM Properties do not contain values. Assume this was not deployed by vmbuild. $_" -Verbose -LogOnly -Warning
             return $null
         }
     }
@@ -1519,7 +1519,7 @@ function New-VirtualMachine {
         }
 
         # VM Exists
-        $vmTest = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+        $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
         if ($vmTest -and $ForceNew.IsPresent) {
             Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is present."
             if ($vmTest.State -ne "Off") {
