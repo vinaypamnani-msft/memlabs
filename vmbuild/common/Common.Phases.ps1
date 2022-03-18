@@ -74,6 +74,7 @@ function Start-Phase {
     # Remove DNS records for VM's in this config, if existing DC
     if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
         Write-Log "[Phase $Phase] Attempting to remove existing DNS Records"
+        $existingDC = $deployConfig.parameters.ExistingDCName
         foreach ($item in $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) } ) {
             if ($existingDC) {
                 Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
@@ -104,7 +105,7 @@ function Start-PhaseJobs {
         [object]$deployConfig
     )
 
-    Write-Progress2 "Preparing Phase $Phase" -Status "Starting Phase" -PercentComplete 1
+    Write-Progress2 "Preparing Phase $Phase" -Status "Creating jobs" -PercentComplete 20
 
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
@@ -114,7 +115,7 @@ function Start-PhaseJobs {
     $multiNodeDsc = $true
     $ConfigurationData = $null
     if ($Phase -gt 1) {
-        Write-Progress2 "Preparing Phase $Phase" -Status "Getting configuration data" -PercentComplete 20
+        Write-Progress2 "Preparing Phase $Phase" -Status "Getting configuration data" -PercentComplete 30
         $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
         if (-not $ConfigurationData) {
             # Nothing applicable for this phase
