@@ -104,6 +104,8 @@ function Start-PhaseJobs {
         [object]$deployConfig
     )
 
+    Write-Progress2 "Preparing Phase $Phase" -Status "Starting Phase" -PercentComplete 1
+
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
     $job_created_no = 0
@@ -112,6 +114,7 @@ function Start-PhaseJobs {
     $multiNodeDsc = $true
     $ConfigurationData = $null
     if ($Phase -gt 1) {
+        Write-Progress2 "Preparing Phase $Phase" -Status "Getting configuration data" -PercentComplete 20
         $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
         if (-not $ConfigurationData) {
             # Nothing applicable for this phase
@@ -132,11 +135,17 @@ function Start-PhaseJobs {
         $multiNodeDsc = $false
     }
 
+    $percent = 40
+    Write-Progress2 "Preparing Phase $Phase" -Status "Updating VM List" -PercentComplete $percent
+
     $global:vm_remove_list = @()
     $maxVmNameLength = 0
     $maxRoleNameLength = 0
     $existingVMs = Get-List -Type VM -SmartUpdate
     foreach ($currentItem in $deployConfig.virtualMachines) {
+
+        $percent++
+        Write-Progress2 "Preparing Phase $Phase" -Status "Evaluating virtual machines" -PercentComplete $percent
 
         # Don't touch non-hidden VM's in Phase 0
         if ($Phase -eq 0 -and -not $currentItem.hidden) {
@@ -179,6 +188,8 @@ function Start-PhaseJobs {
             $maxRoleNameLength = $currentItem.role.Length
         }
 
+        $percent++
+        Write-Progress2 "Preparing Phase $Phase" -Status "Creating job for $($currentItem.vmName)" -PercentComplete $percent
         if ($Phase -eq 0 -or $Phase -eq 1) {
             # Create/Prepare VM
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
@@ -225,6 +236,8 @@ function Start-PhaseJobs {
         Applicable     = $true
         AdditionalData = $additionalData
     }
+
+    Write-Progress2 "Preparing Phase $Phase" -Status "Created $job_created_yes jobs." -PercentComplete 100 -Completed
 
     if ($job_created_no -eq 0) {
         Write-Log "[Phase $Phase] Created $job_created_yes jobs. Waiting for jobs."
