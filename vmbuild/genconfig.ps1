@@ -226,7 +226,7 @@ function Select-ConfigMenu {
                 Write-Redx "Config is invalid, as it does not contain any virtual machines."
                 Write-Host
 
-            }eles {
+            }else {
                 return $SelectedConfig
             }
         }
