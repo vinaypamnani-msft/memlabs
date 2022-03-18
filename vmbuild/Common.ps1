@@ -1435,15 +1435,15 @@ function Remove-DnsRecord {
 
     $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $scriptBlock1 -SuppressLog
     if ($result.ScriptBlockFailed) {
-        Write-Log "DNS resource record for $RecordToDelete was not found."
+        Write-Log "DNS resource record for $RecordToDelete was not found." -LogOnly
     }
     else {
         $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $scriptBlock2 -SuppressLog
         if ($result.ScriptBlockFailed) {
-            Write-Log "Failed to remove DNS resource record for $RecordToDelete. Please remove the record manually." -Warning
+            Write-OrangePoint "Failed to remove DNS resource record for $RecordToDelete. Please remove the record manually."
         }
         else {
-            Write-Log "Removed DNS resource record for $RecordToDelete"
+            Write-GreenCheck "Removed DNS resource record for $RecordToDelete"
         }
     }
 }
