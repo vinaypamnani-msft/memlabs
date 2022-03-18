@@ -897,6 +897,7 @@ class WaitForDomainReady {
         $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         while (!$testconnection) {
             Write-Verbose "Waiting for Domain ready , will try again 30 seconds later..."
+            ipconfig /flushdns
             ipconfig /renew
             ipconfig /registerdns
             Start-Sleep -Seconds $_WaitSeconds
