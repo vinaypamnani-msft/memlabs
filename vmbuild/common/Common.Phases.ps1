@@ -252,6 +252,11 @@ function Wait-Phase {
         Warning = 0
     }
 
+    $esc = [char]27
+    $hideCursor = "$esc[?25l"
+    $showCursor = "$esc[?25h"
+    write-host -NoNewline "$hideCursor"
+
     $FailRetry = 0
     do {
 
@@ -327,6 +332,7 @@ function Wait-Phase {
         Start-Sleep -Milliseconds 10
 
     } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
+    write-host -NoNewline "$showCursor"
     return $return
 }
 
