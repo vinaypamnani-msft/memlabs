@@ -256,7 +256,7 @@ function Get-UpdatePack {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
     $CMPSSuppressFastNotUsedCheck = $true
 
-    $updatepacklist = Get-CMSiteUpdate -Fast | Where-Object { $_.State -ne 196612 }
+    $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -notlike "*hotfix*"} # filter hotfixes
     $getupdateretrycount = 0
     while ($updatepacklist.Count -eq 0) {
 
