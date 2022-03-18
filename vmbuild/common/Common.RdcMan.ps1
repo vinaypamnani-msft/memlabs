@@ -663,7 +663,12 @@ function Add-RDCManServerToGroup {
     if ($ForceOverwrite) {
         #Delete Old Records and let them be regenerated
 
-        $findservers = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName }
+        $displayNameList = @($displayName, $serverName, $displayName + " (Missing IP)")
+        if ($username) {
+            $displayNameList += $displayName + "($username)"
+        }
+
+        $findservers = $findgroup.group.server | Where-Object { $_.properties.displayName -in $displayNameList -or $_.properties.name -in $displayNameList }
 
         foreach ($item in $findservers) {
             Write-Log ("Removing $($item.properties.displayName)") -LogOnly -Verbose
