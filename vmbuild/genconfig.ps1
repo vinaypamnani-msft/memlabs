@@ -221,7 +221,7 @@ function Select-ConfigMenu {
         }
         if ($SelectedConfig) {
             Write-Verbose "SelectedConfig : $SelectedConfig"
-            if (-not $Global:Config.VirtualMachines) {
+            if (-not $SelectedConfig.VirtualMachines) {
                 Write-Host
                 Write-Redx "Config is invalid, as it does not contain any virtual machines."
                 Write-Host
