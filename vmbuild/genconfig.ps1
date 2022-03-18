@@ -3101,7 +3101,7 @@ Function Set-SiteServerLocalSql {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
     }
     $virtualMachine.virtualProcs = 8
-    $virtualMachine.memory = "12GB"
+    $virtualMachine.memory = "10GB"
 
     if ($null -eq $virtualMachine.additionalDisks) {
         $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
@@ -4586,7 +4586,7 @@ function Add-NewVMForRole {
 
     $installSSMS = $false
     if ($OperatingSystem.Contains("Server") -and ($role -notin ("DC", "BDC"))) {
-        $memory = "4GB"
+        $memory = "3GB"
         $vprocs = 4
         $installSSMS = $true
     }
@@ -4615,7 +4615,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
             $disk = [PSCustomObject]@{"E" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $virtualMachine.Memory = "8GB"
+            $virtualMachine.Memory = "7GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $virtualMachine.tpmEnabled = $false
@@ -4626,7 +4626,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
             $disk = [PSCustomObject]@{"E" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $virtualMachine.Memory = "8GB"
+            $virtualMachine.Memory = "7GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $virtualMachine.tpmEnabled = $false
@@ -4641,7 +4641,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
-            $virtualMachine.Memory = "12GB"
+            $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             #$existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
@@ -4675,7 +4675,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
-            $virtualMachine.Memory = "12GB"
+            $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
@@ -4688,7 +4688,7 @@ function Add-NewVMForRole {
 
         }
         "Secondary" {
-            $virtualMachine.memory = "4GB"
+            $virtualMachine.memory = "3GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
             $virtualMachine.operatingSystem = $OperatingSystem
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
@@ -4705,7 +4705,7 @@ function Add-NewVMForRole {
 
         }
         "PassiveSite" {
-            $virtualMachine.memory = "4GB"
+            $virtualMachine.memory = "3GB"
             $NewFSServer = $true
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
@@ -5172,8 +5172,8 @@ function Select-VirtualMachines {
                                         $virtualMachine.memory = "4GB"
                                     }
                                     if ($virtualMachine.role -eq "Secondary") {
-                                        if ($($virtualMachine.memory) / 1GB -lt "6GB" / 1GB) {
-                                            $virtualMachine.memory = "6GB"
+                                        if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
+                                            $virtualMachine.memory = "4GB"
                                         }
                                     }
 
