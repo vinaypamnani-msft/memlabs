@@ -272,18 +272,21 @@ function Wait-Phase {
     )
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
+
+    $esc = [char]27
+    $hideCursor = "$esc[?25l"
+    $showCursor = "$esc[?25h"
+
     try {
+
+        Write-Host -NoNewline "$hideCursor" # Reduce flickering in Progress bars
+
         # Create return object
         $return = [PSCustomObject]@{
             Failed  = 0
             Success = 0
             Warning = 0
         }
-
-        $esc = [char]27
-        $hideCursor = "$esc[?25l"
-        $showCursor = "$esc[?25h"
-        write-host -NoNewline "$hideCursor"
 
         $global:JobProgressHistory = @()
 
@@ -369,7 +372,7 @@ function Wait-Phase {
     }
     finally {
         $Global:ProgressPreference = $OriginalProgressPreference
-        write-host -NoNewline "$showCursor"
+        Write-Host -NoNewline "$showCursor" # Show cursor again
     }
 }
 
