@@ -238,7 +238,7 @@ function Invoke-AutoSnapShotDomain {
     Invoke-StopVMs -domain $domain -quiet:$true
 
     #Take Snapshot
-    $failures = Invoke-SnapshotDomain -domain $domain -comment $comment
+    $failures = Invoke-SnapshotDomain -domain $domain -comment $comment -quiet:$true
     if ($failures -ne 0) {
         write-log "$failures VM(s) could not be snapshotted" -Failure
     }
@@ -258,7 +258,7 @@ function Invoke-SnapshotDomain {
         [Parameter(Mandatory = $false, HelpMessage = "Comment")]
         [string] $comment = "",
         [Parameter(Mandatory = $false, HelpMessage = "Quiet Mode")]
-        [string] $quiet = $false
+        [bool] $quiet = $false
     )
 
 
