@@ -187,9 +187,15 @@ Function Write-Progress2Impl {
             }
             if ($Activity) {
                 $Activity = $Activity.Trim()
+                if ($Activity.Contains("`n")){
+                    Write-Log "$Activity contains new-line"
+                }
             }
             if ($Status) {
                 $Status = $Status.Trim()
+                if ($Status.Contains("`n")){
+                    Write-Log "$Status contains new-line"
+                }
             }
 
             if ($PercentComplete -le 1) {

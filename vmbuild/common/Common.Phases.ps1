@@ -42,7 +42,7 @@ function Write-JobProgress {
 
                         # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                     }
-                    Write-Progress2 -Activity "$jobName2`: $latestActivity" -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete;
+                    Write-Progress2 -Activity "$jobName2`: $latestActivity" -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
                     start-sleep -Milliseconds 200
                 }
                 catch {
@@ -244,96 +244,105 @@ function Wait-Phase {
         $Jobs,
         $AdditionalData
     )
-
-    # Create return object
-    $return = [PSCustomObject]@{
-        Failed  = 0
-        Success = 0
-        Warning = 0
-    }
-
-    $esc = [char]27
-    $hideCursor = "$esc[?25l"
-    $showCursor = "$esc[?25h"
-    write-host -NoNewline "$hideCursor"
-
-    $FailRetry = 0
-    do {
-
-        $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
-        foreach ($job in $runningJobs) {
-            Write-JobProgress -Job $job -AdditionalData $AdditionalData
+    $OriginalProgressPreference = $Global:ProgressPreference
+    $Global:ProgressPreference = 'SilentlyContinue'
+    try {
+        # Create return object
+        $return = [PSCustomObject]@{
+            Failed  = 0
+            Success = 0
+            Warning = 0
         }
 
-        $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
-        foreach ($job in $failedJobs) {
-            $FailRetry = $FailRetry + 1
-            if ($FailRetry -gt 30) {
-                $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
-                $jobJson = $job | convertTo-Json -depth 5 -WarningAction SilentlyContinue
-                Write-Log "[Phase $Phase] Job failed: $jobJson" -LogOnly
-                Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red
-                Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
-                $jobs.Remove($job)
-                $return.Failed++
-            }
-        }
-        $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
-        foreach ($job in $completedJobs) {
-            Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
-            #Write-JobProgress -Job $job -AdditionalData $AdditionalData
+        $esc = [char]27
+        $hideCursor = "$esc[?25l"
+        $showCursor = "$esc[?25h"
+        write-host -NoNewline "$hideCursor"
 
-            $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
-            if (-not $jobOutput) {
-                $jobError = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
-                $jobName = $job | Select-Object -ExpandProperty Name
-                if ($jobError) {
-                    Write-RedX "[Phase $Phase] Job $jobName completed with error: $jobError" -ForegroundColor Red
-                }
-                else {
-                    Write-RedX "[Phase $Phase] Job $jobName completed with no output" -ForegroundColor Red
-                }
-                $jobJson = $job | ConvertTo-Json -Depth 5 -WarningAction SilentlyContinue
-                write-log -LogOnly $jobJson
-                $return.Failed++
+        $FailRetry = 0
+        do {
+            $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
+            foreach ($job in $runningJobs) {
+                Write-JobProgress -Job $job -AdditionalData $AdditionalData
             }
-            #$logLevel = 1    # 0 = Verbose, 1 = Info, 2 = Warning, 3 = Error
-            $incrementCount = $true
-            foreach ($OutputObject in $jobOutput) {
-                $line = $OutputObject.text
-                if (-not $line) {
-                    continue
+
+            $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
+            foreach ($job in $failedJobs) {
+                $FailRetry = $FailRetry + 1
+                if ($FailRetry -gt 30) {
+                    $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
+                    $jobJson = $job | convertTo-Json -depth 5 -WarningAction SilentlyContinue
+                    Write-Log "[Phase $Phase] Job failed: $jobJson" -LogOnly
+                    Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red
+                    Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
+                    $jobs.Remove($job)
+                    $return.Failed++
                 }
-                $line = $line.ToString().Trim()
-                if ($OutputObject.LogLevel -eq 3) {
-                    Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
-                    if ($incrementCount) {
-                        $return.Failed++
+            }
+            $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
+            foreach ($job in $completedJobs) {
+                Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
+                #Write-JobProgress -Job $job -AdditionalData $AdditionalData
+
+                $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
+                if (-not $jobOutput) {
+                    $jobError = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
+                    $jobName = $job | Select-Object -ExpandProperty Name
+                    if ($jobError) {
+                        Write-RedX "[Phase $Phase] Job $jobName completed with error: $jobError" -ForegroundColor Red
                     }
+                    else {
+                        Write-RedX "[Phase $Phase] Job $jobName completed with no output" -ForegroundColor Red
+                    }
+                    $jobJson = $job | ConvertTo-Json -Depth 5 -WarningAction SilentlyContinue
+                    write-log -LogOnly $jobJson
+                    $return.Failed++
                 }
-                elseif ($OutputObject.LogLevel -eq 2) {
-                    Write-OrangePoint $line -ForegroundColor $OutputObject.ForegroundColor
-                    if ($incrementCount) { $return.Warning++ }
-                }
-                else {
-                    Write-GreenCheck $line -ForegroundColor $OutputObject.ForegroundColor
-                    # Assume no error/warning was a success
-                    if ($incrementCount) { $return.Success++ }
+                #$logLevel = 1    # 0 = Verbose, 1 = Info, 2 = Warning, 3 = Error
+                $incrementCount = $true
+                foreach ($OutputObject in $jobOutput) {
+                    $line = $OutputObject.text
+                    if (-not $line) {
+                        continue
+                    }
+                    $line = $line.ToString().Trim()
+                    if ($OutputObject.LogLevel -eq 3) {
+                        Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
+                        if ($incrementCount) {
+                            $return.Failed++
+                        }
+                    }
+                    elseif ($OutputObject.LogLevel -eq 2) {
+                        Write-OrangePoint $line -ForegroundColor $OutputObject.ForegroundColor
+                        if ($incrementCount) { $return.Warning++ }
+                    }
+                    else {
+                        Write-GreenCheck $line -ForegroundColor $OutputObject.ForegroundColor
+                        # Assume no error/warning was a success
+                        if ($incrementCount) { $return.Success++ }
+                    }
+
+                    $incrementCount = $false
                 }
 
-                $incrementCount = $false
+                #Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
+                $jobs.Remove($job)
             }
 
-            #Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
-            $jobs.Remove($job)
-        }
+            # Sleep
+            Start-Sleep -Milliseconds 10
 
-        # Sleep
-        Start-Sleep -Milliseconds 10
+        } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
 
-    } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
-    write-host -NoNewline "$showCursor"
-    return $return
+        return $return
+    }
+    catch {
+        Write-Exception -ExceptionInfo $_
+    }
+    finally {
+        $Global:ProgressPreference = $OriginalProgressPreference
+        write-host -NoNewline "$showCursor"
+    }
 }
 
 function Get-ConfigurationData {
