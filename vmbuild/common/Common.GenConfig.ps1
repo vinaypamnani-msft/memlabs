@@ -748,17 +748,18 @@ function ConvertTo-DeployConfigEx {
                 }
 
                 # --- ClientPush
-                $thisVMFromList2 = get-list2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $thisVM.vmName }
-                $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true) -and -not ($_.SqlVersion) }
+                $thisVMNetwork = $thisVMObject.Network
+
+                $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "DomainMember" -and -not ($_.SqlVersion) }
                 $clientPush = @()
-                $clientPush += ($ClientNames | Where-Object { $_.network -eq $thisVMFromList2.network }).vmName
+                $clientPush += ($ClientNames | Where-Object { $_.network -eq $thisVMNetwork}).vmName
 
 
                 $Secondaries =  get-list2 -deployConfig $deployConfig | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }
                 foreach ($second in $Secondaries) {
                     $clientPush += ($ClientNames | Where-Object { $_.network -eq $second.network }).vmName
                 }
-                $clientPush = ($clientPush | Where-Object ($_ -and $_.Trim()) | select-object -unique)
+                $clientPush = ($clientPush | Where-Object { $_ -and $_.Trim()} | select-object -unique)
                 if ($clientPush) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "ClientPush" -Value $clientPush -Force
                 }
