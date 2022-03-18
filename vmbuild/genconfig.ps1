@@ -735,7 +735,7 @@ function Select-StopDomain {
         $vmsname = $running | Select-Object -ExpandProperty vmName
         $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None" -timeout 10 -test:$false
+            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -CurrentValue "None" -timeout 10 -test:$false
         }
         else {
             $response = $preResponse

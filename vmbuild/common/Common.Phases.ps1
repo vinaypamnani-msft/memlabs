@@ -2,8 +2,14 @@
 function Write-JobProgress {
     param($Job, $AdditionalData)
 
+    $esc = [char]27
+    $hideCursor = "$esc[?25l"
+    $showCursor = "$esc[?25h"
 
     try {
+        if (-not $global:JobProgressHistory) {
+            $global:JobProgressHistory = @()
+        }
         $latestActivity = $null
         $latestStatus = $null
         #Make sure the first child job exists
@@ -42,8 +48,14 @@ function Write-JobProgress {
 
                         # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                     }
-                    Write-Progress2 -Activity "$jobName2`: $latestActivity" -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
-                    start-sleep -Milliseconds 200
+                    $CurrentActivity = "$jobName2`: $latestActivity"
+                    $HistoryLine = $Job.Id.ToString() + $CurrentActivity + $latestStatus
+                    if ($global:JobProgressHistory -notcontains $HistoryLine) {
+                        $global:JobProgressHistory += $HistoryLine
+                        Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
+                        write-host -NoNewline "$hideCursor"
+                        start-sleep -seconds 1
+                    }
                 }
                 catch {
                     Write-Log "[$jobName] Exception during job progress reporting. $vmName; $roleName; $AdditionalData. $_" -failure
@@ -273,6 +285,8 @@ function Wait-Phase {
         $showCursor = "$esc[?25h"
         write-host -NoNewline "$hideCursor"
 
+        $global:JobProgressHistory = @()
+
         $FailRetry = 0
         do {
             $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
@@ -344,7 +358,7 @@ function Wait-Phase {
             }
 
             # Sleep
-            Start-Sleep -Milliseconds 10
+            Start-Sleep -Milliseconds 200
 
         } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
 

@@ -156,6 +156,26 @@ Function Write-Progress2Impl {
                 Write-Log "Write-Status: Force is true" -verbose -LogOnly
             }
 
+            $Activityvalue = $null
+            if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
+                $Activityvalue = $Activity.Trim()
+
+                if ($Activityvalue.Contains("`n")){
+                    Write-Log "$Activity contains new-line"
+                }
+                $PSBoundParameters['Activity'] = $Activityvalue
+            }
+
+            $StatusValue = $null
+            if ($PSBoundParameters.TryGetValue('Status', [ref]$StatusValue)) {
+                $StatusValue = $StatusValue.Trim()
+
+                if ($StatusValue.Contains("`n")){
+                    Write-Log "$StatusValue contains new-line"
+                }
+                $PSBoundParameters['Status'] = $StatusValue
+            }
+
             if ($Global:LastStatus -ne $Status) {
                 Write-Log "Write-Status: Activity: $Activity  Status: $Status" -verbose -LogOnly
                 $Global:LastStatus = $Status
@@ -187,6 +207,7 @@ Function Write-Progress2Impl {
             }
             if ($Activity) {
                 $Activity = $Activity.Trim()
+                $Activity = "CXC"
                 if ($Activity.Contains("`n")){
                     Write-Log "$Activity contains new-line"
                 }
