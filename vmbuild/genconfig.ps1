@@ -221,7 +221,14 @@ function Select-ConfigMenu {
         }
         if ($SelectedConfig) {
             Write-Verbose "SelectedConfig : $SelectedConfig"
-            return $SelectedConfig
+            if (-not $Global:Config.VirtualMachines) {
+                Write-Host
+                Write-Redx "Config is invalid, as it does not contain any virtual machines."
+                Write-Host
+
+            }eles {
+                return $SelectedConfig
+            }
         }
     }
 }
@@ -914,11 +921,13 @@ function Select-MainMenu {
         #        }
         #    }
         #}
-        $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -in ("DC", "BDC") }
-        $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -notin ("DC", "BDC") } | Sort-Object { $_.vmName }
 
-        $global:config.virtualMachines = $virtualMachines
+        if ($global:Config.virtualMachines) {
+            $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -in ("DC", "BDC") }
+            $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -notin ("DC", "BDC") } | Sort-Object { $_.vmName }
 
+            $global:config.virtualMachines = $virtualMachines
+        }
         foreach ($virtualMachine in $global:config.virtualMachines) {
             if ($null -eq $virtualMachine) {
                 $global:config.virtualMachines | convertTo-Json -Depth 5 | out-host
@@ -2115,19 +2124,19 @@ function Select-Subnet {
 }
 
 function Show-SubnetNote {
-    $noteColor = $Global:Common.Colors.GenConfigTip
+    #  $noteColor = $Global:Common.Colors.GenConfigTip
     $textColor = $Global:Common.Colors.GenConfigNormal
-    $highlightColor = $Global:Common.Colors.GenConfigHelpHighlight
+    #  $highlightColor = $Global:Common.Colors.GenConfigHelpHighlight
     #Get-PSCallStack | out-host
     Write-Host
-    write-host2 -ForegroundColor $noteColor "Note: " -NoNewline
-    write-host2 -foregroundcolor $textColor "You can only have 1 " -NoNewLine
-    write-host2 -ForegroundColor $highlightColor "Primary" -NoNewLine
-    write-host2 -ForegroundColor $textColor " or " -NoNewline
-    write-host2 -ForegroundColor $highlightColor "Secondary" -NoNewLine
-    write-host2 -ForegroundColor $textColor " server per " -NoNewline
-    write-host2 -ForegroundColor $highlightColor "subnet" -NoNewline
-    write-host2 -ForegroundColor $textColor "."
+    #write-host2 -ForegroundColor $noteColor "Note: " -NoNewline
+    #write-host2 -foregroundcolor $textColor "You can only have 1 " -NoNewLine
+    #write-host2 -ForegroundColor $highlightColor "Primary" -NoNewLine
+    #write-host2 -ForegroundColor $textColor " or " -NoNewline
+    #write-host2 -ForegroundColor $highlightColor "Secondary" -NoNewLine
+    #write-host2 -ForegroundColor $textColor " server per " -NoNewline
+    #write-host2 -ForegroundColor $highlightColor "subnet" -NoNewline
+    write-host2 -ForegroundColor $textColor ""
     write-host2 -ForegroundColor $textColor "   MemLabs automatically configures this subnet as a Boundary Group for the specified SiteCode."
     write-host2 -ForegroundColor $textColor "   This limitation exists to prevent overlapping Boundary Groups."
     write-host2 -ForegroundColor $textColor "   Subnets without a siteserver do NOT automatically get added to any boundary groups."
@@ -4815,7 +4824,7 @@ function Add-NewVMForRole {
     $virtualMachine.vmName = $machineName
 
     if ($null -eq $ConfigToModify.VirtualMachines) {
-        $ConfigToModify.virtualMachines = @()
+        $ConfigToModify | Add-Member -MemberType NoteProperty -Name "VirtualMachines" -Value @() -Force
     }
 
     $ConfigToModify.virtualMachines += $virtualMachine
@@ -5437,6 +5446,7 @@ do {
     $Global:Config = $null
     $Global:configfile = $null
     $Global:Config = Select-ConfigMenu
+
 
     # $DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig
 

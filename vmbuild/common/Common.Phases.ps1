@@ -275,8 +275,8 @@ function Wait-Phase {
         }
         $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
         foreach ($job in $completedJobs) {
-
-            Write-JobProgress -Job $job -AdditionalData $AdditionalData
+            Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
+            #Write-JobProgress -Job $job -AdditionalData $AdditionalData
 
             $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
             if (-not $jobOutput) {
@@ -319,7 +319,7 @@ function Wait-Phase {
                 $incrementCount = $false
             }
 
-            Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
+            #Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
             $jobs.Remove($job)
         }
 
