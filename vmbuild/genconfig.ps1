@@ -240,7 +240,7 @@ function  Select-NetworkMenu {
     $networks = Get-EnhancedNetworkList
     ($networks | Select-Object Network, Domain, SiteCodes, "Virtual Machines" | Format-Table | Out-String).Trim() | out-host
     $customOptions = $null
-    $response = Get-Menu -Prompt "Press Enter" -OptionArray $subnetlistEnhanced -AdditionalOptions $customOptions -HideHelp:$true
+    $response = Get-Menu -Prompt "Press Enter" -OptionArray $subnetlistEnhanced -AdditionalOptions $customOptions -HideHelp:$true -test:$false
     if (-not $response) {
         return
     }
@@ -272,7 +272,7 @@ function Select-VMMenu {
 
         #$customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
         $customOptions = $null
-        $response = Get-Menu -Prompt "Press Enter" -AdditionalOptions $customOptions -HideHelp:$true
+        $response = Get-Menu -Prompt "Press Enter" -AdditionalOptions $customOptions -HideHelp:$true -test:$false
 
         write-Verbose "1 response $response"
         if (-not $response) {
@@ -311,7 +311,7 @@ function Select-DomainMenu {
         return
     }
 
-    $domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -split
+    $domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false
     if ([string]::isnullorwhitespace($domain)) {
         return $null
     }
@@ -346,7 +346,7 @@ function Select-DomainMenu {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
         $customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
-        $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions
+        $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false
 
         write-Verbose "1 response $response"
         if (-not $response) {
@@ -439,7 +439,7 @@ function select-RestoreSnapshotDomain {
         Write-OrangePoint "No snapshots found for $domain"
         return
     }
-    $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots
+    $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots -test:$false
     if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
         return
     }
@@ -541,7 +541,7 @@ function select-DeleteSnapshotDomain {
         Write-OrangePoint "No snapshots found for $domain"
         return
     }
-    $response = get-menu -Prompt "Select Snapshot to merge/delete" -OptionArray $snapshots -additionalOptions @{"A" = "All Snapshots" }
+    $response = get-menu -Prompt "Select Snapshot to merge/delete" -OptionArray $snapshots -additionalOptions @{"A" = "All Snapshots" } -test:$false
     if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
         return
     }
@@ -665,7 +665,7 @@ function Select-StartDomain {
         $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" }
 
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None" -timeout:10
+            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None" -timeout:10 -test:$false
         }
         else {
             $response = $preResponse
@@ -735,7 +735,7 @@ function Select-StopDomain {
         $vmsname = $running | Select-Object -ExpandProperty vmName
         $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None" -timeout 10
+            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None" -timeout 10 -test:$false
         }
         else {
             $response = $preResponse
@@ -1426,7 +1426,7 @@ function select-timezone {
 
     $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $commonTimeZones -CurrentValue $($ConfigToCheck.vmOptions.timezone) -additionalOptions @{"F" = "Display Full List" }
     if ($timezone -eq "F") {
-        $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $((Get-TimeZone -ListAvailable).Id) -CurrentValue $($ConfigToCheck.vmOptions.timezone)
+        $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $((Get-TimeZone -ListAvailable).Id) -CurrentValue $($ConfigToCheck.vmOptions.timezone) -test:$false
     }
     return $timezone
 }
@@ -1683,7 +1683,7 @@ function Select-Config {
 
         }
 
-        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -split
+        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -split -test:$false
 
         $responseValid = $true
         if (-not $response) {
@@ -1790,7 +1790,7 @@ function Show-ExistingNetwork {
     }
 
     while ($true) {
-        $domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -Split
+        $domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -Split -test:$false
         if ([string]::isnullorwhitespace($domain)) {
             return $null
         }
@@ -2028,7 +2028,7 @@ function Select-RolesForNew {
     #     $existingRoles.Remove("DPMP")
     # }
     $existingRoles.Remove("PassiveSite")
-    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember"
+    $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember" -test:$false
     return $role
 }
 
@@ -2061,7 +2061,7 @@ function Select-OSForNew {
     if ($role -eq "Secondary") {
         return $defaultValue
     }
-    $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue $defaultValue
+    $role = Get-Menu -Prompt "Select OS" -OptionArray $($OSList) -CurrentValue $defaultValue -test:$false
     return $role
 }
 
@@ -2661,12 +2661,12 @@ function Get-Menu {
         if ($split) {
             $response = $response -Split " " | Select-Object -First 1
         }
-        Write-Verbose "[Get-Menu] Returned (R) '$response'"
+        Write-Log -LogOnly "[$prompt] Returned (R) '$response'"
 
         return $response
     }
     else {
-        Write-Verbose "[Get-Menu] Returned (CV) '$CurrentValue'"
+        Write-Log -LogOnly  "[$prompt] Returned (CV) '$CurrentValue'"
         return $CurrentValue
     }
 }
