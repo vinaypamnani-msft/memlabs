@@ -1045,8 +1045,8 @@ $global:VM_Config = {
 
                                 if ($($dscStatus.ScriptBlockOutput.Error) -ne $lasterror) {
                                     [int]$failCount = 0
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)" -Warning -OutputStream
-                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text  "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Attempting to continue. Status: $($dscStatus.ScriptBlockOutput.Status) Output: $($dscStatus.ScriptBlockOutput.Error)"
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status); Output: $($dscStatus.ScriptBlockOutput.Error). Attempting to continue." -Warning -OutputStream
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text  "[Phase $Phase]: $($currentItem.vmName): DSC encountered failures. Status: $($dscStatus.ScriptBlockOutput.Status); Output: $($dscStatus.ScriptBlockOutput.Error). Attempting to continue."
                                 }
                                 $failCount++
                                 if ($failCount -gt 100) {
