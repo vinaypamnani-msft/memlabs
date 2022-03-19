@@ -448,10 +448,12 @@ finally {
             Write-Log "Script exited before Phase 1 completion. Removing all VM's created in Phase 1." -Warning
         }
         Write-Host
-        Get-Job | Stop-Job
+
         foreach ($vmname in $global:vm_remove_list) {
             Remove-VirtualMachine -VmName $vmname -Force
         }
+
+        Get-Job | Stop-Job
     }
 
     # Clear vm remove list
