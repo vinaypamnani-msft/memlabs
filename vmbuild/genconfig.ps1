@@ -226,7 +226,8 @@ function Select-ConfigMenu {
                 Write-Redx "Config is invalid, as it does not contain any virtual machines."
                 Write-Host
 
-            }else {
+            }
+            else {
                 return $SelectedConfig
             }
         }
@@ -5379,14 +5380,15 @@ function Save-Config {
     #$file = $date + "-" + $file
 
     $filename = Join-Path $configDir $file
+    $fullFileName = $null
     if ($Global:configfile) {
         write-host $Global:configfile
         $filename = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile))
-        if ($filename.StartsWith("PSTest") -or $filename.StartsWith("CSTest")) {
-            #return Split-Path -Path $fileName -Leaf
-            Write-Log -HostOnly -Verbose "(1)Returning File: $fileName"
-            return $fileName
-        }
+        #if ($filename.StartsWith("PSTest") -or $filename.StartsWith("CSTest")) {
+        #return Split-Path -Path $fileName -Leaf
+        #    Write-Log -HostOnly -Verbose "(1)Returning File: $fileName"
+        #    return $fileName
+        #}
         #$filename = Join-Path $configDir $filename
         $fullFilename = $Global:configfile
         $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress) -eq
@@ -5406,6 +5408,13 @@ function Save-Config {
         $fileName = Split-Path -Path $fileName -Leaf
     }
     $response = Read-Single -Prompt "Save Filename" -currentValue $filename -HideHelp -Timeout 30 -useReadHost
+
+    if ($fullFileName -and (-not $response)) {
+        $config | ConvertTo-Json -Depth 5 | Out-File $fullfilename
+        Write-Host "Saved to $fullfilename"
+        Write-Log -HostOnly -Verbose "(3)Returning File: $fileName -> $fullFileName"
+        return $filename
+    }
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $filename = Join-Path $configDir $response
