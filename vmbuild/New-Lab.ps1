@@ -441,16 +441,15 @@ finally {
 
     # Delete in progress or failed VM's
     if ($global:vm_remove_list.Count -gt 0) {
-        Get-Job | Stop-Job
-        Write-Host
         if ($NewLabsuccess) {
             Write-Log "Phase 1 encountered failures. Removing all VM's created in Phase 1." -Warning
         }
         else {
             Write-Log "Script exited before Phase 1 completion. Removing all VM's created in Phase 1." -Warning
         }
+        Write-Host
+        Get-Job | Stop-Job
         foreach ($vmname in $global:vm_remove_list) {
-            Write-Log "Removing $vmName"
             Remove-VirtualMachine -VmName $vmname -Force
         }
     }
@@ -463,4 +462,6 @@ finally {
 
     # Set quick edit back
     Set-QuickEdit
+
+    Write-Host
 }

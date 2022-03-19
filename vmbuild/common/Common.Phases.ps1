@@ -54,7 +54,7 @@ function Write-JobProgress {
                         $global:JobProgressHistory += $HistoryLine
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
                         write-host -NoNewline "$hideCursor"
-                        start-sleep -seconds 1
+                        # start-sleep -seconds 1
                     }
                 }
                 catch {
