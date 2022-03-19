@@ -134,7 +134,7 @@
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
-            <value>"sqlVersion"</value>
+            <value>"SQLForSiteServer"</value>
           </rule>
         </ruleGroup>
       </smartGroup>

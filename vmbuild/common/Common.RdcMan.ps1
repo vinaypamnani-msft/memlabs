@@ -425,6 +425,23 @@ function New-RDCManFileFromHyperV {
                     }
                 }
 
+
+            if ($vm.SqlVersion) {
+                $PrimaryNode = $vm
+                if ($vm.role -eq "SQLAO"){
+                    if (-not $vm.OtherNode) {
+                        $primaryNode = $vmListFull | Where-Object {$_.OtherNode -eq $vm.vmName}
+                    }
+                }
+                $SiteServer = $vmListFull | Where-Object {$_.RemoteSQLVM -eq $PrimaryNode.vmName}
+                if ($SiteServer)
+                 {
+                    $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)"
+                 }
+                 else {
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                 }
+            }
             }
 
             $comment = $c | ConvertTo-Json
@@ -663,7 +680,7 @@ function Add-RDCManServerToGroup {
     if ($ForceOverwrite) {
         #Delete Old Records and let them be regenerated
 
-        $displayNameList = @($displayName, $serverName, $displayName + " (Missing IP)")
+        $displayNameList = @($displayName, $serverName, ($displayName + " (Missing IP)"))
         if ($username) {
             $displayNameList += $displayName + "($username)"
         }
