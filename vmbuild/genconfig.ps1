@@ -2331,6 +2331,8 @@ function Select-ExistingSubnets {
             $subnetListNew = $subnetList
         }
 
+        $subnetListNew = $subnetListNew | Sort-Object -Property { [System.Version]$_ } | Get-Unique
+
         if ($configToCheck) {
             $subnetListModified = Get-EnhancedSubnetList -subnetList $subnetListNew -ConfigToCheck $ConfigToCheck
         }
