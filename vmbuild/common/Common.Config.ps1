@@ -1622,6 +1622,30 @@ Function Write-OrangePoint {
     }
 }
 
+
+function Convert-vmNotesToOldFormat {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string] $vmName
+    )
+
+    $newNote = [PSCustomObject]@{}
+
+    $propsToInclude = @("success", "role", "deployedOS", "domain", "adminName", "network", "prefix", "siteCode", "parentSiteCode", "cmInstallDir", "sqlVersion" ,"sqlInstanceName", "sqlInstanceDir", "lastupdate" )
+    $currentNotes = (Get-vm -VMName $vmName).Notes
+    Write-Host "`nOld Notes:`n$currentNotes`n"
+    $props = ($currentNotes | Convertfrom-json).psobject.members | Where-Object {$_.Name -in $propsToInclude}
+    foreach ($prop in $props) {
+        $newNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+    }
+
+    $newJson = ($newNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
+    Write-Host "`nNew Notes:`n$newJson`n"
+    Set-VM -Name $vmName -Notes $newJson
+
+}
+
 Function Show-Summary {
     [CmdletBinding()]
     param (
