@@ -508,6 +508,14 @@ class WaitForExtendSchemaFile {
 
         Write-Verbose "Extended the Active Directory schema..."
 
+        # Force AD Replication
+        $domainControllers = Get-ADDomainController -Filter *
+        if ($domainControllers.Count -gt 1) {
+            Write-Verbose "Forcing AD Replication on $($domainControllers.Name -join ',')"
+            $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
+            Start-Sleep -Seconds 3
+        }
+
         & $extadschpath | out-null
 
         Write-Verbose "Done."

@@ -156,6 +156,14 @@ $Configuration.ScriptWorkflow.Status = "Running"
 $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
+# Force AD Replication
+$domainControllers = Get-ADDomainController -Filter *
+if ($domainControllers.Count -gt 1) {
+    Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
+    $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
+    Start-Sleep -Seconds 3
+}
+
 if ($scenario -eq "Standalone") {
 
     #Install CM and Config
