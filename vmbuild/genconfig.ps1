@@ -1872,7 +1872,12 @@ function Show-ExistingNetwork {
         }
     }
     if ($role -eq "PassiveSite") {
-        $existingPassive = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
+        if (-not $global:Config) {
+            $existingPassive = Get-List -type VM -domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
+        }
+        else {
+            $existingPassive = Get-List2 -deployConfig $global:Config | Where-Object { $_.Role -eq "PassiveSite" }
+        }
         $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
 
         $PossibleSS = @()
@@ -5002,7 +5007,7 @@ function Select-VirtualMachines {
                     $role = "PassiveSite"
                 }
 
-                $os = Select-OSForNew -Role $role
+
                 $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
 
                 if ($role -eq "Secondary") {
@@ -5016,11 +5021,15 @@ function Select-VirtualMachines {
                     $existingPassive = @()
                     $existingSS = @()
 
-                    $existingPassive += Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
-                    $existingSS += Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+                    #$existingPassive += Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
+                    #$existingSS += Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
 
-                    $exisitingPassive += $global:config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
-                    $existingSS += $global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+                    #$exisitingPassive += $global:config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
+                    #$existingSS += $global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+
+
+                    $existingPassive += Get-List2 -deployConfig $global:config | Where-Object { $_.Role -eq "PassiveSite" }
+                    $existingSS += Get-List2 -deployConfig $global:config | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
 
                     $existingSS = $existingSS | Where-Object { $_ }
                     $exisitingPassive = $exisitingPassive | Where-Object { $_ }
@@ -5044,7 +5053,7 @@ function Select-VirtualMachines {
                     }
                     $SiteCode = $result
                 }
-
+                $os = Select-OSForNew -Role $role
 
                 $machineName = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os -parentSiteCode $parentSiteCode -SiteCode $siteCode -ReturnMachineName $true
                 if ($role -eq "DC") {
