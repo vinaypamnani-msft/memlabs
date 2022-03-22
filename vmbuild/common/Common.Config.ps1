@@ -674,13 +674,20 @@ function Get-ExistingForNetwork {
         [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember", "Secondary")]
         [string]$Role,
         [Parameter(Mandatory = $false, HelpMessage = "VMName to exclude")]
-        [string] $exclude = $null
+        [string] $exclude = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Config To Check")]
+        [object] $config
     )
 
     try {
 
         $existingValue = @()
-        $vmList = Get-List -Type VM | Where-Object { $_.network -eq $Network }
+        if ($config) {
+            $vmList = Get-List2 -DeployConfig $config | Where-Object { $_.network -eq $Network }
+        }
+        else {
+            $vmList = Get-List -Type VM | Where-Object { $_.network -eq $Network }
+        }
         foreach ($vm in $vmList) {
             if ($exclude -and $vm.VmName -eq $exclude) {
                 continue

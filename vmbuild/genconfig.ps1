@@ -2312,21 +2312,31 @@ function Select-ExistingSubnets {
         $Role = $currentVM.Role
     }
 
+    $rolesToCheck = @("Primary", "CAS", "Secondary")
     while ($valid -eq $false) {
         $customOptions = @{ "N" = "add New Subnet to domain" }
         $subnetList = @()
         $subnetList += Get-NetworkList -DomainName $Domain | Select-Object -Expand Network | Sort-Object | Get-Unique
-        if ($CurrentNetworkIsValid -and $configToCheck) {
+        if ($ConfigToCheck) {
+            foreach ($vm in $configToCheck.virtualMachines) {
+                if ($vm.Network) {
+                    $subnetList += $vm.Network
+                }
+            }
             $subnetList += $ConfigToCheck.vmOptions.network
         }
+
+        #if ($CurrentNetworkIsValid -and $configToCheck) {
+        #    $subnetList += $ConfigToCheck.vmOptions.network
+        #}
         $subnetListNew = @()
-        if ($Role -in ("Primary", "CAS", "Secondary")) {
+        if ($Role -in $rolesToCheck) {
             $SiteServerRole = $true
             foreach ($subnet in $subnetList) {
                 # If a subnet has a Primary or a CAS in it.. we can not add either.
-                $existingRolePri = Get-ExistingForNetwork -Network $subnet -Role Primary
-                $existingRoleCAS = Get-ExistingForNetwork -Network $subnet -Role CAS
-                $existingRoleSec = Get-ExistingForNetwork -Network $subnet -Role Secondary
+                $existingRolePri = Get-ExistingForNetwork -Network $subnet -Role Primary -config $configToCheck
+                $existingRoleCAS = Get-ExistingForNetwork -Network $subnet -Role CAS -config $configToCheck
+                $existingRoleSec = Get-ExistingForNetwork -Network $subnet -Role Secondary -config $configToCheck
                 if ($null -eq $existingRolePri -and $null -eq $existingRoleCAS -and $null -eq $existingRoleSec) {
                     $subnetListNew += $subnet
                 }
