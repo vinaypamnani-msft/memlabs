@@ -2277,6 +2277,93 @@ function Get-EnhancedSubnetList {
 
     return $subnetListModified
 }
+
+function Get-ValidNetworksForVM {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Current VM")]
+        [object] $CurrentVM = $null,
+        [Parameter(Mandatory = $true, HelpMessage = "config")]
+        [object] $ConfigToCheck
+
+    )
+
+    $Domain = $ConfigToCheck.vmOptions.DomainName
+    #All Existing Subnets
+    $subnetList = @()
+    $subnetList += Get-NetworkList -DomainName $Domain | Select-Object -Expand Network | Sort-Object | Get-Unique
+
+    foreach ($vm in $configToCheck.virtualMachines) {
+        if ($vm.Network) {
+            $subnetList += $vm.Network
+        }
+    }
+    $subnetList += $ConfigToCheck.vmOptions.network
+
+    $subnetList = $subnetList | Sort-Object -Property { [System.Version]$_ } | Get-Unique
+
+    $rolesToCheck = @("Primary", "CAS", "Secondary")
+
+    if ($CurrentVM.Role -notin $rolesToCheck) {
+        return $subnetList
+    }
+
+
+    $vmList = Get-List2 -DeployConfig $ConfigToCheck
+
+    $currentVMNetwork = $CurrentVM.network
+    if (-not $currentVMNetwork) {
+        $currentVMNetwork = $configToCheck.vmOptions.network
+    }
+    $return = @()
+
+    foreach ($subnet in $subnetList) {
+        $found = $false
+        foreach ($vm in $vmList | Where-Object { $_.Network -eq $subnet }) {
+            if ($found) {
+                continue
+            }
+            $found = $false
+            if ($vm.vmName -eq $currentVM.VmName) {
+                continue
+            }
+            switch ($vm.Role) {
+                "Primary" {
+                    if ($CurrentVM.Role -eq "CAS" -and $vm.ParentSiteCode -eq $CurrentVM.SiteCode) {
+                        continue
+                    }
+                    else {
+                        $found = $true
+                    }
+
+                }
+                "CAS" {
+                    if ($CurrentVM.Role -eq "Primary" -and $vm.SiteCode -eq $CurrentVM.ParentSiteCode) {
+                        continue
+                    }
+                    else {
+                        $found = $true
+                    }
+
+                }
+                "Secondary" {
+                    $found = $true
+
+                }
+                Default {
+
+                }
+            }
+        }
+        if (-not $found) {
+            $return += $subnet
+        }
+    }
+
+
+    return $return
+
+}
 function Select-ExistingSubnets {
     [CmdletBinding()]
     param (
@@ -2348,6 +2435,9 @@ function Select-ExistingSubnets {
 
         $subnetListNew = $subnetListNew | Sort-Object -Property { [System.Version]$_ } | Get-Unique
 
+        if ($currentVM -and $configToCheck) {
+            $subnetListNew = Get-ValidNetworksForVM -CurrentVM $currentVM -ConfigToCheck $ConfigToCheck
+        }
         if ($configToCheck) {
             $subnetListModified = Get-EnhancedSubnetList -subnetList $subnetListNew -ConfigToCheck $ConfigToCheck
         }
