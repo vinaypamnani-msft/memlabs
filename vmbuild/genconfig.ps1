@@ -4201,10 +4201,10 @@ function Select-Options {
                         $network = Select-Subnet
                     }
 
-                    if ($network -eq $global:config.vmOptions.network) {
-                        write-host2 -ForegroundColor Khaki "Not changing network as this is the default network."
-                        continue MainLoop
-                    }
+                    #if ($network -eq $global:config.vmOptions.network) {
+                    #    write-host2 -ForegroundColor Khaki "Not changing network as this is the default network."
+                    #    continue MainLoop
+                    #}
                     if ($network) {
                         if ($fakeNetwork) {
                             $property | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
