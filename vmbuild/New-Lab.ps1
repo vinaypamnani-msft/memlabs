@@ -140,6 +140,15 @@ try {
         Write-Host ("`r`n" * 6)
     }
 
+
+    $principal = new-object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))){
+        Write-RedX "MemLabs requires administrative rights to configure. Please run vmbuild.cmd as administrator." -ForegroundColor Red
+        Write-Host
+        Start-Sleep -seconds 60
+        return $false
+    }
+
     Set-QuickEdit -DisableQuickEdit
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
