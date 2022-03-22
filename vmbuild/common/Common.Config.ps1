@@ -1236,12 +1236,19 @@ function Get-List {
         [object] $DeployConfig
     )
 
+    $doSmartUpdate = $SmartUpdate.IsPresent
+
     #Get-PSCallStack | out-host
-    $mutexName = "GetList" + $pid
-    $mtx = New-Object System.Threading.Mutex($false, $mutexName)
-    write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly -Verbose
-    [void]$mtx.WaitOne()
-    write-log "acquired '$mutexName' Mutex" -LogOnly -Verbose
+    if ($global:DisableSmartUpdate -eq $true) {
+        $doSmartUpdate = $false
+    }
+    else {
+        $mutexName = "GetList" + $pid
+        $mtx = New-Object System.Threading.Mutex($false, $mutexName)
+        write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly -Verbose
+        [void]$mtx.WaitOne()
+        write-log "acquired '$mutexName' Mutex" -LogOnly -Verbose
+    }
     try {
 
         if ($FlushCache.IsPresent) {
@@ -1265,7 +1272,7 @@ function Get-List {
             $global:vm_List = $null
         }
 
-        if ($SmartUpdate.IsPresent) {
+        if ($doSmartUpdate) {
             if ($global:vm_List) {
                 try {
                     $virtualMachines = Get-VM
@@ -1407,8 +1414,11 @@ function Get-List {
         return $null
     }
     finally {
-        [void]$mtx.ReleaseMutex()
-        [void]$mtx.Dispose()
+        if ($mtx) {
+            [void]$mtx.ReleaseMutex()
+            [void]$mtx.Dispose()
+            $mtx = $null
+        }
     }
 }
 
@@ -1632,10 +1642,10 @@ function Convert-vmNotesToOldFormat {
 
     $newNote = [PSCustomObject]@{}
 
-    $propsToInclude = @("success", "role", "deployedOS", "domain", "adminName", "network", "prefix", "siteCode", "parentSiteCode", "cmInstallDir", "sqlVersion" ,"sqlInstanceName", "sqlInstanceDir", "lastupdate" )
+    $propsToInclude = @("success", "role", "deployedOS", "domain", "adminName", "network", "prefix", "siteCode", "parentSiteCode", "cmInstallDir", "sqlVersion" , "sqlInstanceName", "sqlInstanceDir", "lastupdate" )
     $currentNotes = (Get-vm -VMName $vmName).Notes
     Write-Host "`nOld Notes:`n$currentNotes`n"
-    $props = ($currentNotes | Convertfrom-json).psobject.members | Where-Object {$_.Name -in $propsToInclude}
+    $props = ($currentNotes | Convertfrom-json).psobject.members | Where-Object { $_.Name -in $propsToInclude }
     foreach ($prop in $props) {
         $newNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
     }

@@ -802,7 +802,9 @@ function Test-Configuration {
     )
     #Get-PSCallStack | out-host
 
+
     try {
+
         $return = [PSCustomObject]@{
             Valid        = $false
             DeployConfig = $null
@@ -815,6 +817,9 @@ function Test-Configuration {
         if ($FilePath) {
             try {
                 $configObject = Get-Content $FilePath -Force | ConvertFrom-Json
+                #update cache, and then disable re-loading it until we complete
+                get-list2 -deployConfig $configObject -SmartUpdate | out-null
+                $global:DisableSmartUpdate = $true
             }
             catch {
                 $return.Message = "Failed to load $FilePath as JSON. Please check if the config is valid or create a new one using genconfig.ps1"
@@ -1178,6 +1183,7 @@ function Test-Configuration {
         return $return
     }
     finally {
+        $global:DisableSmartUpdate = $false
         Write-Progress2 -Activity "Validating Configuration"  -Completed
     }
 }
