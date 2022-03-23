@@ -403,13 +403,15 @@ function Invoke-SmartStartVMs {
         )
 
         $worked = $true
+        $returnWait = $null
         if ($vm.State -ne "Running") {
             if (-not $quiet ) { Show-StatusEraseLine "$($vm.Role) [$($vm.vmName)] state is [$($vm.State)]. Starting VM" -indent }
             $worked = start-vm2 $vm.vmName -PassThru
             if (-not $quiet) {
                 if ($worked) {
                     if ($wait -ne 0) {
-                        Write-GreenCheck "VM [$($vm.vmName)] has been started. Waiting $wait Seconds.                                                                "
+                        Write-GreenCheck "VM [$($vm.vmName)] has been started. Waiting $wait Seconds.
+                        $returnWait = $wait                                                                "
                     }
                     else {
                         Write-GreenCheck "VM [$($vm.vmName)] has been started.                                                                 "
@@ -429,8 +431,12 @@ function Invoke-SmartStartVMs {
                 Write-Log -Failure "Failed to start $($vm.vmName)"
             }
         }
-
-        return $worked
+        if ($returnWait) {
+            return $returnWait
+        }
+        else {
+            return $worked
+        }
     }
 
 
@@ -442,57 +448,97 @@ function Invoke-SmartStartVMs {
             if (-not $worked) {
                 $failures++
             }
+            if ($worked -is [int]) {
+                $sleepSecs = $worked
+            }
         }
         return $failures
     }
 
+    $sleepSecs = $null
     if ($CritList.DC) {
         foreach ($dc in $CritList.DC) {
             $worked = invoke-StartVM -vm $dc -quiet:$quiet -wait $waitSecondsDC
             if (-not $worked) {
                 $failures++
             }
+            else {
+                if ($worked -is [int]) {
+                    $sleepSecs = $worked
+                }
+            }
         }
-        # start-Sleep -Seconds $waitSecondsDC
+        if ($sleepSecs) {
+            start-Sleep -Seconds $sleepSecs
+        }
     }
-
+    $sleepSecs = $null
     if ($CritList.FS) {
         foreach ($fs in $CritList.FS) {
             $worked = invoke-StartVM -vm $fs -quiet:$quiet -wait $waitSeconds
             if (-not $worked) {
                 $failures++
             }
+            else {
+                if ($worked -is [int]) {
+                    $sleepSecs = $worked
+                }
+            }
         }
-        # start-sleep $waitSeconds
+        if ($sleepSecs) {
+            start-Sleep -Seconds $sleepSecs
+        }
     }
+    $sleepSecs = $null
     if ($CritList.SQL) {
         foreach ($sql in $CritList.SQL) {
             $worked = invoke-StartVM -vm $sql -quiet:$quiet -wait $waitSeconds
             if (-not $worked) {
                 $failures++
             }
+            else {
+                if ($worked -is [int]) {
+                    $sleepSecs = $worked
+                }
+            }
         }
-        # start-sleep $waitSeconds
+        if ($sleepSecs) {
+            start-Sleep -Seconds $sleepSecs
+        }
     }
-
+    $sleepSecs = $null
     if ($CritList.CAS) {
         foreach ($ss in $CritList.CAS) {
             $worked = invoke-StartVM -vm $ss -quiet:$quiet -wait $waitSeconds
             if (-not $worked) {
                 $failures++
             }
+            else {
+                if ($worked -is [int]) {
+                    $sleepSecs = $worked
+                }
+            }
         }
-        # start-sleep $waitSeconds
+        if ($sleepSecs) {
+            start-Sleep -Seconds $sleepSecs
+        }
     }
-
+    $sleepSecs = $null
     if ($CritList.PRI) {
         foreach ($ss in $CritList.PRI) {
             $worked = invoke-StartVM -vm $ss -quiet:$quiet -wait $waitSeconds
             if (-not $worked) {
                 $failures++
             }
+            else {
+                if ($worked -is [int]) {
+                    $sleepSecs = $worked
+                }
+            }
         }
-        # start-sleep $waitSeconds
+        if ($sleepSecs) {
+            start-Sleep -Seconds $sleepSecs
+        }
     }
     if ($CriticalOnly -eq $false) {
         foreach ($vm in $CritList.NONCRIT) {
@@ -752,14 +798,14 @@ function ConvertTo-DeployConfigEx {
 
                 $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "DomainMember" -and -not ($_.SqlVersion) }
                 $clientPush = @()
-                $clientPush += ($ClientNames | Where-Object { $_.network -eq $thisVMNetwork}).vmName
+                $clientPush += ($ClientNames | Where-Object { $_.network -eq $thisVMNetwork }).vmName
 
 
-                $Secondaries =  get-list2 -deployConfig $deployConfig | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }
+                $Secondaries = get-list2 -deployConfig $deployConfig | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }
                 foreach ($second in $Secondaries) {
                     $clientPush += ($ClientNames | Where-Object { $_.network -eq $second.network }).vmName
                 }
-                $clientPush = ($clientPush | Where-Object { $_ -and $_.Trim()} | select-object -unique)
+                $clientPush = ($clientPush | Where-Object { $_ -and $_.Trim() } | select-object -unique)
                 if ($clientPush) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "ClientPush" -Value $clientPush -Force
                 }
