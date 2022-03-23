@@ -2861,7 +2861,9 @@ function get-ValidResponse {
                 }
                 if ($response2) {
                     $response = $response + $response2
-                    write-host
+                    if ([String]::IsNullOrWhiteSpace($response2)) {
+                        write-host
+                    }
                 }
             }
         }
@@ -4094,9 +4096,9 @@ function Select-Options {
         #    $i++
         #    $fakeNetwork = $i
         #    $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
-            #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
+        #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
         #    Write-Option $i "$($("network").PadRight($padding," "")) = $network"
-#        }
+        #        }
 
         if ($null -ne $additionalOptions) {
             foreach ($item in $additionalOptions.keys) {
@@ -4158,10 +4160,10 @@ function Select-Options {
                 $done = $true
             }
             else {
+                if ($fakeNetwork -and ($i -eq $fakeNetwork)) {
+                    $i++
+                }
                 if (-not ($response -eq $i)) {
-                    if ($fakeNetwork -and ($i -eq $fakeNetwork)) {
-                        $i++
-                    }
                     continue
                 }
                 $value = $property."$($item)"
@@ -5101,7 +5103,7 @@ function Select-VirtualMachines {
         [string] $response = $null
     )
     while ($true) {
-        Write-Host
+        #Write-Host
         Write-Verbose "8 Select-VirtualMachines"
         if (-not $response) {
             $i = 0
