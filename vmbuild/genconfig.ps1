@@ -20,11 +20,12 @@ if (-not $InternalUseOnly.IsPresent) {
 
     # Dot source common
     . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
+
+    Write-Host2 -ForegroundColor Cyan ""
 }
 
 $configDir = Join-Path $PSScriptRoot "config"
 
-Write-Host2 -ForegroundColor Cyan ""
 Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "New-Lab Configuration generator:"
 Write-Host2 -ForegroundColor DeepSkyBlue "You can use this tool to customize your MemLabs deployment."
 Write-Host2 -ForegroundColor DeepSkyBlue "Press Ctrl-C to exit without saving."
