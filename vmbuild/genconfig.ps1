@@ -2134,10 +2134,10 @@ function Select-Subnet {
 
 function Show-SubnetNote {
     #  $noteColor = $Global:Common.Colors.GenConfigTip
-    $textColor = $Global:Common.Colors.GenConfigNormal
+    $textColor = $Global:Common.Colors.GenConfigHelp
     #  $highlightColor = $Global:Common.Colors.GenConfigHelpHighlight
     #Get-PSCallStack | out-host
-    Write-Host
+
     #write-host2 -ForegroundColor $noteColor "Note: " -NoNewline
     #write-host2 -foregroundcolor $textColor "You can only have 1 " -NoNewLine
     #write-host2 -ForegroundColor $highlightColor "Primary" -NoNewLine
@@ -2145,7 +2145,7 @@ function Show-SubnetNote {
     #write-host2 -ForegroundColor $highlightColor "Secondary" -NoNewLine
     #write-host2 -ForegroundColor $textColor " server per " -NoNewline
     #write-host2 -ForegroundColor $highlightColor "subnet" -NoNewline
-    write-host2 -ForegroundColor $textColor ""
+
     write-host2 -ForegroundColor $textColor "   MemLabs automatically configures this subnet as a Boundary Group for the specified SiteCode."
     write-host2 -ForegroundColor $textColor "   This limitation exists to prevent overlapping Boundary Groups."
     write-host2 -ForegroundColor $textColor "   Subnets without a siteserver do NOT automatically get added to any boundary groups."
@@ -4013,7 +4013,6 @@ function Select-Options {
         $isVM = $false
         # Get the Property Names and Values.. Present as Options.
         foreach ($item in (Get-SortedProperties $property)) {
-            $i = $i + 1
             $value = $property."$($item)"
             if ($item -eq "vmName") {
                 $isVM = $true
@@ -4023,7 +4022,21 @@ function Select-Options {
             }
             if ($item -eq "role" -and $value -eq "DC") {
                 $isVM = $false
+            }
+        }
+        $fakeNetwork = $null
+        foreach ($item in (Get-SortedProperties $property)) {
+            $i = $i + 1
+            $value = $property."$($item)"
 
+
+            if ($isVM -and $i -eq 2) {
+
+                $fakeNetwork = $i
+                $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
+                #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
+                Write-Option $i "$($("network").PadRight($padding," "")) = $network"
+                $i++
             }
             #$padding = 27 - ($i.ToString().Length)
             $padding = 26
@@ -4076,14 +4089,14 @@ function Select-Options {
             }
             Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
         }
-        $fakeNetwork = $null
-        if ($isVM) {
-            $i++
-            $fakeNetwork = $i
-            $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
+
+        #if ($isVM) {
+        #    $i++
+        #    $fakeNetwork = $i
+        #    $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
             #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
-            Write-Option $i "$($("network").PadRight($padding," "")) = $network"
-        }
+        #    Write-Option $i "$($("network").PadRight($padding," "")) = $network"
+#        }
 
         if ($null -ne $additionalOptions) {
             foreach ($item in $additionalOptions.keys) {
@@ -4146,6 +4159,9 @@ function Select-Options {
             }
             else {
                 if (-not ($response -eq $i)) {
+                    if ($fakeNetwork -and ($i -eq $fakeNetwork)) {
+                        $i++
+                    }
                     continue
                 }
                 $value = $property."$($item)"
@@ -4205,6 +4221,9 @@ function Select-Options {
                     }
 
                     if ($network -eq $global:config.vmOptions.network) {
+                        if ($property.Network) {
+                            $property.PsObject.Members.Remove("network")
+                        }
                         #write-host2 -ForegroundColor Khaki "Not changing network as this is the default network."
                         continue MainLoop
                     }
