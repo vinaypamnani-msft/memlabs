@@ -117,7 +117,8 @@ function Start-PhaseJobs {
         [object]$deployConfig
     )
 
-    Write-Progress2 "Preparing Phase $Phase" -Status "Creating jobs" -PercentComplete 20
+    $global:preparePhasePercent = 5
+    Write-Progress2 "Preparing Phase $Phase" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
@@ -127,7 +128,6 @@ function Start-PhaseJobs {
     $multiNodeDsc = $true
     $ConfigurationData = $null
     if ($Phase -gt 1) {
-        Write-Progress2 "Preparing Phase $Phase" -Status "Getting configuration data" -PercentComplete 30
         $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
         if (-not $ConfigurationData) {
             # Nothing applicable for this phase
@@ -148,8 +148,8 @@ function Start-PhaseJobs {
         $multiNodeDsc = $false
     }
 
-    $percent = 40
-    Write-Progress2 "Preparing Phase $Phase" -Status "Updating VM List" -PercentComplete $percent
+    $global:preparePhasePercent = 50
+    Write-Progress2 "Preparing Phase $Phase" -Status "Updating VM List" -PercentComplete $global:preparePhasePercent
 
     $global:vm_remove_list = @()
     $maxVmNameLength = 0
@@ -157,8 +157,8 @@ function Start-PhaseJobs {
     $existingVMs = Get-List -Type VM -SmartUpdate
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
-        $percent++
-        Write-Progress2 "Preparing Phase $Phase" -Status "Evaluating virtual machines" -PercentComplete $percent
+        $global:preparePhasePercent++
+        Write-Progress2 "Preparing Phase $Phase" -Status "Evaluating virtual machine $($currentItem.vmName)" -PercentComplete $global:preparePhasePercent
 
         # Don't touch non-hidden VM's in Phase 0
         if ($Phase -eq 0 -and -not $currentItem.hidden) {
@@ -201,8 +201,6 @@ function Start-PhaseJobs {
             $maxRoleNameLength = $currentItem.role.Length
         }
 
-        $percent++
-        Write-Progress2 "Preparing Phase $Phase" -Status "Creating job for $($currentItem.vmName)" -PercentComplete $percent
         if ($Phase -eq 0 -or $Phase -eq 1) {
             # Create/Prepare VM
             $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
@@ -469,6 +467,9 @@ function Get-Phase2ConfigurationData {
 
     foreach ($vm in $deployConfig.virtualMachines) {
 
+        $global:preparePhasePercent++
+        Write-Progress2 "Preparing Phase 2" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
+
         # Filter out workgroup machines
         if ($vm.role -notin "WorkgroupMember", "AADClient", "InternetClient", "OSDClient", "DC") {
             return $cd
@@ -494,6 +495,9 @@ function Get-Phase3ConfigurationData {
 
     $NumberOfNodesAdded = 0
     foreach ($vm in $deployConfig.virtualMachines) {
+
+        $global:preparePhasePercent++
+        Write-Progress2 "Preparing Phase 3" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent -Force
 
         # Filter out workgroup machines
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
@@ -536,6 +540,10 @@ function Get-Phase4ConfigurationData {
     $NumberOfNodesAdded = 0
     #foreach ($vm in $deployConfig.virtualMachines | Where-Object { ($_.SqlVersion -and -not ($_.Hidden)) -or $_.Role -eq "DC" }) {
     foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.SqlVersion -or $_.Role -eq "DC" }) {
+
+        $global:preparePhasePercent++
+        Write-Progress2 "Preparing Phase 4" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
+
         # Filter out workgroup machines
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
             continue
@@ -581,6 +589,9 @@ function Get-Phase5ConfigurationData {
     if ($primaryNodes) {
 
         foreach ($primaryNode in $primaryNodes) {
+
+            $global:preparePhasePercent++
+            Write-Progress2 "Preparing Phase 5" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
             $primary = @{
                 # Replace with the name of the actual target node.
@@ -648,6 +659,10 @@ function Get-Phase6ConfigurationData {
 
         $fsVMsAdded = @()
         foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP") }) {
+
+            $global:preparePhasePercent++
+            Write-Progress2 "Preparing Phase 6" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
+
             $newItem = @{
                 NodeName = $vm.vmName
                 Role     = $vm.Role

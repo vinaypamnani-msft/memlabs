@@ -147,7 +147,6 @@ Function Write-Progress2Impl {
                 $force = $true
                 $OriginalProgressPreference = $Global:ProgressPreference
                 $Global:ProgressPreference = 'Continue'
-                Write-Log "Write-Status: Force is true" -verbose -LogOnly
             }
 
             $Activityvalue = $null
@@ -197,7 +196,6 @@ Function Write-Progress2Impl {
             if ($force) {
                 $OriginalProgressPreference = $Global:ProgressPreference
                 $Global:ProgressPreference = 'Continue'
-                Write-Log "Write-Status: Force2 is true" -verbose -LogOnly
             }
             if ($Activity) {
                 $Activity = $Activity.TrimEnd()
