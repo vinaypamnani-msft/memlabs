@@ -1007,7 +1007,7 @@ function Get-ValidSubnets {
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [object] $configToCheck = $global:config,
         [Parameter(Mandatory = $false, HelpMessage = "Allow Existing")]
-        [bool] $AllowExisting = $true,
+        [bool] $AllowExisting = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Networks to Exclude")]
         [object] $excludeList = @(),
         [Parameter(Mandatory = $false, HelpMessage = "VM to Check")]
@@ -1031,32 +1031,33 @@ function Get-ValidSubnets {
 
     $subnetlist = @()
     if ($vmToCheck) {
-        foreach ($vm in $configToCheck.virtualMachines) {
-            if ($vm.network) {
-                if ($vm.network -in $usedSubnets) {
-                    continue
-                }
-                if ($vm.network -in $subnetList) {
-                    continue
-                }
-            }
-            switch ($vmToCheck.Role) {
-                "Primary" {
-                    if ($vm.Role -in ("Primary", "Secondary")) {
-                        continue
-                    }
-                }
-                "Secondary" {
-                    if ($vm.Role -in ("Primary", "Secondary")) {
-                        continue
-                    }
-                }
-                Default {
-                    $subnetList += $vm.network
-                }
-            }
-        }
-    }
+        $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck
+        #foreach ($vm in $configToCheck.virtualMachines) {
+        #    if ($vm.network) {
+        #        if ($vm.network -in $usedSubnets) {
+        #            continue
+        #        }
+        #        if ($vm.network -in $subnetList) {
+        #            continue
+        #        }
+        #    }
+        #    switch ($vmToCheck.Role) {
+        #        "Primary" {
+        #            if ($vm.Role -in ("Primary", "Secondary")) {
+        #                continue
+        #            }
+        #        }
+        #        "Secondary" {
+        #            if ($vm.Role -in ("Primary", "Secondary")) {
+        #                continue
+        #            }
+        #        }
+        #        Default {
+        #            $subnetList += $vm.network
+        #        }
+        #    }
+        #}
+    }#
 
     $usedSubnets += $subnetList
     $subnetList = @($subnetList | Sort-Object -Property { [System.Version]$_ } | Get-Unique)
@@ -1616,7 +1617,7 @@ function Select-Config {
     $files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
     $files += Get-ChildItem $ConfigPath\*.json -Include "NoConfigMgr.json"
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
-    $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property CreationTime
+    $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property LastWriteTime
     write-host $ConfigPath
     if ($ConfigPath.EndsWith("tests")) {
         $files = $files | sort-Object -Property Name
@@ -2306,6 +2307,7 @@ function Get-ValidNetworksForVM {
     $rolesToCheck = @("Primary", "CAS", "Secondary")
 
     if ($CurrentVM.Role -notin $rolesToCheck) {
+        Write-Verbose "Current VM $($CurrentVm.Role) returning all subnets"
         return $subnetList
     }
 
@@ -2324,7 +2326,6 @@ function Get-ValidNetworksForVM {
             if ($found) {
                 continue
             }
-            $found = $false
             if ($vm.vmName -eq $currentVM.VmName) {
                 continue
             }
