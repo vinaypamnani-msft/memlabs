@@ -417,16 +417,28 @@ function Get-ConfigurationData {
 
     if ($cd) {
 
+        $global:preparePhasePercent++
+        Start-Sleep -Milliseconds 201
+        Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VM's are running" -PercentComplete $global:preparePhasePercent
+
+        $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
         $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+
+        $global:preparePhasePercent++
+        Start-Sleep -Milliseconds 201
+        Write-Progress2 "Preparing Phase $Phase" -Status "Starting required VMs (if needed)" -PercentComplete $global:preparePhasePercent
+
         $failures = Invoke-SmartStartVMs -CritList $critlist
         if ($failures -ne 0) {
             write-log "$failures VM(s) could not be started" -Failure
         }
 
-        $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
-
         $dc = $cd.AllNodes | Where-Object { $_.Role -eq "DC" }
         if ($dc) {
+
+            $global:preparePhasePercent++
+            Write-Progress2 "Preparing Phase $Phase" -Status "Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent
+
             $OriginalProgressPreference = $Global:ProgressPreference
             try {
                 $Global:ProgressPreference = 'SilentlyContinue'
@@ -497,7 +509,7 @@ function Get-Phase3ConfigurationData {
     foreach ($vm in $deployConfig.virtualMachines) {
 
         $global:preparePhasePercent++
-        Write-Progress2 "Preparing Phase 3" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent -Force
+        Write-Progress2 "Preparing Phase 3" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
         # Filter out workgroup machines
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {

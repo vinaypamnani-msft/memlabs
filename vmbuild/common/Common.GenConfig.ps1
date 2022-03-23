@@ -453,7 +453,7 @@ function Invoke-SmartStartVMs {
                 $failures++
             }
         }
-        start-Sleep -Seconds $waitSecondsDC
+        # start-Sleep -Seconds $waitSecondsDC
     }
 
     if ($CritList.FS) {
@@ -463,7 +463,7 @@ function Invoke-SmartStartVMs {
                 $failures++
             }
         }
-        start-sleep $waitSeconds
+        # start-sleep $waitSeconds
     }
     if ($CritList.SQL) {
         foreach ($sql in $CritList.SQL) {
@@ -472,7 +472,7 @@ function Invoke-SmartStartVMs {
                 $failures++
             }
         }
-        start-sleep $waitSeconds
+        # start-sleep $waitSeconds
     }
 
     if ($CritList.CAS) {
@@ -482,7 +482,7 @@ function Invoke-SmartStartVMs {
                 $failures++
             }
         }
-        start-sleep $waitSeconds
+        # start-sleep $waitSeconds
     }
 
     if ($CritList.PRI) {
@@ -492,7 +492,7 @@ function Invoke-SmartStartVMs {
                 $failures++
             }
         }
-        start-sleep $waitSeconds
+        # start-sleep $waitSeconds
     }
     if ($CriticalOnly -eq $false) {
         foreach ($vm in $CritList.NONCRIT) {
