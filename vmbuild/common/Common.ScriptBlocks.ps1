@@ -1014,8 +1014,19 @@ $global:VM_Config = {
                                 if ($errorObject.FullyQualifiedErrorId -ne "NonTerminatingErrorFromProvider") {
                                     $msg = "$errorResourceId`: $($errorObject.FullyQualifiedErrorId) $($errorObject.Exception.Message)"
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Failure -OutputStream
-                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg"
-                                    $failure = $true
+                                    $FailtimeSpan = New-TimeSpan -Minutes 30
+                                    if ($FailStopWatch -and $FailStopWatch.Elapsed.TotalMinutes -gt 30) {
+                                        $FailStopWatch.Stop()
+                                        $failure = $true
+                                    }
+                                    if (-not $FailStopWatch) {
+                                        $FailStopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
+                                        $FailStopWatch.Start()
+                                    }
+                                    Write-ProgressElapsed -stopwatch $FailStopWatch -timespan $FailtimeSpan -text "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg"
+                                    if (-not $failure) {
+                                        continue
+                                    }
                                 }
                                 else {
                                     Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC is attempting to restart"

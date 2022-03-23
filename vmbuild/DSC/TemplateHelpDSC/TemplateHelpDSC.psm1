@@ -147,7 +147,14 @@ class InstallSSMS {
         $ssmsSetup = "C:\temp\SSMS-Setup-ENU.exe"
         if (!(Test-Path $ssmsSetup)) {
             Write-Verbose "Downloading SSMS from $($this.DownloadUrl)..."
-            Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
+            try {
+                Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                ipconfig /flushdns
+                start-sleep -seconds 60
+                Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
+            }
         }
 
         # Install SSMS
@@ -358,7 +365,7 @@ class WriteEvent {
             if (-not $this.FileName) {
                 # For named-file, caller must ensure file exists with required nodes.
                 [hashtable]$Actions = @{
-                    ConfigurationFinished   = @{
+                    ConfigurationFinished = @{
                         Status    = 'NotStart'
                         StartTime = ''
                         EndTime   = ''
