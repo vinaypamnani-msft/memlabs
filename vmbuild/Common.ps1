@@ -153,7 +153,7 @@ Function Write-Progress2Impl {
             if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
                 $Activityvalue = $Activity.TrimEnd()
 
-                if ($Activityvalue.Contains("`n")){
+                if ($Activityvalue.Contains("`n")) {
                     Write-Log "$Activity contains new-line"
                 }
                 $PSBoundParameters['Activity'] = $Activityvalue
@@ -163,15 +163,18 @@ Function Write-Progress2Impl {
             if ($PSBoundParameters.TryGetValue('Status', [ref]$StatusValue)) {
                 $StatusValue = $StatusValue.TrimEnd()
 
-                if ($StatusValue.Contains("`n")){
+                if ($StatusValue.Contains("`n")) {
                     Write-Log "$StatusValue contains new-line"
                 }
                 $PSBoundParameters['Status'] = $StatusValue
             }
 
-            if ($Global:LastStatus -ne $Status) {
-                Write-Log "Write-Status: Activity: $Activity  Status: $Status" -verbose -LogOnly
-                $Global:LastStatus = $Status
+            if ($Global:LastStatus -ne $Status + $Percent) {
+                Write-Log "Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
+                $Global:LastStatus = $Status + $Percent
+            }
+            else {
+                #Write-Log "Ignored Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
             }
 
             $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
@@ -199,14 +202,13 @@ Function Write-Progress2Impl {
             }
             if ($Activity) {
                 $Activity = $Activity.TrimEnd()
-                $Activity = "CXC"
-                if ($Activity.Contains("`n")){
+                if ($Activity.Contains("`n")) {
                     Write-Log "$Activity contains new-line"
                 }
             }
             if ($Status) {
                 $Status = $Status.TrimEnd()
-                if ($Status.Contains("`n")){
+                if ($Status.Contains("`n")) {
                     Write-Log "$Status contains new-line"
                 }
             }
