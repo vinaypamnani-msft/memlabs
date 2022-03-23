@@ -437,6 +437,7 @@ function Get-ConfigurationData {
         if ($dc) {
 
             $global:preparePhasePercent++
+            Start-Sleep -Milliseconds 201
             Write-Progress2 "Preparing Phase $Phase" -Status "Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent
 
             $OriginalProgressPreference = $Global:ProgressPreference
@@ -480,7 +481,6 @@ function Get-Phase2ConfigurationData {
     foreach ($vm in $deployConfig.virtualMachines) {
 
         $global:preparePhasePercent++
-        Write-Progress2 "Preparing Phase 2" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
         # Filter out workgroup machines
         if ($vm.role -notin "WorkgroupMember", "AADClient", "InternetClient", "OSDClient", "DC") {
@@ -509,7 +509,6 @@ function Get-Phase3ConfigurationData {
     foreach ($vm in $deployConfig.virtualMachines) {
 
         $global:preparePhasePercent++
-        Write-Progress2 "Preparing Phase 3" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
         # Filter out workgroup machines
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
@@ -554,7 +553,6 @@ function Get-Phase4ConfigurationData {
     foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.SqlVersion -or $_.Role -eq "DC" }) {
 
         $global:preparePhasePercent++
-        Write-Progress2 "Preparing Phase 4" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
         # Filter out workgroup machines
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
@@ -603,7 +601,6 @@ function Get-Phase5ConfigurationData {
         foreach ($primaryNode in $primaryNodes) {
 
             $global:preparePhasePercent++
-            Write-Progress2 "Preparing Phase 5" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
             $primary = @{
                 # Replace with the name of the actual target node.
@@ -673,7 +670,6 @@ function Get-Phase6ConfigurationData {
         foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP") }) {
 
             $global:preparePhasePercent++
-            Write-Progress2 "Preparing Phase 6" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
             $newItem = @{
                 NodeName = $vm.vmName
