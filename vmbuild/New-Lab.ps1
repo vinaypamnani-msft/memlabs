@@ -248,7 +248,7 @@ try {
     Write-Log "Starting deployment. Review VMBuild.$domainName.log"
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
 
-    Write-Log "### START DEPLOYMENT (Configuration '$Configuration')" -Activity
+    Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
 
     # Download tools
     $success = Get-Tools -WhatIf:$WhatIf
