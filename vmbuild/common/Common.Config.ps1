@@ -1252,9 +1252,9 @@ function Get-List {
     else {
         $mutexName = "GetList" + $pid
         $mtx = New-Object System.Threading.Mutex($false, $mutexName)
-        write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly -Verbose
+        #write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly -Verbose
         [void]$mtx.WaitOne()
-        write-log "acquired '$mutexName' Mutex" -LogOnly -Verbose
+        #write-log "acquired '$mutexName' Mutex" -LogOnly -Verbose
     }
     try {
 
