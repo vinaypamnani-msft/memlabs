@@ -3075,7 +3075,7 @@ if (-not $Common.Initialized) {
     }
 
     Write-Log "MemLabs version $($global:Common.MemLabsVersion) Initializing" -LogOnly
-    $host.ui.RawUI.WindowTitle = "Memlabs $($global:Common.MemLabsVersion)"
+    $host.ui.RawUI.WindowTitle = "MemLabs $($global:Common.MemLabsVersion)"
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access
