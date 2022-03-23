@@ -1172,7 +1172,7 @@ $global:VM_Config = {
                                     Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $logEntry
                                 }
                                 catch {
-                                    write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Failed SubString for ConfigMgrSetup.log in for line $logEntry : $_"
+                                    # write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Failed SubString for ConfigMgrSetup.log in for line: $logEntry : $_"
                                 }
                             }
                         }
