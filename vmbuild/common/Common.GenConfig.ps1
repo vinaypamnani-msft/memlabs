@@ -410,8 +410,8 @@ function Invoke-SmartStartVMs {
             if (-not $quiet) {
                 if ($worked) {
                     if ($wait -ne 0) {
-                        Write-GreenCheck "VM [$($vm.vmName)] has been started. Waiting $wait Seconds.
-                        $returnWait = $wait                                                                "
+                        Write-GreenCheck "VM [$($vm.vmName)] has been started. Waiting $wait Seconds.                                                                "
+                        $returnWait = $wait
                     }
                     else {
                         Write-GreenCheck "VM [$($vm.vmName)] has been started.                                                                 "
