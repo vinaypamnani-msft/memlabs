@@ -460,6 +460,8 @@ function Show-Notification {
         $ToastTag = "VMBuild"
     )
 
+    if ($Common.PS7) { return } # Not supported on PS7
+
     [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
     $Template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
 
