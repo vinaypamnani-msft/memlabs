@@ -87,7 +87,7 @@ function Show-FailedDomains {
 
     Write-Log "Displaying the failed domains message for ($($failedDomains -join ','))." -LogOnly
 
-    $longest = 128
+    $longest = 130
     $longestMinus1 = $longest - 1
     $longestMinus2 = $longest - 2
 
@@ -95,7 +95,14 @@ function Show-FailedDomains {
     Write-Host2 "  #".PadRight($longest, "#") -ForegroundColor Yellow
     Write-Host2 "  # DC Maintenance failed for below domains. This may be because the passwords for the required accounts (listed below) expired. #" -ForegroundColor Yellow
     Write-Host2 ("  #".PadRight($longestMinus1, " ") + "#") -ForeGroundColor Yellow
-    foreach ($line in $dcList) { Write-Host2 ("  # $($line -replace '\x1b\[[0-9;]*m')".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow }
+    foreach ($line in $dcList) {
+        $newLine = $line -replace '\x1b\[[0-9;]*m'
+        Write-Host2 -ForegroundColor Yellow "  #" -NoNewLine
+        #subtract the 3 chars displayed above
+        $Len = $longestMinus1 -3
+        Write-Host2 " $newLine".PadRight($len, " ").Replace($newLine,$line) -ForegroundColor Turquoise -NoNewLine
+        Write-Host2 -ForeGroundColor Yellow "#"
+    }
     Write-Host2 ("  #".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
     Write-Host2 ("  # Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
     Write-Host2 ("  #".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
