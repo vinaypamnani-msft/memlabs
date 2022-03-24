@@ -256,6 +256,8 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         [switch]$Activity,
         [Parameter(Mandatory = $false)]
+        [switch]$NoNewLine,
+        [Parameter(Mandatory = $false)]
         [switch]$Highlight,
         [Parameter(Mandatory = $false)]
         [switch]$SubActivity,
@@ -315,7 +317,12 @@ function Write-Log {
     If ($Activity.IsPresent) {
         $info = $false
         Write-Host
-        $Text = "=== $Text`r`n"
+        if ($NoNewLine.IsPresent) {
+            $Text = "=== $Text"
+        }
+        else {
+            $Text = "=== $Text`r`n"
+        }
         $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
     }
 

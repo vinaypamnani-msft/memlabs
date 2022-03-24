@@ -70,7 +70,8 @@ function Start-Maintenance {
         Show-FailedDomains -failedDomains $criticalDomains
     }
 
-    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -Activity
+    Write-Host
+    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -SubActivity
     Write-Progress2 -Id $progressId -Activity $text -Completed
 }
 
