@@ -30,7 +30,7 @@ configuration Phase3
         }
 
         WriteStatus AddLocalAdmin {
-            Status = "Adding required accounts to Administrators group"
+            Status = "Adding required accounts [$($ThisVM.thisParams.LocalAdminAccounts -join ',')] to Administrators group"
         }
 
         $addUserDependancy = @('[WriteStatus]AddLocalAdmin')
@@ -47,7 +47,7 @@ configuration Phase3
 
         WriteStatus InstallFeature {
             DependsOn = $addUserDependancy
-            Status    = "Installing required windows features"
+            Status    = "Installing required windows features for role $featureRoles"
         }
 
         InstallFeatureForSCCM InstallFeature {

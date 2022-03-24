@@ -1013,17 +1013,21 @@ $global:VM_Config = {
                                 $errorObject = $badResource.Error | ConvertFrom-Json -ErrorAction SilentlyContinue
                                 if ($errorObject.FullyQualifiedErrorId -ne "NonTerminatingErrorFromProvider") {
                                     $msg = "$errorResourceId`: $($errorObject.FullyQualifiedErrorId) $($errorObject.Exception.Message)"
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Failure -OutputStream
-                                    $FailtimeSpan = New-TimeSpan -Minutes 30
-                                    if ($FailStopWatch -and $FailStopWatch.Elapsed.TotalMinutes -gt 30) {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Warning -OutputStream
+                                    $FailtimeSpan = New-TimeSpan -Minutes 35
+                                    if ($FailStopWatch -and $FailStopWatch.Elapsed.TotalMinutes -gt 35) {
                                         $FailStopWatch.Stop()
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Failure -OutputStream
                                         $failure = $true
+                                    }
+                                    else {
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Warning -LogOnly
                                     }
                                     if (-not $FailStopWatch) {
                                         $FailStopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
                                         $FailStopWatch.Start()
                                     }
-                                    Write-ProgressElapsed -stopwatch $FailStopWatch -timespan $FailtimeSpan -text "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg"
+                                    Write-ProgressElapsed -stopwatch $FailStopWatch -timespan $FailtimeSpan -text "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) (Currently Retrying) : $msg"
                                     if (-not $failure) {
                                         continue
                                     }
