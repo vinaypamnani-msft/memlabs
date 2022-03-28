@@ -2,10 +2,6 @@
 function Write-JobProgress {
     param($Job, $AdditionalData)
 
-    $esc = [char]27
-    $hideCursor = "$esc[?25l"
-    $showCursor = "$esc[?25h"
-
     try {
         if (-not $global:JobProgressHistory) {
             $global:JobProgressHistory = @()
@@ -483,8 +479,10 @@ function Get-Phase2ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -notin "WorkgroupMember", "AADClient", "InternetClient", "OSDClient", "DC") {
-            return $cd
+        if ($vm.role -notin "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
+            if (-not $vm.Hidden) {
+                return $cd
+            }
         }
     }
     return $null

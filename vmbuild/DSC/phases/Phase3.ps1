@@ -70,7 +70,8 @@ configuration Phase3
         }
 
         $nextDepend = "[InstallDotNet4]DotNet"
-        if ($ThisVM.installSSMS -ne $false) {    # Check if false, for older configs that didn't have this prop
+        if ($ThisVM.installSSMS -eq $true -or (($null -eq $ThisVM.installSSMS) -and $ThisVM.SQLVersion)) {
+            # Check if false, for older configs that didn't have this prop
 
             WriteStatus SSMS {
                 DependsOn = $nextDepend

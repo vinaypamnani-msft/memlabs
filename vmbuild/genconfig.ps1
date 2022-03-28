@@ -940,9 +940,12 @@ function Select-MainMenu {
             #write-Option "$i" "$($name)"
         }
 
-        $customOptions += [ordered]@{ "N" = "New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)"; "*D1" = ""; "*D" = "---  Deployment%$($Global:Common.Colors.GenConfigHeader)"; "!" = "Return to main menu %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "N" = "New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)"}
+        $customOptions += [ordered]@{ "*D1" = ""; "*D" = "---  Deployment%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{ "!" = "Return to main menu %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($InternalUseOnly.IsPresent) {
-            $customOptions += [ordered]@{ "D" = "Deploy Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
+            $customOptions += [ordered]@{ "D" = "Deploy And Save Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
         }
         if ($enableDebug) {
             $customOptions += [ordered]@{ "R" = "Return deployConfig" }
@@ -2286,7 +2289,7 @@ function Get-ValidNetworksForVM {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Current VM")]
-        [object] $CurrentVM = $null,
+        [object] $CurrentVM,
         [Parameter(Mandatory = $true, HelpMessage = "config")]
         [object] $ConfigToCheck
 
@@ -5142,7 +5145,6 @@ function Select-VirtualMachines {
                 }
 
                 if ($role -eq "PassiveSite") {
-                    $domain = $global:config.vmOptions.DomainName
                     $existingPassive = @()
                     $existingSS = @()
 
