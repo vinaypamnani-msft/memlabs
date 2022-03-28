@@ -1701,6 +1701,7 @@ function New-VirtualMachine {
             try {
                 Write-Progress2 $Activity -Status "SQLAO: Adding 2nd NIC" -percentcomplete 95 -force
                 write-log "$VmName`: Adding 2nd NIC attached to $SwitchName2" -LogOnly
+                $Global:ProgressPreference = 'SilentlyContinue'
                 $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
                 write-log "$VmName`: NIC added MAC: $($vmnet.MacAddress)" -LogOnly
 
@@ -1753,7 +1754,7 @@ function New-VirtualMachine {
                     write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
 
                     if (-not $clusterIP -or -not $AGIP) {
-                        write-log -failure "$VmName`:Failed to acquire Clueter or AGIP for SQLAO"
+                        write-log -failure "$VmName`:Failed to acquire Cluster or AGIP for SQLAO"
                         return $false
                     }
 

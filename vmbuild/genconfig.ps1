@@ -1671,6 +1671,7 @@ function Select-Config {
 
                 if ($hasDC) {
                     $savedNotes += " [New Domain: $($savedConfigJson.vmoptions.domainName)]"
+                    $color = $Global:Common.Colors.GenConfigNoCM
                 }
                 else {
                     $savedNotes += " [Existing Domain: $($savedConfigJson.vmoptions.domainName)]"
@@ -3089,6 +3090,7 @@ Function Get-SiteCodeForDPMP {
         [string] $Domain
     )
     $valid = $false
+    $ConfigToCheck = $Global:Config
     #Get-PSCallStack | out-host
     while ($valid -eq $false) {
         $siteCodes = @()
@@ -3100,9 +3102,8 @@ Function Get-SiteCodeForDPMP {
         }
         $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" })
         if ($tempSiteCodes) {
-
-            if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-                foreach ($tempSiteCode in $tempSiteCodes) {
+            foreach ($tempSiteCode in $tempSiteCodes) {
+                if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
                     $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName))"
                 }
             }
