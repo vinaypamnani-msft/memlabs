@@ -2047,7 +2047,9 @@ function Wait-ForVm {
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
             $ready = $true -eq $out.ScriptBlockOutput
-            Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
+            if ($ready) {
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
+            }
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
 
