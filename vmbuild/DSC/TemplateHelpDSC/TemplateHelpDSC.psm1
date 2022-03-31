@@ -31,6 +31,8 @@ class InstallADK {
             Start-BitsTransfer -Source $adkurl -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
+
+
         $_adkWinPEpath = $this.ADKWinPEPath
         if (!(Test-Path $_adkWinPEpath)) {
             # $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"  # ADK add-on (19041)
@@ -145,7 +147,14 @@ class InstallSSMS {
         $ssmsSetup = "C:\temp\SSMS-Setup-ENU.exe"
         if (!(Test-Path $ssmsSetup)) {
             Write-Verbose "Downloading SSMS from $($this.DownloadUrl)..."
-            Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
+            try {
+                Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                ipconfig /flushdns
+                start-sleep -seconds 60
+                Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
+            }
         }
 
         # Install SSMS
@@ -356,67 +365,7 @@ class WriteEvent {
             if (-not $this.FileName) {
                 # For named-file, caller must ensure file exists with required nodes.
                 [hashtable]$Actions = @{
-                    MachineJoinDomain       = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    CSJoinDomain            = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    PSJoinDomain            = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DPMPJoinDomain          = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DomainMemberJoinDomain  = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DelegateControl         = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    SCCMinstall             = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DPMPFinished            = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    DomainMemberFinished    = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    PassiveReady            = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    ReadyForPrimary         = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    WorkgroupMemberFinished = @{
-                        Status    = 'NotStart'
-                        StartTime = ''
-                        EndTime   = ''
-                    }
-                    ConfigurationFinished   = @{
+                    ConfigurationFinished = @{
                         Status    = 'NotStart'
                         StartTime = ''
                         EndTime   = ''
@@ -474,11 +423,32 @@ class WaitForEvent {
             $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
         }
 
-        $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+        $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
+        Write-Verbose "Attempting to acquire '$_FileName' Mutex"
+        [void]$mtx.WaitOne()
+        Write-Verbose "acquired '$_FileName' Mutex"
+        $Configuration = $null
+        try {
+            $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+        }
+        finally {
+            [void]$mtx.ReleaseMutex()
+            [void]$mtx.Dispose()
+        }
         while ($Configuration.$($this.ReadNode).Status -ne $this.ReadNodeValue) {
             Write-Verbose "Wait for step: [$($this.ReadNode)] to finish on $($this.MachineName), will try 60 seconds later..."
             Start-Sleep -Seconds 60
-            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
+            Write-Verbose "Attempting to acquire '$_FileName' Mutex"
+            [void]$mtx.WaitOne()
+            Write-Verbose "acquired '$_FileName' Mutex"
+            try {
+                $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            }
+            finally {
+                [void]$mtx.ReleaseMutex()
+                [void]$mtx.Dispose()
+            }
         }
     }
 
@@ -491,10 +461,23 @@ class WaitForEvent {
         $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
 
         if (!(Test-Path $ConfigurationFile)) { return $false }
-
-        $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-        if ($Configuration.$($this.ReadNode).Status -eq $this.ReadNodeValue) {
-            return $true
+        $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
+        Write-Verbose "Attempting to acquire '$_FileName' Mutex"
+        [void]$mtx.WaitOne()
+        Write-Verbose "acquired '$_FileName' Mutex"
+        try {
+            $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+            if ($Configuration.$($this.ReadNode).Status -eq $this.ReadNodeValue) {
+                return $true
+            }
+            return $false
+        }
+        catch {
+            return $false
+        }
+        finally {
+            [void]$mtx.ReleaseMutex()
+            [void]$mtx.Dispose()
         }
 
         return $false
@@ -531,6 +514,14 @@ class WaitForExtendSchemaFile {
         }
 
         Write-Verbose "Extended the Active Directory schema..."
+
+        # Force AD Replication
+        $domainControllers = Get-ADDomainController -Filter *
+        if ($domainControllers.Count -gt 1) {
+            Write-Verbose "Forcing AD Replication on $($domainControllers.Name -join ',')"
+            $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
+            Start-Sleep -Seconds 3
+        }
 
         & $extadschpath | out-null
 
@@ -709,6 +700,10 @@ class DownloadSCCM {
         }
 
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
+        if (Test-Path $cmsourcepath) {
+            Remove-Item -Path $cmsourcepath -Recurse -Force | Out-Null
+        }
+
         if (!(Test-Path $cmsourcepath)) {
             Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -Wait
         }
@@ -917,6 +912,7 @@ class WaitForDomainReady {
         $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         while (!$testconnection) {
             Write-Verbose "Waiting for Domain ready , will try again 30 seconds later..."
+            ipconfig /flushdns
             ipconfig /renew
             ipconfig /registerdns
             Start-Sleep -Seconds $_WaitSeconds
@@ -1148,7 +1144,7 @@ class ChangeSQLServicesAccount {
         if ($services.State -eq 'Running') {
             #Check if SQLSERVERAGENT is running
             $sqlserveragentflag = 0
-            $sqlAgentService = if ($_SQLInstanceName -eq "SQLSERVERAGENT") { $_SQLInstanceName } else { "SQLAgent`$$_SQLInstanceName" }
+            $sqlAgentService = if ($_SQLInstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { "SQLAgent`$$_SQLInstanceName" }
             $sqlserveragentservices = Get-WmiObject win32_service -Filter "Name = '$sqlAgentService'"
             if ($null -ne $sqlserveragentservices) {
                 if ($sqlserveragentservices.State -eq 'Running') {
@@ -1334,6 +1330,11 @@ class RegisterTaskScheduler {
 
         $exists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
         if ($exists) {
+            if ($exists.state -eq "Running") {
+                stop-Process -Name setup -Force -ErrorAction SilentlyContinue
+                stop-Process -Name setupwpf -Force -ErrorAction SilentlyContinue
+                $exists | Stop-ScheduledTask -ErrorAction SilentlyContinue
+            }
             Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
         }
 
@@ -1354,13 +1355,16 @@ class RegisterTaskScheduler {
 
         $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
 
-        $TaskStartTime = [datetime]::Now.AddMinutes(2)
+        $TaskStartTime = [datetime]::Now.AddMinutes(1)
         $Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
 
         $Principal = New-ScheduledTaskPrincipal -UserId $_AdminCreds.UserName -RunLevel Highest
         $Password = $_AdminCreds.GetNetworkCredential().Password
 
+
+
         $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
+
         $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force
 
         # $TaskStartTime = [datetime]::Now.AddMinutes(2)
@@ -1386,19 +1390,28 @@ class RegisterTaskScheduler {
 
     [bool] Test() {
 
-        $ConfigurationFile = Join-Path -Path "C:\Staging\DSC" -ChildPath "ScriptWorkflow.json"
-        if (-not (Test-Path $ConfigurationFile)) {
+        return $false
+        try {
+            $ConfigurationFile = Join-Path -Path "C:\Staging\DSC" -ChildPath "ScriptWorkflow.json"
+            if (-not (Test-Path $ConfigurationFile)) {
+                return $false
+            }
+
+            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            if (-not ($Configuration.ScriptWorkflow)) {
+                return $false
+            }
+            if ($Configuration.ScriptWorkflow.Status -eq 'NotStart') {
+                $Configuration.ScriptWorkflow.Status = 'Scheduled'
+                $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+                return $false
+            }
+
+            return $true
+        }
+        catch {
             return $false
         }
-
-        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-        if ($Configuration.ScriptWorkflow.Status -eq 'NotStart') {
-            $Configuration.ScriptWorkflow.Status = 'Scheduled'
-            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-            return $false
-        }
-
-        return $true
     }
 
     [RegisterTaskScheduler] Get() {
@@ -1672,6 +1685,10 @@ class OpenFirewallPortForSCCM {
 
         Write-Verbose "Current Role is : $_Role"
 
+
+        New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+        New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+
         if ($_Role -contains "DC") {
             #HTTP(S) Requests
             New-NetFirewallRule -DisplayName 'HTTP(S) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For DC"
@@ -1679,6 +1696,8 @@ class OpenFirewallPortForSCCM {
 
             #PS-->DC(in)
             New-NetFirewallRule -DisplayName 'LDAP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 389 -Group "For DC"
+            New-NetFirewallRule -DisplayName 'Kerberos Password Change TCP' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 464 -Group "For DC"
+            New-NetFirewallRule -DisplayName 'Kerberos Password Change UDP' -Profile Domain -Direction Inbound -Action Allow -Protocol UDP -LocalPort 464 -Group "For DC"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For DC"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) UDP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol UDP -LocalPort 636 -Group "For DC"
             New-NetFirewallRule -DisplayName 'Global Catelog LDAP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For DC"
@@ -1719,8 +1738,14 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For SCCM"
 
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM"
+
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 2433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM"
+
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1500' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM"
 
             New-NetFirewallRule -DisplayName 'RPC Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'Wake on LAN Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol UDP -LocalPort 9 -Group "For SCCM"
@@ -1737,7 +1762,7 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'HTTP(S) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For SCCM SUP"
             New-NetFirewallRule -DisplayName 'HTTP(S) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For SCCM SUP"
         }
-        if ($_Role -ccontains "State Migration Point") {
+        if ($_Role -contains "State Migration Point") {
             #SMB,RPC Endpoint Mapper
             New-NetFirewallRule -DisplayName 'SMB SMP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM SMP"
             New-NetFirewallRule -DisplayName 'SMB SMP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM SMP"
@@ -1758,7 +1783,10 @@ class OpenFirewallPortForSCCM {
             #Dynamic Port
             New-NetFirewallRule -DisplayName 'RPC Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'RPC Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM PXE SP"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM PXE SP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM PXE SP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM PXE SP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM PXE SP"
+
             New-NetFirewallRule -DisplayName 'DHCP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(67.68) -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'TFTP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 69  -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'BINL Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4011 -Group "For SCCM PXE SP"
@@ -1790,8 +1818,12 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'HTTP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80 -Group "For SCCM FSP"
         }
         if ($_Role -contains "Reporting Services Point") {
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM RSP"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 2433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1500' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM RSP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM RSP"
             New-NetFirewallRule -DisplayName 'HTTP(S) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For SCCM RSP"
             New-NetFirewallRule -DisplayName 'SMB Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM RSP"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM RSP"
@@ -1806,7 +1838,9 @@ class OpenFirewallPortForSCCM {
         }
         if ($_Role -contains "Management Point") {
             New-NetFirewallRule -DisplayName 'HTTP(S) Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(80, 443) -Group "For SCCM MP"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 389 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) UDP Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol UDP -LocalPort 636 -Group "For SCCM MP"
@@ -1829,7 +1863,9 @@ class OpenFirewallPortForSCCM {
         }
         if ($_Role -contains "Server Locator Point") {
             New-NetFirewallRule -DisplayName 'HTTP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80 -Group "For SCCM SLP"
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server SLP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server SLP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SQL Server SLP"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SQL Server SLP"
             New-NetFirewallRule -DisplayName 'SMB Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM SLP"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SCCM SLP"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For SCCM SLP"
@@ -1837,7 +1873,9 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'RPC Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1024-65535 -Group "For SCCM RSP"
         }
         if ($_Role -contains "SQL Server") {
-            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 2433' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1500' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SQL Server"
             New-NetFirewallRule -DisplayName 'WMI' -Program "%systemroot%\system32\svchost.exe" -Service "winmgmt" -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort Domain -Group "For SQL Server WMI"
             New-NetFirewallRule -DisplayName 'DCOM' -Program "%systemroot%\system32\svchost.exe" -Service "rpcss" -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SQL Server DCOM"
             New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SQL Server"
@@ -1934,91 +1972,143 @@ class InstallFeatureForSCCM {
     [DscProperty(Mandatory)]
     [string[]] $Role
 
+    [DscProperty(NotConfigurable)]
+    [string] $Version = "3"
+
     [void] Set() {
         $_Role = $this.Role
 
         Write-Verbose "Current Role is : $_Role"
 
         # Install on all devices
-        Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
+        try {
+            dism /online /Enable-Feature /FeatureName:TelnetClient
+        }
+        catch {}
+        #Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
 
-        if ($_Role -notcontains "DomainMember") {
-            Install-WindowsFeature -Name "Rdc"
+        # Server OS?
+        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) {
+            $IsServerOS = $true
+            if ($os.ProductType -eq 1) {
+                $IsServerOS = $false
+            }
+        }
+        else {
+            $IsServerOS = $false
         }
 
-        if ($_Role -contains "DC") {
-        }
-        if ($_Role -contains "Site Server") {
-            Install-WindowsFeature Net-Framework-Core
-            Install-WindowsFeature NET-Framework-45-Core
-            Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
-            Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
+        if ($IsServerOS) {
+
+
+
+            #
+            #
+            #
+            #   If you add roles here, please update the Version number so existing Machines will get the new roles
+            #
+            #
+            #
+
+
+            # Always install BITS
             Install-WindowsFeature BITS, BITS-IIS-Ext
-        }
-        if ($_Role -contains "Application Catalog website point") {
-            #IIS
-            Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-        }
-        if ($_Role -contains "Application Catalog web service point") {
-            #IIS
-            Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-        }
-        if ($_Role -contains "Asset Intelligence synchronization point") {
-            #installed .net 4.5 or later
-        }
-        if ($_Role -contains "Certificate registration point") {
-            #IIS
-            Install-WindowsFeature Web-Asp-Net, Web-Asp-Net45, Web-Metabase, Web-WMI
-        }
-        if ($_Role -contains "Distribution point") {
-            #IIS
+            # Always install IIS
             Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
             Install-WindowsFeature Web-WMI, Web-Metabase
+            Install-WindowsFeature RSAT-AD-PowerShell
+            $result = Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+            if ($result.RestartNeeded -eq "Yes") {
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
+            }
+
+            if ($_Role -notcontains "DomainMember") {
+                Install-WindowsFeature -Name "Rdc"
+            }
+
+            if ($_Role -contains "DC") {
+                #Moved to All Servers
+                #Install-WindowsFeature RSAT-AD-PowerShell
+            }
+            if ($_Role -contains "SQLAO") {
+                Install-WindowsFeature Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell
+            }
+            if ($_Role -contains "Site Server") {
+                Install-WindowsFeature Net-Framework-Core
+                Install-WindowsFeature NET-Framework-45-Core
+                Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
+                Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
+                Install-WindowsFeature BITS, BITS-IIS-Ext
+                Install-WindowsFeature -Name "Rdc"
+                Install-WindowsFeature -Name UpdateServices-UI
+            }
+            if ($_Role -contains "Application Catalog website point") {
+                #IIS
+                Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
+            if ($_Role -contains "Application Catalog web service point") {
+                #IIS
+                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
+            if ($_Role -contains "Asset Intelligence synchronization point") {
+                #installed .net 4.5 or later
+            }
+            if ($_Role -contains "Certificate registration point") {
+                #IIS
+                Install-WindowsFeature Web-Asp-Net, Web-Asp-Net45, Web-Metabase, Web-WMI
+            }
+            if ($_Role -contains "Distribution point") {
+                #IIS
+                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
+                Install-WindowsFeature Web-WMI, Web-Metabase
+            }
+
+            if ($_Role -contains "Endpoint Protection point") {
+                #.NET 3.5 SP1 is intalled
+            }
+
+            if ($_Role -contains "Enrollment point") {
+                #iis
+                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
+            if ($_Role -contains "Enrollment proxy point") {
+                #iis
+                Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
+            if ($_Role -contains "Fallback status point") {
+                Install-WindowsFeature Web-Metabase
+            }
+            if ($_Role -contains "Management point") {
+                #BITS
+                Install-WindowsFeature BITS, BITS-IIS-Ext
+                #IIS
+                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
+                Install-WindowsFeature Web-WMI, Web-Metabase
+            }
+            if ($_Role -contains "Reporting services point") {
+                #installed .net 4.5 or later
+            }
+            if ($_Role -contains "Service connection point") {
+                #installed .net 4.5 or later
+            }
+            if ($_Role -contains "Software update point") {
+                #default iis configuration
+                Install-WindowsFeature web-server
+            }
+            if ($_Role -contains "State migration point") {
+                #iis
+                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+            }
         }
 
-        if ($_Role -contains "Endpoint Protection point") {
-            #.NET 3.5 SP1 is intalled
-        }
-
-        if ($_Role -contains "Enrollment point") {
-            #iis
-            Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-        }
-        if ($_Role -contains "Enrollment proxy point") {
-            #iis
-            Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-        }
-        if ($_Role -contains "Fallback status point") {
-            Install-WindowsFeature Web-Metabase
-        }
-        if ($_Role -contains "Management point") {
-            #BITS
-            Install-WindowsFeature BITS, BITS-IIS-Ext
-            #IIS
-            Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
-            Install-WindowsFeature Web-WMI, Web-Metabase
-        }
-        if ($_Role -contains "Reporting services point") {
-            #installed .net 4.5 or later
-        }
-        if ($_Role -contains "Service connection point") {
-            #installed .net 4.5 or later
-        }
-        if ($_Role -contains "Software update point") {
-            #default iis configuration
-            Install-WindowsFeature web-server
-        }
-        if ($_Role -contains "State migration point") {
-            #iis
-            Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-        }
-
-        $StatusPath = "$env:windir\temp\InstallFeatureStatus.txt"
+        $StatusPath = "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt"
         "Finished" >> $StatusPath
     }
 
     [bool] Test() {
-        $StatusPath = "$env:windir\temp\InstallFeatureStatus.txt"
+        $StatusPath = "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt"
         if (Test-Path $StatusPath) {
             return $true
         }
@@ -2125,7 +2215,9 @@ class SetupDomain {
     }
 
     [bool] Test() {
+        # This is broken as AD-Domain-Services is installed in SCCMFeature code
         $_DomainFullName = $this.DomainFullName
+
         $_SafemodeAdministratorPassword = $this.SafemodeAdministratorPassword
         $ADInstallState = Get-WindowsFeature AD-Domain-Services
         if (!($ADInstallState.Installed)) {
@@ -2222,6 +2314,711 @@ class InstallCA {
     }
 
     [InstallCA] Get() {
+        return $this
+    }
+
+}
+
+
+[DscResource()]
+class ClusterSetOwnerNodes {
+    [DscProperty(Key)]
+    [string] $ClusterName
+
+    [DscProperty()]
+    [string[]]$Nodes
+
+    [void] Set() {
+        try {
+            $_ClusterName = $this.ClusterName
+            $_Nodes = $this.Nodes
+            foreach ($c in Get-ClusterResource -Cluster $_ClusterName) {
+                $NeedsFixing = $c | Get-ClusterOwnerNode | Where-Object { $_.OwnerNodes.Count -ne 2 }
+                if ($NeedsFixing) {
+                    Write-Verbose "Setting owners $($_Nodes -Join ',') on $($c.Name)"
+                    $c | Set-ClusterOwnerNode -owners $_Nodes
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Failed to Set Owner Nodes"
+            Write-Verbose "$_"
+        }
+    }
+
+    [bool] Test() {
+
+        try {
+            $_ClusterName = $this.ClusterName
+            $badNodes = foreach ($c in Get-ClusterResource -Cluster $_ClusterName) {
+                $c | Get-ClusterOwnerNode | Where-Object { $_.OwnerNodes.Count -ne 2 }
+            }
+
+            if ($badNodes.Count -gt 0) {
+                return $false
+            }
+
+            return $true
+        }
+        catch {
+            Write-Verbose "Failed to Find Cluster Resources."
+            Write-Verbose "$_"
+            return $true
+        }
+    }
+
+    [ClusterSetOwnerNodes] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class ClusterRemoveUnwantedIPs {
+    [DscProperty(Key)]
+    [string] $ClusterName
+
+    [void] Set() {
+        try {
+            $_ClusterName = $this.ClusterName
+            $valid = $false
+            [int]$failCount = 0
+            $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
+            if ($Cluster) {
+                $valid = $true
+            }
+            while (-not $valid -and $failCount -lt 15) {
+                try {
+                    $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
+                    if ($Cluster) {
+                        $valid = $true
+                    }
+                    else {
+                        $failCount++
+                        start-sleep 60
+                    }
+                }
+                catch {
+                    Write-Verbose "$_ Failed Get-ClusterResource for $_ClusterName"
+                    $failCount++
+                    start-sleep 60
+                }
+            }
+            $ResourcesToRemove = ($Cluster | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            if ($ResourcesToRemove) {
+                foreach ($Resource in $ResourcesToRemove) {
+                    Write-Verbose "Cluster Removing $($resource.Name)"
+                    Remove-ClusterResource -Name $resource.Name -Force
+                }
+            }
+            Write-Verbose "Cluster Registering new DNS records"
+            Get-ClusterResource -Name "Cluster Name" | Update-ClusterNetworkNameResource
+            Write-Verbose "Finished Removing Unwanted Cluster IPs"
+        }
+        catch {
+            Write-Verbose "Failed to Remove Cluster IPs."
+            Write-Verbose "$_"
+        }
+    }
+
+    [bool] Test() {
+
+        try {
+            $_ClusterName = $this.ClusterName
+            $valid = $false
+            [int]$failCount = 0
+            $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
+            if ($Cluster) {
+                $valid = $true
+            }
+            while (-not $valid -and $failCount -lt 15) {
+                try {
+                    $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
+                    if ($Cluster) {
+                        $valid = $true
+                    }
+                    else {
+                        Write-Verbose "$_ Get-ClusterResource for $_ClusterName did not return an entry"
+                        $failCount++
+                        start-sleep 60
+                    }
+                }
+                catch {
+                    Write-Verbose "$_ Failed Get-ClusterResource for $_ClusterName"
+                    $failCount++
+                    start-sleep 60
+                }
+            }
+            $ResourcesToRemove = ($Cluster | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+
+            if ($ResourcesToRemove) {
+                return $false
+            }
+
+            return $true
+        }
+        catch {
+            Write-Verbose "Failed to Find Cluster IPs."
+            Write-Verbose "$_"
+            return $true
+        }
+    }
+
+    [ClusterRemoveUnwantedIPs] Get() {
+        return $this
+    }
+
+}
+
+
+[DscResource()]
+class FileACLPermission {
+    [DscProperty(Key)]
+    [string]$Path
+
+    [DscProperty(Mandatory)]
+    [string[]]$accounts
+
+    [DscProperty()]
+    [string]$access = "Allow"
+
+    [DscProperty()]
+    [string]$rights = "FullControl"
+
+    [DscProperty()]
+    [string]$inherit = "ContainerInherit,ObjectInherit"
+
+    [DscProperty()]
+    [string]$propagate = "None"
+
+
+    [void] Set() {
+        foreach ($account in $this.accounts) {
+            $_account = $account
+            $_path = $this.Path
+
+            write-verbose -message ('Set Entered:  Path Set to:' + $_path + 'Account Operating on:' + $_account)
+
+            $_access = $this.access
+            $_rights = $this.rights
+            $_inherit = $this.inherit
+            $_propagate = $this.propagate
+
+            write-verbose -Message ('Variables Set to:' + $_account + ' ' + $_rights + ' ' + $_inherit + ' ' + $_propagate + ' ' + $_access)
+
+            # Configure the access object values - READ-ONLY
+            $_access = [System.Security.AccessControl.AccessControlType]::$_access
+            $_rights = [System.Security.AccessControl.FileSystemRights]$_rights
+            $_inherit = [System.Security.AccessControl.InheritanceFlags]$_inherit
+            $_propagate = [System.Security.AccessControl.PropagationFlags]::$_propagate
+
+            $ace = New-Object System.Security.AccessControl.FileSystemAccessRule($_account, $_rights, $_inherit, $_propagate, $_access)
+
+            #Retrieve the directory ACL and add a new ACL rule
+            $acl = Get-Acl $_path
+            $acl.AddAccessRule($ace)
+            $acl.SetAccessRuleProtection($false, $false)
+
+            #Set-Acl  $directory $acl
+            set-acl -aclobject $acl $_path
+        }
+    }
+
+    [bool] Test() {
+        $PermissionTest = $false
+
+
+        $_access = $this.access
+        $_rights = $this.rights
+        $_inherit = $this.inherit
+        $_propagate = $this.propagate
+        $AccountTrack = @{ }
+
+        $GetACL = Get-Acl $this.Path
+
+        foreach ($account in $this.accounts) {
+
+            $_account = $account
+
+            Foreach ($AccessRight in $GetACL.access) {
+                IF ($AccessRight.IdentityReference -eq "$_account") {
+                    write-verbose -Message ("Account Discovered:" + $_account)
+                    IF ($AccessRight.InheritanceFlags -eq $_inherit) {
+                        write-verbose -Message ("InheritanceFlags Passed")
+                        IF ($AccessRight.AccessControlType -eq $_access) {
+                            write-verbose -Message ("Access Passed")
+                            IF ($AccessRight.FileSystemRights -eq $_rights) {
+                                write-verbose -Message ("Rights Passed")
+                                IF ($AccessRight.PropagationFlags -eq $_propagate) {
+                                    write-verbose -Message ("Propagate Passed")
+                                    $PermissionTest = $true
+                                    $AccountTrack.Add($_account, $PermissionTest)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            $PermissionTest = $false
+        }
+
+        IF (($AccountTrack.Count -eq 0) -or $AccountTrack.Count -ne $this.accounts.count) {
+            $PermissionTest = $false
+            Return $PermissionTest
+        }
+
+        $PermissionTest = $true
+
+
+        foreach ($object in $AccountTrack.Values) {
+
+            IF ($object -eq "$false") {
+                write-verbose -Message ("Permission check failed set to false")
+                $PermissionTest = $false
+            }
+        }
+
+
+        Return $PermissionTest
+    }
+
+    [FileACLPermission] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
+class ModuleAdd {
+    [DscProperty(Key)]
+    [string]$key = 'Always'
+
+    [DscProperty(Mandatory)]
+    [string]$CheckModuleName
+
+    [DscProperty()]
+    [string]$Clobber = 'Yes'
+
+    [DscProperty()]
+    [string]$UserScope = 'AllUsers'
+
+    [void] Set() {
+
+        $_moduleName = $this.CheckModuleName
+        $_userScope = $this.UserScope
+
+        $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
+
+        IF ($null -eq $NuGet) {
+            #Install-PackageProvider Nuget -force -Confirm:$false
+            Find-PackageProvider -Name NuGet -Force | Install-PackageProvider -Force -Scope AllUsers -Confirm:$false
+            Register-PackageSource -Name nuget.org -Location https://www.nuget.org/api/v2 -ProviderName NuGet -Force -Trusted
+        }
+
+        $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+
+        IF ($null -eq $module) {
+            Install-Module -Name PowerShellGet -Force -Scope $_userScope
+        }
+
+        $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+
+        IF ($null -eq $module) {
+            IF ($this.Clobber -eq 'Yes') {
+                Install-Module -Name $_moduleName -Force -Scope $_userScope -AllowClobber
+            }
+            ELSE {
+                Install-Module -Name $_moduleName -Force -Scope $_userScope
+            }
+
+        }
+    }
+
+    [bool] Test() {
+
+        $_ModuleName = $this.CheckModuleName
+        write-verbose ('Searching for module:' + $_ModuleName)
+        $GetModuleStatus = Get-InstalledModule -Name $_ModuleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+
+        if ($GetModuleStatus) {
+            write-verbose ('Found module:' + $_ModuleName + 'ModuleStatus:' + $GetModuleStatus.Version)
+            return $true
+        }
+
+        return $false
+
+    }
+
+    [ModuleAdd] Get() {
+        return $this
+    }
+
+}
+
+
+[DscResource()]
+class ADServicePrincipalName2 {
+    [DscProperty(key)]
+    [string] $ServicePrincipalName
+
+    [DscProperty(Mandatory)]
+    [String] $Ensure = 'Present'
+
+    [DscProperty()]
+    [String] $Account
+
+    [void] Set() {
+        # Get all Active Directory object having the target SPN configured.
+        $spnAccounts = Get-ADObject -Filter { ServicePrincipalName -eq $this.ServicePrincipalName } -Properties 'SamAccountName', 'DistinguishedName'
+
+        if ($this.Ensure -eq 'Present') {
+            <#
+            Throw an exception, if no account was specified or the account does
+            not exist.
+        #>
+            if ([System.String]::IsNullOrEmpty($this.Account) -or ($null -eq (Get-ADObject -Filter { SamAccountName -eq $Account }))) {
+                throw ("Active Directory object with SamAccountName '{0}' not found. (ADSPN0004)" -f $this.Account)
+            }
+
+            # Remove the SPN(s) from any extra account.
+            foreach ($spnAccount in $spnAccounts) {
+                if ($spnAccount.SamAccountName -ne $this.Account) {
+                    Write-Verbose -Message ("Removing service principal name '{0}' from account '{1}'. (ADSPN0005)" -f $this.ServicePrincipalName, $spnAccount.SamAccountName)
+
+                    Set-ADObject -Identity $spnAccount.DistinguishedName -Remove @{
+                        ServicePrincipalName = $this.ServicePrincipalName
+                    }
+                }
+            }
+
+            <#
+            Add the SPN to the target account. Use Get-ADObject to get the target
+            object filtered by SamAccountName. Set-ADObject does not support the
+            field SamAccountName as Identifier.
+        #>
+            if ($spnAccounts.SamAccountName -notcontains $this.Account) {
+                Write-Verbose -Message ("Adding service principal name '{0}' to account '{1}. (ADSPN0006)" -f $this.ServicePrincipalName, $this.Account)
+
+                Get-ADObject -Filter { SamAccountName -eq $this.Account } |
+                Set-ADObject -Add @{
+                    ServicePrincipalName = $this.ServicePrincipalName
+                }
+            }
+        }
+
+        # Remove the SPN from any account
+        if ($this.Ensure -eq 'Absent') {
+            foreach ($spnAccount in $spnAccounts) {
+                Write-Verbose -Message ("Removing service principal name '{0}' from account '{1}'. (ADSPN0005)" -f $this.ServicePrincipalName, $spnAccount.SamAccountName)
+
+                if (-not ($this.Account) -or ($spnAccount.SamAccountName -eq $this.Account)) {
+                    Set-ADObject -Identity $spnAccount.DistinguishedName -Remove @{
+                        ServicePrincipalName = $this.ServicePrincipalName
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    [bool] Test() {
+        $spnAccounts = Get-ADObject -Filter { ServicePrincipalName -eq $this.ServicePrincipalName } -Properties 'SamAccountName' |
+        Select-Object -ExpandProperty 'SamAccountName'
+
+        if ($spnAccounts.Count -eq 0) {
+
+            $currentConfiguration = @{
+                Ensure               = 'Absent'
+                ServicePrincipalName = $this.ServicePrincipalName
+                Account              = ''
+            }
+        }
+        else {
+            $currentConfiguration = @{
+                Ensure               = 'Present'
+                ServicePrincipalName = $this.ServicePrincipalName
+                Account              = $spnAccounts -join ';'
+            }
+        }
+
+
+        $desiredConfigurationMatch = $currentConfiguration.Ensure -eq $this.Ensure
+
+        if ($this.Ensure -eq 'Present') {
+            $desiredConfigurationMatch = $desiredConfigurationMatch -and
+            $currentConfiguration.Account -eq $this.Account
+        }
+        else {
+            if ($this.Account) {
+                $desiredConfigurationMatch = $currentConfiguration.Account -ne $this.Account
+            }
+        }
+
+        if ($desiredConfigurationMatch) {
+            Write-Verbose -Message ("Service principal name '{0}' is in the desired state. (ADSPN0007)" -f $this.ServicePrincipalName)
+        }
+        else {
+            Write-Verbose -Message ("Service principal name '{0}' is not in the desired state. (ADSPN0008)" -f $this.ServicePrincipalName)
+        }
+
+        return $desiredConfigurationMatch
+    }
+
+
+    [ADServicePrincipalName2] Get() {
+        Write-Verbose -Message ("Getting service principal name '{0}'. (ADSPN0001)" -f $this.ServicePrincipalName)
+
+        $spnAccounts = Get-ADObject -Filter { ServicePrincipalName -eq $ServicePrincipalName } -Properties 'SamAccountName' |
+        Select-Object -ExpandProperty 'SamAccountName'
+
+        if ($spnAccounts.Count -eq 0) {
+            # No SPN found
+            Write-Verbose -Message ("Service principal name '{0}' is absent. (ADSPN0002)" -f $this.ServicePrincipalName)
+
+            $returnValue = @{
+                Ensure               = 'Absent'
+                ServicePrincipalName = $this.ServicePrincipalName
+                Account              = ''
+            }
+        }
+        else {
+            # One or more SPN(s) found, return the account name(s)
+            Write-Verbose -Message ("Service principal name '{0}' is present on account(s) '{1}'. (ADSPN0003)" -f $this.ServicePrincipalName, ($spnAccounts -join ';'))
+
+            $returnValue = @{
+                Ensure               = 'Present'
+                ServicePrincipalName = $this.ServicePrincipalName
+                Account              = $spnAccounts -join ';'
+            }
+        }
+
+        return $returnValue
+    }
+}
+
+[DscResource()]
+class ActiveDirectorySPN {
+    [DscProperty(Key)]
+    [string]$key = 'Always'
+
+    [DscProperty()]
+    [string[]]$UserName
+
+    [DscProperty()]
+    [string]$UserNameCluster
+
+    [DscProperty()]
+    [string[]]$ClusterDevice
+
+    [DscProperty(Mandatory)]
+    [string]$FQDNDomainName
+
+    [DscProperty(Mandatory)]
+    [string]$OULocationUser
+
+    [DscProperty(Mandatory)]
+    [string]$OULocationDevice
+
+    [void] Set() {
+
+        Import-Module ActiveDirectory
+        New-PSDrive -PSProvider ActiveDirectory -Name AD -Root "" -Server localhost -ErrorAction SilentlyContinue
+        Set-Location AD:
+
+        #Set SPN permissions to object to allow it to update SPN registrations.
+        $_OULocationUser = $this.OULocationUser
+        $_OULocationDevice = $this.OULocationDevice
+        $_FQDNDomainName = $this.FQDNDomainName
+        $_UserNameCluster = $this.UserNameCluster
+
+        Foreach ($user in $this.UserName) {
+            $_UserName = $user
+
+            write-verbose ('Adding Write Validated SPN permission to User ' + $user + ' on ' + $user + ' account')
+            write-verbose ('Setting Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
+            #Set SPN permissions to object to allow it to update SPN registrations.
+
+            $oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
+            $UserObject = "CN=$_UserName,$_OULocationUser"
+
+            write-verbose ('ObjectPath set to  AD:' + $UserObject)
+
+            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+            $UserSID = $UserSID.Value
+
+            write-verbose ('User:' + $_UserName + ' SIDValue is:' + $UserSID + ' On Domain:' + $_FQDNDomainName)
+
+            $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+            $SIDMatch = $Matches[0]
+
+            $oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
+
+            #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+            #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+
+            $ACL = Get-Acl -Path "AD:$UserObject"
+            $currentSSDL = $ACL.Sddl
+
+            $newSSDL = $currentSSDL + $oldSddl
+            try {
+                $ACL.SetSecurityDescriptorSddlForm($newSSDL)
+                Set-Acl -AclObject $acl -Path "AD:$UserObject"
+            }
+            catch {
+                Write-Verbose "$_ $newSSDL"
+            }
+
+            write-verbose (' Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName + ' have been set')
+        }
+
+        Foreach ($device in $this.ClusterDevice) {
+            $_DeviceName = $device
+            write-verbose ('Adding Write Validated SPN permission to User ' + $_DeviceName + ' on ' + $_DeviceName + ' account')
+            write-verbose ('Setting Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName)
+
+            $oldSddl = "(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1145)"
+            $DeviceObject = "CN=$_DeviceName,$_OULocationDevice"
+            $UserObject = "CN=$_UserNameCluster,$_OULocationUser"
+
+            write-verbose ('ObjectPath set to  AD:' + $DeviceObject)
+
+            $ComputerSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADComputer -Server "$_FQDNDomainName" $DeviceObject).SID
+            $ComputerSID = $ComputerSID.Value
+
+            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+            $UserSID = $UserSID.Value
+
+            write-verbose ('Device:' + $_DeviceName + ' SIDValue is:' + $ComputerSID + ' On Domain:' + $_FQDNDomainName)
+
+            $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+            $SIDMatch = $Matches[0]
+
+            $oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
+
+            #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+            #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+
+            write-verbose ('Device:' + $_DeviceName + ' UserSet is:' + $_UserNameCluster + ' On Domain:' + $_FQDNDomainName)
+
+            $ACL = Get-Acl -Path "AD:$DeviceObject"
+            $currentSSDL = $ACL.Sddl
+
+            $newSSDL = $currentSSDL + $oldSddl
+            try {
+                $ACL.SetSecurityDescriptorSddlForm($newSSDL)
+                Set-Acl -AclObject $acl -Path "AD:$DeviceObject"
+            }
+            catch {
+                Write-Verbose "$_ $newSSDL"
+            }
+
+            write-verbose (' Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName + ' have been set')
+        }
+    }
+
+    [bool] Test() {
+
+        Import-Module ActiveDirectory
+        New-PSDrive -PSProvider ActiveDirectory -Name AD -Root "" -Server localhost -ErrorAction SilentlyContinue
+        Set-Location AD:
+
+        #Set SPN permissions to object to allow it to update SPN registrations.
+        $_OULocationUser = $this.OULocationUser
+        $_OULocationDevice = $this.OULocationDevice
+        $_FQDNDomainName = $this.FQDNDomainName
+        $_UserNameCluster = $this.UserNameCluster
+        $PermissionTest = $false
+        $AccountTrack = @{ }
+
+        Foreach ($user in $this.UserName) {
+            $_UserName = $user
+
+            write-verbose ('Checking Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
+
+            $oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
+            $UserObject = "CN=$_UserName,$_OULocationUser"
+
+            write-verbose ('ObjectPath set to  AD:' + $UserObject)
+
+            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+            $UserSID = $UserSID.Value
+
+            write-verbose ('User:' + $_UserName + ' SIDValue is:' + $UserSID + ' On Domain:' + $_FQDNDomainName)
+
+            $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+            $SIDMatch = $Matches[0]
+
+            $oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
+
+            #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+            #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+
+            $ACL = Get-Acl -Path "AD:$UserObject"
+            $currentSSDL = $ACL.Sddl
+
+            IF ($currentSSDL -match ("\(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;$UserSID\)")) {
+                write-verbose ('Permissions for SPN are already set')
+                $AccountTrack.Add($_UserName, $true)
+            }
+            ELSE {
+                write-verbose ('Permissions for SPN are not currently set')
+                $AccountTrack.Add($_UserName, $false)
+            }
+        }
+
+        Foreach ($device in $this.ClusterDevice) {
+            $_DeviceName = $device
+
+            write-verbose ('Checking Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName)
+
+            $oldSddl = "(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1145)"
+            $DeviceObject = "CN=$_DeviceName,$_OULocationDevice"
+            $UserObject = "CN=$_UserNameCluster,$_OULocationUser"
+
+            write-verbose ('ObjectPath set to  AD:' + $DeviceObject)
+
+            $ComputerSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADComputer -Server "$_FQDNDomainName" $DeviceObject).SID
+            $ComputerSID = $ComputerSID.Value
+
+            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
+            $UserSID = $UserSID.Value
+
+            write-verbose ('Device:' + $_DeviceName + ' SIDValue is:' + $ComputerSID + ' On Domain:' + $_FQDNDomainName)
+
+            $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
+            $SIDMatch = $Matches[0]
+
+            $oldSddl = $oldSddl -replace ($SIDMatch, $ComputerSID)
+
+            #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
+            #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
+
+            write-verbose ('Device:' + $_DeviceName + ' UserSet is:' + $_UserNameCluster + ' On Domain:' + $_FQDNDomainName)
+
+            $ACL = Get-Acl -Path "AD:$DeviceObject"
+            $currentSSDL = $ACL.Sddl
+
+            IF ($currentSSDL -match ("\(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;$UserSID\)")) {
+                write-verbose ('Permissions for SPN are already set')
+                $AccountTrack.Add($_DeviceName, $true)
+            }
+            ELSE {
+                write-verbose ('Permissions for SPN are not currently set')
+                $AccountTrack.Add($_DeviceName, $false)
+            }
+        }
+
+        $PermissionTest = $true
+        foreach ($object in $AccountTrack.Values) {
+            #write-verbose ('Permissions for Object:' + $object)
+            IF ($object -eq $false) {
+                $PermissionTest = $false
+            }
+        }
+
+        Return $PermissionTest
+    }
+
+    [ActiveDirectorySPN] Get() {
         return $this
     }
 

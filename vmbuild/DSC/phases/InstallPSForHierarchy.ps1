@@ -7,9 +7,10 @@ param(
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-$ThisVM = $deployConfig.thisParams.thisVM
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
 $UpdateToLatest = $deployConfig.cmOptions.updateToLatest
-$CSName = $deployConfig.thisParams.CSName
+$CSName = $ThisVM.thisParams.ParentSiteServer
 
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
@@ -22,10 +23,18 @@ if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
     $sqlInstanceName = $SQLVM.sqlInstanceName
+    $sqlPort = $SQLVM.thisParams.sqlPort
+    if ($SQLVM.AlwaysOnName) {
+        $installToAO = $true
+        $sqlServerName = $SQLVM.AlwaysOnName
+        $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
+        $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
+    }
 }
 else {
     $sqlServerName = $env:COMPUTERNAME
     $sqlInstanceName = $ThisVM.sqlInstanceName
+    $sqlPort = $ThisVM.thisParams.sqlPort
 }
 
 # Set Site Code
@@ -50,16 +59,16 @@ $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.js
 # Wait for ScriptWorkflow.json to exist on CAS
 Write-DscStatus "Waiting for $CSName to begin installation"
 while (!(Test-Path $CSConfigurationFile)) {
-    Write-DscStatus "Waiting for $CSName to begin installation" -RetrySeconds 60
-    Start-Sleep -Seconds 60
+    Write-DscStatus "Waiting for $CSName to begin installation" -RetrySeconds 30
+    Start-Sleep -Seconds 30
 }
 
 # Read CAS actions file, wait for install to finish
 Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr"
 $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
 while ($CSConfiguration.$("InstallSCCM").Status -ne "Completed") {
-    Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr" -NoLog -RetrySeconds 60
-    Start-Sleep -Seconds 60
+    Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr" -NoLog -RetrySeconds 30
+    Start-Sleep -Seconds 30
     $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
 }
 
@@ -68,8 +77,8 @@ if ($UpdateToLatest) {
     Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr"
     $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
     while ($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed") {
-        Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 60
-        Start-Sleep -Seconds 60
+        Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 30
+        Start-Sleep -Seconds 30
         $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
     }
 }
@@ -118,7 +127,9 @@ JoinCEIP=0
 [SQLConfigOptions]
 SQLServerName=%SQLMachineFQDN%
 DatabaseName=%SQLInstance%CM_%SiteCode%
+SQLServerPort=%SqlPort%
 SQLSSBPort=4022
+AGBackupShare=
 
 [CloudConnectorOptions]
 CloudConnector=0
@@ -150,12 +161,21 @@ CCARSiteServer=%CASMachineFQDN%
     $cmini = $cmini.Replace('%SQLMachineFQDN%', "$sqlServerName.$DomainFullName")
     $cmini = $cmini.Replace('%SiteCode%', $SiteCode)
     $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+    $cmini = $cmini.Replace('%SqlPort%', $sqlPort)
     # $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
     # $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CASMachineFQDN%', "$CSName.$DomainFullName")
     $cmini = $cmini.Replace('%REdistPath%', "$cmsourcepath\REdist")
 
-    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
+    if ($installToAO) {
+        $cmini = $cmini.Replace('AGBackupShare=', "AGBackupShare=$agBackupShare")
+    }
+
+    if ($deployConfig.parameters.SysCenterId) {
+        $cmini = $cmini.Replace('SysCenterId=', "SysCenterId=$($deployConfig.parameters.SysCenterId)")
+    }
+
+    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER" -or $installToAO) {
         $cmini = $cmini.Replace('%SQLInstance%', "")
     }
     else {
@@ -186,9 +206,20 @@ CCARSiteServer=%CASMachineFQDN%
     # Wait for Site ready
     $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
     Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
-    while ($CSConfiguration.$("PSReadytoUse").Status -ne "Completed") {
-        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 60
-        Start-Sleep -Seconds 60
+    $propName = "PSReadyToUse" + $ThisVm.VmName
+    $i = 0
+    while ($CSConfiguration.$propName.Status -ne "Completed") {
+        if ($i -eq 0) {
+        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 600
+        $i++
+        }
+        else {
+            $i++
+            if ($i -gt 20) {
+                $i = 0
+            }
+        }
+        Start-Sleep -Seconds 30
         $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
     }
 

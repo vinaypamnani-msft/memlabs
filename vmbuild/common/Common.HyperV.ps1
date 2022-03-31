@@ -64,38 +64,82 @@ function Start-VM2 {
         [int]$RetrySeconds = 60
     )
 
-    $vm = Get-VM2 -Name $Name
+    $OriginalProgressPreference = $Global:ProgressPreference
+    $Global:ProgressPreference = 'SilentlyContinue'
+    try {
+        $vm = Get-VM2 -Name $Name
 
-    if ($vm) {
-        $i = 0
-
-        do {
-            $i++
-            if ($i -gt 1) {
-                Start-Sleep -Seconds $RetrySeconds
+        if ($vm.State -eq "Running") {
+            Write-Log "${Name}: VM is already running." -LogOnly
+            if ($Passthru) {
+                return $true
             }
-            Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue
+            return
         }
 
-        until ($i -gt $retryCount -or $StopError.Count -eq 0)
+        if ($vm) {
+            $i = 0
+            $running = $false
+            do {
+                $i++
+                if ($i -gt 1) {
+                    write-progress2 "Start VM" -Status "Retry Start VM $Name"  -force
+                    Start-Sleep -Seconds $RetrySeconds
+                }
+                else {
+                    write-progress2 "Start VM" -Status "Starting VM $Name"  -force
+                }
+                Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinu
+                $vm = Get-VM2 -Name $Name
+                if ($vm.State -eq "Running") {
+                    $running = $true
+                }
+            }
 
-        if ($StopError.Count -ne 0) {
-            Write-Log "${$Name}: Failed to start the VM. $StopError" -Warning
+            until ($i -gt $retryCount -or $running)
+
+            if ($running) {
+                Write-Log "${Name}: VM was started." -LogOnly
+                if ($Passthru.IsPresent) {
+                    return $true
+                }
+            }
+
+            if ($StopError.Count -ne 0) {
+                Write-Log "${Name}: Failed to start the VM. $StopError" -Warning
+                if ($Passthru.IsPresent) {
+                    return $false
+                }
+            }
+            else {
+                $vm = Get-VM2 -Name $Name
+                if ($vm.State -eq "Running") {
+                    Write-Log "${Name}: VM was started." -LogOnly
+                    if ($Passthru.IsPresent) {
+                        return $true
+                    }
+                }
+                else {
+                    Write-Log "${Name}: VM was not started. Current State $($vm.State)" -Warning
+                    if ($Passthru.IsPresent) {
+                        return $false
+                    }
+                }
+            }
+        }
+        else {
+            Write-Log "$Name`: VM was not found in Hyper-V." -Warning
             if ($Passthru.IsPresent) {
                 return $false
             }
         }
-        else {
-            if ($Passthru.IsPresent) {
-                return $true
-            }
-        }
     }
-    else {
-        Write-Log "$Name`: VM was not found in Hyper-V." -Warning
-        if ($Passthru.IsPresent) {
-            return $false
-        }
+    catch {
+        Write-Exception -ExceptionInfo $_
+    }
+    finally {
+        write-progress2 "Start VM" -Status "Started VM $Name" -force -Completed
+        $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
 function Stop-VM2 {
@@ -110,40 +154,75 @@ function Stop-VM2 {
         [Parameter(Mandatory = $false)]
         [int]$RetrySeconds = 10,
         [Parameter(Mandatory = $false)]
-        [switch]$force
+        [switch]$force,
+        [Parameter(Mandatory = $false)]
+        [switch]$TurnOff
     )
 
-    $vm = Get-VM2 -Name $Name
-    Write-Log "${$Name}: Stopping VM" -HostOnly
+    try {
+        $vm = Get-VM2 -Name $Name
 
-    if ($vm) {
-        $i = 0
-
-        do {
-            $i++
-            if ($i -gt 1) {
-                Start-Sleep -Seconds $RetrySeconds
+        if ($vm.State -eq "Off") {
+            Write-Log "${Name}: VM is already stopped." -LogOnly
+            if ($Passthru) {
+                return $true
             }
-            Stop-VM -VM $vm -force:$force -ErrorVariable StopError -ErrorAction SilentlyContinue
+            return
         }
-        until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
-        if ($StopError.Count -ne 0) {
-            Write-Log "${$Name}: Failed to stop the VM. $StopError" -Warning
-            if ($Passthru.IsPresent) {
-                return $false
+        Write-Log "${Name}: Stopping VM" -HostOnly
+
+
+
+        if ($vm) {
+            $i = 0
+            if ($TurnOff) {
+                Stop-VM -VM $vm -TurnOff -force:$force -WarningAction SilentlyContinu
+                start-sleep -seconds 5
+            }
+            do {
+                $i++
+                if ($i -gt 1) {
+                    Start-Sleep -Seconds $RetrySeconds
+                }
+                Stop-VM -VM $vm -force:$force -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinu
+            }
+            until ($i -gt $retryCount -or $StopError.Count -eq 0)
+
+            if ($StopError.Count -ne 0) {
+                if ($TurnOff) {
+                    Stop-VM -VM $vm -TurnOff -force:$force -WarningAction SilentlyContinu
+                    Start-Sleep -Seconds 5
+                    $vm = Get-VM2 -Name $Name
+                    if ($vm.State -eq "Off") {
+                        return $true
+                    }
+                }
+                Write-Log "${Name}: Failed to stop the VM. $StopError" -Warning
+                if ($Passthru.IsPresent) {
+                    return $false
+                }
+            }
+            else {
+                if ($Passthru.IsPresent) {
+                    return $true
+                }
             }
         }
         else {
             if ($Passthru.IsPresent) {
-                return $true
+                Write-Log "$Name`: VM was not found in Hyper-V." -Warning
+                return $false
             }
         }
     }
-    else {
-        if ($Passthru.IsPresent) {
-            Write-Log "$Name`: VM was not found in Hyper-V." -Warning
+    catch {
+        if ($Passthru) {
+            Write-Log "$Name`: Exception stopping VM $_" -error
             return $false
+        }
+        else {
+            Write-Log "$Name`: Exception stopping VM $_" -error -LogOnly
         }
     }
 }
@@ -162,9 +241,9 @@ function Get-VMCheckpoint2 {
 
     if ($vm) {
         if ($name) {
-        return Get-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
+            return Get-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
         }
-        else{
+        else {
             return Get-VMCheckpoint -VM $vm  -ErrorAction SilentlyContinue
         }
     }
@@ -200,6 +279,9 @@ function Checkpoint-VM2 {
     $vm = Get-VM2 -Name $Name
 
     if ($vm) {
+        $json = $SnapshotName + ".json"
+        $notesFile = Join-Path ($vm).Path $json
+        $vm.notes | Out-File $notesFile
         Checkpoint-VM -VM $vm -SnapshotName $SnapshotName -ErrorAction Stop
     }
     return [System.Management.Automation.Internal.AutomationNull]::Value

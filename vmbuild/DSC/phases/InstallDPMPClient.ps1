@@ -9,12 +9,12 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $DomainName = $DomainFullName.Split(".")[0]
-$ThisMachineName = $deployConfig.thisParams.MachineName
-$ThisVM = $deployConfig.thisParams.thisVM
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
 
-#bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
-$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
-#$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" }).vmName -join ","
+# bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
+#$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
+$ClientNames = $thisVM.thisParams.ClientPush
 $cm_svc = "$DomainName\cm_svc"
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 
@@ -23,34 +23,31 @@ $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
 # Read Site Code from registry
-Write-DscStatus "Setting PS Drive for ConfigMgr"
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
-$ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
-
-# Get CM module path
-$key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-$subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-$uiInstallPath = $subKey.GetValue("UI Installation Directory")
-$modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-$initParams = @{}
-
-# Import the ConfigurationManager.psd1 module
-if ($null -eq (Get-Module ConfigurationManager)) {
-    Import-Module $modulePath
+if (-not $SiteCode) {
+    Write-DscStatus "Failed to get 'Site Code' from SOFTWARE\Microsoft\SMS\Identification. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return
 }
 
-# Connect to the site's drive if it is not already present
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+# Provider
+$smsProvider = Get-SMSProvider -SiteCode $SiteCode
+if (-not $smsProvider.FQDN) {
+    Write-DscStatus "Failed to get SMS Provider for site $SiteCode. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return $false
+}
 
-while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-    Write-DscStatus "Retry in 10s to Set PS Drive" -NoLog
-    Start-Sleep -Seconds 10
-    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+# Set CMSite Provider
+$worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($smsProvider.FQDN)
+if (-not $worked) {
+    return
 }
 
 # Set the current location to be the site code.
-Set-Location "$($SiteCode):\" @initParams
-
+Set-Location "$($SiteCode):\"
+if ((Get-Location).Drive.Name -ne $SiteCode) {
+    Write-DscStatus "Failed to Set-Location to $SiteCode`:"
+    return $false
+}
 
 $cm_svc_file = "$LogPath\cm_svc.txt"
 if (Test-Path $cm_svc_file) {
@@ -65,135 +62,11 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Setting the Client Push Account"
     Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
     Start-Sleep -Seconds 5
-}
 
-
-# Enable EHTTP, some components are still installing and they reset it to Disabled.
-# Keep setting it every 30 seconds, 10 times and bail...
-$attempts = 0
-if ($ThisVM.hidden) {
-    # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
-    $attempts = 10
-}
-
-$enabled = $false
-Write-DscStatus "Enabling e-HTTP"
-do {
-    $attempts++
-    Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
-    Start-Sleep 30
-    $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
-    $enabled = ($prop.Value -band 1024) -eq 1024
-    Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled" -RetrySeconds 30
-} until ($attempts -ge 10)
-
-if (-not $enabled) {
-    Write-DscStatus "e-HTTP not enabled after trying $attempts times, skip."
-}
-else {
-    Write-DscStatus "e-HTTP was enabled."
-}
-
-# Restart services to make sure push account is acknowledged by CCM
-Write-DscStatus "Restarting services"
-Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
-
-
-function Install-DP {
-    param (
-        [Parameter()]
-        [string]
-        $ServerFQDN,
-        [string]
-        $ServerSiteCode
-    )
-
-    $i = 0
-    $installFailure = $false
-    $DPFQDN = $ServerFQDN
-
-    do {
-
-        $i++
-
-        # Create Site system Server
-        #============
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
-        if (-not $SystemServer) {
-            Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
-            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
-        }
-
-        # Install DP
-        #============
-        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
-        if (-not $dpinstalled) {
-            Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role."
-            $Date = [DateTime]::Now.AddYears(30)
-            #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
-            Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 60
-        }
-        else {
-            Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
-            $dpinstalled = $true
-        }
-
-        if ($i -gt 10) {
-            Write-DscStatus "No Progress after $i tries, Giving up on $DPFQDN SiteCode: $ServerSiteCode ."
-            $installFailure = $true
-        }
-
-        Start-Sleep -Seconds 10
-
-    } until ($dpinstalled -or $installFailure)
-}
-
-function Install-MP {
-    param (
-        [string]
-        $ServerFQDN,
-        [string]
-        $ServerSiteCode
-    )
-
-    $i = 0
-    $installFailure = $false
-    $MPFQDN = $ServerFQDN
-
-    do {
-
-        $i++
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
-        if (-not $SystemServer) {
-            Write-DscStatus "Creating new CM Site System server on $MPFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
-        }
-
-        $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
-        if (-not $mpinstalled) {
-            Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
-            Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 60
-        }
-        else {
-            Write-DscStatus "MP Role detected on $MPFQDN"
-            $mpinstalled = $true
-        }
-
-        if ($i -gt 10) {
-            Write-DscStatus "No Progress after $i tries, Giving up."
-            $installFailure = $true
-        }
-
-        Start-Sleep -Seconds 10
-
-    } until ($mpinstalled -or $installFailure)
+    # Restart services to make sure push account is acknowledged by CCM
+    Write-DscStatus "Restarting services"
+    Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+    Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
 }
 
 $DPs = @()
@@ -266,15 +139,10 @@ if ($mpCount -eq 0) {
     Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
 }
 
-# exit if rerunning DSC to add passive site
-if ($null -ne $deployConfig.thisParams.PassiveVM) {
-    Write-DscStatus "Skip Client Push since we're adding Passive site server"
-    return
-}
-
-$bgs = $deployConfig.thisParams.sitesAndNetworks
-
-# Create BGs
+# Create Boundary groups
+$bgs = $ThisVM.thisParams.sitesAndNetworks | Where-Object { $_.SiteCode -in $ValidSiteCodes }
+$bgsCount = $bgs.count
+Write-DscStatus "Create $bgsCount Boundary Groups"
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     $siteStatus = Get-CMSite -SiteCode $bgsitecode
     if ($siteStatus.Status -eq 1) {
@@ -294,7 +162,7 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
             }
         }
         catch {
-            Write-DscStatus "Failed to create BG '$bgsitecode'. Error: $_"
+            Write-DscStatus "Failed to create Boundary Group '$bgsitecode'. Error: $_"
         }
     }
     else {
@@ -304,6 +172,7 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
 }
 
 # Create Boundaries for each subnet and add to BG
+Write-DscStatus "Create Boundaries for each subnet and add to BG"
 foreach ($bg in $bgs) {
     $exists = Get-CMBoundary -BoundaryName $bg.Subnet
     if ($exists) {
@@ -312,7 +181,7 @@ foreach ($bg in $bgs) {
             Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
         }
         catch {
-            Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to BG '$($bg.SiteCode)'. Error: $_"
+            Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
         }
     }
     else {
@@ -324,7 +193,7 @@ foreach ($bg in $bgs) {
                 Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
             }
             catch {
-                Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to BG '$($bg.SiteCode)'. Error: $_"
+                Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
             }
         }
         catch {
@@ -356,6 +225,12 @@ Write-DscStatus "Invoking AD system discovery"
 Start-Sleep -Seconds 5
 Invoke-CMSystemDiscovery
 Start-Sleep -Seconds 5
+
+if ($ThisVm.thisParams.PassiveNode) {
+    Write-DscStatus "Skip Client Push since we're adding Passive site server"
+    $pushClients = $false
+    #return
+}
 
 # Push Clients
 #==============
@@ -390,8 +265,8 @@ foreach ($client in $ClientNameList) {
         Invoke-CMSystemDiscovery
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
-        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 60
-        Start-Sleep -Seconds 60
+        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
+        Start-Sleep -Seconds 30
         $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
     }
 

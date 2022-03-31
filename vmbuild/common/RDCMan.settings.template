@@ -80,7 +80,7 @@
         </redirectDrivesList>
         <redirectPrinters>False</redirectPrinters>
         <redirectPorts>False</redirectPorts>
-        <redirectSmartCards>True</redirectSmartCards>
+        <redirectSmartCards>False</redirectSmartCards>
         <redirectPnpDevices>False</redirectPnpDevices>
       </localResources>
       <displaySettings>

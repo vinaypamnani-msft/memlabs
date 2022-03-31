@@ -50,17 +50,17 @@ function Save-RdcManSettignsFile {
         Write-Log "Could not locate $templatefile" -Failure
         return
     }
-
+    $modified = $false
     # Gets the blank template, or returns the existing settings xml if available.
     $file = $template
     Write-Verbose "Checking for $existingfile"
     if (Test-Path $existingfile) {
         [xml]$file = Get-Content -Path $existingfile
         write-verbose "Found existing file at $existingfile"
-        $existingIsPresent = $true
     }
     else {
         write-verbose "Using Template file at $templatefile"
+        $modified = $true
     }
 
     $settings = $file.Settings
@@ -69,16 +69,27 @@ function Save-RdcManSettignsFile {
     $FilesToOpenFromTemplate = $template.Settings.FilesToOpen
 
     $found = $false
-
     #Always update the template so we can use it.
     if ($FilesToOpenFromTemplate.Item -eq "TEMPLATE") {
         $FilesToOpenFromTemplate.Item = $rdcmanfile
         $itemTemplate = $template.Settings.FilesToOpen.SelectSingleNode('./item')
-        $settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName = $env:Username
-        $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain = $env:ComputerName
-        $settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName = ($($env:ComputerName) + "\" + $($env:Username))
+        if ($settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName -ne $env:Username) {
+            $settings.DefaultGroupSettings.defaultSettings.logonCredentials.userName = $env:Username
+            $modified = $true
+        }
+        if ( $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain -ne $env:ComputerName) {
+            $settings.DefaultGroupSettings.defaultSettings.logonCredentials.domain = $env:ComputerName
+            $modified = $true
+        }
+        if ($settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName -ne ($($env:ComputerName) + "\" + $($env:Username))) {
+            $settings.DefaultGroupSettings.defaultSettings.encryptionSettings.credentialName = ($($env:ComputerName) + "\" + $($env:Username))
+            $modified = $true
+        }
     }
-    $settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication = "None"
+    if ($settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication -ne "None") {
+        $settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication = "None"
+        $modified = $true
+    }
 
     #FilesToOpen is missing!?
     if ($null -eq $FilesToOpen) {
@@ -86,6 +97,7 @@ function Save-RdcManSettignsFile {
         $newFiles = $FilesToOpenFromTemplate.Clone()
         $FilesToOpen = $file.ImportNode($newFiles, $true)
         $settings.AppendChild($FilesToOpen)
+        $modified = $true
     }
 
     $FilesToOpenCount = 0
@@ -113,12 +125,14 @@ function Save-RdcManSettignsFile {
         $FilesToOpen = $file.ImportNode($newFiles, $true)
 
         $settings.AppendChild($FilesToOpen)
+        $modified = $true
     }
     elseif (-not $found) {
         Write-Verbose ("Adding new entry")
         if ($itemTemplate) {
             $clonedNode = $file.ImportNode($itemTemplate, $true)
             $FilesToOpen.AppendChild($clonedNode)
+            $modified = $true
             #$settings.AppendChild($FilesToOpen)
         }
         else {
@@ -126,18 +140,26 @@ function Save-RdcManSettignsFile {
         }
     }
 
-    Write-Verbose "Stopping RDCMan and Saving $existingfile"
-    Get-Process -Name rdcman -ea Ignore | Stop-Process
-    Start-Sleep 1
-
-    If (-not (test-path $existingfile)) {
-        $existingdir = Split-Path $existingfile
-        if (-not (test-path $existingdir)) {
-            New-Item -ItemType Directory -Force -Path $existingdir | Out-Null
+    if ($modified) {
+        Write-Verbose "Stopping RDCMan and Saving $existingfile"
+        $proc = Get-Process -Name rdcman -ea Ignore
+        $killed = $false
+        if ($proc) {
+            $killed = $true
         }
-    }
-    $file.Save($existingfile)
+        $proc | Stop-Process
+        Start-Sleep 1
 
+        If (-not (test-path $existingfile)) {
+            $existingdir = Split-Path $existingfile
+            if (-not (test-path $existingdir)) {
+                New-Item -ItemType Directory -Force -Path $existingdir | Out-Null
+            }
+        }
+        $file.Save($existingfile)
+        return $killed
+    }
+    return $false
 }
 #
 #function New-RDCManFile {
@@ -259,14 +281,22 @@ function New-RDCManFileFromHyperV {
     [CmdletBinding()]
     param(
         [string]$rdcmanfile,
-        [bool]$OverWrite = $false
+        [bool]$OverWrite = $false,
+        [switch]$NoActivity,
+        [switch]$WhatIf
     )
 
-    Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity
+    if ($WhatIf.IsPresent) {
+        Write-Log "[WhatIf] Will update MEMLabs.RDG file on Desktop, if needed."
+        return
+    }
+
+    $Activity = -not $NoActivity.IsPresent
+    Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity:$Activity
 
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
-            Write-Log "Killing RDCMan, and Deleting $rdcmanfile."
+            Write-Log "Regenerating new MEMLabs.RDG: stopping RDCMan.exe, and Deleting $rdcmanfile."
             Get-Process -Name rdcman -ea Ignore | Stop-Process
             Start-Sleep 1
             Remove-Item $rdcmanfile | out-null
@@ -395,6 +425,23 @@ function New-RDCManFileFromHyperV {
                     }
                 }
 
+
+            if ($vm.SqlVersion) {
+                $PrimaryNode = $vm
+                if ($vm.role -eq "SQLAO"){
+                    if (-not $vm.OtherNode) {
+                        $primaryNode = $vmListFull | Where-Object {$_.OtherNode -eq $vm.vmName}
+                    }
+                }
+                $SiteServer = $vmListFull | Where-Object {$_.RemoteSQLVM -eq $PrimaryNode.vmName}
+                if ($SiteServer)
+                 {
+                    $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)"
+                 }
+                 else {
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                 }
+            }
             }
 
             $comment = $c | ConvertTo-Json
@@ -428,7 +475,13 @@ function New-RDCManFileFromHyperV {
                     $name = $vm.LastKnownIP
                 }
                 else {
-                    $displayName = $displayName + "(Missing IP)"
+                    $IP = (get-vm2 -name $vm.vmName | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
+                    if ($IP) {
+                        $name = $IP
+                    }
+                    else {
+                        $displayName = $displayName + "(Missing IP)"
+                    }
                 }
             }
             if ($vm.domainUser) {
@@ -457,7 +510,7 @@ function New-RDCManFileFromHyperV {
             [void]$findGroup.AppendChild($clonedItem)
         }
         $roles = $vmListFull | Select-Object -ExpandProperty role
-        $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | where-object {$_.properties.name -eq "Servers" } | Select-Object -First 1
+        $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | where-object { $_.properties.name -eq "Servers" } | Select-Object -First 1
         #write-host $SmartGroupToClone.properties.name
         #$ruleToClone = $SmartGroupToClone.ruleGroup.rule
         $clonedSG = $SmartGroupToClone.clone()
@@ -498,7 +551,7 @@ function New-RDCManFileFromHyperV {
         $shouldSave = $true
     }
     $unknownVMs = @()
-    $unknownVMs += get-list -type vm  | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
+    $unknownVMs += get-list -type vm | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
         Write-Verbose "New-RDCManFileFromHyperV: Adding Unknown VMs"
         $findGroup = $null
@@ -531,16 +584,33 @@ function New-RDCManFileFromHyperV {
         [void]$file.AppendChild($findgroup)
     }
 
-    Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
+    $killed = Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
-        Write-Log "Killing RDCMan, if necessary and updating $rdcmanfile." -Success
-        Get-Process -Name rdcman -ea Ignore | Stop-Process
-        Start-Sleep 1
-        $existing.save($rdcmanfile) | Out-Null
+        try {
+
+            $proc = $null
+            $proc = Get-Process -Name rdcman -ea Ignore | Select-Object -First 1
+            if ($proc) {
+                $killed = $true
+                Get-Process -Name rdcman -ea Ignore | Stop-Process
+            }
+            Start-Sleep 1
+            $existing.save($rdcmanfile) | Out-Null
+            Write-GreenCheck "Updated $rdcmanfile. Restarting the process if possible" -ForegroundColor ForestGreen
+
+        }
+        catch {
+            Write-RedX "Could not update $rdcmanfile. $_"
+        }
     }
     else {
-        Write-Log "No Changes. Not updating $rdcmanfile" -Success
+        Write-Log "No Changes. Not updating $rdcmanfile" -Success -Verbose
+    }
+    if ($killed) {
+
+        #Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
+        Start-Process "C:\tools\RDCMan.exe" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
     }
 }
 
@@ -610,7 +680,12 @@ function Add-RDCManServerToGroup {
     if ($ForceOverwrite) {
         #Delete Old Records and let them be regenerated
 
-        $findservers = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName }
+        $displayNameList = @($displayName, $serverName, ($displayName + " (Missing IP)"))
+        if ($username) {
+            $displayNameList += $displayName + "($username)"
+        }
+
+        $findservers = $findgroup.group.server | Where-Object { $_.properties.displayName -in $displayNameList -or $_.properties.name -in $displayNameList }
 
         foreach ($item in $findservers) {
             Write-Log ("Removing $($item.properties.displayName)") -LogOnly -Verbose

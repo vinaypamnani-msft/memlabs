@@ -10,6 +10,239 @@ param (
 ### Common Functions ###
 ########################
 
+Function Write-ProgressElapsed {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$StopWatch,
+        [Parameter(Mandatory = $true)]
+        [object]$TimeSpan,
+        [Parameter(Mandatory = $true)]
+        [String]$text,
+        [Parameter(Mandatory = $false)]
+        [switch]$showTimeout,
+        [Parameter(Mandatory = $false)]
+        [string]$FailCount,
+        [Parameter(Mandatory = $false)]
+        [string]$FailCountMax
+
+
+    )
+    try {
+        $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
+        $msg = ""
+        if ($showTimeout) {
+            $msg = "Waiting $TimeSpan minutes. "
+        }
+        $msg = $msg + "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))"
+        if ($FailCount) {
+            $msg = $msg + " Failed $FailCount / $FailCountMax"
+        }
+        Write-Progress2 $msg -Status $text -PercentComplete $percent
+    }
+    catch {
+        Write-Exception $_
+        Write-Progress2 "Exception" -Status $_
+    }
+}
+
+#Main wrapper for Write-Progress.  This allows all params, and catches any errors
+Function Write-Progress2 {
+
+    try {
+        # write-host -NoNewline "$hideCursor"
+        Write-Progress2Impl @Args @PSBoundParameters | out-null
+    }
+    catch {
+        write-Log "Write-Progress $args $_"
+    }
+}
+
+#Sub Wrapper for Write-Progress.  This allows PercentComplete to be modified, and can log the activity in verbose
+#We can also add additional params here if needed. (eg -NoLog)
+Function Write-Progress2Impl {
+    [CmdletBinding(HelpUri = 'https://go.microsoft.com/fwlink/?LinkID=2097036', RemotingCapability = 'None')]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]
+        ${Activity},
+
+        [Parameter(Position = 1)]
+        [ValidateNotNullOrEmpty()]
+        [string]
+        ${Status},
+
+        [Parameter(Position = 2)]
+        [ValidateRange(0, 2147483647)]
+        [int]
+        ${Id},
+
+        #[ValidateRange(-1, 100)]
+        [int]
+        ${PercentComplete},
+
+        [int]
+        ${SecondsRemaining},
+
+        [string]
+        ${CurrentOperation},
+
+        [ValidateRange(-1, 2147483647)]
+        [int]
+        ${ParentId},
+
+        [switch]
+        ${Completed},
+
+        [int]
+        ${SourceId},
+
+        [switch]
+        ${force}
+    )
+    dynamicparam {
+
+        try {
+            $targetCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet, $PSBoundParameters)
+            $dynamicParams = @($targetCmd.Parameters.GetEnumerator() | Microsoft.PowerShell.Core\Where-Object { $_.Value.IsDynamic })
+            if ($dynamicParams.Length -gt 0) {
+                $paramDictionary = [Management.Automation.RuntimeDefinedParameterDictionary]::new()
+                foreach ($param in $dynamicParams) {
+                    $param = $param.Value
+
+                    if (-not $MyInvocation.MyCommand.Parameters.ContainsKey($param.Name)) {
+                        $dynParam = [Management.Automation.RuntimeDefinedParameter]::new($param.Name, $param.ParameterType, $param.Attributes)
+                        $paramDictionary.Add($param.Name, $dynParam)
+                    }
+                }
+
+                return $paramDictionary
+            }
+        }
+        catch {
+            throw
+        }
+
+    }
+    begin {
+
+        try {
+            $Percent = $null
+            if ($PSBoundParameters.TryGetValue('PercentComplete', [ref]$Percent)) {
+                if ($Percent -le 1) {
+                    $Percent = 1
+                }
+                if ($Percent -ge 100) {
+                    $Percent = 99
+                }
+                $PSBoundParameters['PercentComplete'] = $percent
+            }
+            $outBuffer = $null
+            if ($PSBoundParameters.TryGetValue('OutBuffer', [ref]$outBuffer)) {
+                $PSBoundParameters['OutBuffer'] = 1
+            }
+
+            $forcevalue = $null
+            if ($force -or $PSBoundParameters.TryGetValue('force', [ref]$forcevalue)) {
+                $PSBoundParameters.remove("force")
+                $force = $true
+                $OriginalProgressPreference = $Global:ProgressPreference
+                $Global:ProgressPreference = 'Continue'
+            }
+
+            $Activityvalue = $null
+            if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
+                $Activityvalue = $Activity.TrimEnd()
+
+                if ($Activityvalue.Contains("`n")) {
+                    Write-Log "$Activity contains new-line"
+                }
+                $PSBoundParameters['Activity'] = $Activityvalue
+            }
+
+            $StatusValue = $null
+            if ($PSBoundParameters.TryGetValue('Status', [ref]$StatusValue)) {
+                $StatusValue = $StatusValue.TrimEnd()
+
+                if ($StatusValue.Contains("`n")) {
+                    Write-Log "$StatusValue contains new-line"
+                }
+                $PSBoundParameters['Status'] = $StatusValue
+            }
+
+            if ($Global:LastStatus -ne $Status + $Percent) {
+                Write-Log "Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
+                $Global:LastStatus = $Status + $Percent
+            }
+            else {
+                #Write-Log "Ignored Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
+            }
+
+            $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
+            $scriptCmd = { & $wrappedCmd @PSBoundParameters }
+
+            $steppablePipeline = $scriptCmd.GetSteppablePipeline($myInvocation.CommandOrigin)
+            $steppablePipeline.Begin($PSCmdlet)
+        }
+        catch {
+            throw
+        }
+        finally {
+            if ($force) {
+                $Global:ProgressPreference = $OriginalProgressPreference
+            }
+        }
+
+    }
+    process {
+
+        try {
+            if ($force) {
+                $OriginalProgressPreference = $Global:ProgressPreference
+                $Global:ProgressPreference = 'Continue'
+            }
+            if ($Activity) {
+                $Activity = $Activity.TrimEnd()
+                if ($Activity.Contains("`n")) {
+                    Write-Log "$Activity contains new-line"
+                }
+            }
+            if ($Status) {
+                $Status = $Status.TrimEnd()
+                if ($Status.Contains("`n")) {
+                    Write-Log "$Status contains new-line"
+                }
+            }
+
+            if ($PercentComplete -le 1) {
+                $PercentComplete = 1
+            }
+            if ($PercentComplete -ge 100) {
+                $PercentComplete = 99
+            }
+
+            $steppablePipeline.Process($_)
+        }
+        catch {
+            throw
+        }
+        finally {
+            if ($force) {
+                $Global:ProgressPreference = $OriginalProgressPreference
+            }
+        }
+
+    }
+    end {
+
+        try {
+            $steppablePipeline.End()
+        }
+        catch {
+            throw
+        }
+
+    }
+}
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)]
@@ -23,6 +256,8 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         [switch]$Activity,
         [Parameter(Mandatory = $false)]
+        [switch]$NoNewLine,
+        [Parameter(Mandatory = $false)]
         [switch]$Highlight,
         [Parameter(Mandatory = $false)]
         [switch]$SubActivity,
@@ -33,11 +268,15 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         [switch]$HostOnly,
         [Parameter(Mandatory = $false)]
+        [switch]$NoIndent,
+        [Parameter(Mandatory = $false)]
         [switch]$ShowNotification
     )
 
     $HashArguments = @{}
+
     $info = $true
+    $logLevel = 1    # 0 = Verbose, 1 = Info, 2 = Warning, 3 = Error
 
     # Get caller function name and add it to Text
     try {
@@ -49,8 +288,14 @@ function Write-Log {
         $caller = "<Script>"
     }
 
+    if ($caller -eq "<ScriptBlock>") {
+        if ($global:ScriptBlockName) {
+            $caller = $global:ScriptBlockName
+        }
+    }
+
     if ($Text -is [string]) { $Text = $Text.ToString().Trim() }
-    $Text = "[$caller] $Text"
+    # $Text = "[$caller] $Text"
 
     if ($ShowNotification.IsPresent) {
         Show-Notification -ToastText $Text
@@ -64,61 +309,85 @@ function Write-Log {
 
     If ($Success.IsPresent) {
         $info = $false
-        $Text = "SUCCESS: $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Green)
+        $TextOutput = "  SUCCESS: $Text"
+        # $Text = "SUCCESS: $Text"
+        $HashArguments.Add("ForegroundColor", "Chartreuse")
     }
 
     If ($Activity.IsPresent) {
         $info = $false
         Write-Host
-        $Text = "=== $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
+        if ($NoNewLine.IsPresent) {
+            $Text = "=== $Text"
+        }
+        else {
+            $Text = "=== $Text`r`n"
+        }
+        $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
     }
 
-    If ($SubActivity.IsPresent) {
+    If ($SubActivity.IsPresent -and -not $Activity.IsPresent) {
         $info = $false
-        Write-Host
-        $Text = "====== $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Magenta)
+        $Text = "  === $Text"
+        $HashArguments.Add("ForegroundColor", "LightSkyBlue")
     }
 
     If ($Warning.IsPresent) {
         $info = $false
-        $Text = "WARNING: $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Yellow)
+        $logLevel = 2
+        $TextOutput = "  WARNING: $Text"
+        # $Text = "WARNING: $Text"
+        $HashArguments.Add("ForegroundColor", "Yellow")
+
     }
 
     If ($Failure.IsPresent) {
         $info = $false
-        $Text = "ERROR: $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Red)
+        $logLevel = 3
+        $TextOutput = "  ERROR: $Text"
+        # $Text = "ERROR: $Text"
+        $HashArguments.Add("ForegroundColor", "Red")
+
     }
 
     If ($IsVerbose) {
         $info = $false
-        $Text = "VERBOSE: $Text"
+        $logLevel = 0
+        $TextOutput = "  VERBOSE: $Text"
+        # $Text = "VERBOSE: $Text"
     }
 
     If ($Highlight.IsPresent) {
         $info = $false
         Write-Host
-        $Text = "+++ $Text"
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::Cyan)
+        $Text = "  +++ $Text"
+        $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
     }
 
     if ($info) {
-        $HashArguments.Add("ForegroundColor", [System.ConsoleColor]::White)
-        $Text = "INFO: $Text"
+        $HashArguments.Add("ForegroundColor", "White")
+        $TextOutput = "  $Text"
+        #$Text = "INFO: $Text"
     }
 
     # Write to output stream
     if ($OutputStream.IsPresent) {
-        Write-Output $Text
+        $Output = [PSCustomObject]@{
+            Text     = $text
+            Loglevel = $logLevel
+        }
+        if ($HashArguments) {
+            foreach ($arg in $HashArguments.Keys) {
+                $Output | Add-Member -MemberType NoteProperty -Name $arg -Value $HashArguments[$arg] -Force
+            }
+        }
+
+        Write-Output $Output
     }
 
     # Write progress if output stream and failure present
     if ($OutputStream.IsPresent -and $Failure.IsPresent) {
-        Write-Progress -Activity $Text -Status "Failed :(" -Completed
+        Write-Progress -Activity $Text -Status "Failed :-(" -Completed
     }
 
     # Write to console, if not logOnly and not OutputStream
@@ -132,12 +401,22 @@ function Write-Log {
         $writeHost = $true
     }
 
-    if ($writeHost) {
-        Write-Host $Text @HashArguments
+    # Suppress write-host when in-job
+    if ($InJob.IsPresent) {
+        $writeHost = $false
     }
 
-    $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss:fff'
-    $Text = "$time $Text"
+    if ($writeHost) {
+        if ($TextOutput) {
+            if ($NoIndent.IsPresent) {
+                $TextOutput = $TextOutput.Trim()
+            }
+            Write-Host2 $TextOutput @HashArguments
+        }
+        else {
+            Write-Host2 $Text @HashArguments
+        }
+    }
 
     # Write to log, non verbose entries
     $write = $false
@@ -153,12 +432,20 @@ function Write-Log {
     if ($write) {
         $Text = $Text.ToString().Trim()
         try {
-            $Text | Out-File $Common.LogPath -Append
+            $CallingFunction = Get-PSCallStack | Select-Object -first 2 | select-object -last 1
+            $context = $CallingFunction.Command
+            $file = $CallingFunction.Location
+            $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+            $date = Get-Date -Format 'MM-dd-yyyy'
+            $time = Get-Date -Format 'HH:mm:ss.fff'
+
+            $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""$logLevel"" thread=""$tid"" file=""$file"">"
+            $logText | Out-File $Common.LogPath -Append -Encoding utf8
         }
         catch {
             try {
                 # Retry once and ignore if failed
-                $Text | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue
+                $logText | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
             }
             catch {
                 # ignore
@@ -179,6 +466,8 @@ function Show-Notification {
         [parameter(ValueFromPipeline)]
         $ToastTag = "VMBuild"
     )
+
+    if ($Common.PS7) { return } # Not supported on PS7
 
     [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
     $Template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
@@ -216,32 +505,37 @@ function Write-Exception {
     $parentFunctionName = (Get-PSCallStack)[1].FunctionName
     $msg = "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
     [void]$sb.AppendLine($msg)
-    Write-Host $msg -ForegroundColor Red
+    Write-Host2 $msg -ForegroundColor Red
 
     $msg = "`n=== Exception.ScriptStackTrace:`n"
     [void]$sb.AppendLine($msg)
-    Write-Host $msg -ForegroundColor Red
+    Write-Host2 $msg -ForegroundColor Red
+    Write-Log -LogOnly $msg -Failure
 
     $msg = $ExceptionInfo.ScriptStackTrace
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
+    Write-Log -LogOnly $msg -Failure
 
     $msg = "`n=== Get-PSCallStack:`n"
     [void]$sb.AppendLine($msg)
-    Write-Host $msg -ForegroundColor Red
+    Write-Host2 $msg -ForegroundColor Red
+    Write-Log -LogOnly $msg -Failure
 
     $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
-
+    Write-Log -LogOnly $msg -Failure
     if ($AdditionalInfo) {
         $msg = "`n=== Additional Information:`n"
         [void]$sb.AppendLine($msg)
-        Write-Host "$msg" -ForegroundColor Red
+        Write-Host2 "$msg" -ForegroundColor Red
         Write-Host "Dumped to $crashFile"
-
+        Write-Log -LogOnly $msg -Failure
+        Write-Log -LogOnly  "Dumped to $crashFile" -Failure
         $msg = ($AdditionalInfo | Out-String).Trim()
         [void]$sb.AppendLine($msg)
+        Write-Log -LogOnly $msg -Failure
     }
 
     $sb.ToString() | Out-File -FilePath $crashFile -Force
@@ -269,6 +563,8 @@ function Get-File {
         [switch]$ResumeDownload,
         [Parameter(Mandatory = $false)]
         [switch]$UseCDN,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseBITS,
         [Parameter(Mandatory = $false, ParameterSetName = "WhatIf")]
         [switch]$WhatIf
     )
@@ -318,7 +614,7 @@ function Get-File {
 
     if (-not $Silent) {
         Write-Log "$Action $sourceDisplay to $Destination... "
-        if ($DisplayName) { Write-Log "Get-File: $DisplayName" -LogOnly }
+        if ($DisplayName) { Write-Log "$DisplayName" -LogOnly }
     }
 
     if ($RemoveIfPresent.IsPresent -and (Test-Path $Destination)) {
@@ -331,6 +627,8 @@ function Get-File {
         New-Item -Path $destinationDirectory -ItemType Directory -Force | Out-Null
     }
 
+    $OriginalProgressPreference = $Global:ProgressPreference
+    $Global:ProgressPreference = 'Continue'
     try {
         $i = 0
         $timedOut = $false
@@ -361,10 +659,15 @@ function Get-File {
         }
 
         if ($Action -eq "Downloading") {
-            $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
-            if (-not $worked) {
-                Write-Log "Failed to download file using curl."
-                return $false
+            if ($UseBITS.IsPresent) {
+                Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+            }
+            else {
+                $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
+                if (-not $worked) {
+                    Write-Log "Failed to download file. using curl"
+                    return $false
+                }
             }
         }
         else {
@@ -379,10 +682,13 @@ function Get-File {
     }
     catch {
         Write-Log "$Action $sourceDisplay failed. Error: $($_.ToString().Trim())" -Failure
+        Write-Log "$Action $sourceDisplay failed. Error: $($_.ScriptStackTrace)" -LogOnly
         return $false
     }
+    finally {
+        $Global:ProgressPreference = $OriginalProgressPreference
+    }
 }
-
 function Start-CurlTransfer {
     [CmdletBinding()]
     param (
@@ -574,26 +880,80 @@ Function Set-Window {
     }
 }
 
+
+function Add-SwitchAndDhcp {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Network Name.")]
+        [string]$NetworkName,
+        [Parameter(Mandatory = $true, HelpMessage = "Network Subnet.")]
+        [string]$NetworkSubnet,
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name.")]
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "Override DNS.")]
+        [string]$DNSServer,
+        [Parameter(Mandatory = $false, HelpMessage = "What If?")]
+        [switch]$WhatIf
+    )
+
+
+    if ($WhatIf.IsPresent) {
+        Write-Log "[What-If] Will create/verify Hyper-V switch and DHCP scopes."
+        return $true
+    }
+
+
+    get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' } | start-service
+    $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
+    if ($service) {
+        Write-Log "DHCPServer Service could not be started." -Failure
+        return $false
+    }
+    Write-Log "Creating/verifying Hyper-V switch and DHCP Scopes for '$NetworkName' network." -Activity
+
+    $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName
+    if (-not $switch) {
+        Write-Log "Failed to verify/create Hyper-V switch for $NetworkName network ($NetworkSubnet). Exiting." -Failure
+        return $false
+    }
+
+    # Test if DHCP scope exists, if not create it
+    $worked = Test-DHCPScope -ScopeID $NetworkSubnet -ScopeName $NetworkName -DomainName $DomainName -DNSServer $DNSServer
+    if (-not $worked) {
+        Write-Log "Failed to verify/create DHCP Scope for the '$NetworkName' network. ($NetworkSubnet) Exiting." -Failure
+        return $false
+    }
+    return $true
+}
+
 function Test-NetworkSwitch {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Network Name.")]
         [string]$NetworkName,
         [Parameter(Mandatory = $true, HelpMessage = "Network Subnet.")]
         [string]$NetworkSubnet,
-        [Parameter(Mandatory = $true, HelpMessage = "Domain Name.")]
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name.")]
         [string]$DomainName
     )
 
+    $notes = $DomainName
+    if (-not $notes) {
+        if ($NetworkName -eq "cluster") {
+            $notes = "Cluster network shared by all domains"
+        }
+        else {
+            $notes = $NetworkName
+        }
+    }
     $exists = Get-VMSwitch2 -NetworkName $NetworkName
     if (-not $exists) {
         Write-Log "HyperV Network switch for '$NetworkName' not found. Creating a new one."
         try {
-            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Stop | Out-Null
+            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Stop | Out-Null
         }
         catch {
             Write-Log "Failed to create HyperV Network switch for $NetworkName. Trying again in 30 seconds"
             start-sleep -seconds 30
-            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $DomainName -ErrorAction Continue | Out-Null
+            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Continue | Out-Null
         }
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
     }
@@ -637,7 +997,7 @@ function Test-NetworkSwitch {
         $success = $false
         while (-not $success) {
             try {
-                Restart-Service RemoteAccess -ErrorAction Stop
+                Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
                 $success = $true
             }
             catch {
@@ -659,26 +1019,8 @@ function Test-NetworkSwitch {
     }
 }
 
-function Test-DHCPScope {
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]
-        [string]$ScopeID,
-        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope Name.")]
-        [string]$ScopeName,
-        [Parameter(Mandatory = $true, HelpMessage = "DHCP Domain Name option.")]
-        [string]$DomainName,
-        [Parameter(Mandatory = $false, HelpMessage = "DC VM Name for extracting the DNS IP.")]
-        [string]$DCVMName
-    )
 
-    # Define Lease Time
-    $leaseTimespan = New-TimeSpan -Days 16
-    $internetScope = $false
-    if ($ScopeName.ToLowerInvariant() -eq "internet") {
-        $leaseTimespan = New-TimeSpan -Days 365
-        $internetScope = $true
-    }
-
+function Start-DHCP {
     # Install DHCP, if not found
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
@@ -691,78 +1033,192 @@ function Test-DHCPScope {
         }
     }
 
-    # Check if scope exists
-    $createScope = $false
-    $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
-    if ($scope) {
-        Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+    if ($dhcp.Status -ne 'Running') {
+        start-service "DHCPServer"
+        start-sleep -seconds 5
     }
-    else {
-        $createScope = $true
+    $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
+    if ($dhcp.Status -ne 'Running') {
+        return $false
     }
+    return $true
+}
 
-    # Define scope options
-    $network = $ScopeID.Substring(0, $ScopeID.LastIndexOf("."))
-    $DHCPDNSAddress = $network + ".1"
-    $DHCPDefaultGateway = $network + ".200"
-    $DHCPScopeStart = $network + ".20"
-    $DHCPScopeEnd = $network + ".199"
-
-    # Create scope, if needed
-    if ($createScope) {
-        Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction SilentlyContinue
-        $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction SilentlyContinue
-        if ($scope) {
-            Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
-        }
-        else {
-            Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
-            return $false
-        }
-    }
-
+function Test-DHCPScope {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]
+        [string]$ScopeID,
+        [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope Name.")]
+        [string]$ScopeName,
+        [Parameter(Mandatory = $false, HelpMessage = "DHCP Domain Name option.")]
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "Override DNS Server")]
+        [string]$DNSServer
+    )
     try {
 
-        if ($internetScope) {
-            $HashArguments = @{
-                ScopeId = $ScopeID
-                Router  = $DHCPDefaultGateway
+        write-log -logonly "Test-DHCPScope called with ScopeID: $ScopeID ScopeName: $ScopeName DomainName: $DomainName DNSSERVER: $DNSServer"
+        # Define Lease Time
+        $leaseTimespan = New-TimeSpan -Days 16
+        $DomainScope = $true
+        if (-not $DomainName) {
+            $leaseTimespan = New-TimeSpan -Days 365
+            $DomainScope = $false
+        }
+
+        # Install DHCP, if not found
+
+
+        $dhcp = Start-DHCP
+        if (-not $dhcp) {
+            Write-Log "DHCP Could not be started" -Failure
+            return $false
+        }
+
+        # Define scope options
+        $DHCPDNSAddress = $null
+        $network = $ScopeID.Substring(0, $ScopeID.LastIndexOf("."))
+        if ($ScopeName -notin ("cluster", "Internet")) {
+            if ($DNSServer) {
+                $DHCPDNSAddress = $DNSServer
+            }
+            else {
+                $DC = get-list -type VM -domain $DomainName | Where-Object { $_.Role -eq "DC" }
+                if ($DC) {
+                    $DHCPDNSAddress = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+                }
+                else {
+                    $DHCPDNSAddress = $network + ".1"
+                }
+            }
+        }
+
+
+        # Check if scope exists
+        $createScope = $true
+        $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
+        if ($scope) {
+            if ($DHCPDNSAddress) {
+                $scopeOptions = get-DhcpServerv4OptionValue -scopeID $scopeID -ErrorAction SilentlyContinue
+                $currentDNS = ($scopeOptions | Where-Object OptionID -eq 6).Value
+                if ($currentDNS -ne $DHCPDNSAddress) {
+                    Write-Log "'$ScopeID ($ScopeName)' scope does not match preferred DNS server"
+                    $createScope = $true
+                }
+                else {
+                    Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+                    $createScope = $false
+                }
+            }
+            else {
+                Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+                $createScope = $false
             }
         }
         else {
-            $HashArguments = @{
-                ScopeId   = $ScopeID
-                Router    = $DHCPDefaultGateway
-                DnsDomain = $DomainName
-            }
+            Write-Log "'$ScopeID ($ScopeName)' scope is not present in DHCP. Creating new scope"
+            $createScope = $true
         }
 
-        if ($DCVMName -and -not $internetScope) {
-            $dcnet = Get-VM2 -Name $DCVMName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
-            if ($dcnet) {
-                $dcIpv4 = $dcnet.IPAddresses | Where-Object { $_ -notlike "*:*" }
-                $HashArguments.Add("DnsServer", $dcIpv4)
-                $HashArguments.Add("WinsServer", $dcIpv4)
-            }
-            else {
-                $HashArguments.Add("DnsServer", $DHCPDNSAddress)
-            }
+        $dhcp = Start-DHCP
+        if (-not $dhcp) {
+            Write-Log "DHCP Could not be started" -Failure
+            return $false
         }
 
-        if ($internetScope) {
-            $DHCPDNSAddress = @("4.4.4.4", "8.8.8.8")
-            $HashArguments.Add("DnsServer", $DHCPDNSAddress)
+        if ($scope -and $createScope) {
+            Remove-DhcpServerv4Scope -scopeID $scopeID -force
         }
 
-        Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
-        Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
+        $dhcp = Start-DHCP
+        if (-not $dhcp) {
+            Write-Log "DHCP Could not be started" -Failure
+            return $false
+        }
+
+        $DHCPDefaultGateway = $network + ".200"
+        $DHCPScopeStart = $network + ".20"
+        $DHCPScopeEnd = $network + ".199"
+
+        $scope = $null
+        # Create scope, if needed
+        $maxRetries = 3
+        $retry = 0
+        if ($createScope) {
+
+            Write-Log "Creating '$ScopeID ($ScopeName)' scope with DHCPDefaultGateway: $DHCPDefaultGateway DHCPScopeStart: $DHCPScopeStart DHCPScopeEnd: $DHCPScopeEnd DNSServer: $DHCPDNSAddress "
+            while (-not $scope) {
+                try {
+                    if ($retry -gt 0) {
+                        if ($retry -ge $maxRetries) {
+                            Write-Log "Max Retries Exceeded. Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
+                            return $false
+                        }
+                        $dhcp = Start-DHCP
+                        if (-not $dhcp) {
+                            Write-Log "DHCP Could not be started" -Failure
+                            return $false
+                        }
+                    }
+                    $retry++
+                    Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction Stop
+                    $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction Stop
+                    if ($scope) {
+                        Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
+                    }
+                    else {
+                        Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
+                    }
+                }
+                catch {
+                    Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
+                }
+            }
+
+
+            try {
+                if (-not $DomainScope) {
+                    if ($ScopeName -eq "cluster") {
+                        $HashArguments = @{
+                            ScopeId = $ScopeID
+                            Router  = $DHCPDefaultGateway
+                        }
+                    }
+                    else {
+                        $HashArguments = @{
+                            ScopeId   = $ScopeID
+                            Router    = $DHCPDefaultGateway
+                            DnsServer = @("4.4.4.4", "8.8.8.8")
+                        }
+                    }
+                }
+                else {
+                    $HashArguments = @{
+                        ScopeId    = $ScopeID
+                        Router     = $DHCPDefaultGateway
+                        DnsDomain  = $DomainName
+                        WinsServer = $DHCPDNSAddress
+                        DnsServer  = $DHCPDNSAddress
+                    }
+                }
+
+                Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
+                Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
+                return $true
+            }
+            catch {
+                Write-Log "Failed to add/update scope options for '$ScopeID ($ScopeName)' scope in DHCP. $_" -Failure
+                Write-Log "$($_.ScriptStackTrace)" -LogOnly
+                return $false
+            }
+        }
         return $true
     }
     catch {
-        Write-Log "Failed to add/update scope options for '$ScopeID ($ScopeName)' scope in DHCP. $_" -Failure
+        Write-Log $_
+        Write-Exception -ExceptionInfo $_
         return $false
     }
-
 }
 
 function New-VmNote {
@@ -776,13 +1232,20 @@ function New-VmNote {
         [Parameter(Mandatory = $false)]
         [bool]$InProgress,
         [Parameter(Mandatory = $false)]
-        [switch]$UpdateVersion
+        [switch]$UpdateVersion,
+        [Parameter(Mandatory = $false)]
+        [bool]$Force = $false
     )
 
     try {
         $ProgressPreference = 'SilentlyContinue'
 
         $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
+
+        $network = $DeployConfig.vmOptions.network
+        if ($ThisVm.network) {
+            $network = $ThisVm.network
+        }
 
         $vmNote = [PSCustomObject]@{
             inProgress           = $InProgress
@@ -791,7 +1254,7 @@ function New-VmNote {
             deployedOS           = $ThisVM.operatingSystem
             domain               = $DeployConfig.vmOptions.domainName
             adminName            = $DeployConfig.vmOptions.adminName
-            network              = $DeployConfig.vmOptions.network
+            network              = $network
             prefix               = $DeployConfig.vmOptions.prefix
             memLabsDeployVersion = $Common.MemLabsVersion
         }
@@ -801,14 +1264,18 @@ function New-VmNote {
         }
 
         foreach ($prop in $ThisVM.PSObject.Properties) {
+            if ($prop.Name -eq "thisParams" -or $prop.Name -eq "SQLAO") {
+                continue
+            }
             $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
         }
 
-        Set-VMNote -vmName $vmName -vmNote $vmNote
+        Set-VMNote -vmName $vmName -vmNote $vmNote -force:$Force
 
     }
     catch {
         Write-Log "Failed to add a note to the VM '$VmName' in Hyper-V. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
     }
     finally {
         $ProgressPreference = 'Continue'
@@ -832,7 +1299,12 @@ function Get-VMNote {
     $vmNoteObject = $null
     try {
         if ($vm.Notes -like "*lastUpdate*") {
-            $vmNoteObject = $vm.Notes | ConvertFrom-Json
+            try {
+                $vmNoteObject = $vm.Notes | ConvertFrom-Json
+            }
+            catch {
+                return $null
+            }
 
             if (-not $vmNoteObject.adminName) {
                 # we renamed this property, read as "adminName" if it exists
@@ -842,12 +1314,13 @@ function Get-VMNote {
             return $vmNoteObject
         }
         else {
-            Write-Log "$VMName`: VM Properties do not contain values. Assume this was not deployed by vmbuild. $_" -Warning -LogOnly
+            Write-Log "$VMName`: VM Properties do not contain values. Assume this was not deployed by vmbuild. $_" -Verbose -LogOnly -Warning
             return $null
         }
     }
     catch {
         Write-Log "Failed to get VM Properties for '$($vm.Name)'. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 }
@@ -865,11 +1338,24 @@ function Set-VMNote {
         [Parameter(Mandatory = $true, ParameterSetName = "VMVersion")]
         [string]$vmVersion,
         [Parameter(Mandatory = $false)]
-        [switch]$forceVersionUpdate
+        [switch]$forceVersionUpdate,
+        [Parameter(Mandatory = $false)]
+        [bool]$force
     )
 
     if (-not $vmNote) {
         $vmNote = Get-VMNote -VMName $vmName
+    }
+    if ($force -eq $false) {
+        #If we are not forcing an overwrite, use the new note to update the contents of the old note.
+        #Old Note may have more properties than the new note, and we dont want to lose those.
+        $oldvmNote = Get-VMNote -VMName $vmName
+        if ($oldvmNote) {
+            foreach ($note in $vmNote.PSObject.Properties) {
+                $oldvmNote | Add-Member -MemberType NoteProperty -Name $note.Name -Value $note.Value -Force
+            }
+            $vmNote = $oldvmNote
+        }
     }
 
     $vmVersionUpdated = $false
@@ -952,15 +1438,15 @@ function Remove-DnsRecord {
 
     $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $scriptBlock1 -SuppressLog
     if ($result.ScriptBlockFailed) {
-        Write-Log "DNS resource record for $RecordToDelete was not found."
+        Write-Log "DNS resource record for $RecordToDelete was not found." -LogOnly
     }
     else {
         $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $scriptBlock2 -SuppressLog
         if ($result.ScriptBlockFailed) {
-            Write-Log "Failed to remove DNS resource record for $RecordToDelete. Please remove the record manually." -Warning
+            Write-OrangePoint "Failed to remove DNS resource record for $RecordToDelete. Please remove the record manually."
         }
         else {
-            Write-Log "Removed DNS resource record for $RecordToDelete"
+            Write-GreenCheck "Removed DNS resource record for $RecordToDelete"
         }
     }
 }
@@ -979,6 +1465,7 @@ function Get-DhcpScopeDescription {
     }
     catch {
         Write-Log "Failed to get description for '$ScopeId' scope in DHCP. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
 }
@@ -1000,172 +1487,317 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $true)]
         [string]$SwitchName,
         [Parameter(Mandatory = $false)]
+        [string]$SwitchName2,
+        [Parameter(Mandatory = $false)]
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
-        [Parameter()]
+        [Parameter(Mandatory = $true)]
         [PsCustomObject] $DeployConfig,
         [Parameter(Mandatory = $false)]
         [switch]$OSDClient,
         [Parameter(Mandatory = $false)]
+        [switch]$tpmEnabled,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
-    # WhatIf
-    if ($WhatIf) {
-        Write-Log "WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName, ForceNew: $ForceNew"
+    $OriginalProgressPreference = $Global:ProgressPreference
+    $Global:ProgressPreference = 'SilentlyContinue'
+    $Activity = "Creating Virtual Machine"
+    try {
+        # WhatIf
+        if ($WhatIf) {
+            Write-Log "WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName, ForceNew: $ForceNew"
+            return $true
+        }
+
+
+        Write-Log "$VmName`: $Activity"
+        Write-Progress2 $Activity -Status "Starting" -percentcomplete 0 -force
+        # Test if source file exists
+        if (-not (Test-Path $SourceDiskPath) -and (-not $OSDClient.IsPresent)) {
+            Write-Log "$VmName`: $SourceDiskPath not found. Cannot create new VM." -failure -OutputStream
+            return $false
+        }
+
+        # VM Exists
+        $vmTest = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+        if ($vmTest -and $ForceNew.IsPresent) {
+            Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is present."
+            if ($vmTest.State -ne "Off") {
+                Write-Log "$VmName`: Turning the VM off forcefully..."
+                $vmTest | Stop-VM -TurnOff -Force -WarningAction SilentlyContinue
+            }
+            $vmTest | Remove-VM -Force
+            Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
+            Remove-Item -Path $($vmTest.Path) -Force -Recurse | out-null
+            Write-Log "$VmName`: Purge complete."
+            Get-List -FlushCache | Out-Null # flush cache
+        }
+
+        if ($vmTest -and -not $ForceNew.IsPresent) {
+            Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is NOT present. Exit."
+            return $false
+        }
+
+        # Make sure Existing VM Path is gone!
+        $VmSubPath = Join-Path $VmPath $VmName
+        if (Test-Path -Path $VmSubPath) {
+            Write-Log "$VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
+            Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+            Write-Log "$VmName`: Purge complete." -Verbose
+        }
+
+        Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
+        # Create new VM
+        try {
+            $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
+        }
+        catch {
+            Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
+            Write-Log "$($_.ScriptStackTrace)" -LogOnly
+            return $false
+        }
+
+        Write-Progress2 $Activity -Status "Hyper-V VM Object created. Waiting for Disk Creation" -percentcomplete 30 -force
+        # Add VMNote as soon as VM is created
+        if ($DeployConfig) {
+            New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+        }
+
+        # Copy sysprepped image to VM location
+        $osDiskName = "$($VmName)_OS.vhdx"
+        $osDiskPath = Join-Path $vm.Path $osDiskName
+
+        if (-not $OSDClient.IsPresent) {
+            $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
+            if (-not $worked) {
+                Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+                return $false
+            }
+        }
+        else {
+            Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
+            $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
+            if (-not $worked) {
+                Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+                return $false
+            }
+        }
+
+        Write-Log "$VmName`: Enabling Hyper-V Guest Services"
+        Write-Progress2 $Activity -Status "Enabling Hyper-V Guest Services" -percentcomplete 35 -force
+        Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | out-null
+
+        if ($Generation -eq "2" -and $tpmEnabled) {
+            $mutexName = "TPM"
+            $mtx = New-Object System.Threading.Mutex($false, $mutexName)
+            Write-Progress2 $Activity -Status "Waiting to enable TPM" -percentcomplete 40 -force
+            write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly
+            [void]$mtx.WaitOne()
+            write-log "acquired '$mutexName' Mutex" -LogOnly
+            try {
+                Write-Progress2 $Activity -Status "Enabling TPM" -percentcomplete 50 -force
+                if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
+                    New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates | out-null
+                    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+
+                $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
+                if ($localCASupported -eq 1) {
+                    Write-Log "$VmName`: Enabling TPM"
+                    $HGOwner = Get-HgsGuardian MemLabsGuardian
+                    $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
+                    if (-not $KeyProtector -or -not ($KeyProtector.RawData)) {
+                        Write-Log "$VmName`: New-HgsKeyProtector failed"
+                        return $false
+                    }
+                    Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData | out-null
+                    Enable-VMTPM $VmName -ErrorAction Stop | out-null ## Only required for Win11
+                }
+                else {
+                    Write-Log "$VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
+                }
+            }
+            catch {
+                Write-Log "$VmName`: TPM failed $_"
+                return $false
+            }
+            finally {
+                [void]$mtx.ReleaseMutex()
+                [void]$mtx.Dispose()
+            }
+        }
+
+        Write-Progress2 $Activity -Status "Setting Processors" -percentcomplete 60 -force
+        Write-Log "$VmName`: Setting Processor count to $Processors"
+        Set-VM -Name $vmName -ProcessorCount $Processors | out-null
+
+        Write-Progress2 $Activity -Status "Adding OS Disk to VM" -percentcomplete 65 -force
+        Write-Log "$VmName`: Adding virtual disk $osDiskPath"
+        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | out-null
+
+        Write-Progress2 $Activity -Status "Adding DVD disk to VM" -percentcomplete 70 -force
+        Write-Log "$VmName`: Adding a DVD drive"
+        Add-VMDvdDrive -VMName $VmName | out-null
+
+        Write-Progress2 $Activity -Status "Changing Boot Order" -percentcomplete 75 -force
+        Write-Log "$VmName`: Changing boot order"
+        $f = Get-VM2 -Name $VmName | Get-VMFirmware
+        $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
+        $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
+        $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
+        $f_dvd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.DvdDrive] }
+
+        # Add additional disks
+        if ($AdditionalDisks) {
+            $count = 0
+            $label = "DATA"
+            Write-Progress2 $Activity -Status "Adding Additional Disks" -percentcomplete 80 -force
+            foreach ($disk in $AdditionalDisks.psobject.properties) {
+                $newDiskName = "$VmName`_$label`_$count.vhdx"
+                $newDiskPath = Join-Path $vm.Path $newDiskName
+                Write-Log "$VmName`: Adding $newDiskPath"
+                New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic | out-null
+                Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath | out-null
+                $count++
+            }
+        }
+
+        Write-Progress2 $Activity -Status "Setting Firmware" -percentcomplete 85 -force
+        # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
+        if ($null -ne $f_file) {
+            if (-not $OSDClient.IsPresent) {
+                Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net | out-null
+            }
+            else {
+                Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd | out-null
+            }
+        }
+        else {
+            if (-not $OSDClient.IsPresent) {
+                Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net | out-null
+            }
+            else {
+                Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
+            }
+        }
+
+        Write-Progress2 $Activity -Status "Starting VM" -percentcomplete 86 -force
+        Write-Log "$VmName`: Starting virtual machine"
+        $started = Start-VM2 -Name $VmName -Passthru
+        if (-not $started) {
+            Write-Log "$VmName`: VM Not Started."
+            return $false
+        }
+
+        if ($SwitchName2) {
+            Write-Progress2 $Activity -Status "SQLAO: Waiting to add 2nd NIC" -percentcomplete 90 -force
+            $mtx = New-Object System.Threading.Mutex($false, "GetIP")
+            write-log "Attempting to acquire 'GetIP' Mutex" -LogOnly
+            [void]$mtx.WaitOne()
+            write-log "acquired 'GetIP' Mutex" -LogOnly
+            try {
+                Write-Progress2 $Activity -Status "SQLAO: Adding 2nd NIC" -percentcomplete 95 -force
+                write-log "$VmName`: Adding 2nd NIC attached to $SwitchName2" -LogOnly
+                $Global:ProgressPreference = 'SilentlyContinue'
+                $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
+                write-log "$VmName`: NIC added MAC: $($vmnet.MacAddress)" -LogOnly
+
+                if (-not $($vmnet.MacAddress)) {
+                    start-sleep -Seconds 60
+                    if (-not $($vmnet.MacAddress)) {
+                        write-log "$VmName`: 2nd NIC does not have a MAC address: $($vmnet)" -Failure
+                        return $false
+                    }
+                }
+
+                $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
+                if (-not ($dc.network)) {
+                    $dns = $DeployConfig.vmOptions.network.Substring(0, $DeployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
+                }
+                else {
+                    $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
+                }
+
+
+                if (-not $dns) {
+                    write-Log -Failure "$VmName`:Could not determine DNS for cluster network"
+                    return $false
+                }
+
+                $ip = $null
+                Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                try {
+                    $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                    Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -ErrorAction Stop | out-null
+                }
+                catch {
+                    write-log -failure "$VmName`:Failed to reserve IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
+                    Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
+                    return $false
+                }
+
+                $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
+                #$currentItem | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value $ip -Force
+                #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
+                if ($currentItem.OtherNode) {
+                    $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75 -WarningAction SilentlyContinue) | Select-Object -Last 2
+                    Write-Log "$VmName`: SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
+                    $clusterIP = $IPs[0]
+                    $AGIP = $IPs[1]
+
+                    write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
+
+                    if (-not $clusterIP -or -not $AGIP) {
+                        write-log -failure "$VmName`:Failed to acquire Cluster or AGIP for SQLAO"
+                        return $false
+                    }
+
+                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
+                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue | out-null
+                    $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
+                    $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
+                }
+            }
+            catch {
+                Write-Progress2 $Activity -Status "SQLAO: $_" -percentcomplete 99 -force
+                Start-Sleep -seconds 5
+                Write-Exception $_
+                Write-Log "$vmName`: Failed adding 2nd NIC $_"
+                return $false
+            }
+            finally {
+                [void]$mtx.ReleaseMutex()
+                [void]$mtx.Dispose()
+            }
+
+            New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+            Write-Progress2 $Activity -Status "SQLAO: 2nd NIC Added" -percentcomplete 100 -force
+        }
+
+        Write-Progress2 $Activity -Status "VM Created in Hyper-V successfully" -percentcomplete 100 -force -Completed
         return $true
     }
-
-    Write-Log "$VmName`: Creating Virtual Machine"
-
-    # Test if source file exists
-    if (-not (Test-Path $SourceDiskPath) -and (-not $OSDClient.IsPresent)) {
-        Write-Log "$VmName`: $SourceDiskPath not found. Cannot create new VM."
-        return $false
-    }
-
-    # VM Exists
-    $vmTest = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
-    if ($vmTest -and $ForceNew.IsPresent) {
-        Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is present."
-        if ($vmTest.State -ne "Off") {
-            Write-Log "$VmName`: Turning the VM off forcefully..."
-            $vmTest | Stop-VM -TurnOff -Force
-        }
-        $vmTest | Remove-VM -Force
-        Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
-        Remove-Item -Path $($vmTest.Path) -Force -Recurse
-        Write-Log "$VmName`: Purge complete."
-    }
-
-    if ($vmTest -and -not $ForceNew.IsPresent) {
-        Write-Log "$VmName`: Virtual machine already exists. ForceNew switch is NOT present. Exit."
-        return $false
-    }
-
-    # Make sure Existing VM Path is gone!
-    $VmSubPath = Join-Path $VmPath $VmName
-    if (Test-Path -Path $VmSubPath) {
-        Write-Log "$VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
-        Remove-Item -Path $VmSubPath -Force -Recurse
-        Write-Log "$VmName`: Purge complete." -Verbose
-    }
-
-    # Create new VM
-    try {
-        $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
-    }
     catch {
-        Write-Log "$VmName`: Failed to create new VM. $_"
+        Write-Exception $_
+        Write-Progress2 $Activity -Status $_ -percentcomplete 100 -force -Completed
+        Start-Sleep -Seconds 3
+        Write-Log "Create VM failed with $_"
         return $false
     }
-
-    # Add VMNote as soon as VM is created
-    if ($DeployConfig) {
-        New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+    finally {
+        $Global:ProgressPreference = $OriginalProgressPreference
     }
-
-    # Copy sysprepped image to VM location
-    $osDiskName = "$($VmName)_OS.vhdx"
-    $osDiskPath = Join-Path $vm.Path $osDiskName
-
-    if (-not $OSDClient.IsPresent) {
-        $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "$VmName`: Making a copy of base image in $osDiskPath" -Action "Copying"
-        if (-not $worked) {
-            Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
-            return $false
-        }
-    }
-    else {
-        $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
-        if (-not $worked) {
-            Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
-            return $false
-        }
-    }
-
-    Write-Log "$VmName`: Enabling Hyper-V Guest Services"
-    Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue
-
-    if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
-        New-HgsGuardian -Name "MemLabsGuardian" -GenerateCertificates
-        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-    }
-
-    $localCASupported = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported"
-    if ($localCASupported -eq 1) {
-        Write-Log "$VmName`: Enabling TPM"
-        $HGOwner = Get-HgsGuardian MemLabsGuardian
-        $KeyProtector = New-HgsKeyProtector -Owner $HGOwner -AllowUntrustedRoot
-        Set-VMKeyProtector -VMName $VmName -KeyProtector $KeyProtector.RawData
-        Enable-VMTPM $VmName -ErrorAction SilentlyContinue ## Only required for Win11
-    }
-    else {
-        Write-Log "$VmName`: Skipped enabling TPM since HKLM:\SOFTWARE\Microsoft\HgsClient\LocalCACertSupported is not set."
-    }
-
-    Write-Log "$VmName`: Setting Processor count to $Processors"
-    Set-VM -Name $vmName -ProcessorCount $Processors
-
-    Write-Log "$VmName`: Adding virtual disk $osDiskPath"
-    Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0
-
-
-    Write-Log "$VmName`: Adding a DVD drive"
-    Add-VMDvdDrive -VMName $VmName
-
-    Write-Log "$VmName`: Changing boot order"
-    $f = Get-VM2 -Name $VmName | Get-VMFirmware
-    $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
-    $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
-    $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
-    $f_dvd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.DvdDrive] }
-
-    # Add additional disks
-    if ($AdditionalDisks) {
-        $count = 0
-        $label = "DATA"
-        foreach ($disk in $AdditionalDisks.psobject.properties) {
-            $newDiskName = "$VmName`_$label`_$count.vhdx"
-            $newDiskPath = Join-Path $vm.Path $newDiskName
-            Write-Log "$VmName`: Adding $newDiskPath"
-            New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic
-            Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath
-            $count++
-        }
-    }
-
-    # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
-    if ($null -ne $f_file) {
-        if (-not $OSDClient.IsPresent) {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net
-        }
-        else {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd
-        }
-    }
-    else {
-        if (-not $OSDClient.IsPresent) {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net
-        }
-        else {
-            Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd
-        }
-    }
-
-    Write-Log "$VmName`: Starting virtual machine"
-    $started = Start-VM2 -Name $VmName -Passthru
-    if (-not $started) {
-        return $false
-    }
-
-    return $true
 }
 
 function Get-AvailableMemoryGB {
     $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-    $availableMemory = ($availableMemory - ("4GB" / 1kB)) * 1KB / 1GB
+    $availableMemory = ($availableMemory - ("5GB" / 1kB)) * 1KB / 1GB
     $availableMemory = [Math]::Round($availableMemory, 2)
     if ($availableMemory -lt 0) {
         $availableMemory = 0
@@ -1187,9 +1819,9 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false, ParameterSetName = "VmTestPath")]
         [string]$PathToVerify,
         [Parameter(Mandatory = $false)]
-        [int]$TimeoutMinutes = 10,
+        [int]$TimeoutMinutes = 20,
         [Parameter(Mandatory = $false)]
-        [int]$WaitSeconds = 15,
+        [int]$WaitSeconds = 10,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
         [string]$VmDomainName = "WORKGROUP",
         [Parameter(Mandatory = $false)]
@@ -1214,7 +1846,18 @@ function Wait-ForVm {
         do {
             try {
                 $vmTest = Get-VM2 -Name $VmName
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                if (-not $vmTest) {
+                    Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+                    Write-Log -Failure "Could not find VM $VMName"
+                    return
+                }
+
+                try {
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)"
+                }
+                catch {
+
+                }
                 $ready = $vmTest.State -eq $VmState
                 Start-Sleep -Seconds 5
             }
@@ -1222,24 +1865,66 @@ function Wait-ForVm {
                 $ready = $false
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+        if (-not $ready -and ($vmState -eq "Off")) {
+            stop-vm2 -name $VMName -Force
+        }
     }
 
     if ($OobeComplete.IsPresent) {
-        $originalStatus = "Waiting for OOBE to complete. "
+        $originalStatus = "Waiting for OOBE to complete for $vmName "
         Write-Log "$VmName`: $originalStatus"
-        Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $originalStatus -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+        try {
+            Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus
+        }
+        catch {
+
+        }
         $readyOobe = $false
         $wwahostrunning = $false
         $readySmb = $false
 
+        [int]$failures = 0
+        [int]$maxFailures = ([int]$TimeoutMinutes * 4)
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
+
+            $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
+            $stopwatch2.Start()
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $stopwatch2.Stop()
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $originalStatus -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                try {
+                    if ($failures -gt ([int]$TimeoutMinutes * 2)) {
+                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus -failcount $failures -failcountMax $maxFailures
+                    }
+                    else {
+                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus
+                    }
+                }
+                catch {
+
+                }
                 Start-Sleep -Seconds 5
+                if ($stopwatch2.elapsed.TotalSeconds -gt 15) {
+                    [int]$failures = $failures + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 15, 0))
+                }
+                else {
+                    [int]$failures++
+                }
+                if ($failures -ge $maxFailures) {
+                    stop-vm2 -force -name $VmName -TurnOff
+                    start-sleep -seconds 8
+                    Start-vm2 -name $VmName
+                    Start-Sleep -Seconds 8
+                    [int]$failures = 0
+                }
+            }
+            else {
+                [int]$failures = 0
+                $text = $($originalStatus + ": " + $out.ScriptBlockOutput)
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $text
             }
 
             # Wait until OOBE is ready
@@ -1248,18 +1933,24 @@ function Wait-ForVm {
                 $status = $originalStatus
                 $status += "Current State: $($out.ScriptBlockOutput)"
                 $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                try {
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
+                }
+                catch {
+
+                }
                 Start-Sleep -Seconds 5
             }
 
             # Wait until \\localhost\c$ is accessible
             if (-not $readySmb -and $readyOobe) {
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "OOBE complete. Waiting 15 seconds, before checking SMB access" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
-                Start-Sleep -Seconds 15
+
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE complete. Checking SMB access"
+                Start-Sleep -Seconds 3
                 $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "$VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
-                if ($readySmb) { Start-Sleep -Seconds 15 } # Extra 15 second wait to ensure wwahost has had a chance to start
+                if ($readySmb) { Start-Sleep -Seconds 10 } # Extra wait to ensure wwahost has had a chance to start
             }
 
             # Wait until wwahost.exe is not found, or not longer running
@@ -1269,7 +1960,7 @@ function Wait-ForVm {
                 if ($wwahost.ScriptBlockOutput) {
                     $wwahostrunning = $true
                     Write-Log "$VmName`: OOBE complete. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
-                    Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "OOBE complete, and SMB available. Waiting for WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) to stop before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text  "OOBE complete, and SMB available. Waiting for WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) to stop before continuing"
                     Start-Sleep -Seconds 15
                 }
                 else {
@@ -1281,18 +1972,23 @@ function Wait-ForVm {
             # OOBE and SMB ready, buffer wait to ensure we're at login screen. Bad things happen if you reboot the machine before it really finished OOBE.
             if (-not $wwahostrunning -and $readySmb) {
                 Write-Log "$VmName`: VM is ready. Waiting $WaitSeconds seconds before continuing."
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "VM is ready. Waiting $WaitSeconds seconds before continuing" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is ready. Waiting $WaitSeconds seconds before continuing"
                 Start-Sleep -Seconds $WaitSeconds
                 $ready = $true
             }
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+
+        if (-not $ready) {
+            # Try the command one more time, to get real error in logs
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError | Out-Null
+        }
     }
 
     if ($OobeStarted.IsPresent) {
         $status = "Waiting for OOBE to start "
         Write-Log "$VmName`: $status"
-        Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed)" -Status $status -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
 
         do {
             $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
@@ -1300,7 +1996,7 @@ function Wait-ForVm {
             if ($wwahost.ScriptBlockOutput) {
                 $ready = $true
                 Write-Log "$VmName`: OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
-                Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running" -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running"
             }
             else {
                 Write-Log "$VmName`: OOBE hasn't started yet. WWAHost not running."
@@ -1308,6 +2004,11 @@ function Wait-ForVm {
                 Start-Sleep -Seconds $WaitSeconds
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+
+        if (-not $ready) {
+            # Try the command one more time, to get real error in logs
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null
+        }
     }
 
     if ($PathToVerify) {
@@ -1318,25 +2019,54 @@ function Wait-ForVm {
             $msg = "Waiting for $PathToVerify to exist"
         }
 
+        $vmTest = Get-VM2 -Name $VmName
+        if ($vmTest.State -ne "Running") {
+            start-vm2 -name $vmName
+            start-sleep -seconds 30
+        }
+        if (-not $vmTest) {
+            Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+            Write-Log -Failure "Could not find VM $VMName"
+            return
+        }
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
         do {
-            Write-Progress -Activity  "$VmName`: Waiting $TimeoutMinutes minutes. Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Status $msg -PercentComplete ($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100)
             Start-Sleep -Seconds 5
+            try {
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
+            }
+            catch {}
+            $vmTest = Get-VM2 -Name $VmName
+            if ($vmTest.State -ne "Running") {
+                stop-vm2 -name $vmName
+                start-sleep -seconds 30
+                start-vm2 -name $vmName
+                start-sleep -seconds 30
+            }
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
             $ready = $true -eq $out.ScriptBlockOutput
+            if ($ready) {
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
+            }
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+
+        if (-not $ready) {
+            # Try the command one more time, to get real error in logs
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError | Out-Null
+        }
     }
 
-    Write-Progress -Activity "$VmName`: Waiting for virtual machine" -Status "Wait complete." -Completed
+
 
     if ($ready) {
+        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Wait complete." -Completed
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: VM is now available." -Success }
     }
-
-    if (-not $ready) {
+    else {
+        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Timer expired while waiting for VM" -Completed
         Write-Log "$VmName`: Timer expired while waiting for VM" -Warning
     }
 
@@ -1366,65 +2096,92 @@ function Invoke-VmCommand {
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
+    try {
+        # Set display name for logging
+        if (-not $DisplayName) {
+            $DisplayName = $ScriptBlock
+        }
 
-    # Set display name for logging
-    if (-not $DisplayName) {
-        $DisplayName = $ScriptBlock
-    }
+        # WhatIf
+        if ($WhatIf.IsPresent) {
+            Write-Log "WhatIf: Will run '$DisplayName' inside '$VmName'"
+            return $true
+        }
 
-    # WhatIf
-    if ($WhatIf.IsPresent) {
-        Write-Log "WhatIf: Will run '$DisplayName' inside '$VmName'"
-        return $true
-    }
+        # Fatal failure
+        if ($null -eq $Common.LocalAdmin) {
+            Write-Log "$VmName`: Skip running '$DisplayName' since Local Admin creds not available" -Failure
+            return $false
+        }
 
-    # Fatal failure
-    if ($null -eq $Common.LocalAdmin) {
-        Write-Log "$VmName`: Skip running '$DisplayName' since Local Admin creds not available" -Failure
-        return $false
-    }
+        # Log entry
+        if (-not $SuppressLog) {
+            Write-Log "$VmName`: Running '$DisplayName'" -Verbose
+        }
 
-    # Log entry
-    if (-not $SuppressLog) {
-        Write-Log "$VmName`: Running '$DisplayName'" -Verbose
-    }
+        # Create return object
+        $return = [PSCustomObject]@{
+            CommandResult     = $false
+            ScriptBlockFailed = $false
+            ScriptBlockOutput	= $null
+        }
 
-    # Create return object
-    $return = [PSCustomObject]@{
-        CommandResult     = $false
-        ScriptBlockFailed = $false
-        ScriptBlockOutput	= $null
-    }
+        # Prepare args
+        $HashArguments = @{
+            ScriptBlock = $ScriptBlock
+        }
 
-    # Prepare args
-    $HashArguments = @{
-        ScriptBlock = $ScriptBlock
-    }
+        if ($ArgumentList) {
+            $HashArguments.Add("ArgumentList", $ArgumentList)
+        }
 
-    if ($ArgumentList) {
-        $HashArguments.Add("ArgumentList", $ArgumentList)
-    }
+        # Get VM Session
+        $ps = $null
+        if ($VmDomainAccount) {
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError
+        }
 
-    # Get VM Session
-    $ps = $null
-    if ($VmDomainAccount) {
-        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError
-    }
+        if (-not $ps) {
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
+        }
 
-    if (-not $ps) {
-        $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
-    }
+        $failed = $null -eq $ps
 
-    $failed = $null -eq $ps
-
-    # Run script block inside VM
-    if (-not $failed) {
-        $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
-        if ($CommandReturnsBool) {
-            if ($($return.ScriptBlockOutput) -ne $true) {
-                Write-Log "Output was: $($return.ScriptBlockOutput)" -Warning
+        # Run script block inside VM
+        if (-not $failed) {
+            try {
+                $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+            }
+            catch {
                 $failed = $true
-                $return.ScriptBlockFailed = $true
+                if (-not $SuppressLog) {
+                    Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $_" -Failure
+                    Write-Log "$($_.ScriptStackTrace)" -LogOnly
+                    Write-Exception -ExceptionInfo $_
+                }
+            }
+            if ($CommandReturnsBool) {
+                if ($($return.ScriptBlockOutput) -ne $true) {
+                    Write-Log "Output was: $($return.ScriptBlockOutput)" -Warning
+                    $failed = $true
+                    $return.ScriptBlockFailed = $true
+                    if ($Err2.Count -ne 0) {
+                        $failed = $true
+                        $return.ScriptBlockFailed = $true
+                        if (-not $SuppressLog) {
+                            if ($Err2.Count -eq 1) {
+                                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
+                            }
+                            else {
+                                $msg = @()
+                                foreach ($failMsg in $Err2) { $msg += $failMsg }
+                                Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
+                            }
+                        }
+                    }
+                }
+            }
+            else {
                 if ($Err2.Count -ne 0) {
                     $failed = $true
                     $return.ScriptBlockFailed = $true
@@ -1442,37 +2199,23 @@ function Invoke-VmCommand {
             }
         }
         else {
-            if ($Err2.Count -ne 0) {
-                $failed = $true
-                $return.ScriptBlockFailed = $true
-                if (-not $SuppressLog) {
-                    if ($Err2.Count -eq 1) {
-                        Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $($Err2[0].ToString().Trim())." -Failure
-                    }
-                    else {
-                        $msg = @()
-                        foreach ($failMsg in $Err2) { $msg += $failMsg }
-                        Write-Log "$VmName`: Failed to run '$DisplayName'. Error: {$($msg -join '; ')}" -Failure
-                    }
-                }
+            $return.ScriptBlockFailed = $true
+            # Uncomment when debugging, this is called many times while waiting for VM to be ready
+            # Write-Log "Invoke-VmCommand: $VmName`: Failed to get VM Session." -Failure -LogOnly
+            # return $return
+        }
+
+        # Set Command Result state in return object
+        if (-not $failed) {
+            $return.CommandResult = $true
+            if (-not $SuppressLog) {
+                Write-Log "$VmName`: Successfully ran '$DisplayName'" -LogOnly -Verbose
             }
         }
     }
-    else {
-        $return.ScriptBlockFailed = $true
-        # Uncomment when debugging, this is called many times while waiting for VM to be ready
-        # Write-Log "Invoke-VmCommand: $VmName`: Failed to get VM Session." -Failure -LogOnly
-        # return $return
+    catch {
+        Write-Log "$VmName`: Exception $_"
     }
-
-    # Set Command Result state in return object
-    if (-not $failed) {
-        $return.CommandResult = $true
-        if (-not $SuppressLog) {
-            Write-Log "$VmName`: Successfully ran '$DisplayName'" -LogOnly -Verbose
-        }
-    }
-
     return $return
 
 }
@@ -1521,6 +2264,10 @@ function Get-VmSession {
 
     $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
     $vm = get-vm2 -Name $VmName
+    if (-not $vm) {
+        Write-Log "$VmName`: Failed to find VM named $VmName" -Failure -OutputStream
+        return
+    }
     $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
     if ($Err0.Count -ne 0) {
         if ($VmDomainName -ne $VmName) {
@@ -1563,6 +2310,8 @@ function Get-StorageConfig {
 
     if (-not (Test-Path $configPath)) {
         $Common.FatalError = "Storage Config not found. Refer internal documentation."
+        Write-Log "File $configPath does not exist."
+        return
     }
 
     try {
@@ -1622,19 +2371,298 @@ function Get-StorageConfig {
         $username = "vmbuildadmin"
         $item = $Common.AzureFileList.OS | Where-Object { $_.id -eq $username }
         $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)?$($StorageConfig.StorageToken)"
-        $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
-        $s = ConvertTo-SecureString $response.Content.Trim() -AsPlainText -Force
-        $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
+        $filePath = Join-Path $PSScriptRoot "cache\$username.txt"
+        if (Test-Path $filePath -PathType leaf) {
+            $response = Get-Content $filePath
+            $response = $response.Trim()
+        }
+        else {
+            $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
+            if ($response) {
+                $response.Content.Trim() | Out-file $filePath -Force
+            }
+            else {
+                start-sleep -seconds 60
+                $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
+                if (-not $response) {
+                    $Common.FatalError = "Could not download default credentials from azure. Please check your token"
+                    return
+                }
+                $response.Content.Trim() | Out-file $filePath -Force
+            }
+            $response = $response.Content.Trim()
+        }
+
+        if ($response) {
+            $s = ConvertTo-SecureString $response -AsPlainText -Force
+            $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
+        }
+        else {
+            $Common.FatalError = "Admin file from azure is empty"
+        }
 
     }
     catch {
-        $Common.FatalError = "Storage Config found, but storage access failed. $_"
+        $Common.FatalError = "Storage Access failed. $_"
+        Write-Exception -ExceptionInfo $_
         Write-Host $_.ScriptStackTrace | Out-Host
     }
     finally {
         $ProgressPreference = $pp
         $VerbosePreference = $vp
     }
+}
+
+function Get-Tools {
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Skip Hash Testing of downloaded files.")]
+        [switch]$IgnoreHashFailure,
+        [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
+        [switch]$ForceDownloadFiles,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
+        [string]$VmName,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Tool Name.")]
+        [string]$ToolName,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseCDN,
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludeOptional,
+        [Parameter(Mandatory = $false, HelpMessage = "Inject tools inside all Virtual Machines.")]
+        [switch]$Inject,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    $allSuccess = $true
+
+    if ($ToolName -and $Common.AzureFileList.Tools.Name -notcontains $ToolName) {
+        Write-Log "Invalid Tool Name ($ToolName) specified." -Warning
+        return $false
+    }
+
+    if ($VmName) {
+        $Inject = $true
+    }
+
+    Write-Log "Downloading/Verifying Tools that need to be injected in Virtual Machines..." -Activity
+    foreach ($tool in $Common.AzureFileList.Tools) {
+
+        if ($ToolName -and $tool.Name -ne $ToolName) { continue }
+
+        if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { continue }
+
+        $name = $tool.Name
+        $url = $tool.URL
+        $fileTargetRelative = $tool.Target
+        $fileName = Split-Path $url -Leaf
+        $fileNameForDownload = Join-Path "tools" $fileName
+        $downloadPath = Join-Path $Common.AzureToolsPath $fileName
+
+        if (-not $tool.IsPublic) {
+            $url = "$($StorageConfig.StorageLocation)/$url"
+        }
+
+        if (-not $tool.md5) {
+            Write-Log "Downloading/Verifying '$name'" -SubActivity
+            $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
+        }
+        else {
+            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+        }
+
+        if (-not $worked) {
+            $allSuccess = $false
+        }
+
+        # Move to staging dir
+        if ($worked) {
+
+            # Create final destination directory, if not present
+            $fileDestination = Join-Path $Common.StagingInjectPath $fileTargetRelative
+            if (-not (Test-Path $fileDestination)) {
+                $folderToCreate = $fileDestination
+                if ($fileDestination.Contains(".")) {
+                    $folderToCreate = Split-Path $fileDestination -Parent
+                }
+                New-Item -Path $folderToCreate -ItemType Directory -Force | Out-Null
+            }
+
+            # File downloaded
+            $extractIfZip = $tool.ExtractFolderIfZip
+            if (Test-Path $downloadPath) {
+                if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
+                    Write-Log "Extracting $fileName to $fileDestination."
+                    Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                }
+                else {
+                    Write-Log "Copying $fileName to $fileDestination."
+                    Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                }
+            }
+        }
+    }
+
+
+    $injected = $allSuccess
+    if ($Inject.IsPresent -and $allSuccess) {
+        $HashArguments = @{
+            WhatIf          = $WhatIf
+            IncludeOptional = $IncludeOptional
+        }
+
+        if ($VmName) { $HashArguments.Add("VmName", $VmName) }
+        if ($ToolName) { $HashArguments.Add("ToolName", $ToolName) }
+
+        $injected = Install-Tools @HashArguments
+
+    }
+
+    if (-not $Inject.IsPresent) {
+        Write-Host2
+    }
+
+    return $injected
+}
+
+function Install-Tools {
+
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
+        [string]$VmName,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional ToolName Name.")]
+        [string]$ToolName,
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludeOptional,
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowProgress,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    if ($VmName) {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    }
+    else {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
+    }
+
+    $success = $true
+    foreach ($vm in $allVMs) {
+
+        if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
+        if ($vm.vmbuild -eq $false) { continue } # don't touch VM's we didn't create
+
+        $vmName = $vm.vmName
+        Write-Log "$vmName`: Injecting Tools to C:\tools directory inside the VM" -Activity
+
+        # Get VM Session
+        if ($vm.State -ne "Running") {
+            Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+            continue
+        }
+
+        $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+        if (-not $ps) {
+            Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+            continue
+        }
+
+        foreach ($tool in $Common.AzureFileList.Tools) {
+
+            if ($tool.NoUpdate) { continue }
+
+            if ($ToolName -and $tool.Name -ne $ToolName) { continue }
+
+            if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { continue }
+
+            if ($ShowProgress) {
+                Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
+            }
+
+            $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
+            if (-not $worked) {
+                $success = $false
+            }
+        }
+    }
+
+    Write-Host2
+
+    if ($ShowProgress) {
+        Write-Progress2 "Injecting tools" -Status "Done" -Completed
+    }
+    return $success
+}
+
+function Copy-ToolToVM {
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "Tool PS Object.")]
+        [object]$Tool,
+        [Parameter(Mandatory = $true, HelpMessage = "VM Name to inject tool in.")]
+        [string]$VMName,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
+    if ($vm.State -ne "Running") {
+        Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+        continue
+    }
+
+    $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+    if (-not $ps) {
+        Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+        return $false
+    }
+
+    if ($tool.NoUpdate -eq $true) {
+        Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's marked NoUpdate." -Verbose
+        return $true
+    }
+
+    $toolFileName = Split-Path $tool.url -Leaf
+    $fileTargetRelative = Join-Path $tool.Target $toolFileName
+
+    if ($toolFileName.EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+        $fileTargetRelative = $tool.Target
+    }
+
+    $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
+    $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
+
+    $isContainer = $false
+    if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
+        $isContainer = $true
+        $fileTargetPathInVM = "C:\tools"
+    }
+
+    if ($tool.Name -eq "WMI Explorer") {
+        $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
+        $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
+    }
+
+    Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
+
+    try {
+        $progressPref = $ProgressPreference
+        $ProgressPreference = "SilentlyContinue"
+        if ($isContainer) {
+            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+        }
+        else {
+            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Log "$vmName`: Failed to inject '$($tool.Name)'. $_" -Failure
+        return $false
+    }
+    finally {
+        $ProgressPreference = $progressPref
+    }
+
+    return $true
 }
 
 function Get-FileFromStorage {
@@ -1652,16 +2680,11 @@ function Get-FileFromStorage {
     )
 
     $imageName = $File.id
-    Write-Log "Downloading/Verifying '$imageName'" -SubActivity
-
-    # What if returns success
-    if ($WhatIf) {
-        return $true
-    }
 
     $success = $true
     $hashAlg = "MD5"
     $i = 0
+
     foreach ($fileItem in $File.filename) {
 
         $isArray = $File.filename -is [array]
@@ -1676,70 +2699,105 @@ function Get-FileFromStorage {
             $fileHash = $File.($hashAlg)
         }
 
-        $imageUrl = "$($StorageConfig.StorageLocation)/$($filename)"
-        $imageFileName = Split-Path $filename -Leaf
-        $localImagePath = Join-Path $Common.AzureFilesPath $filename
-        $localImageHashPath = "$localImagePath.$hashAlg"
+        $fileUrl = "$($StorageConfig.StorageLocation)/$($filename)"
+        $success = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+    }
 
-        $download = $true
-        if (Test-Path $localImagePath) {
+    return $success
+}
 
-            if (Test-Path $localImageHashPath) {
-                # Read hash from local hash file
-                $localFileHash = Get-Content $localImageHashPath
-            }
-            else {
-                # Download if file present, but hashFile isn't there.
-                Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -WhatIf:$WhatIf
+function Get-FileWithHash {
 
-                # Calculate file hash, save to local hash file
-                Write-Log "Calculating $hashAlg hash for $filename in $($Common.AzureFilesPath)..."
-                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
-                $localFileHash = $hashFileResult.Hash
-                $localFileHash | Out-File -FilePath $localImageHashPath -Force
-            }
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "File Name. Relative Path inside azureFiles directory.")]
+        [string]$FileName,
+        [Parameter(Mandatory = $false, HelpMessage = "File Display Name.")]
+        [string]$FileDisplayName,
+        [Parameter(Mandatory = $true, HelpMessage = "File URL.")]
+        [string]$FileUrl,
+        [Parameter(Mandatory = $true, HelpMessage = "Expected File Hash.")]
+        [string]$ExpectedHash,
+        [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
+        [switch]$ForceDownload,
+        [Parameter(Mandatory = $false, HelpMessage = "Ignore Hash Failures on file downloads.")]
+        [switch]$IgnoreHashFailure,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseCDN,
+        [Parameter(Mandatory = $false)]
+        [switch]$UseBITS,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
 
-            if ($localFileHash -eq $fileHash) {
-                Write-Log "Found $filename in $($Common.AzureFilesPath) with expected hash $fileHash."
-                if ($ForceDownloadFiles.IsPresent) {
-                    Write-Log "ForceDownloadFiles switch present. Removing pre-existing $imageFileName file..." -Warning
-                    Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-                }
-                else {
-                    Write-Log "ForceDownloadFiles switch not present. Skip downloading '$imageFileName'." -LogOnly
-                    $download = $false
-                    continue
-                }
-            }
-            else {
-                Write-Log "Found $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $fileHash. Redownloading..."
-                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-                Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
-                $download = $true
-            }
+    $hashAlg = "MD5"
+    $fileNameLeaf = Split-Path $FileName -Leaf
+    $localImagePath = Join-Path $Common.AzureFilesPath $FileName
+    $localImageHashPath = "$localImagePath.$hashAlg"
+
+    $success = $false
+    $download = $true
+
+    Write-Log "Downloading/Verifying '$FileDisplayName'" -SubActivity
+
+    if (Test-Path $localImagePath) {
+
+        if (Test-Path $localImageHashPath) {
+            # Read hash from local hash file
+            $localFileHash = Get-Content $localImageHashPath
+        }
+        else {
+            # Download if file present, but hashFile isn't there.
+            Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Hash Missing. Downloading '$FileName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
+
+            # Calculate file hash, save to local hash file
+            Write-Log "Calculating $hashAlg hash for $FileName in $($Common.AzureFilesPath)..."
+            $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+            $localFileHash = $hashFileResult.Hash
+            $localFileHash | Out-File -FilePath $localImageHashPath -Force
         }
 
-        if ($download) {
-            $worked = Get-File -Source $imageUrl -Destination $localImagePath -DisplayName "Downloading '$imageName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -WhatIf:$WhatIf
-            if (-not $worked) {
-                $success = $false
+        if ($localFileHash -eq $ExpectedHash) {
+            Write-Log "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
+            if ($ForceDownload.IsPresent) {
+                Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
+                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
             }
             else {
-                # Calculate file hash, save to local hash file
-                Write-Log "Calculating $hashAlg hash for $filename in $($Common.AzureFilesPath)..."
-                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
-                $localFileHash = $hashFileResult.Hash
-                if ($localFileHash -eq $fileHash) {
-                    $localFileHash | Out-File -FilePath $localImageHashPath -Force
+                # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
+                $download = $false
+                $success = $true
+            }
+        }
+        else {
+            Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
+            Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+            Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
+            $download = $true
+        }
+    }
+
+    if ($download) {
+        $worked = Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Downloading '$FileName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
+        if (-not $worked) {
+            $success = $false
+        }
+        else {
+            # Calculate file hash, save to local hash file
+            Write-Log "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
+            $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+            $localFileHash = $hashFileResult.Hash
+            if ($localFileHash -eq $ExpectedHash) {
+                $localFileHash | Out-File -FilePath $localImageHashPath -Force
+                Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
+                $success = $true
+            }
+            else {
+                if ($IgnoreHashFailure) {
+                    $success = $true
                 }
                 else {
-                    if ($IgnoreHashFailure) {
-                        $success = $true
-                    }
-                    else {
-                        Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $fileHash." -Failure
-                        $success = $false
-                    }
+                    Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
+                    $success = $false
                 }
             }
         }
@@ -1832,20 +2890,25 @@ function Set-SupportedOptions {
 
     $roles = @(
         "DC",
-        "Primary",
+        "BDC",
         "CAS",
+        "Primary",
+        "Secondary",
         "PassiveSite",
         "FileServer",
         "DPMP",
+        "SQLAO",
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
         "AADClient",
         "OSDClient"
+
     )
 
     $rolesForExisting = @(
         "CAS",
+        "BDC",
         "Primary",
         "Secondary",
         "PassiveSite",
@@ -1855,7 +2918,8 @@ function Set-SupportedOptions {
         "WorkgroupMember",
         "InternetClient",
         "AADClient",
-        "OSDClient"
+        "OSDClient",
+        "SQLAO"
     )
 
     $cmVersions = @(
@@ -1880,30 +2944,50 @@ function Set-SupportedOptions {
 
 }
 
-###################
-### GIT BRANCH  ###
-###################
-$currentBranch = (& git branch) -match '\*'
-$devBranch = $false
-if ($currentBranch -and $currentBranch -notmatch "main") {
-    $devBranch = $true
+function Get-BranchName {
+    try {
+        $branch = git rev-parse --abbrev-ref HEAD
+
+        if ($branch -eq "HEAD") {
+            # we're probably in detached HEAD state, so print the SHA
+            $branch = git rev-parse --short HEAD
+        }
+
+        return $branch
+
+    }
+    catch {
+        return $null
+    }
 }
 
-# Set-StrictMode -Off
-# if ($devBranch) {
-#     Set-StrictMode -Version 1.0
-# }
+Function Set-PS7ProgressWidth {
+    if ($PSVersionTable.PSVersion.Major -eq 7) {
+        $maxWidth = 500
+        try {
+            $currentWidth = [Console]::WindowWidth
+            if ($currentWidth -gt 0) {
+                $maxWidth = [Math]::Round(($currentWidth * 0.95), 0)
+            }
+        }
+        catch {}
+        $PSStyle.Progress.MaxWidth = $maxWidth
+    }
+}
 
 ####################
 ### DOT SOURCING ###
 ####################
+. $PSScriptRoot\common\Common.Colors.ps1
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
+. $PSScriptRoot\common\Common.Phases.ps1
 . $PSScriptRoot\common\Common.Validation.ps1
 . $PSScriptRoot\common\Common.RdcMan.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
+. $PSScriptRoot\common\Common.GenConfig.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
 
 ############################
@@ -1913,8 +2997,42 @@ if ($currentBranch -and $currentBranch -notmatch "main") {
 if (-not $Common.Initialized) {
 
     # Write progress
-    Write-Progress "Loading required modules." -Status "Please wait..." -PercentComplete -1
+    Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
 
+    $global:vm_remove_list = @()
+
+    ###################
+    ### GIT BRANCH  ###
+    ###################
+    Write-Progress2 "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
+    write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
+    $devBranch = $false
+    try {
+        if ($pwd.Path -like '*memlabs*') {
+            $currentBranch = Get-BranchName
+        }
+    }
+    catch {}
+    if ($currentBranch -and $currentBranch -notmatch "main") {
+        $devBranch = $true
+    }
+
+    # PS Version
+    $PS7 = $false
+    Write-Progress2 "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
+    if ($PSVersionTable.PSVersion.Major -eq 7) {
+        $PS7 = $true
+        $PSStyle.Progress.Style = "`e[38;5;123m"
+        $psstyle.Formatting.TableHeader = "`e[3;38;5;195m"
+        $psstyle.Formatting.Warning = "`e[33m"
+
+    }
+
+    # Set-StrictMode -Off
+    # if ($devBranch) {
+    #     Set-StrictMode -Version 1.0
+    # }
+    Write-Progress2 "Loading required modules." -Status "Checking Directories" -PercentComplete 5
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
     $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
@@ -1922,16 +3040,22 @@ if (-not $Common.Initialized) {
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
     # Get latest hotfix version
+    Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 7
     $latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
 
+    Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 10
     # Common global props
+
+    $colors = Get-Colors
+
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "220202"
+        MemLabsVersion        = "220401"
         LatestHotfixVersion   = $latestHotfixVersion
+        PS7                   = $PS7
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
         ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
-       # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
+        # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
         CachePath             = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
         SizeCache             = $null                                                                     # Cache for Memory Assigned, and Disk Usage
         NetCache              = $null                                                                     # Cache for Get-NetworkAdapter
@@ -1953,6 +3077,7 @@ if (-not $Common.Initialized) {
         AzureFileList         = $null
         LocalAdmin            = $null
         FatalError            = $null
+        Colors                = $colors
     }
 
     # Storage config
@@ -1961,15 +3086,26 @@ if (-not $Common.Initialized) {
         StorageToken    = $null
     }
 
+    Write-Log "MemLabs version $($global:Common.MemLabsVersion) Initializing" -LogOnly
+    $host.ui.RawUI.WindowTitle = "MemLabs $($global:Common.MemLabsVersion)"
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access
+    Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 12
     Get-StorageConfig
 
     ### Set supported options
+    Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13
     Set-SupportedOptions
 
+    # Generate cache
+    $i = 14
     if (-not $InJob.IsPresent) {
+
+        #disable Sticky Keys
+        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
+        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
+        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
 
         try {
             if ($global:common.CachePath) {
@@ -1979,26 +3115,52 @@ if (-not $Common.Initialized) {
         }
         catch {}
 
+        try {
+            Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse | ForEach-Object { $_.PSChildName } | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 1 }
+        }
+        catch {}
+
         # Retrieve VM List, and cache results
+        Write-Progress2 "Loading required modules." -Status "Reset Cache" -PercentComplete $i
         $list = Get-List -Type VM -ResetCache
         foreach ($vm in $list) {
+            $i++
+            if ($i -ge 98) {
+                $i = 98
+            }
+            Write-Progress2 "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
             $vm2 = Get-VM -id $vm.vmId
             Update-VMInformation -vm $vm2
         }
+
+
+        $i++
+        Write-Progress2 "Loading required modules." -Status "Moving Logs" -PercentComplete $i
+
+        # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
+        Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
+        $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
+        if (Test-Path $oldCrashPath) {
+            Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        # Starting 3/11/2022, we changed the log format, remove older format logs
+        $logPath = Join-Path $PSScriptRoot "logs"
+        foreach ($log in (Get-ChildItem $logPath -Filter *.log )) {
+            $logLine = Get-Content $log.FullName -TotalCount 1
+            if ($logLine -and -not $logLine.StartsWith("<![LOG[")) {
+                Remove-Item -Path $log.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        }
+
+        $i++
+        Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
+
+        # Add HGS Registry key to allow local CA Cert
+        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
     }
-
-    # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
-    Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
-    $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
-    if (Test-Path $oldCrashPath) {
-        Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
-    }
-
-    # Add HGS Registry key to allow local CA Cert
-    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-
     # Write progress
-    Write-Progress "Loading required modules." -Completed
+    Write-Progress2 "Loading required modules." -Completed
 
 }

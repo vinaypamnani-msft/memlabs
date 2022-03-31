@@ -38,7 +38,7 @@
         </redirectDrivesList>
         <redirectPrinters>True</redirectPrinters>
         <redirectPorts>True</redirectPorts>
-        <redirectSmartCards>True</redirectSmartCards>
+        <redirectSmartCards>False</redirectSmartCards>
         <redirectPnpDevices>True</redirectPnpDevices>
       </localResources>
       <smartGroup>
@@ -64,6 +64,11 @@
             <property>Comment</property>
             <operator>Matches</operator>
             <value>"DC"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"BDC"</value>
           </rule>
           <rule>
             <property>Comment</property>
@@ -129,7 +134,7 @@
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
-            <value>"sqlVersion"</value>
+            <value>"SQLForSiteServer"</value>
           </rule>
         </ruleGroup>
       </smartGroup>

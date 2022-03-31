@@ -20,7 +20,7 @@ function Start-Maintenance {
     }
 
     $progressId = Get-Random
-    Write-Progress -Id $progressId -Activity $text -Status "Please wait..." -PercentComplete 0
+    Write-Progress2 -Id $progressId -Activity $text -Status "Please wait..." -PercentComplete 0
 
     $i = 0
     $countWorked = $countFailed = $countSkipped = 0
@@ -29,7 +29,7 @@ function Start-Maintenance {
     $failedDomains = @()
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
         $i++
-        Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
+        Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         $worked = Start-VMMaintenance -VMName $vm.vmName
         if ($worked) { $countWorked++ } else {
             $failedDomains += $vm.domain
@@ -54,7 +54,7 @@ function Start-Maintenance {
     # Perform maintenance on other VM's
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
         $i++
-        Write-Progress -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
+        Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         if ($vm.domain -in $criticalDomains) {
             Write-Log "$($vm.vmName)`: Maintenance skipped, DC maintenance failed." -Highlight
             $countSkipped++
@@ -70,8 +70,9 @@ function Start-Maintenance {
         Show-FailedDomains -failedDomains $criticalDomains
     }
 
-    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -Activity
-    Write-Progress -Id $progressId -Activity $text -Completed
+    Write-Host
+    Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -SubActivity
+    Write-Progress2 -Id $progressId -Activity $text -Completed
 }
 
 function Show-FailedDomains {
@@ -87,24 +88,33 @@ function Show-FailedDomains {
 
     Write-Log "Displaying the failed domains message for ($($failedDomains -join ','))." -LogOnly
 
-    $longest = 128
-    $longestMinus2 = 126
+    $longest = 130
+    $longestMinus1 = $longest - 1
+    $longestMinus2 = $longest - 2
+
     Write-Host
-    Write-Host "#".PadRight($longest, "#") -ForegroundColor Yellow
-    Write-Host "# DC Maintenance failed for below domains. This may be because the passwords for the required accounts (listed below) expired. #" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longestMinus2, " ") "#"
-    foreach ($line in $dcList) { Write-Host "# $line".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow }
-    Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longestMinus2, " ") "#"
-    Write-Host "# 1. Logon to the affected DC's using Hyper-V console.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# 2. Launch 'AD Users and Computers', and reset the account for the above listed accounts to the desiredPassword.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# 3. Run 'VMBuild.cmd' again.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# If the password hasn't expired/changed, re-run VMBuild.cmd in case there was a transient issue.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "# If the issue persists, please report it.".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longestMinus2, " ") "#" -ForegroundColor Yellow
-    Write-Host "#".PadRight($longest, "#") -ForegroundColor Yellow
+    Write-Host2 "  #".PadRight($longest, "#") -ForegroundColor Yellow
+    Write-Host2 "  # DC Maintenance failed for below domains. This may be because the passwords for the required accounts (listed below) expired. #" -ForegroundColor Yellow
+    Write-Host2 ("  #".PadRight($longestMinus1, " ") + "#") -ForeGroundColor Yellow
+    foreach ($line in $dcList) {
+        $newLine = $line -replace '\x1b\[[0-9;]*m'
+        Write-Host2 -ForegroundColor Yellow "  #" -NoNewLine
+        #subtract the 3 chars displayed above
+        $Len = $longestMinus1 -3
+        Write-Host2 " $newLine".PadRight($len, " ").Replace($newLine,$line) -ForegroundColor Turquoise -NoNewLine
+        Write-Host2 -ForeGroundColor Yellow "#"
+    }
+    Write-Host2 ("  #".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 ("  # Please perform manual remediation steps listed below to keep VMBuild functional.".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 ("  #".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 ("  # 1. Logon to the affected DC's using Hyper-V console.".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 ("  # 2. Launch 'AD Users and Computers', and reset the account for the above listed accounts to the desiredPassword.".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 ("  # 3. Run 'VMBuild.cmd' again.".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 ("  #".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 ("  # If the password hasn't expired/changed, re-run VMBuild.cmd in case there was a transient issue.".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 ("  # If the issue persists, please report it.".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 ("  #".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
+    Write-Host2 "  #".PadRight($longest, "#") -ForegroundColor Yellow
 
 }
 

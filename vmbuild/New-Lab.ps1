@@ -1,11 +1,26 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
+    [ArgumentCompleter( {
+            param ( $CommandName,
+                $ParameterName,
+                $WordToComplete,
+                $CommandAst,
+                $FakeBoundParameters
+            )
+            $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config" -Filter *.json | Sort-Object -Property { $_.LastWriteTime -as [Datetime] } -Descending
+            if ($WordToComplete) { $ConfigPaths = $ConfigPaths | Where-Object { $_.Name.ToLowerInvariant().StartsWith($WordToComplete) } }
+            $ConfigNames = ForEach ($Path in $ConfigPaths) {
+                if ($Path.Name -eq "_storageConfig.json") { continue }
+                If (Test-Path $Path) {
+                    (Get-ChildItem $Path).BaseName
+                }
+            }
+            return [string[]] $ConfigNames
+        })]
     [string]$Configuration,
     [Parameter(Mandatory = $false, HelpMessage = "Download all files required by the specified config without deploying any VMs.")]
     [switch]$DownloadFilesOnly,
-    [Parameter(Mandatory = $false, HelpMessage = "Force recreation of virtual machines, if already present.")]
-    [switch]$ForceNew,
     [Parameter(Mandatory = $false, HelpMessage = "Force redownload of required files, if already present.")]
     [switch]$ForceDownloadFiles,
     [Parameter(Mandatory = $false, HelpMessage = "Timeout in minutes for VM Configuration.")]
@@ -14,6 +29,16 @@ param (
     [switch]$NoWindowResize,
     [Parameter(Mandatory = $false, HelpMessage = "Use Azure CDN for download.")]
     [switch]$UseCDN,
+    [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase only. Applies to Phase > 1.")]
+    [int[]]$Phase,
+    [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
+    [int[]]$SkipPhase,
+    [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
+    [ValidateRange(2, 6)]
+    [int]$StartPhase,
+    [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
+    [ValidateRange(2, 6)]
+    [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf
 )
@@ -52,8 +77,11 @@ if (-not $NoWindowResize.IsPresent) {
     }
     catch {
         Write-Log "Failed to set window size. $_" -LogOnly -Warning
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
     }
 }
+
+Set-PS7ProgressWidth
 
 # Validate token exists
 if ($Common.FatalError) {
@@ -61,202 +89,73 @@ if ($Common.FatalError) {
     return
 }
 
-function Write-JobProgress {
-    param($Job)
-
-    #Make sure the first child job exists
-    if ($null -ne $Job.ChildJobs[0].Progress) {
-        #Extracts the latest progress of the job and writes the progress
-        $latestPercentComplete = 0
-        $lastProgress = $Job.ChildJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
-
-        if ($lastProgress) {
-            $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
-            $latestActivity = $lastProgress | Select-Object -expand Activity;
-            $latestStatus = $lastProgress | Select-Object -expand StatusDescription;
-            $jobName = $job.Name
-            $latestActivity = $latestActivity.Replace("$jobName`: ", "")
-        }
-
-        if ($latestActivity -and $latestStatus) {
-            #When adding multiple progress bars, a unique ID must be provided. Here I am providing the JobID as this
-            Write-Progress -Id $Job.Id -Activity "$jobName`: $latestActivity" -Status $latestStatus -PercentComplete $latestPercentComplete;
-        }
-    }
+if (-not $Common.DevBranch) {
+    Clear-Host
 }
 
-function New-VMJobs {
+function Write-Phase {
 
     param(
-        [int]$Phase,
-        [object]$deployConfig
+        [int]$Phase
     )
 
     switch ($Phase) {
         0 {
-            $PhaseDescription = "Preparation"
             Write-Log "Phase $Phase - Preparing existing Virtual Machines" -Activity
         }
 
         1 {
-            $PhaseDescription = "Creation"
             Write-Log "Phase $Phase - Creating Virtual Machines" -Activity
         }
 
         2 {
-            $PhaseDescription = "Configuration"
-            Write-Log "Phase $Phase - Configuring Virtual Machines" -Activity
+            Write-Log "Phase $Phase - Setup and Join Domain" -Activity
+        }
+
+        3 {
+            Write-Log "Phase $Phase - Configure Virtual Machine" -Activity
+        }
+
+        4 {
+            Write-Log "Phase $Phase - Install SQL" -Activity
+        }
+
+        5 {
+            Write-Log "Phase $Phase - Configuring SQL Always On" -Activity
+        }
+
+        6 {
+            Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
         }
     }
-
-    Write-Host
-
-
-    [System.Collections.ArrayList]$jobs = @()
-    $job_created_yes = 0
-    $job_created_no = 0
-
-    # Track all VM's for removal, if failures encountered
-    $global:vm_remove_list = @()
-
-    foreach ($currentItem in $deployConfig.virtualMachines) {
-
-        # Don't touch non-hidden VM's in Phase 0
-        if ($Phase -eq 0 -and -not $currentItem.hidden) {
-            continue
-        }
-
-        # Don't touch hidden VM's in Phase 1
-        if ($Phase -eq 1 -and $currentItem.hidden) {
-            continue
-        }
-
-        # Add non-hidden VM's to removal list, in case Phase 1 fails
-        if ($Phase -eq 1 -and -not $currentItem.hidden) {
-            $global:vm_remove_list += $currentItem.vmName
-        }
-
-        # Skip Phase 2 for OSDClient, nothing for us to do
-        if ($Phase -eq 2 -and $currentItem.role -eq "OSDClient") {
-            continue
-        }
-
-        $deployConfigCopy = $deployConfig | ConvertTo-Json -Depth 3 | ConvertFrom-Json
-        Add-PerVMSettings -deployConfig $deployConfigCopy -thisVM $currentItem
-
-        if ($WhatIf) {
-            Write-Log "Will start a job for VM $PhaseDescription $($currentItem.vmName)"
-            continue
-        }
-
-        if ($Phase -eq 0 -or $Phase -eq 1) {
-            $job = Start-Job -ScriptBlock $global:VM_Create -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
-        }
-        else {
-            $job = Start-Job -ScriptBlock $global:VM_Config -Name $currentItem.vmName -ErrorAction Stop -ErrorVariable Err
-        }
-
-        if ($Err.Count -ne 0) {
-            Write-Log "Failed to start job for VM $PhaseDescription $($currentItem.vmName). $Err" -Failure
-            $job_created_no++
-        }
-        else {
-            Write-Log "Created job $($job.Id) for VM $PhaseDescription $($currentItem.vmName)" -LogOnly
-            $jobs += $job
-            $job_created_yes++
-        }
-    }
-
-    if ($job_created_no -eq 0) {
-        Write-Log "Created $job_created_yes jobs for VM $PhaseDescription. Waiting for jobs."
-    }
-    else {
-        Write-Log "Created $job_created_yes jobs for VM $PhaseDescription. Failed to create $job_created_no jobs."
-    }
-
-    $failedCount = 0
-    $successCount = 0
-    $warningCount = 0
-    do {
-        $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" } | Sort-Object -Property Id
-        foreach ($job in $runningJobs) {
-            Write-JobProgress($job)
-        }
-
-        $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
-        foreach ($job in $completedJobs) {
-
-            Write-JobProgress($job)
-
-            # if ($Phase -eq 2) {
-            #     Write-Host "`n=== $($job.Name) (Job ID $($job.Id)) output:" -ForegroundColor Yellow
-            # }
-
-            $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
-            $incrementCount = $true
-            foreach ($line in $jobOutput) {
-                $line = $line.ToString().Trim()
-                if ($line.StartsWith("ERROR")) {
-                    Write-Host $line -ForegroundColor Red
-                    if ($incrementCount) { $failedCount++ }
-                }
-                elseif ($line.StartsWith("WARNING")) {
-                    Write-Host $line -ForegroundColor Yellow
-                    if ($incrementCount) { $warningCount++ }
-                }
-                else {
-                    Write-Host $line -ForegroundColor Green
-                    if ($incrementCount) { $successCount++ }
-                }
-
-                $incrementCount = $false
-            }
-
-            Write-Progress -Id $job.Id -Activity $job.Name -Completed
-            $jobs.Remove($job)
-        }
-
-        # Sleep
-        Start-Sleep -Seconds 1
-
-    } until ($runningJobs.Count -eq 0)
-
-    Write-Log "`n$successCount jobs completed successfully; $warningCount warnings, $failedCount failures."
-
-    if ($failedCount -gt 0) {
-        return $false
-    }
-
-    return $true
 }
-
-Clear-Host
 
 # Main script starts here
 try {
 
-    Write-Host ("`r`n" * 6)
-    Start-Maintenance
-
-    if ($Configuration) {
-        # Get user configuration
-        $configResult = Get-UserConfiguration -Configuration $Configuration
-        if ($configResult.Loaded) {
-            $userConfig = $configResult.Config
-            # Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
-            Write-Log "### START." -Success
-            Write-Log "Validating specified configuration: $Configuration" -Activity
-        }
-        else {
-            Write-Log "### START." -Success
-            Write-Log "Validating specified configuration: $Configuration" -Activity
-            Write-Log $configResult.Message -Failure
-            Write-Host
-            return
-        }
-
+    if ($Common.PS7) {
+        Write-Host
     }
     else {
+        Write-Host ("`r`n" * 6)
+    }
+
+
+    $principal = new-object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))){
+        Write-RedX "MemLabs requires administrative rights to configure. Please run vmbuild.cmd as administrator." -ForegroundColor Red
+        Write-Host
+        Start-Sleep -seconds 60
+        return $false
+    }
+
+    Set-QuickEdit -DisableQuickEdit
+    # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
+
+    Start-Maintenance
+
+    # Get config
+    if (-not $Configuration) {
         Write-Log "No Configuration specified. Calling genconfig." -Activity
         Set-Location $PSScriptRoot
         $result = ./genconfig.ps1 -InternalUseOnly -Verbose:$enableVerbose -Debug:$enableDebug
@@ -271,147 +170,161 @@ try {
             return
         }
 
-        if ($result.ForceNew) {
-            $ForceNew = $true
-        }
-
-        $configResult = Get-UserConfiguration -Configuration $result.ConfigFileName
-
         if (-not $($result.DeployNow)) {
             return
         }
+
+        $Configuration = $result.ConfigFileName
+    }
+
+    Write-Log "### VALIDATE" -Activity
+
+    # Load config
+    if ($Configuration) {
+
+        Write-Log "Validating specified configuration: $Configuration"
+        $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
+            Write-GreenCheck "Loaded Configuration: $Configuration"
             $userConfig = $configResult.Config
-            # Clear-Host
-            # Write-Host ("`r`n" * (($userConfig.virtualMachines.Count * 3) + 3))
-            Write-Log "### START." -Success
-            Write-Log "Using $($result.ConfigFileName) provided by genconfig" -Activity
-            Write-Log "genconfig specified DeployNow: $($result.DeployNow); ForceNew: $($result.ForceNew)"
         }
         else {
-            Write-Log "### START." -Success
-            Write-Log "Validating specified configuration: $Configuration" -Activity
             Write-Log $configResult.Message -Failure
             Write-Host
             return
         }
-
     }
-    Set-QuickEdit -DisableQuickEdit
-    # Timer
-    $timer = New-Object -TypeName System.Diagnostics.Stopwatch
-    $timer.Start()
+    else {
+        Write-Host
+        Write-Log "No Configuration was specified." -Failure
+        Write-Host
+        return
+    }
 
-    # Load configuration
+    # Determine if we need to run Phase 1
+    $runPhase1 = $false
+    $existingVMs = Get-List -Type VM -SmartUpdate
+    $newVMs = $userConfig.virtualMachines | Where-Object { $userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName }
+    if ($newVMs.Count -gt 0) {
+        $runPhase1 = $true
+    }
+
+    # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
-        if ($testConfigResult.Valid) {
+        if ($testConfigResult.Valid -or $runPhase1 -eq $false) {
+            # Skip validation in phased run
             $deployConfig = $testConfigResult.DeployConfig
-            Add-ExistingVMsToDeployConfig -config $deployConfig
-            $InProgessVMs = @()
-
-            foreach ($thisVM in $deployConfig.virtualMachines) {
-                $thisVMObject = Get-VMObjectFromConfigOrExisting -deployConfig $deployConfig -vmName $thisVM.vmName
-                if ($thisVMObject.inProgress -eq $true) {
-                    $InProgessVMs += $thisVMObject.vmName
-                }
-
-            }
-            if ($InProgessVMs.Count -gt 0) {
-                Write-Host
-                write-host -ForegroundColor Blue "*************************************************************************************************************************************"
-                write-host -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
-                write-log "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
-                write-host
-                write-host -ForegroundColor White "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
-                write-host -ForegroundColor Blue "*************************************************************************************************************************************"
-
-                return
-            }
-
-            Write-Log "Config validated successfully." -Success
+            Write-GreenCheck "Configuration validated successfully." -ForeGroundColor SpringGreen
         }
         else {
-            Write-Log "Config validation failed. `r`n$($testConfigResult.Message)" -Failure
+            Write-Host
+            Write-Log "Configuration validation failed." -Failure
+            Write-Host
+            Write-ValidationMessages -TestObject $testConfigResult
             Write-Host
             return
         }
     }
     catch {
         Write-Log "Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         Write-Host
         return
     }
 
+    # Skip if any VM in progress
+    if ($runPhase1 -and (Test-InProgress -DeployConfig $deployConfig)) {
+        Write-Host
+        return
+    }
+
+    # Timer
+    $timer = New-Object -TypeName System.Diagnostics.Stopwatch
+    $timer.Start()
+
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
-    Write-Log "Starting deployment. Review VMBuild.$domainName.log" -Activity
+    Write-Log "Starting deployment. Review VMBuild.$domainName.log"
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
 
-    # Download required files
-    $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
+    Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
+
+    # Download tools
+    $success = Get-Tools -WhatIf:$WhatIf
     if (-not $success) {
-        Write-Host
-        Write-Log "Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
-        Start-Sleep -Seconds 120
+        Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
+    }
+
+    if ($runPhase1) {
+        # Download required files
         $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
         if (-not $success) {
+            Write-Host
+            Write-Log "Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
+            Start-Sleep -Seconds 120
+            $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
+            if (-not $success) {
+                $timer.Stop()
+                Write-Log "Failed to download all required files. Exiting." -Failure
+                return
+            }
+        }
+
+        if ($DownloadFilesOnly.IsPresent) {
             $timer.Stop()
-            Write-Log "Failed to download all required files. Exiting." -Failure
+            Write-Host
+            Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Success
+            Write-Host
             return
         }
     }
 
-    if ($DownloadFilesOnly.IsPresent) {
-        $timer.Stop()
-        Write-Host
-        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
-        Write-Host
-        return
-    }
-
     # Test if hyper-v switch exists, if not create it
-    Write-Log "Creating/verifying whether a Hyper-V switch for specified network exists." -Activity
-    $switch = Test-NetworkSwitch -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
-    if (-not $switch) {
-        Write-Log "Failed to verify/create Hyper-V switch for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
-        return
-    }
-
-    # Test if DHCP scope exists, if not create it
-    Write-Log "Creating/verifying DHCP scope options for specified network." -Activity
-    $DCVM = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.role -eq 'DC' }
-    if ($DCVM) {
-        $worked = Test-DHCPScope -ScopeID $deployConfig.vmOptions.network -ScopeName $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -DCVMName $DCVM.vmName
-    }
-    else {
-        $worked = Test-DHCPScope -ScopeID $deployConfig.vmOptions.network -ScopeName $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName
-    }
-
+    $AddedScopes = @($deployConfig.vmOptions.network)
+    $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
     if (-not $worked) {
-        Write-Log "Failed to verify/create DHCP Scope for specified network ($($deployConfig.vmOptions.network)). Exiting." -Failure
         return
+    }
+
+    # Create additional switches
+    foreach ($virtualMachine in $deployConfig.VirtualMachines) {
+        if ($virtualMachine.network) {
+            if ($AddedScopes -contains $virtualMachine.network) {
+                continue
+            }
+            $AddedScopes += $virtualMachine.network
+            $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
+            $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+            $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
+            if (-not $worked) {
+                return
+            }
+        }
     }
 
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
-    if ($containsIN) {
-        Write-Log "Creating/verifying whether a Hyper-V switch for 'Internet' network exists." -Activity
-        $internetSwitchName = "Internet"
-        $internetSubnet = "172.31.250.0"
-        $switch = Test-NetworkSwitch -NetworkName $internetSwitchName -NetworkSubnet $internetSubnet -DomainName $internetSwitchName
-        if (-not $switch) {
-            Write-Log "Failed to verify/create Hyper-V switch for 'Internet' network ($internetSwitchName). Exiting." -Failure
-            return
-        }
+    $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -WhatIf:$WhatIf
+    if ($containsIN -and (-not $worked)) {
+        return
+    }
 
-        # Test if DHCP scope exists, if not create it
-        Write-Log "Creating/verifying DHCP scope options for the 'Internet' network." -Activity
-        $worked = Test-DHCPScope -ScopeID $internetSubnet -ScopeName $internetSwitchName -DomainName $deployConfig.vmOptions.domainName
+    # AO VM switch and DHCP scope
+    $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
+    if ($containsAO) {
+        $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
         if (-not $worked) {
-            Write-Log "Failed to verify/create DHCP Scope for the 'Internet' network. Exiting." -Failure
             return
         }
+    }
+
+    #Make sure DHCP is still running
+    get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' } | start-service
+    $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
+    if ($service) {
+        Write-Log "DHCPServer Service could not be started." -Failure
+        return $false
     }
 
     # Remove existing jobs
@@ -420,27 +333,19 @@ try {
         Write-Log "Stopping and removing existing jobs." -Verbose -LogOnly
         foreach ($job in $existingJobs) {
             Write-Log "Removing job $($job.Id) with name $($job.Name)" -Verbose -LogOnly
-            $job | Stop-Job -ErrorAction SilentlyContinue
-            $job | Remove-Job -ErrorAction SilentlyContinue
+            try {
+                $job | Stop-Job -ErrorAction SilentlyContinue
+                $job | Remove-Job -ErrorAction SilentlyContinue
+            }
+            catch {
+                write-log "Failed to remove jobs $_"
+                return
+            }
         }
     }
 
-    # Generate RDCMan file
-    #New-RDCManFile $deployConfig $global:Common.RdcManFilePath
-
-    # Existing DC scenario
-    $existingDC = $deployConfig.parameters.ExistingDCName
-
-    # Remove DNS records for VM's in this config, if existing DC
-    if ($existingDC) {
-        Write-Log "Attempting to remove existing DNS Records" -Activity -HostOnly
-        foreach ($item in $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) } ) {
-            Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
-        }
-    }
-
+    # Show summary
     Write-Log "Deployment Summary" -Activity -HostOnly
-    Write-Host
     Show-Summary -deployConfig $deployConfig
 
     # Return if debug enabled
@@ -448,54 +353,75 @@ try {
         return $deployConfig
     }
 
-    # Phases:
-    # 0 - Prepare existing VMs
-    # 1 - Create new VMs
-    # 2 - Configure VMs (run DSC)
-
+    # Prepare existing VM - Phase 0
+    $prepared = $true
     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
     if ($containsHidden) {
-        $prepared = New-VMJobs -Phase 0 -deployConfig $deployConfig
-    }
-    else {
-        $prepared = $true
+        Write-Phase -Phase 0
+        $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf
     }
 
-    if (-not $prepared) {
-        Write-Log "Phase 1 - Skipped Virtual Machine Creation and Configuration because errors were encountered in Phase 0." -Activity
-        $created = $configured = $false
-    }
-    else {
+    # Define phases
+    $start = 1
+    $maxPhase = 6
+    if ($prepared) {
 
-        $created = New-VMJobs -Phase 1 -deployConfig $deployConfig
+        for ($i = $start; $i -le $maxPhase; $i++) {
+            Write-Phase -Phase $i
 
-        if (-not $created) {
-            Write-Log "Phase 2 - Skipped Virtual Machine Configuration because errors were encountered in Phase 1." -Activity
-        }
-        else {
-
-            # Clear out vm remove list
-            $global:vm_remove_list = @()
-
-            # Create/Updated RDCMan file
-            if (Test-Path "C:\tools\rdcman.exe") {
-                Start-Sleep -Seconds 5
-                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+            if ($i -eq 1 -and -not $runPhase1) {
+                Write-OrangePoint "[Phase $i] Not Applicable. Skipping." -ForegroundColor Yellow -WriteLog
+                continue
             }
 
-            $configured = New-VMJobs -Phase 2 -deployConfig $deployConfig
+            if ($Phase -and $i -notin $Phase) {
+                Write-OrangePoint "Skipped Phase $i because -Phase is $Phase." -ForegroundColor Yellow -WriteLog
+                continue
+            }
+
+            if ($SkipPhase -and $i -in $SkipPhase) {
+                Write-OrangePoint "Skipped Phase $i because -SkipPhase is $SkipPhase." -ForegroundColor Yellow -WriteLog
+                continue
+            }
+
+            if ($StartPhase -and $i -lt $StartPhase) {
+                Write-OrangePoint "Skipped Phase $i because -StartPhase is $StartPhase." -ForegroundColor Yellow -WriteLog
+                continue
+            }
+
+            if ($StopPhase -and $i -gt $StopPhase) {
+                Write-OrangePoint "Skipped Phase $i because -StopPhase is $StopPhase." -ForegroundColor Yellow -WriteLog
+                continue
+            }
+
+            $configured = Start-Phase -Phase $i -deployConfig $deployConfig -WhatIf:$WhatIf
+            if (-not $configured) {
+                break
+            }
+            else {
+                if ($i -eq 1) {
+                    # Clear out vm remove list
+                    $global:vm_remove_list = @()
+
+                    # Create RDCMan file
+                    Start-Sleep -Seconds 5
+                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false -NoActivity -WhatIf:$WhatIf
+                    #Refresh deployConfig to add any props that may have been added in New-VirtualMachine, eg ClusterIPAddress
+                    $deployConfig = ConvertTo-DeployConfigEx -DeployConfig $deployConfig
+                }
+            }
         }
     }
 
     $timer.Stop()
 
-    if (-not $created -or -not $configured) {
+    if (-not $prepared -or -not $configured) {
         Write-Host
-        Write-Log "### SCRIPT FINISHED WITH FAILURES. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Failure
+        Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
+        Write-Host
     }
     else {
-        Write-Host
-        Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss\:ff"))" -Success
+        Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
     }
 
     $NewLabsuccess = $true
@@ -504,12 +430,17 @@ catch {
     Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json)
 }
 finally {
+
     # Ctrl + C brings us here :)
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
+        Write-Log "### $Configuration Terminated" -HostOnly
+        Write-Host
     }
 
-    Get-Job | Stop-Job
+    if (-not $global:Common.DevBranch) {
+        Get-Job | Stop-Job
+    }
 
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {
@@ -519,16 +450,19 @@ finally {
 
     # Delete in progress or failed VM's
     if ($global:vm_remove_list.Count -gt 0) {
-        Write-Host
         if ($NewLabsuccess) {
             Write-Log "Phase 1 encountered failures. Removing all VM's created in Phase 1." -Warning
         }
         else {
             Write-Log "Script exited before Phase 1 completion. Removing all VM's created in Phase 1." -Warning
         }
+        Write-Host
+
         foreach ($vmname in $global:vm_remove_list) {
-            Remove-VirtualMachine -VmName $vmname
+            Remove-VirtualMachine -VmName $vmname -Force
         }
+
+        Get-Job | Stop-Job
     }
 
     # Clear vm remove list
@@ -539,6 +473,6 @@ finally {
 
     # Set quick edit back
     Set-QuickEdit
-}
 
-Write-Host
+    Write-Host
+}

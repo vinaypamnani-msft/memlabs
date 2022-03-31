@@ -7,20 +7,52 @@ function Remove-VirtualMachine {
         [Parameter(Mandatory = $true)]
         [string] $VmName,
         [Parameter()]
-        [switch] $WhatIf
+        [switch] $WhatIf,
+        [Parameter()]
+        [switch] $Force
     )
-
-    $vmFromList = Get-List -Type VM | Where-Object {$_.vmName -eq $VmName}
+    #{ "network": "10.0.1.0", "ClusterIPAddress": "10.250.250.135", "AGIPAddress": "10.250.250.136",
+    $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
     if ($vmFromList.vmBuild -eq $false) {
-        Write-Log "VM '$VmName' exists, but it was not deployed via MemLabs. Skipping." -SubActivity
-        return
+        if (-not ($Force.IsPresent)) {
+            Write-Log "VM '$VmName' exists, but it was not deployed via MemLabs. Skipping." -SubActivity
+            return
+        }
     }
 
     $vmTest = Get-VM2 -Name $VmName -Fallback
+
     if ($vmTest) {
         Write-Log "VM '$VmName' exists. Removing." -SubActivity
+
+        if ($vmFromList.ClusterIPAddress) {
+            Write-Log "$VmName`: Removing $($vmFromList.ClusterIPAddress) Exclusion..." -HostOnly
+            Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.ClusterIPAddress -EndRange $vmFromList.ClusterIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        }
+
+        if ($vmFromList.AGIPAddress) {
+            Write-Log "$VmName`: Removing $($vmFromList.AGIPAddress) Exclusion..." -HostOnly
+            Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.AGIPAddress -EndRange $vmFromList.AGIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        }
+
+        $adapters = $vmTest | Get-VMNetworkAdapter
+        foreach ($adapter in $adapters) {
+            if ($adapter.SwitchName -eq "cluster") {
+                try {
+                    Remove-DhcpServerv4Reservation  -ScopeId 10.250.250.0 -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+                    Write-Log "$VmName`: Removing $($adapter.MacAddress) Reservation..." -HostOnly
+                }
+                catch {}
+                #Write-Log "$VmName`: Removing DHCP Reservation on cluster network..." -HostOnly
+            }
+            else {
+                Remove-DhcpServerv4Reservation  -ScopeId $vmFromList.Network -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+
+            }
+        }
+
         if ($vmTest.State -ne "Off") {
-            $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf
+            $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinu
         }
 
         $cachediskFile = Join-Path $global:common.CachePath ($($vm.vmID).toString() + ".disk.json")
@@ -35,7 +67,7 @@ function Remove-VirtualMachine {
         Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
     }
     else {
-        Write-Log "VM '$VmName' does not exist in Hyper-V." -SubActivity
+        Write-Log "VM '$VmName' does not exist in Hyper-V." -Warning
     }
 }
 
@@ -49,6 +81,9 @@ function Remove-DhcpScope {
 
     if ($ScopeId -eq "Internet") {
         $ScopeId = "172.31.250.0"
+    }
+    if ($ScopeId -eq "cluster") {
+        $ScopeId = "10.250.250.0"
     }
 
     $dhcpScope = Get-DhcpServerv4Scope -ScopeID $ScopeId -ErrorAction SilentlyContinue
@@ -71,9 +106,8 @@ function Remove-Orphaned {
 
         if (-not $vm.Domain) {
             # Prompt for delete, likely no json object in vm notes
-            Write-Host
-            $response = Read-Host -Prompt "VM $($vm.VmName) may be orphaned. Delete? [y/N]"
-            if ($response.ToLowerInvariant() -eq "y") {
+            $response = Read-YesorNoWithTimeout -Prompt "  VM $($vm.VmName) may be orphaned. Delete? [y/N]" -HideHelp
+            if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
             }
         }
@@ -82,22 +116,23 @@ function Remove-Orphaned {
                 Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
             }
         }
+        Write-Host
     }
 
     # Loop through vm's again (in case some were deleted above)
-    $vmNetworksInUse = Get-List -Type UniqueSubnet -SmartUpdate
+    $vmNetworksInUse = Get-List -Type UniqueSwitch -SmartUpdate
     $vmNetworksInUse2 = $vmNetworksInUse -replace "Internet", "172.31.250.0"
 
     Write-Log "Detecting orphaned DHCP Scopes" -Activity
     $scopes = Get-DhcpServerv4Scope
     foreach ($scope in $scopes) {
-        $scopeId = $scope.ScopeId.IPAddressToString # This requires us to replace "Internet" with subnet
+        $scopeId = $scope.ScopeId.ToString() # This requires us to replace "Internet" with subnet
         if ($vmNetworksInUse2 -notcontains $scopeId) {
-            Write-Host
-            $response = Read-Host -Prompt "DHCP Scope '$($scope.Name)' may be orphaned. Delete DHCP Scope? [y/N]"
-            if ($response.ToLowerInvariant() -eq "y") {
+            $response = Read-YesorNoWithTimeout -Prompt "  DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -HideHelp
+            if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-DhcpScope -ScopeId $scopeId -WhatIf:$WhatIf
             }
+            Write-Host
         }
     }
 
@@ -113,15 +148,13 @@ function Remove-Orphaned {
         }
 
         if (-not $inUse) {
-            Write-Host
-            $response = Read-Host -Prompt "Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]"
-            if ($response.ToLowerInvariant() -eq "y") {
+            $response = Read-YesorNoWithTimeout -Prompt "  Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -HideHelp
+            if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-VMSwitch2 -NetworkName $switch.Name
             }
+            Write-Host
         }
     }
-
-    Write-Host
 }
 
 function Remove-InProgress {
@@ -160,7 +193,7 @@ function Remove-Domain {
 
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
     $vmsToDelete = Get-List -Type VM -DomainName $DomainName
-    $scopesToDelete = Get-List -Type UniqueSubnet -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
 
     if ($vmsToDelete) {
         foreach ($vm in $vmsToDelete) {
@@ -181,11 +214,10 @@ function Remove-Domain {
     }
 
     if (-not $WhatIf.IsPresent) {
+        Get-List -type VM -SmartUpdate | Out-Null
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+        Write-Host
     }
-
-    Write-Host
-
 }
 
 function Remove-All {
@@ -196,7 +228,7 @@ function Remove-All {
     )
 
     $vmsToDelete = Get-List -Type VM
-    $scopesToDelete = Get-List -Type UniqueSubnet -DomainName $DomainName
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName
 
     if ($vmsToDelete) {
         Write-Log "Removing ALL virtual machines" -Activity
@@ -218,6 +250,7 @@ function Remove-All {
     }
 
     Remove-Orphaned -WhatIf:$WhatIf
+    Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue | Out-Null
 
     Write-Host
 

@@ -1,0 +1,118 @@
+{
+    "cmOptions": null,
+    "vmOptions": {
+        "prefix": "SQL-",
+        "basePath": "E:\\VirtualMachines",
+        "domainName": "sqlao.com",
+        "adminName": "admin",
+        "network": "192.168.5.0",
+        "timeZone": "Eastern Standard Time"
+    },
+    "virtualMachines": [
+        {
+            "vmName": "SQL-DC1",
+            "role": "DC",
+            "operatingSystem": "Server 2022",
+            "memory": "4GB",
+            "virtualProcs": 4
+        },
+        {
+            "vmName": "SQL-SQLAO1",
+            "role": "SQLAO",
+            "operatingSystem": "Server 2022",
+            "memory": "8GB",
+            "virtualProcs": 8,
+            "sqlVersion": "SQL Server 2019",
+            "sqlInstanceName": "BOB",
+            "sqlInstanceDir": "E:\\SQL",
+            "additionalDisks": {
+                "E": "120GB"
+            },
+            "OtherNode": "SQL-SQLAO2",
+            "fileServerVM": "SQL-FS1",
+            "SQLAgentUser": "SqlAgentUser",
+            "ClusterName": "SQL-SqlCluster"
+        },
+        {
+            "vmName": "SQL-SQLAO2",
+            "role": "SQLAO",
+            "operatingSystem": "Server 2022",
+            "memory": "8GB",
+            "virtualProcs": 8,
+            "sqlVersion": "SQL Server 2019",
+            "sqlInstanceName": "BOB",
+            "sqlInstanceDir": "E:\\SQL",
+            "additionalDisks": {
+                "E": "120GB"
+            }
+        },
+        {
+            "vmName": "SQL-FS1",
+            "role": "FileServer",
+            "operatingSystem": "Server 2022",
+            "memory": "3GB",
+            "virtualProcs": 4,
+            "additionalDisks": {
+                "E": "500GB",
+                "F": "200GB"
+            }
+        }
+    ],
+    "parameters": {
+        "DomainName": "sqlao.com",
+        "DCName": "SQL-DC1",
+        "Scenario": "Standalone",
+        "ExistingDCName": null
+    },
+    "thisParams": {
+        "MachineName": "SQL-DC1",
+        "thisVM": {
+            "vmName": "SQL-DC1",
+            "role": "DC",
+            "operatingSystem": "Server 2022",
+            "memory": "4GB",
+            "virtualProcs": 4
+        },
+        "network": "192.168.5.0",
+        "ServersToWaitOn": [],
+        "sitesAndNetworks": [],
+        "LocalAdminAccounts": "cm_svc",
+        "DomainAccounts": [
+            "admin",
+            "cm_svc",
+            "vmbuildadmin",
+            "administrator"
+        ],
+        "DomainAccountsUPN": [
+            "SQLClusterAgentServiceAccount(Add UPNS)",
+            "SQLClusterServiceAccount(Add UPNS)"
+        ],
+        "DomainAdmins": [
+            "admin"
+        ],
+        "SchemaAdmins": [
+            "admin"
+        ],
+        "DomainComputers": [
+            "SQL-SQLCluster"
+        ],
+        "SQLAO": {
+            "GroupName": "SQL-SQLCluster",
+            "GroupMembers(ADmembers in $cd)" : [
+                "SQL-SQLAO1$",
+                "SQL-SQLAO2$",
+                "SQL-SqlCluster$"
+            ],
+            "SqlServiceAccount(Also use for UserNameCluster)": "SQLClusterServiceAccount",
+            "OULocationUser" : "CN=Users,DC=sqlao,DC=com",
+            "OULocationDevice" : "CN=Computers,DC=sqlao,DC=com",
+            "ClusterNodes(add to servers to wait on+fileserver)" : [
+                "SQL-SQLAO1",
+                "SQL-SQLAO2"
+            ],
+            "WitnessShare" : "SQLCluster-Witness",
+            "WitnessLocalPath" : "F:\\SQLCluster-Witness"
+        }
+
+    }
+}

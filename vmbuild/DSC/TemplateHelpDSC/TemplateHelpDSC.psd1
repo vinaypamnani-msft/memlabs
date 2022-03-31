@@ -39,7 +39,14 @@ DscResourcesToExport = @(
     'SetCustomPagingFile',
     'SetupDomain',
     'FileReadAccessShare',
-    'InstallCA'
+    'InstallCA',
+    'FileACLPermission',
+    'ModuleAdd',
+    'ActiveDirectorySPN',
+    'ClusterRemoveUnwantedIPs',
+    'ClusterSetOwnerNodes',
+    'ADServicePrincipalName2'
+
 )
 
 # Version number of this module.

@@ -3,53 +3,16 @@ param(
     [string]$LogPath
 )
 
-$global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
-$global:StatusLog = "C:\staging\DSC\InstallCMLog.txt"
-
-function Write-DscStatusSetup {
-    $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
-    $StatusPrefix | Out-File $global:StatusFile -Force
-    "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $StatusPrefix" | Out-File -Append $global:StatusLog
-}
-
-function Write-DscStatus {
-    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds, [switch]$Failure)
-
-    if ($RetrySeconds) {
-        $status = "$status; checking again in $RetrySeconds seconds"
-    }
-
-    if ($Failure.IsPresent) {
-        # Add prefix that host job can use to acknowledge failure
-        $status = "JOBFAILURE: $status"
-    }
-
-    if (-not $NoStatus.IsPresent) {
-        $StatusPrefix = "Setting up ConfigMgr."
-        "$StatusPrefix Current Status: $status" | Out-File $global:StatusFile -Force
-    }
-
-    if (-not $NoLog.IsPresent) {
-        "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $status" | Out-File -Append $global:StatusLog
-    }
-
-    if ($Failure.IsPresent) {
-        # Add a sleep so host VM has had time to poll for this entry
-        Start-Sleep -Seconds 10
-    }
-}
-
-# Provision Tool path, RegisterTaskScheduler copies files here
-$ProvisionToolPath = "$env:windir\temp\ProvisionScript"
-if (!(Test-Path $ProvisionToolPath)) {
-    New-Item $ProvisionToolPath -ItemType directory | Out-Null
-}
+# dot source functions
+. $PSScriptRoot\ScriptFunctions.ps1
 
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
-$scenario = $deployConfig.parameters.Scenario
-$ThisVM = $deployConfig.thisParams.thisVM
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
 $CurrentRole = $ThisVM.role
+
+$scenario = "Standalone"
+if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
 
 # contains passive?
 $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
@@ -61,7 +24,10 @@ $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 if (Test-Path -Path $ConfigurationFile) {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 }
-else {
+if (-not ($configuration.ScriptWorkflow)) {
+    $Configuration = $null
+}
+if (-not $Configuration) {
     if ($scenario -eq "Standalone") {
         [hashtable]$Actions = @{
             InstallSCCM    = @{
@@ -110,16 +76,21 @@ else {
                     StartTime = ''
                     EndTime   = ''
                 }
-                PSReadytoUse   = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
                 ScriptWorkflow = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
                 }
+            }
+            $psvms = $deployConfig.VirtualMachines | Where-Object { $_.Role -eq "Primary" -and ($_.ParentSiteCode -eq $thisVM.SiteCode) }
+            foreach ($psvm in $psvms) {
+                $PSReadytoUse = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
+                $propName = propName = "PSReadyToUse" + $psvm.VmName
+                $Actions.Add($propName, $PSReadytoUse)
             }
         }
         elseif ($CurrentRole -eq "Primary") {
@@ -149,11 +120,6 @@ else {
                     StartTime = ''
                     EndTime   = ''
                 }
-                InstallSecondary = @{
-                    Status    = 'NotStart'
-                    StartTime = ''
-                    EndTime   = ''
-                }
                 ScriptWorkflow               = @{
                     Status    = 'NotStart'
                     StartTime = ''
@@ -173,26 +139,45 @@ else {
         }
     }
 
+    if ($containsPassive) {
+        $Actions += @{
+            InstallSecondary = @{
+                Status    = 'NotStart'
+                StartTime = ''
+                EndTime   = ''
+            }
+        }
+    }
+
     $Configuration = New-Object -TypeName psobject -Property $Actions
-    $Configuration.ScriptWorkflow.Status = "Running"
-    $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+}
+
+$Configuration.ScriptWorkflow.Status = "Running"
+$Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
+# Force AD Replication
+$domainControllers = Get-ADDomainController -Filter *
+if ($domainControllers.Count -gt 1) {
+    Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
+    $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
+    Start-Sleep -Seconds 3
 }
 
 if ($scenario -eq "Standalone") {
 
     #Install CM and Config
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
 
     if ($containsSecondary) {
         # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
     #Install DP/MP/Client
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
 
 }
@@ -202,31 +187,31 @@ if ($scenario -eq "Hierarchy") {
     if ($CurrentRole -eq "CAS") {
 
         #Install CM and Config
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallAndUpdateSCCM.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
 
     }
     elseif ($CurrentRole -eq "Primary") {
 
         #Install CM and Config
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPSForHierarchy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
 
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
-            $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallSecondarySiteServer.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
         #Install DP/MP/Client
-        $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallDPMPClient.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
     }
 }
 
 if ($containsPassive) {
     # Install Passive Site Server
-    $ScriptFile = Join-Path -Path $ProvisionToolPath -ChildPath "InstallPassiveSiteServer.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
 }
 
@@ -237,3 +222,7 @@ $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 $Configuration.ScriptWorkflow.Status = "Completed"
 $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
+# Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
+$ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
+. $ScriptFile $ConfigFilePath $LogPath
