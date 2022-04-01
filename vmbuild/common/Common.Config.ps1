@@ -1826,7 +1826,7 @@ Function Show-Summary {
 
     if (-not $Common.DevBranch) {
         Write-GreenCheck "Domain Admin account: " -NoNewLine
-        Write-Hos2t -ForegroundColor DeepPink "$($deployConfig.vmOptions.adminName)" -NoNewline
+        Write-Host2 -ForegroundColor DeepPink "$($deployConfig.vmOptions.adminName)" -NoNewline
         Write-Host " Password: " -NoNewLine
         Write-Host2 -ForegroundColor DeepPink "$($Common.LocalAdmin.GetNetworkCredential().Password)"
     }
