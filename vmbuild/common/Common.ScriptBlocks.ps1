@@ -380,17 +380,18 @@ $global:VM_Config = {
 
         # Get VM Session
         Write-Progress2 $Activity -Status "Establishing a connection with the VM" -percentcomplete 0 -force
-        $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
-
-        if (-not $ps) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
-            return
-        }
 
         # Verify again that VM is connectable, in case DSC caused a reboot
         $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
         if (-not $connected) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
+            return
+        }
+
+        $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+
+        if (-not $ps) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
             return
         }
 
