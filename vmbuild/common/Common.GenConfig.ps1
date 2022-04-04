@@ -827,26 +827,20 @@ function ConvertTo-DeployConfigEx {
         #add the SiteCodes and Subnets so DC can add ad sites, and primary can setup BG's
         if ($thisVM.Role -eq "DC" -or $thisVM.Role -eq "Primary") {
             $sitesAndNetworks = @()
-            $siteCodes = @()
-            # foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary" -and -not $_.hidden }) {
-            #     $sitesAndNetworks += [PSCustomObject]@{
-            #         SiteCode = $vm.siteCode
-            #         Subnet   = $deployConfig.vmOptions.network
-            #     }
-            #     if ($vm.siteCode -in $siteCodes) {
-            #         Write-Log "Error: $($vm.vmName) has a sitecode already in use in config by another Primary or Secondary"
-            #     }
-            #     $siteCodes += $vm.siteCode
-            # }
+
             foreach ($vm in get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -in "Primary", "Secondary" }) {
+                if ($vm.SiteCode -in $sitesAndNetworks.siteCode) {
+                    Write-Log "Warning: $($vm.vmName) has a sitecode already in use by another Primary or Secondary" -Warning
+                    continue
+                }
+                if ($vm.network -in $sitesAndNetworks.Subnet) {
+                    Write-Log "Warning: $($vm.vmName) has a network already in use by another Primary or Secondary" -Warning
+                    continue
+                }
                 $sitesAndNetworks += [PSCustomObject]@{
                     SiteCode = $vm.siteCode
                     Subnet   = $vm.network
                 }
-                if ($vm.siteCode -in $siteCodes) {
-                    Write-Log "Error: $($vm.vmName) has a sitecode already in use in hyper-v by another Primary or Secondary"
-                }
-                $siteCodes += $vm.siteCode
             }
             $thisParams | Add-Member -MemberType NoteProperty -Name "sitesAndNetworks" -Value $sitesAndNetworks -Force
         }
