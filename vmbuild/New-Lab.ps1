@@ -40,7 +40,10 @@ param (
     [ValidateRange(2, 6)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
-    [switch]$WhatIf
+    [switch]$WhatIf,
+    [Parameter(Mandatory = $false, HelpMessage = "Best not to use this. Skips configuration validation.")]
+    [switch]$SkipValidation
+
 )
 
 # Tell common to re-init
@@ -212,7 +215,7 @@ try {
     # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
-        if ($testConfigResult.Valid -or $runPhase1 -eq $false) {
+        if ($testConfigResult.Valid -or ($runPhase1 -eq $false) -or $SkipValidation.IsPresent) {
             # Skip validation in phased run
             $deployConfig = $testConfigResult.DeployConfig
             Write-GreenCheck "Configuration validated successfully." -ForeGroundColor SpringGreen
