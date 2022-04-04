@@ -2262,46 +2262,60 @@ function Get-VmSession {
         }
     }
 
-    $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
     $vm = get-vm2 -Name $VmName
     if (-not $vm) {
         Write-Log "$VmName`: Failed to find VM named $VmName" -Failure -OutputStream
         return
     }
-    $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
-    if ($Err0.Count -ne 0) {
-        if ($VmDomainName -ne $VmName) {
-            Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
-            $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
-            $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
-            $cacheKey = $VmName + "-WORKGROUP"
-            Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
-            $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
-            if ($Err1.Count -ne 0) {
+    $failCount = 0
+    while ($true) {
+        $ps = $null
+        $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
+        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
+        if ($Err0.Count -ne 0) {
+            if ($VmDomainName -ne $VmName) {
+                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+                $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
+                $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
+                $cacheKey = $VmName + "-WORKGROUP"
+                Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
+                $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
+                if ($Err1.Count -ne 0) {
+                    if ($ShowVMSessionError.IsPresent) {
+                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
+                    }
+                    else {
+                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
+                    }
+                    return $null
+                }
+            }
+            else {
                 if ($ShowVMSessionError.IsPresent) {
-                    Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
+                    Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
                 }
                 else {
-                    Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
+                    Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 }
                 return $null
             }
         }
-        else {
-            if ($ShowVMSessionError.IsPresent) {
-                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
-            }
-            else {
-                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
-            }
-            return $null
+
+        if ($ps.Availability -eq "Available") {
+            # Cache & return session
+            Write-Log "$VmName`: Created session with VM using $username. CacheKey [$cacheKey]" -Success -Verbose
+            $global:ps_cache[$cacheKey] = $ps
+            return $ps
         }
+        Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Warning
+        $failCount++
+        if ($failCount -gt 3) {
+            break
+        }
+        start-sleep -seconds 15
     }
 
-    # Cache & return session
-    Write-Log "$VmName`: Created session with VM using $username. CacheKey [$cacheKey]" -Success -Verbose
-    $global:ps_cache[$cacheKey] = $ps
-    return $ps
+    Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure -OutputStream
 }
 
 function Get-StorageConfig {

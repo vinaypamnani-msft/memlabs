@@ -197,8 +197,12 @@ $global:VM_Create = {
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
         if (-not $ps) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
-            return
+            start-sleep -seconds 60
+            $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+            if (-not $ps) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
+                return
+            }
         }
 
         # Set PS Execution Policy (required on client OS)
