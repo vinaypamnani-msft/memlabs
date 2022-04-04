@@ -308,11 +308,11 @@ function Wait-Phase {
             foreach ($job in $completedJobs) {
                 Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
                 #Write-JobProgress -Job $job -AdditionalData $AdditionalData
-
+                $jobName = $job | Select-Object -ExpandProperty Name
                 $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
                 if (-not $jobOutput) {
                     $jobError = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
-                    $jobName = $job | Select-Object -ExpandProperty Name
+
                     if ($jobError) {
                         Write-RedX "[Phase $Phase] Job $jobName completed with error: $jobError" -ForegroundColor Red
                     }
@@ -335,6 +335,14 @@ function Wait-Phase {
                         Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
                         if ($incrementCount) {
                             $return.Failed++
+                        }
+                        if ($phase -gt 2 -and $jobName.Contains("[DC]")) {
+                            Write-RedX "DC failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
+                            try {
+                                $jobs | Stop-Job
+                            }
+                            catch {}
+                            return
                         }
                     }
                     elseif ($OutputObject.LogLevel -eq 2) {
