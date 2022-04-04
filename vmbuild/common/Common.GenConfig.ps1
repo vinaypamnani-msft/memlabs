@@ -97,6 +97,7 @@ Function Read-SingleKeyWithTimeout {
         return $charsToDeleteNextTime
     }
 
+    $stopTimeout = $false
     $key = $null
     $secs = 0
     $charsToDeleteNextTime = 0
@@ -141,6 +142,7 @@ Function Read-SingleKeyWithTimeout {
                         return $key.Character.ToString()
                     }
                     else {
+                        $stopTimeout = $true
                         Write-Host -NoNewline ("`b `b")
                     }
                 }
@@ -165,7 +167,9 @@ Function Read-SingleKeyWithTimeout {
         start-sleep -Milliseconds 25
         if ($timeout -ne 0) {
             #infinite wait
-            $secs++
+            if (-not $stopTimeout) {
+                $secs++
+            }
         }
     }
 
