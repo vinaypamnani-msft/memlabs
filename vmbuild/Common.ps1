@@ -2281,23 +2281,23 @@ function Get-VmSession {
                 Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
                 $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
-                    if ($ShowVMSessionError.IsPresent) {
+                    if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
                         Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
                     }
                     else {
                         Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
                     }
-                    return $null
+                    continue
                 }
             }
             else {
-                if ($ShowVMSessionError.IsPresent) {
+                if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
                     Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
                 }
                 else {
                     Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 }
-                return $null
+                continue
             }
         }
 
