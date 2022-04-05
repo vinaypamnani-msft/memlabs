@@ -4211,11 +4211,11 @@ function Select-Options {
                     continue MainLoop
                 }
                 "remoteContentLibVM" {
-                    $property.remoteContentLibVM = select-FileServerMenu -HA:$true
+                    $property.remoteContentLibVM = select-FileServerMenu -HA:$true -CurrentValue $value
                     continue MainLoop
                 }
                 "fileServerVM" {
-                    $property.fileServerVM = select-FileServerMenu -HA:$false
+                    $property.fileServerVM = select-FileServerMenu -HA:$false -CurrentValue $value
                     continue MainLoop
                 }
                 "domainName" {
@@ -5058,7 +5058,9 @@ function select-FileServerMenu {
         [Parameter(Mandatory = $false, HelpMessage = "Display HA message")]
         [bool] $HA = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
-        [object] $ConfigToModify = $global:config
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentValue")]
+        [string] $CurrentValue = $null
     )
     #Get-PSCallStack | Out-Host
     $result = $null
@@ -5074,7 +5076,7 @@ function select-FileServerMenu {
         $additionalOptions += @{ "N" = "Create a New FileServer VM" }
     }
     while ([string]::IsNullOrWhiteSpace($result)) {
-        $result = Get-Menu "Select FileServer VM" $(Get-ListOfPossibleFileServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions
+        $result = Get-Menu "Select FileServer VM" $(Get-ListOfPossibleFileServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
     }
     switch ($result.ToLowerInvariant()) {
         "n" {
