@@ -663,9 +663,9 @@ function ConvertTo-DeployConfigEx {
             }
 
             "DC" {
+                $DomainAccountsUPN = @()
+                $DomainComputers = @()
                 if ($SQLAO) {
-                    $DomainAccountsUPN = @()
-                    $DomainComputers = @()
                     foreach ($sql in $SQLAO) {
                         if ($sql.OtherNode) {
 
@@ -676,21 +676,26 @@ function ConvertTo-DeployConfigEx {
                             $DomainComputers += @($ClusterName)
                         }
                     }
-
-                    foreach ($vm in $deployConfig.virtualMachines) {
-                        if ($vm.SqlServiceAccount -and $vm.SqlServiceAccount -ne "LocalSystem") {
-                            $DomainAccountsUPN += @($vm.SqlServiceAccount)
-                        }
-
-                        if ($vm.SqlAgentAccount -and $vm.SqlAgentAccount -ne "LocalSystem") {
-                            $DomainAccountsUPN += @($vm.SqlAgentAccount)
-                        }
+                }
+                foreach ($vm in $deployConfig.virtualMachines) {
+                    if ($vm.SqlServiceAccount -and $vm.SqlServiceAccount -ne "LocalSystem") {
+                        $DomainAccountsUPN += @($vm.SqlServiceAccount)
                     }
+
+                    if ($vm.SqlAgentAccount -and $vm.SqlAgentAccount -ne "LocalSystem") {
+                        $DomainAccountsUPN += @($vm.SqlAgentAccount)
+                    }
+                }
+
+                if ($DomainAccountsUPN.Count -gt 0) {
                     $DomainAccountsUPN = $DomainAccountsUPN | Select-Object -Unique
-                    $DomainComputers = $DomainComputers | Select-Object -Unique
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccountsUPN" -Value $DomainAccountsUPN -Force
+                }
+                if ($DomainComputers.Count -gt 0) {
+                    $DomainComputers = $DomainComputers | Select-Object -Unique
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
                 }
+
                 $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentAccount } | Select-Object -ExpandProperty SQLAgentAccount -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SqlServiceAccount } | Select-Object -ExpandProperty SqlServiceAccount -Unique
