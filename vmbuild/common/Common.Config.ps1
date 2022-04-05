@@ -45,14 +45,18 @@ function Get-UserConfiguration {
             $config.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
 
-        if ($null -ne $config.vmOptions.AlwaysOnName ) {
-            if ($null -eq ($config.vmOptions.AlwaysOnGroupName)) {
-                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $config.vmOptions.AlwaysOnName
+        foreach ($vm in $config.VirtualMachines) {
+
+            if ($null -ne $vm.AlwaysOnName ) {
+                if ($null -eq ($vm.AlwaysOnGroupName)) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $vm.AlwaysOnName
+                }
+                if ($null -eq ($vm.AlwaysOnListenerName)) {
+                    $vm| Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $vm.AlwaysOnName
+                }
+                $vm.PsObject.properties.Remove('AlwaysOnName')
+
             }
-            if ($null -eq ($config.vmOptions.AlwaysOnListenerName)) {
-                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $config.vmOptions.AlwaysOnName
-            }
-            $config.vmOptions.PsObject.properties.Remove('AlwaysOnName')
         }
 
         if ($null -ne $config.cmOptions.installDPMPRoles) {
@@ -521,8 +525,8 @@ function Get-SQLAOConfig {
         AGIPAddress                = $PrimaryAO.AGIPAddress + "/255.255.255.0"
         PrimaryReplicaServerName   = $PrimaryAO.vmName + "." + $deployConfig.vmOptions.DomainName
         SecondaryReplicaServerName = $PrimaryAO.OtherNode + "." + $deployConfig.vmOptions.DomainName
-        AlwaysOnListenerName             = $PrimaryAO.AlwaysOnListenerName
-        AlwaysOnListenerNameFQDN       = $PrimaryAO.AlwaysOnListenerName + "." + $deployConfig.vmOptions.DomainName
+        AlwaysOnListenerName       = $PrimaryAO.AlwaysOnListenerName
+        AlwaysOnListenerNameFQDN   = $PrimaryAO.AlwaysOnListenerName + "." + $deployConfig.vmOptions.DomainName
         WitnessShareFQ             = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Witness"
         BackupShareFQ              = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Backup"
         WitnessShare               = "$($ClusterNameNoPrefix)-Witness"

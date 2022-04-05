@@ -3954,6 +3954,17 @@ function Get-AdditionalInformation {
                 $data = $data.PadRight(20) + "[SQL Always On Cluster]"
             }
         }
+        "ClusterName" {
+            $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+        }
+
+        "AlwaysOnListenerName" {
+            $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+        }
+
+        "vmName" {
+            $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+        }
         "memory" {
             #add Available memory
         }
