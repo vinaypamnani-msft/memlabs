@@ -2079,8 +2079,8 @@ function Invoke-VmCommand {
         [string]$VmName,
         [Parameter(Mandatory = $true, HelpMessage = "Script Block to execute")]
         [ScriptBlock]$ScriptBlock,
-        [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
-        [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name to use for creating domain creds")]
+        [string]$VmDomainName, # = "WORKGROUP",
         [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
         [string]$VmDomainAccount,
         [Parameter(Mandatory = $false, HelpMessage = "Argument List to supply to ScriptBlock")]

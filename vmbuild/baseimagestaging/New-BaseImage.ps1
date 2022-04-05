@@ -235,8 +235,8 @@ Write-Log "Sleep for 45 seconds before preparing $vmName for customization..." -
 Start-Sleep -Seconds 45
 Write-Log "Restarting $vmName in Audit-Mode..."
 
-$worked = Invoke-VmCommand -VmName $vmName -ScriptBlock { Remove-Item -Path "C:\staging\Customization.txt" -Force -ErrorAction SilentlyContinue } -WhatIf:$WhatIf # Sleep for a bit to make sure VM is at login screen.
-$worked = Invoke-VmCommand -VmName $vmName -ScriptBlock { & $env:windir\system32\sysprep\sysprep.exe /audit /reboot } -WhatIf:$WhatIf
+$worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -ScriptBlock { Remove-Item -Path "C:\staging\Customization.txt" -Force -ErrorAction SilentlyContinue } -WhatIf:$WhatIf # Sleep for a bit to make sure VM is at login screen.
+$worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -ScriptBlock { & $env:windir\system32\sysprep\sysprep.exe /audit /reboot } -WhatIf:$WhatIf
 
 if (-not $worked) {
     Write-Log "Could not restart VM in Audit-mode. Exiting!" -Failure
