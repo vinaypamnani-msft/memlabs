@@ -2253,6 +2253,7 @@ function Get-VmSession {
         $cacheKey = $cacheKey + "-" + $Common.LocalAdmin.UserName
     }
 
+    Write-Log "$VmName`: Get-VmSession started with cachekey $cacheKey" -Verbose
     # Retrieve session from cache
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
@@ -2270,6 +2271,14 @@ function Get-VmSession {
     $failCount = 0
     while ($true) {
         $ps = $null
+        $failCount++
+        if ($failCount -gt 1) {
+            start-sleep -seconds 15
+        }
+        if ($failCount -gt 3) {
+            break
+        }
+
         $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
         $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
         if ($Err0.Count -ne 0) {
@@ -2308,11 +2317,6 @@ function Get-VmSession {
             return $ps
         }
         Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Warning
-        $failCount++
-        if ($failCount -gt 3) {
-            break
-        }
-        start-sleep -seconds 15
     }
 
     Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure -OutputStream

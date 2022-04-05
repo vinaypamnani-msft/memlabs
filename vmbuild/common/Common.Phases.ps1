@@ -342,7 +342,7 @@ function Wait-Phase {
                                 $jobs | Stop-Job
                             }
                             catch {}
-                            return
+                            return $return
                         }
                     }
                     elseif ($OutputObject.LogLevel -eq 2) {
