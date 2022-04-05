@@ -3326,7 +3326,7 @@ Function Get-remoteSQLVM {
             "a" {
                 $name1 = $($property.SiteCode) + "SQLAO1"
                 $name2 = $($property.SiteCode) + "SQLAO2"
-                Add-NewVMForRole -Role "SQLAO" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name1 -Name2 $Name2 -network:$property.network
+                Add-NewVMForRole -Role "SQLAO" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name1 -Name2 $Name2 -network:$property.network -SiteCode $($property.SiteCode)
                 Set-SiteServerRemoteSQL $property $name1
             }
             Default {
@@ -5022,7 +5022,11 @@ function Add-NewVMForRole {
         $ClusterName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -ClusterName:$true -SkipOne:$true
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value $ClusterName
         $AOName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -AOName:$true -SkipOne:$true
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnGroupName' -Value $AOName
+        $AGName = "SQL"
+        if ($SiteCode) {
+            $AGName = $siteCode
+        }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnGroupName' -Value $($AGName + " Availibility Group")
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnListenerName' -Value $AOName
 
         $ServiceAccount = "$($ClusterName)Svc"
