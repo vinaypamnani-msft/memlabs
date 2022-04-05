@@ -146,10 +146,6 @@ configuration Phase4
         if (-not ($thisVM.Hidden)) {
             if ($ThisVM.SqlServiceAccount) {
 
-                WriteStatus SetSQLSPN {
-                    DependsOn = $nextDepend
-                    Status    = "Removing SQL SPNs for $($thisvm.VmName + "$")"
-                }
 
                 $SPNs = @()
                 $SPNs += "MSSQLSvc/" + $thisvm.VmName
@@ -166,17 +162,24 @@ configuration Phase4
                 # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
                 $spnDependency = @($nextDepend)
                 $i = 0
+
+                WriteStatus SetSQLSPN {
+                    DependsOn = $nextDepend
+                    Status    = "Updating SQL SPNs ($($SPNs -join ",")) for $($ThisVM.SqlServiceAccount)"
+                }
+
                 foreach ($spn in $SPNs ) {
                     $i++
 
-                    ADServicePrincipalName2 "spn$i" {
-                        Ensure               = 'Absent'
+                    ADServicePrincipalName "spn$i" {
+                        Ensure               = 'Present'
                         ServicePrincipalName = $spn
-                        Account              = $thisvm.VmName + "$"
+                        Account              = $ThisVM.SqlServiceAccount
                         Dependson            = $nextDepend
+                        PsDscRunAsCredential = $Admincreds
                     }
 
-                    $spnDependency += "[ADServicePrincipalName2]spn$i"
+                    $spnDependency += "[ADServicePrincipalName]spn$i"
                 }
 
                 [System.Management.Automation.PSCredential]$sqlUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)", $Admincreds.Password)

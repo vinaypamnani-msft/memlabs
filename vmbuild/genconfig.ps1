@@ -1287,10 +1287,10 @@ function Get-NewMachineName {
             write-log "Config is NULL..  Machine names will not be checked. Please notify someone of this bug."
             #break
         }
-        if (($ConfigToCheck.virtualMachines | Where-Object { ($_.vmName -eq $NewName -or $_.AlwaysOnName -eq $NewName -or $_.ClusterName -eq $NewName) -and $NewName -ne $CurrentName } | Measure-Object).Count -eq 0) {
+        if (($ConfigToCheck.virtualMachines | Where-Object { ($_.vmName -eq $NewName -or $_.AlwaysOnListenerName -eq $NewName -or $_.ClusterName -eq $NewName) -and $NewName -ne $CurrentName } | Measure-Object).Count -eq 0) {
 
             $newNameWithPrefix = ($ConfigToCheck.vmOptions.prefix) + $NewName
-            if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix -or $_.ClusterName -eq $newNameWithPrefix -or $_.AlwaysOnName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {
+            if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix -or $_.ClusterName -eq $newNameWithPrefix -or $_.AlwaysOnListenerName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {
                 break
             }
         }
@@ -5009,7 +5009,8 @@ function Add-NewVMForRole {
         $ClusterName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -ClusterName:$true -SkipOne:$true
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value $ClusterName
         $AOName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -AOName:$true -SkipOne:$true
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnName' -Value $AOName
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnGroupName' -Value $AOName
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnListenerName' -Value $AOName
 
         $ServiceAccount = "$($ClusterName)Svc"
         $AgentAccount = "$($ClusterName)Agent"

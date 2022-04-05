@@ -254,8 +254,8 @@ function Test-ValidVmSupported {
         Test-ValidMachineName $VM.OtherNode
     }
 
-    if ($VM.AlwaysOnName) {
-        Test-ValidMachineName $VM.AlwaysOnName
+    if ($VM.AlwaysOnListenerName) {
+        Test-ValidMachineName $VM.AlwaysOnListenerName
     }
 
     if ($VM.remoteContentLibVM) {

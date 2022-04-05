@@ -457,13 +457,13 @@ Configuration Phase5
 
         WriteStatus SQLAG {
             DependsOn = $nextDepend
-            Status    = "Creating Availability Group $($thisVM.thisParams.SQLAO.ClusterNameAoG) on $($Node.NodeName)\$($thisVM.sqlInstanceName)"
+            Status    = "Creating Availability Group $($thisVM.thisParams.SQLAO.AlwaysOnGroupName) on $($Node.NodeName)\$($thisVM.sqlInstanceName)"
         }
 
         # Create the availability group on the instance tagged as the primary replica
         SqlAG 'CMCASAG' {
             Ensure                        = 'Present'
-            Name                          = $thisVM.thisParams.SQLAO.ClusterNameAoG
+            Name                          = $thisVM.thisParams.SQLAO.AlwaysOnGroupName
             InstanceName                  = $thisVM.sqlInstanceName
             ServerName                    = $Node.NodeName
             AvailabilityMode              = 'SynchronousCommit'
@@ -491,9 +491,9 @@ Configuration Phase5
             Ensure               = 'Present'
             ServerName           = $Node.NodeName
             InstanceName         = $thisVM.sqlInstanceName
-            AvailabilityGroup    = $thisVM.thisParams.SQLAO.ClusterNameAoG
+            AvailabilityGroup    = $thisVM.thisParams.SQLAO.AlwaysOnGroupName
             DHCP                 = $false
-            Name                 = $thisVM.thisParams.SQLAO.ClusterNameAoG
+            Name                 = $thisVM.thisParams.SQLAO.AlwaysOnGroupName
             IpAddress            = $thisVM.thisParams.SQLAO.AGIPAddress
             Port                 = $AOSqlPort
             DependsOn            = $nextDepend
@@ -514,8 +514,8 @@ Configuration Phase5
         $nextDepend = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
 
 
-        $lspn1 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.ClusterNameAoG
-        $lspn2 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.ClusterNameAoGFQDN
+        $lspn1 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.AlwaysOnListenerName
+        $lspn2 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.AlwaysOnListenerNameFQDN
         $lspn3 = $lspn1 + ":" + $AOSqlPort
         $lspn4 = $lspn2 + ":" + $AOSqlPort
         $account = $thisVM.thisParams.SQLAO.SqlServiceAccount
@@ -600,7 +600,7 @@ Configuration Phase5
                 Status    = "Adding $dbName to Always On Group"
             }
             SqlAGDatabase 'AddAGDatabaseMemberships' {
-                AvailabilityGroupName   = $thisVM.thisParams.SQLAO.ClusterNameAoG
+                AvailabilityGroupName   = $thisVM.thisParams.SQLAO.AlwaysOnGroupName
                 BackupPath              = $thisVM.thisParams.SQLAO.BackupShareFQ
                 DatabaseName            = $dbName
                 InstanceName            = $thisVM.sqlInstanceName
@@ -858,7 +858,7 @@ Configuration Phase5
         }
 
         SqlWaitForAG 'SQLConfigureAG-WaitAG' {
-            Name                 = $node1VM.thisParams.SQLAO.ClusterNameAoG
+            Name                 = $node1VM.thisParams.SQLAO.AlwaysOnGroupName
             RetryIntervalSec     = 5
             RetryCount           = 450
             ServerName           = $node1
@@ -912,7 +912,7 @@ Configuration Phase5
         SqlAGReplica 'AddReplica' {
             Ensure                        = 'Present'
             Name                          = $nodename
-            AvailabilityGroupName         = $node1VM.thisParams.SQLAO.ClusterNameAoG
+            AvailabilityGroupName         = $node1VM.thisParams.SQLAO.AlwaysOnGroupName
             ServerName                    = $node.NodeName
             InstanceName                  = $node1vm.sqlInstanceName
             AvailabilityMode              = 'SynchronousCommit'
@@ -949,19 +949,7 @@ Configuration Phase5
             }
 
             $nextDepend = '[WaitForAll]AddAGDatabaseMemberships'
-            #SqlAGDatabase 'AddAGDatabaseMemberships' {
-            #    AvailabilityGroupName   = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).ClusterNameAoG
-            #    BackupPath              = $Node.BackupShare
-            #    DatabaseName            = $Node.DBName
-            #    InstanceName            = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).InstanceName
-            #    ServerName              = $node1
-            #    Ensure                  = 'Present'
-            #    ProcessOnlyOnActiveNode = $true
-            #    MatchDatabaseOwner      = $true
-            #    PsDscRunAsCredential    = $Admincreds
-            #    DependsOn = '[WaitForAll]RecoveryModel'
-            #}
-            #$nextDepend = '[SqlAGDatabase]AddAGDatabaseMemberships'
+
         }
         $AgentJobSet = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Set.sql"
         $AgentJobTest = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Test.sql"

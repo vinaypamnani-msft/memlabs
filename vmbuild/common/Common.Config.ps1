@@ -44,6 +44,17 @@ function Get-UserConfiguration {
             }
             $config.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
+
+        if ($null -ne $config.vmOptions.AlwaysOnName ) {
+            if ($null -eq ($config.vmOptions.AlwaysOnGroupName)) {
+                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $config.vmOptions.AlwaysOnName
+            }
+            if ($null -eq ($config.vmOptions.AlwaysOnListenerName)) {
+                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $config.vmOptions.AlwaysOnName
+            }
+            $config.vmOptions.PsObject.properties.Remove('AlwaysOnName')
+        }
+
         if ($null -ne $config.cmOptions.installDPMPRoles) {
             $config.cmOptions.PsObject.properties.Remove('installDPMPRoles')
             foreach ($vm in $config.virtualMachines) {
@@ -172,8 +183,8 @@ function New-DeployConfig {
                 if ($SQLAO.ClusterName -and -not $SQLAO.ClusterName.StartsWith($configObject.vmOptions.prefix)) {
                     $SQLAO.ClusterName = $configObject.vmOptions.prefix + $SQLAO.ClusterName
                 }
-                if ($SQLAO.AlwaysOnName -and -not $SQLAO.AlwaysOnName.StartsWith($configObject.vmOptions.prefix)) {
-                    $SQLAO.AlwaysOnName = $configObject.vmOptions.prefix + $SQLAO.AlwaysOnName
+                if ($SQLAO.AlwaysOnListenerName -and -not $SQLAO.AlwaysOnListenerName.StartsWith($configObject.vmOptions.prefix)) {
+                    $SQLAO.AlwaysOnListenerName = $configObject.vmOptions.prefix + $SQLAO.AlwaysOnListenerName
                 }
             }
         }
@@ -502,7 +513,7 @@ function Get-SQLAOConfig {
         ClusterNodes               = @($PrimaryAO.vmName, $SecondAO)
         WitnessLocalPath           = "F:\$($ClusterNameNoPrefix)-Witness"
         BackupLocalPath            = "F:\$($ClusterNameNoPrefix)-Backup"
-        AlwaysOnName               = $PrimaryAO.AlwaysOnName
+        AlwaysOnGroupName          = $PrimaryAO.AlwaysOnGroupName
         PrimaryNodeName            = $PrimaryAO.vmName
         SecondaryNodeName          = $SecondAO
         FileServerName             = $FSAO.vmName
@@ -510,8 +521,8 @@ function Get-SQLAOConfig {
         AGIPAddress                = $PrimaryAO.AGIPAddress + "/255.255.255.0"
         PrimaryReplicaServerName   = $PrimaryAO.vmName + "." + $deployConfig.vmOptions.DomainName
         SecondaryReplicaServerName = $PrimaryAO.OtherNode + "." + $deployConfig.vmOptions.DomainName
-        ClusterNameAoG             = $PrimaryAO.AlwaysOnName
-        ClusterNameAoGFQDN         = $PrimaryAO.AlwaysOnName + "." + $deployConfig.vmOptions.DomainName
+        AlwaysOnListenerName             = $PrimaryAO.AlwaysOnListenerName
+        AlwaysOnListenerNameFQDN       = $PrimaryAO.AlwaysOnListenerName + "." + $deployConfig.vmOptions.DomainName
         WitnessShareFQ             = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Witness"
         BackupShareFQ              = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Backup"
         WitnessShare               = "$($ClusterNameNoPrefix)-Witness"

@@ -1038,7 +1038,7 @@ $global:VM_Config = {
                                     }
                                 }
                                 else {
-                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC is attempting to restart"
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Non Terminating error from DSC. Attempting to restart."
                                 }
                             }
 
