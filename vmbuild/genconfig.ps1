@@ -4409,7 +4409,7 @@ Function Get-TestResult {
         $c = Test-Configuration -InputObject $Config
         $valid = $c.Valid
         if ($valid -eq $false) {
-            Write-Host "`r`nERROR: Validation Failures were encountered:`r`n" -ForegroundColor Red
+            Write-Host "`r`n>>>>>>>>>>>>>>  ERROR: Validation Failures were encountered:`r`n" -ForegroundColor Crimson
             Write-ValidationMessages -TestObject $c
             #$MyInvocation | Out-Host
             if ($enableVerbose) {

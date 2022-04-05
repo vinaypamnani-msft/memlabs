@@ -425,23 +425,22 @@ function New-RDCManFileFromHyperV {
                     }
                 }
 
+            }
 
             if ($vm.SqlVersion) {
                 $PrimaryNode = $vm
-                if ($vm.role -eq "SQLAO"){
+                if ($vm.role -eq "SQLAO") {
                     if (-not $vm.OtherNode) {
-                        $primaryNode = $vmListFull | Where-Object {$_.OtherNode -eq $vm.vmName}
+                        $primaryNode = $vmListFull | Where-Object { $_.OtherNode -eq $vm.vmName }
                     }
                 }
-                $SiteServer = $vmListFull | Where-Object {$_.RemoteSQLVM -eq $PrimaryNode.vmName}
-                if ($SiteServer)
-                 {
+                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName }
+                if ($SiteServer) {
                     $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)"
-                 }
-                 else {
+                }
+                else {
                     $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
-                 }
-            }
+                }
             }
 
             $comment = $c | ConvertTo-Json
