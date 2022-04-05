@@ -1492,7 +1492,7 @@ function New-VirtualMachine {
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
         [PsCustomObject] $DeployConfig,
         [Parameter(Mandatory = $false)]
         [switch]$OSDClient,

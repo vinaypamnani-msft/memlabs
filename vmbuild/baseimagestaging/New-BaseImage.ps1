@@ -27,6 +27,14 @@ param (
     [switch]$WhatIf
 )
 
+# Check for PS Version
+if ($PSVersionTable.PSVersion.Major -gt 5) {
+    Write-Host
+    Write-Host "This script must run using PowerShell version 5." -ForegroundColor Red
+    Write-Host
+    return
+}
+
 # Set Verbose
 $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
 
@@ -50,13 +58,6 @@ if (-not (Test-Path $bgInfoPath)) {
     }
 }
 
-Clear-Host
-Write-Host
-Write-Host
-Write-Host
-Write-Host
-Write-Host
-Write-Host
 Write-Host
 
 # Timer
@@ -90,6 +91,14 @@ if (-not $WhatIf -and (Test-Path $goldImagePath)) {
         Write-Log "ForceNewGoldImage switch not present and gold image exists. Exiting! " -Warning
         return
     }
+}
+
+################
+### GET TOOLS
+################
+if ($Common.AzureFileList.Tools) {
+    Write-Log "Obtaining Tools to inject in the image." -Activity
+    Get-ToolsForBaseImage -ForceTools:$ForceTools
 }
 
 ##############
@@ -132,16 +141,6 @@ if ($importWim) {
 if ($null -eq $wimPath -and -not $WhatIf) {
     Write-Log "$WimFileName was not found. Exiting!" -Failure
     return
-}
-
-################
-### GET TOOLS
-################
-if ($Common.AzureFileList.Tools) {
-
-    Write-Log "Obtaining Tools to inject in the image." -Activity
-    Get-ToolsForBaseImage -ForceTools:$ForceTools
-
 }
 
 ##############
@@ -232,7 +231,9 @@ if (-not $connected) {
 #################
 
 Write-Log "Sleep for 45 seconds before preparing $vmName for customization..." -Activity
-Start-Sleep -Seconds 45
+if (-not $WhatIf.IsPresent) {
+    Start-Sleep -Seconds 45
+}
 Write-Log "Restarting $vmName in Audit-Mode..."
 
 $worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -ScriptBlock { Remove-Item -Path "C:\staging\Customization.txt" -Force -ErrorAction SilentlyContinue } -WhatIf:$WhatIf # Sleep for a bit to make sure VM is at login screen.

@@ -142,7 +142,7 @@ function Import-WimFromIso {
 
     # Move the imported WIM to the wim folder
     try {
-        Write-Log "Moving $WimName to wim folder..."
+        Write-Log "Moving $WimName to $($Common.StagingWimPath) folder..."
         Move-Item -Path "$($Common.TempPath)\install.wim" -Destination "$($Common.StagingWimPath)\$WimName" -ErrorAction Stop | Out-Null
     }
     catch {
@@ -193,7 +193,7 @@ function New-VhdxFile {
 
         if ($WimName -like "WIN10-*") {
             $selectedImage = $windowsImage | Where-Object { $_.ImageName -eq "Windows 10 Enterprise" }
-            if ($WimName -like "WIN10-*-64.wim") {
+            if ($WimName -like "WIN10-*-64*.wim") {
                 $unattendFile = "WIN10-64.xml"
             }
         }
