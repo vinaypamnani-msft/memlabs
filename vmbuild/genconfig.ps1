@@ -4768,6 +4768,8 @@ function Add-NewVMForRole {
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $virtualMachine.tpmEnabled = $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
         }
         "SQLAO" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -5322,6 +5324,8 @@ function Select-VirtualMachines {
                                         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
                                     }
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
                                     $virtualMachine.virtualProcs = 4
                                     if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
                                         $virtualMachine.memory = "4GB"
@@ -5352,6 +5356,8 @@ function Select-VirtualMachines {
                                 $virtualMachine.psobject.properties.remove('sqlversion')
                                 $virtualMachine.psobject.properties.remove('sqlInstanceDir')
                                 $virtualMachine.psobject.properties.remove('sqlInstanceName')
+                                $virtualMachine.psobject.properties.remove('SqlServiceAccount')
+                                $virtualMachine.psobject.properties.remove('SqlAgentAccount')
                                 $newName = Get-NewMachineName -vm $virtualMachine
                                 if ($($virtualMachine.vmName) -ne $newName) {
                                     $rename = $true

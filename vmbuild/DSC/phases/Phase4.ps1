@@ -144,7 +144,7 @@ configuration Phase4
         $nextDepend = '[ChangeSqlInstancePort]SqlInstancePort'
 
         if (-not ($thisVM.Hidden)) {
-            if ($ThisVM.SqlServiceAccount) {
+            if ($ThisVM.SqlServiceAccount -and ($ThisVM.SqlAgentServiceAccount -ne "LocalSystem")) {
 
 
                 $SPNs = @()
@@ -200,34 +200,38 @@ configuration Phase4
                     DependsOn      = $spnDependency
                     Force          = $false
                 }
-                WriteStatus SetSQLAgentUser {
-                    DependsOn = '[SqlServiceAccount]SetServiceAccountSQL_User'
-                    Status    = "SQL setting new agent user to $($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)"
-                }
-                #Change SQL Service Account
-                SqlServiceAccount 'SetServiceAccountAgent_User' {
-                    ServerName     = $thisvm.VmName
-                    InstanceName   = $SQLInstanceName
-                    ServiceType    = 'SQLServerAgent'
-                    ServiceAccount = $sqlAgentUser
-                    RestartService = $true
-                    DependsOn      = '[SqlServiceAccount]SetServiceAccountSQL_User'
-                    Force          = $false
-                }
+                $nextDepend = "[SqlServiceAccount]SetServiceAccountSQL_User"
 
-                $agentName = if ($SQLInstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + $SQLInstanceName }
+                if ($ThisVM.SqlAgentAccount -and ($ThisVM.SqlAgentAccount -ne "LocalSystem")) {
+                    WriteStatus SetSQLAgentUser {
+                        DependsOn = '[SqlServiceAccount]SetServiceAccountSQL_User'
+                        Status    = "SQL setting new agent user to $($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)"
+                    }
+                    #Change SQL Service Account
+                    SqlServiceAccount 'SetServiceAccountAgent_User' {
+                        ServerName     = $thisvm.VmName
+                        InstanceName   = $SQLInstanceName
+                        ServiceType    = 'SQLServerAgent'
+                        ServiceAccount = $sqlAgentUser
+                        RestartService = $true
+                        DependsOn      = $nextDepend
+                        Force          = $false
+                    }
 
-                WriteStatus SetSQLAgentStartup {
-                    DependsOn = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
-                    Status    = "Setting $agentName Service to Automatic Start"
+                    $agentName = if ($SQLInstanceName -eq "MSSQLSERVER") { "SQLSERVERAGENT" } else { 'SQLAgent$' + $SQLInstanceName }
+
+                    WriteStatus SetSQLAgentStartup {
+                        DependsOn = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
+                        Status    = "Setting $agentName Service to Automatic Start"
+                    }
+                    Service 'ChangeStartupAgent' {
+                        Name        = $agentName
+                        StartupType = "Automatic"
+                        State       = "Running"
+                        DependsOn   = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
+                    }
+                    $nextDepend = "[Service]ChangeStartupAgent"
                 }
-                Service 'ChangeStartupAgent' {
-                    Name        = $agentName
-                    StartupType = "Automatic"
-                    State       = "Running"
-                    DependsOn   = '[SqlServiceAccount]SetServiceAccountAgent_User', $nextDepend
-                }
-                $nextDepend = "[Service]ChangeStartupAgent"
 
             }
             else {
