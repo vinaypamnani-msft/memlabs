@@ -679,11 +679,11 @@ function ConvertTo-DeployConfigEx {
 
                     foreach ($vm in $deployConfig.virtualMachines) {
                         if ($vm.SqlServiceAccount -and $vm.SqlServiceAccount -ne "LocalSystem") {
-                            $DomainAccountsUPN += @($sql.SqlServiceAccount)
+                            $DomainAccountsUPN += @($vm.SqlServiceAccount)
                         }
 
                         if ($vm.SqlAgentAccount -and $vm.SqlAgentAccount -ne "LocalSystem") {
-                            $DomainAccountsUPN += @($sql.SqlAgentAccount)
+                            $DomainAccountsUPN += @($vm.SqlAgentAccount)
                         }
                     }
                     $DomainAccountsUPN = $DomainAccountsUPN | Select-Object -Unique

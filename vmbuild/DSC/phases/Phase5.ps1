@@ -493,7 +493,7 @@ Configuration Phase5
             InstanceName         = $thisVM.sqlInstanceName
             AvailabilityGroup    = $thisVM.thisParams.SQLAO.AlwaysOnGroupName
             DHCP                 = $false
-            Name                 = $thisVM.thisParams.SQLAO.AlwaysOnGroupName
+            Name                 = $thisVM.thisParams.SQLAO.AlwaysOnListenerName
             IpAddress            = $thisVM.thisParams.SQLAO.AGIPAddress
             Port                 = $AOSqlPort
             DependsOn            = $nextDepend
