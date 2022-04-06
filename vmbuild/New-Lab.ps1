@@ -210,6 +210,10 @@ try {
     $newVMs = $userConfig.virtualMachines | Where-Object { $userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName }
     if ($newVMs.Count -gt 0) {
         $runPhase1 = $true
+        Write-Log -Verbose "Phase 1 is scheduled to run"
+    }
+    else{
+        Write-Log -Verbose "Phase 1 is not scheduled to run: ExistingVms = $($existingVMs.vmName -join ",") NewVMs = $($userConfig.virtualMachines.vmName -join ",")"
     }
 
     # Test Config
