@@ -2319,7 +2319,7 @@ function Get-VmSession {
         Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Warning
     }
 
-    Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure -OutputStream
+    Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure
 }
 
 function Get-StorageConfig {
