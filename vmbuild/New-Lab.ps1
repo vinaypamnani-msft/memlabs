@@ -143,6 +143,10 @@ try {
         Write-Host ("`r`n" * 6)
     }
 
+    $global:SkipValidation = $false
+    if ($SkipValidation.IsPresent) {
+        $global:SkipValidation = $true
+    }
 
     $principal = new-object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))){
@@ -215,6 +219,7 @@ try {
     else{
         Write-Log -Verbose "Phase 1 is not scheduled to run: ExistingVms = $($existingVMs.vmName -join ",") NewVMs = $($userConfig.virtualMachines.vmName -join ",")"
     }
+
 
     # Test Config
     try {

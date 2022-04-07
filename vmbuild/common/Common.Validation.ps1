@@ -1191,6 +1191,16 @@ function Test-Configuration {
         $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
         $return.DeployConfig = $deployConfigEx
 
+
+
+        if ($global:SkipValidation) {
+            $return.Message = $null
+            $return.Valid = $true
+            $return.Problems = 0
+            $return.Failures = 0
+            return $return
+        }
+
         # Return if validation failed
         if ($return.Problems -ne 0) {
             $return.Message = $return.Message.ToString().Trim()
