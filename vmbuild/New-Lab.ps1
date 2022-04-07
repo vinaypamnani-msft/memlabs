@@ -226,8 +226,12 @@ try {
     # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
-        if ($testConfigResult.Valid -or ($runPhase1 -eq $false) -or $SkipValidation.IsPresent) {
-            # Skip validation in phased run
+        if ($runPhase1 -eq $false -or $SkipValidation.IsPresent) {
+            # Skip validation in phased run or when asked to skip
+            $deployConfig = $testConfigResult.DeployConfig
+            Write-OrangePoint "Configuration validated skipped."
+        }
+        elseif ($testConfigResult.Valid) {
             $deployConfig = $testConfigResult.DeployConfig
             Write-GreenCheck "Configuration validated successfully." -ForeGroundColor SpringGreen
         }
