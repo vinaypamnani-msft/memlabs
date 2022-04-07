@@ -211,8 +211,10 @@ try {
     # Determine if we need to run Phase 1
     $runPhase1 = $false
     $existingVMs = Get-List -Type VM -SmartUpdate
-    $newVMs = $userConfig.virtualMachines | Where-Object { $userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName }
-    if ($newVMs.Count -gt 0) {
+    $newVMs = @()
+    $newVMs += $userConfig.virtualMachines | Where-Object { $userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName }
+    $count = ($newVMs | Measure-Object).count
+    if ($count -gt 0) {
         $runPhase1 = $true
         Write-Log -Verbose "Phase 1 is scheduled to run"
     }
