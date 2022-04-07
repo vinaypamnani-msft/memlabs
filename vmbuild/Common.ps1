@@ -2514,7 +2514,10 @@ function Get-Tools {
                 }
                 else {
                     Write-Log "Copying $fileName to $fileDestination."
-                    Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                    try {
+                        Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                    }
+                    catch {}
                 }
             }
         }
