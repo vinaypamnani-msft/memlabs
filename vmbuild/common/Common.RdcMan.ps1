@@ -496,6 +496,13 @@ function New-RDCManFileFromHyperV {
                 $shouldSave = $true
             }
         }
+        try{
+        $return = Add-RDCManSmartGroupToGroup -vmListFull $vmListFull -findgroup $findGroup -existing $existing
+        if ($return) {
+            $shouldSave = $true
+        }
+        }catch {}
+
         $CurrentSmartGroups = $findgroup.SelectNodes('smartGroup')
         foreach ($item in $CurrentSmartGroups) {
             #Write-Log $item.properties.name
@@ -755,6 +762,50 @@ function Add-RDCManServerToGroup {
         return $False
     }
     return $False
+}
+
+function Add-RDCManSmartGroupToGroup {
+    [CmdletBinding()]
+    param(
+        [object]$vmListFull,
+        [object]$findgroup,
+        [object]$existing
+
+    )
+
+    #Delete Old Records and let them be regenerated
+
+    $findservers = $findgroup.group.smartGroup
+
+    foreach ($item in $findservers) {
+        $findGroup.group.RemoveChild($item)
+    }
+
+    $return = $false
+    $networks = $vmListFull.network | Select-Object -Unique
+    foreach ($network in $networks) {
+
+        [xml]$smartGroupTemplate = @"
+    <smartGroup>
+        <properties>
+            <expanded>False</expanded>
+            <name>$network</name>
+        </properties>
+        <ruleGroup operator="Any">
+            <rule>
+                <property>Comment</property>
+                <operator>Matches</operator>
+                    <value>"$network"</value>
+            </rule>
+        </ruleGroup>
+    </smartGroup>
+"@
+
+        $findgroup.group.AppendChild($existing.ImportNode($smartGroupTemplate.smartGroup, $true))
+        $return = $true
+    }
+    return $return
+
 }
 
 # This gets the <Group> section from the template. Either makes a new one, or returns an existing one.
