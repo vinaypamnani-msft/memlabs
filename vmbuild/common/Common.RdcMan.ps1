@@ -297,10 +297,15 @@ function New-RDCManFileFromHyperV {
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
             Write-Log "Regenerating new MEMLabs.RDG: stopping RDCMan.exe, and Deleting $rdcmanfile."
-            Get-Process -Name rdcman -ea Ignore | Stop-Process
+            $p = Get-Process -Name rdcman -ea Ignore
+            if ($p) {
+                $p | Stop-Process
+                $killedAlready = $true
+            }
             Start-Sleep 1
             Remove-Item $rdcmanfile | out-null
         }
+        $shouldSave = $true
     }
     try {
         $templatefile = Join-Path $PSScriptRoot "template.rdg"
@@ -613,10 +618,17 @@ function New-RDCManFileFromHyperV {
     else {
         Write-Log "No Changes. Not updating $rdcmanfile" -Success -Verbose
     }
-    if ($killed) {
+    if ($killed -or $killedAlready) {
 
         #Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
         Start-Process "C:\tools\RDCMan.exe" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        $i =0
+        while ($i -lt 3){
+            Set-RdcManMin
+            start-sleep -Seconds 1
+            $i++
+        }
+        Set-RdcManMin
     }
 }
 
