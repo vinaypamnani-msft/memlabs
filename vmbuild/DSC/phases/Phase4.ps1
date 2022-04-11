@@ -144,9 +144,7 @@ configuration Phase4
         $nextDepend = '[ChangeSqlInstancePort]SqlInstancePort'
 
         if (-not ($thisVM.Hidden)) {
-            if ($ThisVM.SqlServiceAccount -and ($ThisVM.SqlAgentServiceAccount -ne "LocalSystem")) {
-
-
+            if ($ThisVM.SqlServiceAccount -and ($ThisVM.SqlServiceAccount -ne "LocalSystem")) {
                 $SPNs = @()
                 $SPNs += "MSSQLSvc/" + $thisvm.VmName
                 $SPNs += "MSSQLSvc/" + $thisvm.VmName + "." + $DomainName
