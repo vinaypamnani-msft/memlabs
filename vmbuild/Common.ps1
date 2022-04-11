@@ -2485,7 +2485,7 @@ function Get-Tools {
             $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
         else {
-            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
 
         if (-not $worked) {
@@ -2721,7 +2721,7 @@ function Get-FileFromStorage {
         }
 
         $fileUrl = "$($StorageConfig.StorageLocation)/$($filename)"
-        $success = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+        $success = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -HashAlg $hashAlg -UseCDN:$UseCDN -WhatIf:$WhatIf
     }
 
     return $success
@@ -2738,6 +2738,8 @@ function Get-FileWithHash {
         [string]$FileUrl,
         [Parameter(Mandatory = $true, HelpMessage = "Expected File Hash.")]
         [string]$ExpectedHash,
+        [Parameter(Mandatory = $true, HelpMessage = "Hash Algorithm.")]
+        [string]$hashAlg,
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
         [switch]$ForceDownload,
         [Parameter(Mandatory = $false, HelpMessage = "Ignore Hash Failures on file downloads.")]
@@ -2750,7 +2752,6 @@ function Get-FileWithHash {
         [switch]$WhatIf
     )
 
-    $hashAlg = "MD5"
     $fileNameLeaf = Split-Path $FileName -Leaf
     $localImagePath = Join-Path $Common.AzureFilesPath $FileName
     $localImageHashPath = "$localImagePath.$hashAlg"
