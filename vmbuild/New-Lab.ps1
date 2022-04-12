@@ -71,7 +71,7 @@ if (-not $NoWindowResize.IsPresent) {
 
         # Set Window
         Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
-        $parent = (Get-WmiObject win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
+        $parent = (Get-CimInstance win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
         if ($parent) {
             # set parent, cmd -> ps
             Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
