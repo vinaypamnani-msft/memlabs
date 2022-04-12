@@ -25,9 +25,9 @@ configuration Phase3
         if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") {
             $featureRoles += "Site Server"
         }
-        if ($ThisVM.role -eq "SQLAO") {
-            $featureRoles += "SQLAO"
-        }
+        #if ($ThisVM.role -eq "SQLAO") {
+        #    $featureRoles += "SQLAO"
+        #}
 
         WriteStatus AddLocalAdmin {
             Status = "Adding required accounts [$($ThisVM.thisParams.LocalAdminAccounts -join ',')] to Administrators group"
