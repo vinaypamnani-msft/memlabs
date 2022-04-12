@@ -1068,10 +1068,10 @@ try{
 }
 catch{}
 
-    $Win32ShowWindowAsync = Add-Type –memberDefinition @"
+    $Win32ShowWindowAsync = Add-Type -memberDefinition @"
     [DllImport("user32.dll")]
     public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-"@ -name "Win32ShowWindowAsync" -namespace Win32Functions –passThru
+"@ -name "Win32ShowWindowAsync" -namespace Win32Functions -passThru
 
     $wnd = [Api.Apidef]::GetWindows() | Where-Object { $_.WinTitle -like "memlabs - Remote Desktop Connection Manager*" }
 
