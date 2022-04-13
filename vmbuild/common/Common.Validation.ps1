@@ -199,7 +199,7 @@ function Test-ValidMachineName {
     }
 
     if ($name -eq $env:COMPUTERNAME) {
-        Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Can not be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Can not be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Warning
     }
 }
 
