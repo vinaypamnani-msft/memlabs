@@ -268,6 +268,7 @@ foreach ($client in $ClientNameList) {
     while ($machinelist -notcontains $client) {
         if ($failCount -gt 30) {
             $success = $false
+            break
         }
         Invoke-CMSystemDiscovery
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
