@@ -809,7 +809,8 @@ $global:VM_Config = {
                 $cd | ConvertTo-Json -Depth 5 | Out-File "C:\staging\DSC\Phase$($Phase)_CD.json" -Force -Confirm:$false
 
                 # Create domain creds
-                $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+                #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+                $netbiosName = $deployConfig.vmOptions.domainNetBiosName
                 $user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
                 $domainCreds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
 
@@ -865,7 +866,8 @@ $global:VM_Config = {
                 }
                 else {
                     # Use domainCreds instead of local Creds for multi-node DSC
-                    $userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
+                    #$userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
+                    $userdomain = $deployConfig.vmOptions.domainNetBiosName
                     $user = "$userdomain\$($using:Common.LocalAdmin.UserName)"
                     $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
                     "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append

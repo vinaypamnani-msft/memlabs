@@ -15,6 +15,7 @@ configuration Phase3
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
+    $NetBiosDomainName = $deployConfig.vmoptions.domainNetBiosName
 
     Node $AllNodes.NodeName
     {
@@ -40,7 +41,7 @@ configuration Phase3
             $DscNodeName = "AddADUserToLocalAdminGroup$($i)"
             AddUserToLocalAdminGroup "$DscNodeName" {
                 Name       = $user
-                DomainName = $DomainName
+                NetbiosDomainName = $NetBiosDomainName
             }
             $addUserDependancy += "[AddUserToLocalAdminGroup]$DscNodeName"
         }

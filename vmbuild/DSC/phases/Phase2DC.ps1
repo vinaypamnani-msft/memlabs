@@ -115,7 +115,7 @@
         #    DomainFullName                = $DomainName
         #    SafemodeAdministratorPassword = $DomainCreds
         #}
-        $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+        $netbiosName = $deployConfig.vmOptions.domainNetBiosName
 
         ADDomain FirstDS {
             DomainName                    = $DomainName

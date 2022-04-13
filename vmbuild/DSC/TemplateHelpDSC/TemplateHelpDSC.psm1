@@ -1583,23 +1583,26 @@ class AddUserToLocalAdminGroup {
     [string] $Name
 
     [DscProperty(Key)]
-    [string] $DomainName
+    [string] $NetbiosDomainName
 
     [void] Set() {
-        $_DomainName = $($this.DomainName).Split(".")[0]
+        $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
         $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
         $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
-        Write-Verbose "[$(Get-Date -format HH:mm:ss)] add $_Name to administrators group"
-        $GroupObj.Add("WinNT://$_DomainName/$_Name")
+        Write-Verbose "[$(Get-Date -format HH:mm:ss)] add $_DomainName\$_Name to administrators group"
+        if (-not $GroupObj.IsMember("WinNT://$_DomainName/$_Name")) {
+            $GroupObj.Add("WinNT://$_DomainName/$_Name")
+        }
 
     }
 
     [bool] Test() {
-        $_DomainName = $($this.DomainName).Split(".")[0]
+        $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
         $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
         $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
+        Write-Verbose "[$(Get-Date -format HH:mm:ss)] Testing $_DomainName\$_Name is in administrators group"
         if ($GroupObj.IsMember("WinNT://$_DomainName/$_Name") -eq $true) {
             return $true
         }
@@ -2189,6 +2192,9 @@ class SetupDomain {
     [System.Management.Automation.PSCredential] $SafemodeAdministratorPassword
 
     [void] Set() {
+
+        #Dead Code.
+
         $_DomainFullName = $this.DomainFullName
         $_SafemodeAdministratorPassword = $this.SafemodeAdministratorPassword
 
@@ -2196,6 +2202,8 @@ class SetupDomain {
         if (!$ADInstallState.Installed) {
             Install-WindowsFeature -Name AD-Domain-Services -IncludeAllSubFeature -IncludeManagementTools
         }
+
+
 
         $NetBIOSName = $_DomainFullName.split('.')[0]
         Import-Module ADDSDeployment

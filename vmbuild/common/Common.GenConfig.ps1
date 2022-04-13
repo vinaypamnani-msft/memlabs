@@ -880,8 +880,9 @@ function ConvertTo-DeployConfigEx {
             }
 
             $DomainAdminName = $deployConfig.vmOptions.adminName
-            $DomainName = $deployConfig.parameters.domainName
-            $DName = $DomainName.Split(".")[0]
+            $DomainName = $deployConfig.vmOptions.domainName
+            #$DName = $DomainName.Split(".")[0]
+            $DName = $deployConfig.vmOptions.domainNetBiosName 
             $cm_admin = "$DNAME\$DomainAdminName"
             $vm_admin = "$DNAME\vmbuildadmin"
             $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, $vm_admin, 'BUILTIN\Administrators')

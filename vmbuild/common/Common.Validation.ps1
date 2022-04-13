@@ -78,7 +78,8 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName value [$($ConfigObject.vmOptions.domainName)] contains invalid characters, is too long, or too short. You must specify a valid Domain name. For example: contoso.com." -ReturnObject $ReturnObject -Failure
         }
 
-        $netBiosDomain = $ConfigObject.vmOptions.domainName.Split(".")[0]
+        #$netBiosDomain = $ConfigObject.vmOptions.domainName.Split(".")[0]
+        $netBiosDomain = $ConfigObject.vmOptions.domainNetBiosName
         if ($netBiosDomain.Length -gt 15) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName [$($ConfigObject.vmOptions.domainName)] is too long. Netbios domain name [$netBiosDomain] must be less than 15 chars." -ReturnObject $ReturnObject -Failure
         }
@@ -178,10 +179,11 @@ function Test-ValidCmOptions {
 
 function Test-ValidMachineName {
     param (
-        [string] $name
+        [string] $name,
+        [object] $ReturnObject
     )
 
-    if (-not $VM) {
+    if (-not $name) {
         throw "Test-ValidMachineName called without a VMName"
     }
 
@@ -196,6 +198,9 @@ function Test-ValidMachineName {
         Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters in $name." -ReturnObject $ReturnObject -Failure
     }
 
+    if ($name -eq $env:COMPUTERNAME) {
+        Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Can not be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Failure
+    }
 }
 
 function Test-ValidUserName {
@@ -240,34 +245,34 @@ function Test-ValidVmSupported {
     if (-not ($vmName.StartsWith( $($ConfigObject.vmOptions.prefix) ) ) ) {
         $vmName = $($ConfigObject.vmOptions.prefix) + $vmName
     }
-    Test-ValidMachineName $vmName
+    Test-ValidMachineName $vmName -ReturnObject $ReturnObject
 
     if ($VM.remoteSQLVM) {
-        Test-ValidMachineName $VM.remoteSQLVM
+        Test-ValidMachineName $VM.remoteSQLVM -ReturnObject $ReturnObject
     }
 
     if ($VM.fileServerVM) {
-        Test-ValidMachineName $VM.fileServerVM
+        Test-ValidMachineName $VM.fileServerVM -ReturnObject $ReturnObject
     }
 
     if ($VM.OtherNode) {
-        Test-ValidMachineName $VM.OtherNode
+        Test-ValidMachineName $VM.OtherNode -ReturnObject $ReturnObject
     }
 
     if ($VM.AlwaysOnListenerName) {
-        Test-ValidMachineName $VM.AlwaysOnListenerName
+        Test-ValidMachineName $VM.AlwaysOnListenerName -ReturnObject $ReturnObject
     }
 
     if ($VM.remoteContentLibVM) {
-        Test-ValidMachineName $VM.remoteContentLibVM
+        Test-ValidMachineName $VM.remoteContentLibVM -ReturnObject $ReturnObject
     }
 
     if ($VM.ClusterName) {
-        Test-ValidMachineName $VM.ClusterName
+        Test-ValidMachineName $VM.ClusterName -ReturnObject $ReturnObject
     }
 
     if ($VM.SqlInstanceName) {
-        Test-ValidMachineName $VM.SqlInstanceName
+        Test-ValidMachineName $VM.SqlInstanceName -ReturnObject $ReturnObject
     }
 
 
@@ -914,6 +919,7 @@ function Test-Configuration {
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing Vm Options" -PercentComplete 7
         Test-ValidVmOptions -ConfigObject $deployConfig -ReturnObject $return
 
+        Test-ValidMachineName $deployConfig.vmOptions.domainNetBiosName -ReturnObject $return
         # CM Options
         # ===========
 

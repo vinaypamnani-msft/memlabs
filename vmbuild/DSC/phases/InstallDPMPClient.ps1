@@ -7,8 +7,10 @@ param(
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get reguired values from config
-$DomainFullName = $deployConfig.parameters.domainName
-$DomainName = $DomainFullName.Split(".")[0]
+$DomainFullName = $deployConfig.vmOptions.domainName
+#$DomainName = $DomainFullName.Split(".")[0]
+$DomainName = $deployConfig.vmOptions.domainNetBiosName
+
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
 

@@ -942,7 +942,7 @@ function Select-MainMenu {
             #write-Option "$i" "$($name)"
         }
 
-        $customOptions += [ordered]@{ "N" = "New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)"}
+        $customOptions += [ordered]@{ "N" = "New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)" }
         $customOptions += [ordered]@{ "*D1" = ""; "*D" = "---  Deployment%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{ "!" = "Return to main menu %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
@@ -1565,6 +1565,8 @@ function Select-NewDomainConfig {
                 Write-Verbose "Prefix = $prefix"
                 $newConfig.vmOptions.domainName = $domain
                 $newConfig.vmOptions.prefix = $prefix
+                $netbiosName = $domain.Split(".")[0]
+                $newConfig.vmOptions.DomainNetBiosName = $netbiosName
                 if ($version) {
                     $newConfig.cmOptions.version = $version
                 }
@@ -2545,12 +2547,14 @@ function New-UserConfig {
     if ([string]::IsNullOrWhiteSpace($prefix)) {
         $prefix = "NULL-"
     }
+    $netbiosName = $Domain.Split(".")[0]
     $vmOptions = [PSCustomObject]@{
-        prefix     = $prefix
-        basePath   = "E:\VirtualMachines"
-        domainName = $Domain
-        adminName  = $adminUser
-        network    = $Subnet
+        prefix            = $prefix
+        basePath          = "E:\VirtualMachines"
+        domainName        = $Domain
+        domainNetBiosName = $netbiosName
+        adminName         = $adminUser
+        network           = $Subnet
     }
     Write-Verbose "[Get-ExistingConfig] vmOptions: $vmOptions"
     $configGenerated = $null
@@ -4222,6 +4226,8 @@ function Select-Options {
                     $domain = select-NewDomainName
                     $property.domainName = $domain
                     $property.prefix = get-PrefixForDomain -Domain $domain
+                    $netbiosName = $domain.Split(".")[0]
+                    $property.DomainNetBiosName = $netbiosName
                     Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
                 }
@@ -5208,6 +5214,8 @@ function Select-VirtualMachines {
                 if ($role -eq "DC") {
                     $Global:Config.vmOptions.domainName = select-NewDomainName
                     $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
+                    $netbiosName = $Global:Config.vmOptions.domainName.Split(".")[0]
+                    $Global:Config.vmOptions.DomainNetBiosName = $netbiosName
                 }
                 Get-TestResult -SuccessOnError | out-null
                 if (-not $machineName) {

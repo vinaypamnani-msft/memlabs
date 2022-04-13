@@ -384,7 +384,8 @@ function Get-ConfigurationData {
         [object]$deployConfig
     )
 
-    $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+    #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+    $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     if (-not $netbiosName) {
         write-Log -Failure "[Phase $Phase] Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
         return

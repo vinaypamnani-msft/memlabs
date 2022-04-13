@@ -59,6 +59,11 @@ function Get-UserConfiguration {
             }
         }
 
+        if ($null -eq $config.vmOptions.domainNetBiosName ) {
+            $netbiosName = $config.vmOptions.domainName.Split(".")[0]
+            $config.vmOptions | Add-Member -MemberType NoteProperty -Name "domainNetBiosName" -Value $netbiosName
+        }
+
         if ($null -ne $config.cmOptions.installDPMPRoles) {
             $config.cmOptions.PsObject.properties.Remove('installDPMPRoles')
             foreach ($vm in $config.virtualMachines) {
@@ -440,9 +445,10 @@ function Add-VMToAccountLists {
             continue
         }
 
-        $DomainName = $deployConfig.parameters.domainName
-        $DName = $DomainName.Split(".")[0]
+        $DomainName = $deployConfig.vmOptions.domainName
+        #$DName = $DomainName.Split(".")[0]
 
+        $DName = $deployConfig.vmOptions.domainNetBiosName
         if ($SQLSysAdminAccounts) {
             $accountLists.SQLSysAdminAccounts += "$DNAME\$($vmToAdd.vmName)$"
         }
@@ -491,8 +497,8 @@ function Get-SQLAOConfig {
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
     $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
-    $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
-
+    #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+    $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     if (-not ($PrimaryAO.ClusterIPAddress)) {
         $vm = Get-List2 -deployConfig $deployConfig -SmartUpdate | where-object { $_.vmName -eq $PrimaryAO.vmName }
         if ($vm.ClusterIPAddress) {
