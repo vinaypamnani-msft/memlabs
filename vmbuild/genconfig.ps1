@@ -1287,10 +1287,10 @@ function Get-NewMachineName {
             write-log "Config is NULL..  Machine names will not be checked. Please notify someone of this bug."
             #break
         }
-        if (($ConfigToCheck.virtualMachines | Where-Object { ($_.vmName -eq $NewName -or $_.AlwaysOnName -eq $NewName -or $_.ClusterName -eq $NewName) -and $NewName -ne $CurrentName } | Measure-Object).Count -eq 0) {
+        if (($ConfigToCheck.virtualMachines | Where-Object { ($_.vmName -eq $NewName -or $_.AlwaysOnListenerName -eq $NewName -or $_.ClusterName -eq $NewName) -and $NewName -ne $CurrentName } | Measure-Object).Count -eq 0) {
 
             $newNameWithPrefix = ($ConfigToCheck.vmOptions.prefix) + $NewName
-            if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix -or $_.ClusterName -eq $newNameWithPrefix -or $_.AlwaysOnName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {
+            if ((Get-List -Type VM | Where-Object { $_.vmName -eq $newNameWithPrefix -or $_.ClusterName -eq $newNameWithPrefix -or $_.AlwaysOnListenerName -eq $newNameWithPrefix } | Measure-Object).Count -eq 0) {
                 break
             }
         }
@@ -1957,9 +1957,9 @@ function Format-Roles {
             "Secondary" { $newRoles += "$($role.PadRight($padding))`t[New Secondary site (Attach to Primary)]" }
             "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]" }
             "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site]" }
-            "DomainMember" { $newRoles += "$($role.PadRight($padding))`t[New VM joined to the domain]" }
+            "DomainMember" { $newRoles += "$($role.PadRight($padding))`t[New VM joined to the domain. Can be a standalone SQL server on server OS]" }
             "SQLAO" { $newRoles += "$($role.PadRight($padding))`t[SQL High Availability Always On Cluster]" }
-            "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain]" }
+            "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain. Can be a SQL Server]" }
             "DomainMember (Client)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Client OS joined to the domain]" }
             "WorkgroupMember" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access]" }
             "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]" }
@@ -3326,7 +3326,7 @@ Function Get-remoteSQLVM {
             "a" {
                 $name1 = $($property.SiteCode) + "SQLAO1"
                 $name2 = $($property.SiteCode) + "SQLAO2"
-                Add-NewVMForRole -Role "SQLAO" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name1 -Name2 $Name2 -network:$property.network
+                Add-NewVMForRole -Role "SQLAO" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name1 -Name2 $Name2 -network:$property.network -SiteCode $($property.SiteCode)
                 Set-SiteServerRemoteSQL $property $name1
             }
             Default {
@@ -3954,6 +3954,17 @@ function Get-AdditionalInformation {
                 $data = $data.PadRight(20) + "[SQL Always On Cluster]"
             }
         }
+        "ClusterName" {
+            $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+        }
+
+        "AlwaysOnListenerName" {
+            $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+        }
+
+        "vmName" {
+            $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+        }
         "memory" {
             #add Available memory
         }
@@ -4200,11 +4211,11 @@ function Select-Options {
                     continue MainLoop
                 }
                 "remoteContentLibVM" {
-                    $property.remoteContentLibVM = select-FileServerMenu -HA:$true
+                    $property.remoteContentLibVM = select-FileServerMenu -HA:$true -CurrentValue $value
                     continue MainLoop
                 }
                 "fileServerVM" {
-                    $property.fileServerVM = select-FileServerMenu -HA:$false
+                    $property.fileServerVM = select-FileServerMenu -HA:$false -CurrentValue $value
                     continue MainLoop
                 }
                 "domainName" {
@@ -4398,7 +4409,7 @@ Function Get-TestResult {
         $c = Test-Configuration -InputObject $Config
         $valid = $c.Valid
         if ($valid -eq $false) {
-            Write-Host "`r`nERROR: Validation Failures were encountered:`r`n" -ForegroundColor Red
+            Write-Host2 "`r`n>>>>>>>>>>>>>>  ERROR: Validation Failures were encountered:`r`n" -ForegroundColor Crimson
             Write-ValidationMessages -TestObject $c
             #$MyInvocation | Out-Host
             if ($enableVerbose) {
@@ -4757,6 +4768,8 @@ function Add-NewVMForRole {
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $virtualMachine.tpmEnabled = $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
         }
         "SQLAO" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
@@ -5009,7 +5022,12 @@ function Add-NewVMForRole {
         $ClusterName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -ClusterName:$true -SkipOne:$true
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value $ClusterName
         $AOName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -AOName:$true -SkipOne:$true
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnName' -Value $AOName
+        $AGName = "SQL"
+        if ($SiteCode) {
+            $AGName = $siteCode
+        }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnGroupName' -Value $($AGName + " Availibility Group")
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnListenerName' -Value $AOName
 
         $ServiceAccount = "$($ClusterName)Svc"
         $AgentAccount = "$($ClusterName)Agent"
@@ -5046,7 +5064,9 @@ function select-FileServerMenu {
         [Parameter(Mandatory = $false, HelpMessage = "Display HA message")]
         [bool] $HA = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
-        [object] $ConfigToModify = $global:config
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentValue")]
+        [string] $CurrentValue = $null
     )
     #Get-PSCallStack | Out-Host
     $result = $null
@@ -5062,7 +5082,7 @@ function select-FileServerMenu {
         $additionalOptions += @{ "N" = "Create a New FileServer VM" }
     }
     while ([string]::IsNullOrWhiteSpace($result)) {
-        $result = Get-Menu "Select FileServer VM" $(Get-ListOfPossibleFileServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions
+        $result = Get-Menu "Select FileServer VM" $(Get-ListOfPossibleFileServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
     }
     switch ($result.ToLowerInvariant()) {
         "n" {
@@ -5308,6 +5328,8 @@ function Select-VirtualMachines {
                                         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
                                     }
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
                                     $virtualMachine.virtualProcs = 4
                                     if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
                                         $virtualMachine.memory = "4GB"
@@ -5338,6 +5360,8 @@ function Select-VirtualMachines {
                                 $virtualMachine.psobject.properties.remove('sqlversion')
                                 $virtualMachine.psobject.properties.remove('sqlInstanceDir')
                                 $virtualMachine.psobject.properties.remove('sqlInstanceName')
+                                $virtualMachine.psobject.properties.remove('SqlServiceAccount')
+                                $virtualMachine.psobject.properties.remove('SqlAgentAccount')
                                 $newName = Get-NewMachineName -vm $virtualMachine
                                 if ($($virtualMachine.vmName) -ne $newName) {
                                     $rename = $true
@@ -5683,7 +5707,7 @@ do {
                 Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
             }
             Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
-            $response = Read-YesorNoWithTimeout -Prompt "Everything correct? (Y/n)" -HideHelp
+            $response = Read-YesorNoWithTimeout -Prompt "Everything correct? (Y/n)" -HideHelp -timeout 180
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                     $valid = $false

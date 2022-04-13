@@ -189,11 +189,11 @@ function Test-ValidMachineName {
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
 
     if ($name.Length -gt 15) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name. Windows computer name cannot be more than 15 characters long." -ReturnObject $ReturnObject -Warning
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. Windows computer name cannot be more than 15 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Warning
     }
 
     if ($name -match $pattern) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters in $name." -ReturnObject $ReturnObject -Failure
     }
 
 }
@@ -241,6 +241,35 @@ function Test-ValidVmSupported {
         $vmName = $($ConfigObject.vmOptions.prefix) + $vmName
     }
     Test-ValidMachineName $vmName
+
+    if ($VM.remoteSQLVM) {
+        Test-ValidMachineName $VM.remoteSQLVM
+    }
+
+    if ($VM.fileServerVM) {
+        Test-ValidMachineName $VM.fileServerVM
+    }
+
+    if ($VM.OtherNode) {
+        Test-ValidMachineName $VM.OtherNode
+    }
+
+    if ($VM.AlwaysOnListenerName) {
+        Test-ValidMachineName $VM.AlwaysOnListenerName
+    }
+
+    if ($VM.remoteContentLibVM) {
+        Test-ValidMachineName $VM.remoteContentLibVM
+    }
+
+    if ($VM.ClusterName) {
+        Test-ValidMachineName $VM.ClusterName
+    }
+
+    if ($VM.SqlInstanceName) {
+        Test-ValidMachineName $VM.SqlInstanceName
+    }
+
 
     # Supported OS
     if ($VM.role -ne "OSDClient") {
@@ -1161,6 +1190,16 @@ function Test-Configuration {
         # Add thisParams
         $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
         $return.DeployConfig = $deployConfigEx
+
+
+
+        if ($global:SkipValidation) {
+            $return.Message = $null
+            $return.Valid = $true
+            $return.Problems = 0
+            $return.Failures = 0
+            return $return
+        }
 
         # Return if validation failed
         if ($return.Problems -ne 0) {

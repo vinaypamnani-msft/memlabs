@@ -97,6 +97,7 @@ Function Read-SingleKeyWithTimeout {
         return $charsToDeleteNextTime
     }
 
+    $stopTimeout = $false
     $key = $null
     $secs = 0
     $charsToDeleteNextTime = 0
@@ -141,6 +142,7 @@ Function Read-SingleKeyWithTimeout {
                         return $key.Character.ToString()
                     }
                     else {
+                        $stopTimeout = $true
                         Write-Host -NoNewline ("`b `b")
                     }
                 }
@@ -165,7 +167,9 @@ Function Read-SingleKeyWithTimeout {
         start-sleep -Milliseconds 25
         if ($timeout -ne 0) {
             #infinite wait
-            $secs++
+            if (-not $stopTimeout) {
+                $secs++
+            }
         }
     }
 
@@ -659,9 +663,9 @@ function ConvertTo-DeployConfigEx {
             }
 
             "DC" {
+                $DomainAccountsUPN = @()
+                $DomainComputers = @()
                 if ($SQLAO) {
-                    $DomainAccountsUPN = @()
-                    $DomainComputers = @()
                     foreach ($sql in $SQLAO) {
                         if ($sql.OtherNode) {
 
@@ -672,12 +676,26 @@ function ConvertTo-DeployConfigEx {
                             $DomainComputers += @($ClusterName)
                         }
                     }
+                }
+                foreach ($vm in $deployConfig.virtualMachines) {
+                    if ($vm.SqlServiceAccount -and $vm.SqlServiceAccount -ne "LocalSystem") {
+                        $DomainAccountsUPN += @($vm.SqlServiceAccount)
+                    }
 
+                    if ($vm.SqlAgentAccount -and $vm.SqlAgentAccount -ne "LocalSystem") {
+                        $DomainAccountsUPN += @($vm.SqlAgentAccount)
+                    }
+                }
+
+                if ($DomainAccountsUPN.Count -gt 0) {
                     $DomainAccountsUPN = $DomainAccountsUPN | Select-Object -Unique
-                    $DomainComputers = $DomainComputers | Select-Object -Unique
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DomainAccountsUPN" -Value $DomainAccountsUPN -Force
+                }
+                if ($DomainComputers.Count -gt 0) {
+                    $DomainComputers = $DomainComputers | Select-Object -Unique
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
                 }
+
                 $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentAccount } | Select-Object -ExpandProperty SQLAgentAccount -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SqlServiceAccount } | Select-Object -ExpandProperty SqlServiceAccount -Unique
@@ -827,26 +845,20 @@ function ConvertTo-DeployConfigEx {
         #add the SiteCodes and Subnets so DC can add ad sites, and primary can setup BG's
         if ($thisVM.Role -eq "DC" -or $thisVM.Role -eq "Primary") {
             $sitesAndNetworks = @()
-            $siteCodes = @()
-            # foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary" -and -not $_.hidden }) {
-            #     $sitesAndNetworks += [PSCustomObject]@{
-            #         SiteCode = $vm.siteCode
-            #         Subnet   = $deployConfig.vmOptions.network
-            #     }
-            #     if ($vm.siteCode -in $siteCodes) {
-            #         Write-Log "Error: $($vm.vmName) has a sitecode already in use in config by another Primary or Secondary"
-            #     }
-            #     $siteCodes += $vm.siteCode
-            # }
+
             foreach ($vm in get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -in "Primary", "Secondary" }) {
+                if ($vm.SiteCode -in $sitesAndNetworks.siteCode) {
+                    Write-Log "Warning: $($vm.vmName) has a sitecode already in use by another Primary or Secondary" -Warning
+                    continue
+                }
+                if ($vm.network -in $sitesAndNetworks.Subnet) {
+                    Write-Log "Warning: $($vm.vmName) has a network already in use by another Primary or Secondary" -Warning
+                    continue
+                }
                 $sitesAndNetworks += [PSCustomObject]@{
                     SiteCode = $vm.siteCode
                     Subnet   = $vm.network
                 }
-                if ($vm.siteCode -in $siteCodes) {
-                    Write-Log "Error: $($vm.vmName) has a sitecode already in use in hyper-v by another Primary or Secondary"
-                }
-                $siteCodes += $vm.siteCode
             }
             $thisParams | Add-Member -MemberType NoteProperty -Name "sitesAndNetworks" -Value $sitesAndNetworks -Force
         }
@@ -999,3 +1011,72 @@ function ConvertTo-DeployConfigEx {
     }
     return $deployConfigEx
 }
+
+
+
+function Set-RdcManMin {
+
+    $TypeDef = @"
+
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+namespace Api
+{
+
+ public class WinStruct
+ {
+   public string WinTitle {get; set; }
+   public int WinHwnd { get; set; }
+ }
+
+ public class ApiDef
+ {
+   private delegate bool CallBackPtr(int hwnd, int lParam);
+   private static CallBackPtr callBackPtr = Callback;
+   private static List<WinStruct> _WinStructList = new List<WinStruct>();
+
+   [DllImport("User32.dll")]
+   [return: MarshalAs(UnmanagedType.Bool)]
+   private static extern bool EnumWindows(CallBackPtr lpEnumFunc, IntPtr lParam);
+
+   [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+   static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+   private static bool Callback(int hWnd, int lparam)
+   {
+       StringBuilder sb = new StringBuilder(256);
+       int res = GetWindowText((IntPtr)hWnd, sb, 256);
+      _WinStructList.Add(new WinStruct { WinHwnd = hWnd, WinTitle = sb.ToString() });
+       return true;
+   }
+
+   public static List<WinStruct> GetWindows()
+   {
+      _WinStructList = new List<WinStruct>();
+      EnumWindows(callBackPtr, IntPtr.Zero);
+      return _WinStructList;
+   }
+
+ }
+}
+"@
+try{
+    Add-Type -TypeDefinition $TypeDef -ErrorAction SilentlyContinue
+}
+catch{}
+
+    $Win32ShowWindowAsync = Add-Type -memberDefinition @"
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+"@ -name "Win32ShowWindowAsync" -namespace Win32Functions -passThru
+
+    $wnd = [Api.Apidef]::GetWindows() | Where-Object { $_.WinTitle -like "memlabs - Remote Desktop Connection Manager*" }
+
+    foreach ($window in $wnd) {
+        $Win32ShowWindowAsync::ShowWindowAsync($window.WinHwnd, 6) | Out-Null
+    }
+}
+

@@ -40,7 +40,10 @@ param (
     [ValidateRange(2, 6)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
-    [switch]$WhatIf
+    [switch]$WhatIf,
+    [Parameter(Mandatory = $false, HelpMessage = "Best not to use this. Skips configuration validation.")]
+    [switch]$SkipValidation
+
 )
 
 # Tell common to re-init
@@ -68,7 +71,7 @@ if (-not $NoWindowResize.IsPresent) {
 
         # Set Window
         Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
-        $parent = (Get-WmiObject win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
+        $parent = (Get-CimInstance win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
         if ($parent) {
             # set parent, cmd -> ps
             Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
@@ -86,6 +89,12 @@ Set-PS7ProgressWidth
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
+    return
+}
+
+# Validate PS7
+if (-not $Common.PS7) {
+    Write-Log "You must use PowerShell version 7.1 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
     return
 }
 
@@ -140,6 +149,10 @@ try {
         Write-Host ("`r`n" * 6)
     }
 
+    $global:SkipValidation = $false
+    if ($SkipValidation.IsPresent) {
+        $global:SkipValidation = $true
+    }
 
     $principal = new-object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))){
@@ -204,16 +217,27 @@ try {
     # Determine if we need to run Phase 1
     $runPhase1 = $false
     $existingVMs = Get-List -Type VM -SmartUpdate
-    $newVMs = $userConfig.virtualMachines | Where-Object { $userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName }
-    if ($newVMs.Count -gt 0) {
+    $newVMs = @()
+    $newVMs += $userConfig.virtualMachines | Where-Object { $userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName }
+    $count = ($newVMs | Measure-Object).count
+    if ($count -gt 0) {
         $runPhase1 = $true
+        Write-Log -Verbose "Phase 1 is scheduled to run"
     }
+    else{
+        Write-Log -Verbose "Phase 1 is not scheduled to run: ExistingVms = $($existingVMs.vmName -join ",") NewVMs = $($userConfig.virtualMachines.vmName -join ",")"
+    }
+
 
     # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig
-        if ($testConfigResult.Valid -or $runPhase1 -eq $false) {
-            # Skip validation in phased run
+        if ($runPhase1 -eq $false -or $SkipValidation.IsPresent) {
+            # Skip validation in phased run or when asked to skip
+            $deployConfig = $testConfigResult.DeployConfig
+            Write-OrangePoint "Configuration validated skipped."
+        }
+        elseif ($testConfigResult.Valid) {
             $deployConfig = $testConfigResult.DeployConfig
             Write-GreenCheck "Configuration validated successfully." -ForeGroundColor SpringGreen
         }

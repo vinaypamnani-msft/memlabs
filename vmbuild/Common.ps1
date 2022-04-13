@@ -1492,7 +1492,7 @@ function New-VirtualMachine {
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
         [PsCustomObject] $DeployConfig,
         [Parameter(Mandatory = $false)]
         [switch]$OSDClient,
@@ -1796,7 +1796,7 @@ function New-VirtualMachine {
 }
 
 function Get-AvailableMemoryGB {
-    $availableMemory = Get-WmiObject win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
+    $availableMemory = Get-CimInstance win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
     $availableMemory = ($availableMemory - ("5GB" / 1kB)) * 1KB / 1GB
     $availableMemory = [Math]::Round($availableMemory, 2)
     if ($availableMemory -lt 0) {
@@ -2079,8 +2079,8 @@ function Invoke-VmCommand {
         [string]$VmName,
         [Parameter(Mandatory = $true, HelpMessage = "Script Block to execute")]
         [ScriptBlock]$ScriptBlock,
-        [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
-        [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name to use for creating domain creds")]
+        [string]$VmDomainName, # = "WORKGROUP",
         [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
         [string]$VmDomainAccount,
         [Parameter(Mandatory = $false, HelpMessage = "Argument List to supply to ScriptBlock")]
@@ -2253,6 +2253,7 @@ function Get-VmSession {
         $cacheKey = $cacheKey + "-" + $Common.LocalAdmin.UserName
     }
 
+    Write-Log "$VmName`: Get-VmSession started with cachekey $cacheKey" -Verbose
     # Retrieve session from cache
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
@@ -2262,46 +2263,63 @@ function Get-VmSession {
         }
     }
 
-    $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
     $vm = get-vm2 -Name $VmName
     if (-not $vm) {
         Write-Log "$VmName`: Failed to find VM named $VmName" -Failure -OutputStream
         return
     }
-    $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
-    if ($Err0.Count -ne 0) {
-        if ($VmDomainName -ne $VmName) {
-            Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
-            $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
-            $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
-            $cacheKey = $VmName + "-WORKGROUP"
-            Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
-            $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
-            if ($Err1.Count -ne 0) {
-                if ($ShowVMSessionError.IsPresent) {
-                    Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
-                }
-                else {
-                    Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
-                }
-                return $null
-            }
+    $failCount = 0
+    while ($true) {
+        $ps = $null
+        $failCount++
+        if ($failCount -gt 1) {
+            start-sleep -seconds 15
         }
-        else {
-            if ($ShowVMSessionError.IsPresent) {
-                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
+        if ($failCount -gt 3) {
+            break
+        }
+
+        $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
+        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
+        if ($Err0.Count -ne 0) {
+            if ($VmDomainName -ne $VmName) {
+                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+                $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
+                $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
+                $cacheKey = $VmName + "-WORKGROUP"
+                Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
+                $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
+                if ($Err1.Count -ne 0) {
+                    if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
+                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
+                    }
+                    else {
+                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
+                    }
+                    continue
+                }
             }
             else {
-                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+                if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
+                    Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
+                }
+                else {
+                    Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+                }
+                continue
             }
-            return $null
         }
+
+        if ($ps.Availability -eq "Available") {
+            # Cache & return session
+            Write-Log "$VmName`: Created session with VM using $username. CacheKey [$cacheKey]" -Success -Verbose
+            $global:ps_cache[$cacheKey] = $ps
+            return $ps
+        }
+        Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Warning
     }
 
-    # Cache & return session
-    Write-Log "$VmName`: Created session with VM using $username. CacheKey [$cacheKey]" -Success -Verbose
-    $global:ps_cache[$cacheKey] = $ps
-    return $ps
+    Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure
 }
 
 function Get-StorageConfig {
@@ -2467,7 +2485,7 @@ function Get-Tools {
             $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
         else {
-            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
 
         if (-not $worked) {
@@ -2496,7 +2514,10 @@ function Get-Tools {
                 }
                 else {
                     Write-Log "Copying $fileName to $fileDestination."
-                    Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                    try {
+                        Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                    }
+                    catch {}
                 }
             }
         }
@@ -2700,7 +2721,7 @@ function Get-FileFromStorage {
         }
 
         $fileUrl = "$($StorageConfig.StorageLocation)/$($filename)"
-        $success = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -UseCDN:$UseCDN -WhatIf:$WhatIf
+        $success = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -HashAlg $hashAlg -UseCDN:$UseCDN -WhatIf:$WhatIf
     }
 
     return $success
@@ -2717,6 +2738,8 @@ function Get-FileWithHash {
         [string]$FileUrl,
         [Parameter(Mandatory = $true, HelpMessage = "Expected File Hash.")]
         [string]$ExpectedHash,
+        [Parameter(Mandatory = $true, HelpMessage = "Hash Algorithm.")]
+        [string]$hashAlg,
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
         [switch]$ForceDownload,
         [Parameter(Mandatory = $false, HelpMessage = "Ignore Hash Failures on file downloads.")]
@@ -2729,7 +2752,6 @@ function Get-FileWithHash {
         [switch]$WhatIf
     )
 
-    $hashAlg = "MD5"
     $fileNameLeaf = Split-Path $FileName -Leaf
     $localImagePath = Join-Path $Common.AzureFilesPath $FileName
     $localImageHashPath = "$localImagePath.$hashAlg"
@@ -3049,7 +3071,7 @@ if (-not $Common.Initialized) {
     $colors = Get-Colors
 
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "220401"
+        MemLabsVersion        = "220413"
         LatestHotfixVersion   = $latestHotfixVersion
         PS7                   = $PS7
         Initialized           = $true

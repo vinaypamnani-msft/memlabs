@@ -24,9 +24,9 @@ if ($ThisVM.remoteSQLVM) {
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
     $sqlInstanceName = $SQLVM.sqlInstanceName
     $sqlPort = $SQLVM.thisParams.sqlPort
-    if ($SQLVM.AlwaysOnName) {
+    if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
-        $sqlServerName = $SQLVM.AlwaysOnName
+        $sqlServerName = $SQLVM.AlwaysOnListenerName
         $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
         $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
     }

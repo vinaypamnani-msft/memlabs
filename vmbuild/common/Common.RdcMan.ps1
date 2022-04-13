@@ -297,10 +297,15 @@ function New-RDCManFileFromHyperV {
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
             Write-Log "Regenerating new MEMLabs.RDG: stopping RDCMan.exe, and Deleting $rdcmanfile."
-            Get-Process -Name rdcman -ea Ignore | Stop-Process
+            $p = Get-Process -Name rdcman -ea Ignore
+            if ($p) {
+                $p | Stop-Process
+                $killedAlready = $true
+            }
             Start-Sleep 1
             Remove-Item $rdcmanfile | out-null
         }
+        $shouldSave = $true
     }
     try {
         $templatefile = Join-Path $PSScriptRoot "template.rdg"
@@ -425,23 +430,22 @@ function New-RDCManFileFromHyperV {
                     }
                 }
 
+            }
 
             if ($vm.SqlVersion) {
                 $PrimaryNode = $vm
-                if ($vm.role -eq "SQLAO"){
+                if ($vm.role -eq "SQLAO") {
                     if (-not $vm.OtherNode) {
-                        $primaryNode = $vmListFull | Where-Object {$_.OtherNode -eq $vm.vmName}
+                        $primaryNode = $vmListFull | Where-Object { $_.OtherNode -eq $vm.vmName }
                     }
                 }
-                $SiteServer = $vmListFull | Where-Object {$_.RemoteSQLVM -eq $PrimaryNode.vmName}
-                if ($SiteServer)
-                 {
+                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName }
+                if ($SiteServer) {
                     $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)"
-                 }
-                 else {
+                }
+                else {
                     $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
-                 }
-            }
+                }
             }
 
             $comment = $c | ConvertTo-Json
@@ -497,6 +501,13 @@ function New-RDCManFileFromHyperV {
                 $shouldSave = $true
             }
         }
+        try{
+        $return = Add-RDCManSmartGroupToGroup -vmListFull $vmListFull -findgroup $findGroup -existing $existing
+        if ($return) {
+            $shouldSave = $true
+        }
+        }catch {}
+
         $CurrentSmartGroups = $findgroup.SelectNodes('smartGroup')
         foreach ($item in $CurrentSmartGroups) {
             #Write-Log $item.properties.name
@@ -607,10 +618,17 @@ function New-RDCManFileFromHyperV {
     else {
         Write-Log "No Changes. Not updating $rdcmanfile" -Success -Verbose
     }
-    if ($killed) {
+    if ($killed -or $killedAlready) {
 
         #Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
         Start-Process "C:\tools\RDCMan.exe" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        $i =0
+        while ($i -lt 3){
+            Set-RdcManMin
+            start-sleep -Seconds 1
+            $i++
+        }
+        Set-RdcManMin
     }
 }
 
@@ -756,6 +774,50 @@ function Add-RDCManServerToGroup {
         return $False
     }
     return $False
+}
+
+function Add-RDCManSmartGroupToGroup {
+    [CmdletBinding()]
+    param(
+        [object]$vmListFull,
+        [object]$findgroup,
+        [object]$existing
+
+    )
+
+    #Delete Old Records and let them be regenerated
+
+    $findservers = $findgroup.group.smartGroup
+
+    foreach ($item in $findservers) {
+        $findGroup.group.RemoveChild($item)
+    }
+
+    $return = $false
+    $networks = $vmListFull.network | Select-Object -Unique
+    foreach ($network in $networks) {
+
+        [xml]$smartGroupTemplate = @"
+    <smartGroup>
+        <properties>
+            <expanded>False</expanded>
+            <name>$network</name>
+        </properties>
+        <ruleGroup operator="Any">
+            <rule>
+                <property>Comment</property>
+                <operator>Matches</operator>
+                    <value>"$network"</value>
+            </rule>
+        </ruleGroup>
+    </smartGroup>
+"@
+
+        $findgroup.group.AppendChild($existing.ImportNode($smartGroupTemplate.smartGroup, $true))
+        $return = $true
+    }
+    return $return
+
 }
 
 # This gets the <Group> section from the template. Either makes a new one, or returns an existing one.

@@ -197,8 +197,12 @@ $global:VM_Create = {
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
         if (-not $ps) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
-            return
+            start-sleep -seconds 60
+            $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+            if (-not $ps) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
+                return
+            }
         }
 
         # Set PS Execution Policy (required on client OS)
@@ -297,11 +301,11 @@ $global:VM_Create = {
             Set-VMDvdDrive -VMName $currentItem.vmName -Path $sqlIsoPath
 
             # Create C:\temp\SQL & C:\temp\SQL_CU inside VM
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force }
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -ScriptBlock { New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
 
             # Copy files from DVD
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -DisplayName "Copy SQL Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy SQL Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
@@ -376,17 +380,18 @@ $global:VM_Config = {
 
         # Get VM Session
         Write-Progress2 $Activity -Status "Establishing a connection with the VM" -percentcomplete 0 -force
-        $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
-
-        if (-not $ps) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
-            return
-        }
 
         # Verify again that VM is connectable, in case DSC caused a reboot
         $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
         if (-not $connected) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
+            return
+        }
+
+        $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+
+        if (-not $ps) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
             return
         }
 
@@ -902,7 +907,7 @@ $global:VM_Config = {
                     $percent = [Math]::Min($attempts, 100)
                     Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
                     foreach ($node in $nonReadyNodes) {
-                        $result = Invoke-VmCommand -VmName $node -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
+                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
                         if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
                             Write-Log "[Phase $Phase]: Node $node is NOT ready."
                             $allNodesReady = $false
@@ -1033,7 +1038,7 @@ $global:VM_Config = {
                                     }
                                 }
                                 else {
-                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC is attempting to restart"
+                                    Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Non Terminating error from DSC. Attempting to restart."
                                 }
                             }
 
