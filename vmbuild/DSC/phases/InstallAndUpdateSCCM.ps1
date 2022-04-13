@@ -217,7 +217,8 @@ SysCenterId=
             $success++
             Write-DscStatus "Pre-Req downloading complete Success Count $success out of 2."
         }
-        else { #If we didnt find it, increment fail count, and bail after 10 fails
+        else {
+            #If we didnt find it, increment fail count, and bail after 10 fails
             $success = 0
             $fail++
             if ($fail -ge 10) {
@@ -626,6 +627,57 @@ else {
         #Set each Primary to Started
         foreach ($PSVM in $PSVMs) {
 
+            # Set Delegation for CMPivot
+            try {
+                if ($SQLVM) {
+                    if ($SQLVM.SqlServiceAccount) {
+                        if ($SQLVM.SqlServiceAccount -ne "LocalSystem") {
+                            $SQLServiceAccountCAS = Get-ADUser -Identity $SQLVM.SqlServiceAccount -Properties PrincipalsAllowedToDelegateToAccount
+                        }
+                        else {
+                            $SQLServiceAccountCAS = Get-ADComputer -Identity $SQLVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                        }
+                    }
+                    else {
+                        $SQLServiceAccountCAS = Get-ADComputer -Identity $SQLVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                    }
+                }
+                else {
+                    $SQLServiceAccountCAS = Get-ADComputer -Identity $ThisVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+
+                }
+
+                $user = $false
+                if ($PSVM.remoteSQLVM) {
+                    $PriSQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $($PSVM.remoteSQLVM) }
+                    if ($PriSQLVM.SqlServiceAccount) {
+                        if ($PriSQLVM.SqlServiceAccount -ne "LocalSystem") {
+                            $SQLServiceAccountPRI = Get-ADUser -Identity $PriSQLVM.SqlServiceAccount -Properties PrincipalsAllowedToDelegateToAccount
+                            $user = $true
+                        }
+                        else {
+                            $SQLServiceAccountPRI = Get-ADComputer -Identity $PriSQLVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                        }
+                    }
+                    else {
+                        $SQLServiceAccountPRI = Get-ADComputer -Identity $PriSQLVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                    }
+                }
+                else {
+                    $SQLServiceAccountPRI = Get-ADComputer -Identity $PSVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                }
+                
+                if ($user) {
+                    Set-ADUser -Identity $SQLServiceAccountPRI -PrincipalsAllowedToDelegateToAccount $SQLServiceAccountCAS
+                }
+                else {
+                    Set-ADComputer -Identity $SQLServiceAccountPRI -PrincipalsAllowedToDelegateToAccount $SQLServiceAccountCAS
+                }
+            }
+            catch {
+                Write-DscStatus "Delegation failed $_"
+                start-sleep -seconds 60
+            }
             $propName = "PSReadyToUse" + $PSVM.VmName
             if (-not $Configuration.$propName) {
                 $PSReadytoUse = @{
