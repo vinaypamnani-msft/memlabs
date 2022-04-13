@@ -115,6 +115,7 @@
         #    DomainFullName                = $DomainName
         #    SafemodeAdministratorPassword = $DomainCreds
         #}
+        $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
 
         ADDomain FirstDS {
             DomainName                    = $DomainName
@@ -123,6 +124,7 @@
             ForestMode                    = 'WinThreshold'
             DomainMode                    = 'WinThreshold'
             DependsOn                     = "[WriteStatus]FirstDS"
+            DomainNetBiosName             = $netbiosName
         }
 
         WriteStatus CreateAccounts {
