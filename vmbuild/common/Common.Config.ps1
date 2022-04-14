@@ -59,6 +59,13 @@ function Get-UserConfiguration {
             }
         }
 
+        if ($null -ne $config.cmOptions.updateToLatest ) {
+            if ($config.cmOptions.updateToLatest -eq $true) {
+                $config.cmOptions.version = Get-CMLatestVersion
+            }
+            $config.cmOptions.PsObject.properties.Remove('updateToLatest')
+        }
+
         if ($null -eq $config.vmOptions.domainNetBiosName ) {
             $netbiosName = $config.vmOptions.domainName.Split(".")[0]
             $config.vmOptions | Add-Member -MemberType NoteProperty -Name "domainNetBiosName" -Value $netbiosName
@@ -1736,7 +1743,7 @@ Function Show-Summary {
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true -and ($containsPS -or $containsSecondary)) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
-            
+
             $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PS) {
                 foreach ($PSVM in $PS) {
