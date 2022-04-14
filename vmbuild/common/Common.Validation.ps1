@@ -212,7 +212,7 @@ function Test-ValidUserName {
     if (-not $name) {
         return
     }
-    if ($name -in "Administrator", "vmBuildAdmin" , "default" , "cm_svc" ,"guest") {
+    if ($name -in "Administrator", "vmBuildAdmin" , "default" , "cm_svc" , "guest") {
         Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] can not be a Reserved Name, as these accounts exist by default and can not be added" -ReturnObject $return -Warning
     }
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
@@ -279,7 +279,9 @@ function Test-ValidVmSupported {
     # Supported OS
     if ($VM.role -ne "OSDClient") {
         if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
-            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+            if ((Get-LinuxImages).Name -notcontains $vm.operatingSystem) {
+                Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+            }
         }
     }
 
@@ -293,8 +295,10 @@ function Test-ValidVmSupported {
         # Supported DSC Roles for Existing Scenario
         if ($Common.Supported.RolesForExisting -notcontains $vm.role -and $vm.role -ne "DC") {
             # DC is caught in Test-ValidDC
-            $supportedRoles = $Common.Supported.RolesForExisting -join ", "
-            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            if ($role -ne "Linux") {
+                $supportedRoles = $Common.Supported.RolesForExisting -join ", "
+                Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            }
         }
     }
     else {
@@ -1137,7 +1141,7 @@ function Test-Configuration {
         # tech preview and hierarchy
         if ($deployConfig.cmOptions.version -eq "tech-preview") {
             $anyPS = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "Primary" }
-            if($anyPS.Count -gt 1) {
+            if ($anyPS.Count -gt 1) {
                 Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with more than one Primary; Tech Preview doesn't support support multiple sites." -ReturnObject $return -Warning
             }
             if ($anyPS.Count -eq 1) {

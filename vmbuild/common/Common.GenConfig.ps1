@@ -775,6 +775,8 @@ function ConvertTo-DeployConfigEx {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
                     }
                 }
+                $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadUrl" -Value $url  -Force
             }
             "Primary" {
                 $reportingSecondaries = @()
@@ -809,6 +811,10 @@ function ConvertTo-DeployConfigEx {
                     if ($CASPassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                     }
+                }
+                else {
+                    $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadUrl" -Value $url  -Force
                 }
 
                 # --- ClientPush
@@ -882,7 +888,7 @@ function ConvertTo-DeployConfigEx {
             $DomainAdminName = $deployConfig.vmOptions.adminName
             $DomainName = $deployConfig.vmOptions.domainName
             #$DName = $DomainName.Split(".")[0]
-            $DName = $deployConfig.vmOptions.domainNetBiosName 
+            $DName = $deployConfig.vmOptions.domainNetBiosName
             $cm_admin = "$DNAME\$DomainAdminName"
             $vm_admin = "$DNAME\vmbuildadmin"
             $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, $vm_admin, 'BUILTIN\Administrators')
@@ -1064,10 +1070,10 @@ namespace Api
  }
 }
 "@
-try{
-    Add-Type -TypeDefinition $TypeDef -ErrorAction SilentlyContinue
-}
-catch{}
+    try {
+        Add-Type -TypeDefinition $TypeDef -ErrorAction SilentlyContinue
+    }
+    catch {}
 
     $Win32ShowWindowAsync = Add-Type -memberDefinition @"
     [DllImport("user32.dll")]

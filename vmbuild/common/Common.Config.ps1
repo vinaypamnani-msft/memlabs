@@ -52,7 +52,7 @@ function Get-UserConfiguration {
                     $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $vm.AlwaysOnName
                 }
                 if ($null -eq ($vm.AlwaysOnListenerName)) {
-                    $vm| Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $vm.AlwaysOnName
+                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $vm.AlwaysOnName
                 }
                 $vm.PsObject.properties.Remove('AlwaysOnName')
 
@@ -1684,214 +1684,239 @@ function Convert-vmNotesToOldFormat {
 
 }
 
-Function Show-Summary {
+Function Get-LinuxImages {
+    $linuxJson = Join-Path $Global:Common.TempPath "LinuxHyperVGallery.json"
+    & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+    $linux = Get-Content $linuxJson | convertfrom-json
+    return ($linux.images | Where-Object { $_.config.secureboot -ne $true })
+}
+
+Function Download-LinuxImage {
     [CmdletBinding()]
     param (
         [Parameter()]
-        [PsCustomObject] $deployConfig
+        [string] $name
     )
 
-    $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
-    #$CHECKMARK = ([char]8730)
-    $containsPS = $fixedConfig.role -contains "Primary"
-    $containsSecondary = $fixedConfig.role -contains "Secondary"
-    $containsDPMP = $fixedConfig.role -contains "DPMP"
-    $containsMember = $fixedConfig.role -contains "DomainMember"
-    $containsPassive = $fixedConfig.role -contains "PassiveSite"
+    $linux = Get-LinuxImages
 
-    Write-Verbose "ContainsPS: $containsPS ContainsDPMP: $containsDPMP ContainsMember: $containsMember ContainsPassive: $containsPassive"
-    if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
-        if ($deployConfig.cmOptions.install -eq $true -and ($containsPS -or $containsSecondary)) {
-            Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+    $image = ($linux | Where-Object { $_.name -eq $name })
+    Get-FileWithHash -FileName $($name + ".zip") -FileDisplayName $image.disk.archiveRelativePath -FileUrl $image.disk.uri -hashAlg $($image.disk.hash.split(":")[0]) -ExpectedHash $($image.disk.hash.Split(":")[1])
+    Expand-Archive -Path $("azureFiles\" + $name + ".zip") -DestinationPath $($Global:Common.AzureImagePath) -Force
+    if (-not (test-path $($Global:Common.AzureImagePath + $image.Name + ".vhdx") -PathType Leaf)) {
+            Get-FileWithHash -FileName $($name + ".zip") -FileDisplayName $image.disk.archiveRelativePath -FileUrl $image.disk.uri -hashAlg $($image.disk.hash.split(":")[0]) -ExpectedHash $($image.disk.hash.Split(":")[1])
+            move-item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) $($Global:Common.AzureImagePath + $image.Name + ".vhdx")
+        }
+    }
+
+    Function Show-Summary {
+        [CmdletBinding()]
+        param (
+            [Parameter()]
+            [PsCustomObject] $deployConfig
+        )
+
+        $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
+        #$CHECKMARK = ([char]8730)
+        $containsPS = $fixedConfig.role -contains "Primary"
+        $containsSecondary = $fixedConfig.role -contains "Secondary"
+        $containsDPMP = $fixedConfig.role -contains "DPMP"
+        $containsMember = $fixedConfig.role -contains "DomainMember"
+        $containsPassive = $fixedConfig.role -contains "PassiveSite"
+
+        Write-Verbose "ContainsPS: $containsPS ContainsDPMP: $containsDPMP ContainsMember: $containsMember ContainsPassive: $containsPassive"
+        if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
+            if ($deployConfig.cmOptions.install -eq $true -and ($containsPS -or $containsSecondary)) {
+                Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
 
 
-            if ($deployConfig.cmOptions.updateToLatest -eq $true) {
-                Write-GreenCheck "ConfigMgr will be updated to latest"
-            }
-            else {
-                Write-RedX "ConfigMgr will NOT updated to latest"
-            }
-            $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-            if ($PS) {
-                foreach ($PSVM in $PS) {
-                    if ($PSVM.ParentSiteCode) {
-                        Write-GreenCheck "ConfigMgr Primary server $($PSVM.VMName) will join a Hierarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
+                if ($deployConfig.cmOptions.updateToLatest -eq $true) {
+                    Write-GreenCheck "ConfigMgr will be updated to latest"
+                }
+                else {
+                    Write-RedX "ConfigMgr will NOT updated to latest"
+                }
+                $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
+                if ($PS) {
+                    foreach ($PSVM in $PS) {
+                        if ($PSVM.ParentSiteCode) {
+                            Write-GreenCheck "ConfigMgr Primary server $($PSVM.VMName) will join a Hierarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
+                        }
+                        else {
+                            Write-GreenCheck "Primary server $($PSVM.VMName) with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
+                        }
+                    }
+                }
+
+                $SSVM = $fixedConfig | Where-Object { $_.Role -eq "Secondary" }
+                if ($SSVM) {
+                    Write-GreenCheck -NoNewLine "Secondary Site(s) will be installed:"
+                    foreach ($SS in $SSVM) {
+                        write-host -NoNewLine " $($SS.SiteCode) -> $($SS.ParentSiteCode)"
+                    }
+                    write-host
+                }
+                if ($containsPS) {
+                    if ($containsPassive) {
+                        $PassiveVMs = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
+                        foreach ($PassiveVM in $PassiveVMs) {
+                            Write-GreenCheck "(High Availability) ConfigMgr site server in passive mode $($PassiveVM.VMName) will be installed for SiteCode $($PassiveVM.SiteCode -Join ',')"
+                        }
                     }
                     else {
-                        Write-GreenCheck "Primary server $($PSVM.VMName) with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
+                        Write-RedX "(High Availability) No ConfigMgr site server in passive mode will be installed"
                     }
                 }
             }
-
-            $SSVM = $fixedConfig | Where-Object { $_.Role -eq "Secondary" }
-            if ($SSVM) {
-                Write-GreenCheck -NoNewLine "Secondary Site(s) will be installed:"
-                foreach ($SS in $SSVM) {
-                    write-host -NoNewLine " $($SS.SiteCode) -> $($SS.ParentSiteCode)"
-                }
-                write-host
+            else {
+                Write-RedX "ConfigMgr will not be installed."
             }
-            if ($containsPS) {
-                if ($containsPassive) {
-                    $PassiveVMs = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-                    foreach ($PassiveVM in $PassiveVMs) {
-                        Write-GreenCheck "(High Availability) ConfigMgr site server in passive mode $($PassiveVM.VMName) will be installed for SiteCode $($PassiveVM.SiteCode -Join ',')"
+
+
+            if ($deployConfig.cmOptions.install -eq $true) {
+                $foundDP = $false
+                $foundMP = $false
+
+                $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and $_.InstallMP }
+                if ($DPMP) {
+                    Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")"
+                    $foundDP = $true
+                    $foundMP = $true
+                }
+
+                $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and -not $_.InstallMP }
+                if ($DPMP) {
+                    Write-GreenCheck "DP role will be installed on $($DPMP.vmName -Join ",")"
+                    $foundDP = $true
+                }
+                $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallMP -and -not $_.InstallDP }
+                if ($DPMP) {
+                    Write-GreenCheck "MP role will be installed on $($DPMP.vmName -Join ",")"
+                    $foundMP = $true
+                }
+
+                if (-not $foundDP -or -not $foundMP) {
+                    $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
+                    if ($PSVM) {
+                        if (-not $foundDP -and -not $foundMP) {
+                            Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)"
+                        }
+                        else {
+                            if (-not $foundDP) {
+                                Write-GreenCheck "DP role will be installed on Primary Site Server $($PSVM.vmName)"
+                            }
+                            if (-not $foundMP) {
+                                Write-GreenCheck "MP role will be installed on Primary Site Server $($PSVM.vmName)"
+                            }
+                        }
+                    }
+                }
+
+            }
+            else {
+                Write-RedX "DPMP roles will not be installed"
+            }
+
+            if ($containsMember) {
+                if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
+                    $PSVMs = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
+                    foreach ($PSVM in $PSVMs) {
+                        if ($PSVM.thisParams.ClientPush) {
+                            Write-GreenCheck "Client Push: Yes $($PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
+                        }
+                        else {
+                            Write-OrangePoint "Client Push is enabled for $($PSVM.VMname) , but no eligible clients found"
+                        }
                     }
                 }
                 else {
-                    Write-RedX "(High Availability) No ConfigMgr site server in passive mode will be installed"
-                }
-            }
-        }
-        else {
-            Write-RedX "ConfigMgr will not be installed."
-        }
-
-
-        if ($deployConfig.cmOptions.install -eq $true) {
-            $foundDP = $false
-            $foundMP = $false
-
-            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and $_.InstallMP }
-            if ($DPMP) {
-                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")"
-                $foundDP = $true
-                $foundMP = $true
-            }
-
-            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and -not $_.InstallMP }
-            if ($DPMP) {
-                Write-GreenCheck "DP role will be installed on $($DPMP.vmName -Join ",")"
-                $foundDP = $true
-            }
-            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallMP -and -not $_.InstallDP }
-            if ($DPMP) {
-                Write-GreenCheck "MP role will be installed on $($DPMP.vmName -Join ",")"
-                $foundMP = $true
-            }
-
-            if (-not $foundDP -or -not $foundMP) {
-                $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-                if ($PSVM) {
-                    if (-not $foundDP -and -not $foundMP) {
-                        Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)"
-                    }
-                    else {
-                        if (-not $foundDP) {
-                            Write-GreenCheck "DP role will be installed on Primary Site Server $($PSVM.vmName)"
-                        }
-                        if (-not $foundMP) {
-                            Write-GreenCheck "MP role will be installed on Primary Site Server $($PSVM.vmName)"
-                        }
-                    }
-                }
-            }
-
-        }
-        else {
-            Write-RedX "DPMP roles will not be installed"
-        }
-
-        if ($containsMember) {
-            if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                $PSVMs = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-                foreach ($PSVM in $PSVMs) {
-                    if ($PSVM.thisParams.ClientPush) {
-                        Write-GreenCheck "Client Push: Yes $($PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
-                    }
-                    else {
-                        Write-OrangePoint "Client Push is enabled for $($PSVM.VMname) , but no eligible clients found"
-                    }
+                    Write-RedX "Client Push: No"
                 }
             }
             else {
-                Write-RedX "Client Push: No"
+                #Write-Host " [Client Push: N/A]"
             }
+
         }
         else {
-            #Write-Host " [Client Push: N/A]"
-        }
-
-    }
-    else {
-        Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
-        if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
-            $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-        }
-        else {
-            Write-RedX "ConfigMgr will not be installed."
-        }
-    }
-
-    #  if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
-    #     $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-    #     Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
-    # }
-    if (-not $null -eq $($deployConfig.vmOptions)) {
-
-        if ($null -eq $deployConfig.parameters.ExistingDCName) {
-            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be created." -NoNewLine
-        }
-        else {
-            Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be joined." -NoNewLine
-        }
-
-        Write-Host " [Default Network $($deployConfig.vmOptions.network)]"
-        #Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
-
-        $totalMemory = $fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
-        $totalMemory = $totalMemory.Sum / 1GB
-        $availableMemory = Get-AvailableMemoryGB
-        Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine"
-    }
-
-    if (-not $Common.DevBranch) {
-        Write-GreenCheck "Domain Admin account: " -NoNewLine
-        Write-Host2 -ForegroundColor DeepPink "$($deployConfig.vmOptions.adminName)" -NoNewline
-        Write-Host " Password: " -NoNewLine
-        Write-Host2 -ForegroundColor DeepPink "$($Common.LocalAdmin.GetNetworkCredential().Password)"
-    }
-
-    $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,
-    @{Label = "Procs"; Expression = { $_.virtualProcs } },
-    @{Label = "SiteCode"; Expression = {
-            $SiteCode = $_.siteCode
-            if ($_.ParentSiteCode) {
-                $SiteCode += "->$($_.ParentSiteCode)"
-            }
-            $SiteCode
-        }
-    },
-    @{Label = "Network"; Expression = {
-            if ($_.Network) { $_.Network }
-            else {
-                $deployConfig.vmOptions.network + " [Default]"
-            }
-        }
-    },
-    #@{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
-    @{Label = "Disks"; Expression = {
-            $Disks = @("C")
-            $Disks += $_.additionalDisks.psobject.Properties.Name | Where-Object { $_ }
-            $Disks -Join ","
-        }
-    },
-    @{Label = "SQL"; Expression = {
-            if ($null -ne $_.SqlVersion) {
-                $_.SqlVersion
+            Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
+            if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
+                $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
             }
             else {
-                if ($null -ne $_.remoteSQLVM) {
+                Write-RedX "ConfigMgr will not be installed."
+            }
+        }
+
+        #  if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
+        #     $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
+        #     Write-GreenCheck "ConfigMgr HA Passive server with Sitecode $($PassiveVM.SiteCode) will be installed"
+        # }
+        if (-not $null -eq $($deployConfig.vmOptions)) {
+
+            if ($null -eq $deployConfig.parameters.ExistingDCName) {
+                Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be created." -NoNewLine
+            }
+            else {
+                Write-GreenCheck "Domain: $($deployConfig.vmOptions.domainName) will be joined." -NoNewLine
+            }
+
+            Write-Host " [Default Network $($deployConfig.vmOptions.network)]"
+            #Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
+
+            $totalMemory = $fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
+            $totalMemory = $totalMemory.Sum / 1GB
+            $availableMemory = Get-AvailableMemoryGB
+            Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine"
+        }
+
+        if (-not $Common.DevBranch) {
+            Write-GreenCheck "Domain Admin account: " -NoNewLine
+            Write-Host2 -ForegroundColor DeepPink "$($deployConfig.vmOptions.adminName)" -NoNewline
+            Write-Host " Password: " -NoNewLine
+            Write-Host2 -ForegroundColor DeepPink "$($Common.LocalAdmin.GetNetworkCredential().Password)"
+        }
+
+        $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,
+        @{Label = "Procs"; Expression = { $_.virtualProcs } },
+        @{Label = "SiteCode"; Expression = {
+                $SiteCode = $_.siteCode
+                if ($_.ParentSiteCode) {
+                    $SiteCode += "->$($_.ParentSiteCode)"
+                }
+                $SiteCode
+            }
+        },
+        @{Label = "Network"; Expression = {
+                if ($_.Network) { $_.Network }
+                else {
+                    $deployConfig.vmOptions.network + " [Default]"
+                }
+            }
+        },
+        #@{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
+        @{Label = "Disks"; Expression = {
+                $Disks = @("C")
+                $Disks += $_.additionalDisks.psobject.Properties.Name | Where-Object { $_ }
+                $Disks -Join ","
+            }
+        },
+        @{Label = "SQL"; Expression = {
+                if ($null -ne $_.SqlVersion) {
+                    $_.SqlVersion
+                }
+                else {
+                    if ($null -ne $_.remoteSQLVM) {
                 ("Remote -> " + $($_.remoteSQLVM))
+                    }
                 }
             }
+        } `
+        | Out-String
+        Write-Host
+        $outIndented = $out.Trim() -split "\r\n"
+        foreach ($line in $outIndented) {
+            Write-Host "  $line"
         }
-    } `
-    | Out-String
-    Write-Host
-    $outIndented = $out.Trim() -split "\r\n"
-    foreach ($line in $outIndented) {
-        Write-Host "  $line"
-    }
 
-}
+    }

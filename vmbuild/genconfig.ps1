@@ -1838,7 +1838,9 @@ function Show-ExistingNetwork {
     if ($role -eq "H") {
         $role = "PassiveSite"
     }
-
+    if ($role -eq "L") {
+        $role = "Linux"
+    }
 
     $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $domain
     #if ($role -eq "Primary") {
@@ -2015,6 +2017,7 @@ function Select-RolesForExisting {
     $existingRoles2 = Format-Roles $existingRoles2
 
     $OptionArray = @{ "H" = $ha_Text }
+    $OptionArray = @{  "L" = "Add Linux VM from Hyper-V Gallery" }
 
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
 
@@ -2953,9 +2956,9 @@ function get-ValidResponse {
 Function Get-SupportedOperatingSystemsForRole {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "vm")]
-        [object] $vm
+        [string] $role
     )
-    $role = $vm.Role
+
     $ServerList = $Common.Supported.OperatingSystems | Where-Object { $_ -like 'Server*' }
     $ClientList = $Common.Supported.OperatingSystems | Where-Object { $_ -notlike 'Server*' }
     $AllList = $Common.Supported.OperatingSystems
@@ -2983,6 +2986,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "InternetClient" { return $ClientList }
         "AADClient" { return $ClientList }
         "OSDClient" { return $null }
+        "Linux" { Return (Get-LinuxImages).name }
         default {
             return $AllList
         }
@@ -3004,7 +3008,7 @@ Function Get-OperatingSystemMenu {
 
     $valid = $false
     while ($valid -eq $false) {
-        $OSList = Get-SupportedOperatingSystemsForRole -vm $property
+        $OSList = Get-SupportedOperatingSystemsForRole -role $property.Role
         if ($null -eq $OSList ) {
             return
         }
@@ -4727,7 +4731,19 @@ function Add-NewVMForRole {
             $operatingSystem = "Windows 10 Latest (64-bit)"
         }
         else {
-            $OperatingSystem = "Server 2022"
+            if ($role -eq "Linux") {
+                $OSList = Get-SupportedOperatingSystemsForRole -role $role
+                if ($null -eq $OSList ) {
+                    $OperatingSystem = "Linux Unknown"
+                }
+                else {
+                    $OperatingSystem = Get-Menu "Select OS Version" $OSList -Test:$false
+                }
+            }
+            else {
+
+                $OperatingSystem = "Server 2022"
+            }
         }
     }
     $actualRoleName = ($Role -split " ")[0]
@@ -4745,13 +4761,27 @@ function Add-NewVMForRole {
         $vprocs = 4
         $installSSMS = $true
     }
-    $virtualMachine = [PSCustomObject]@{
-        vmName          = $null
-        role            = $actualRoleName
-        operatingSystem = $OperatingSystem
-        memory          = $memory
-        virtualProcs    = $vprocs
-        tpmEnabled      = $true
+
+    if ($role -eq "Linux") {
+        $virtualMachine = [PSCustomObject]@{
+            vmName          = $null
+            role            = $actualRoleName
+            operatingSystem = $OperatingSystem
+            memory          = $memory
+            virtualProcs    = $vprocs
+            vmGeneration    = 1
+            tpmEnabled      = $false
+        }
+    }
+    else {
+        $virtualMachine = [PSCustomObject]@{
+            vmName          = $null
+            role            = $actualRoleName
+            operatingSystem = $OperatingSystem
+            memory          = $memory
+            virtualProcs    = $vprocs
+            tpmEnabled      = $true
+        }
     }
 
     if ($network) {
@@ -5162,7 +5192,9 @@ function Select-VirtualMachines {
                 if ($role -eq "H") {
                     $role = "PassiveSite"
                 }
-
+                if ($role -eq "L") {
+                    $role = "Linux"
+                }
 
                 $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
 
