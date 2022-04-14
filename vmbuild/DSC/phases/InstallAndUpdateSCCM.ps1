@@ -230,16 +230,16 @@ SysCenterId=
 
     # Install CM
     $CMInstallationFile = "c:\$CM\SMSSETUP\BIN\X64\Setup.exe"
+    $CMFileVersion = Get-Item -Path $CMInstallationFile -ErrorAction SilentlyContinue
 
-
-    Write-DscStatus "Starting Install of CM from $CMInstallationFile"
+    Write-DscStatus "Starting Install of CM from $CMInstallationFile [$($CMFileVersion.VersionInfo.FileVersion)]"
     start-sleep -seconds 4
 
     Write-DscStatusSetup
 
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
 
-    Write-DscStatus "Installation finished."
+    Write-DscStatus "Installation finished [$($CMFileVersion.VersionInfo.FileVersion)]."
 
     # Write action completed
     $Configuration.InstallSCCM.Status = 'Completed'
