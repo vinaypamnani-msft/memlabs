@@ -2986,6 +2986,32 @@ function Get-CMBaselineVersion
 
 }
 
+function Get-CMLatestBaselineVersion
+{
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $CMVersion
+    )
+
+    return ($Common.AzureFileList.CMVersions.baselineVersion | Where-Object { $_ -notin "tech-preview", "current-branch" } | Sort-Object -Descending | Select-Object -First 1)
+
+}
+
+function Get-CMLatestVersion
+{
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $CMVersion
+    )
+
+    return (Get-CMVersions | Where-Object { $_ -notin "tech-preview", "current-branch" } | Select-Object -First 1)
+
+}
+
 function Get-BranchName {
     try {
         $branch = git rev-parse --abbrev-ref HEAD
