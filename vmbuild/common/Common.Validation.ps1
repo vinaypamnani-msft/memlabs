@@ -151,7 +151,7 @@ function Test-ValidCmOptions {
 
     # version
     if ($Common.Supported.CMVersions -notcontains $ConfigObject.cmOptions.version) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions contains invalid CM Version [$($ConfigObject.cmOptions.version)]. Must be either 'current-branch' or 'tech-preview'." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions contains invalid CM Version [$($ConfigObject.cmOptions.version)]. Must be one of [$($Common.Supported.CMVersions -join ',')]." -ReturnObject $ReturnObject -Failure
     }
 
     # install
