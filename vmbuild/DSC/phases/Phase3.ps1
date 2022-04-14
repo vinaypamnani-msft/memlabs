@@ -40,7 +40,7 @@ configuration Phase3
             $i++
             $DscNodeName = "AddADUserToLocalAdminGroup$($i)"
             AddUserToLocalAdminGroup "$DscNodeName" {
-                Name       = $user
+                Name              = $user
                 NetbiosDomainName = $NetBiosDomainName
             }
             $addUserDependancy += "[AddUserToLocalAdminGroup]$DscNodeName"
@@ -108,7 +108,7 @@ configuration Phase3
             if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite") {
 
                 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-                $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
+                $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
                 if ($CM -eq "CMTP") {
                     $CMDownloadStatus = "Downloading Configuration Manager technical preview"
                 }
@@ -119,9 +119,10 @@ configuration Phase3
                 }
 
                 DownloadSCCM DownLoadSCCM {
-                    CM        = $CM
-                    Ensure    = "Present"
-                    DependsOn = $prevDepend
+                    CM            = $CM
+                    CMDownloadUrl = $ThisVM.thisParams.cmDownloadUrl
+                    Ensure        = "Present"
+                    DependsOn     = $prevDepend
                 }
 
                 FileReadAccessShare CMSourceSMBShare {

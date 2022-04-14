@@ -76,14 +76,8 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
     # Ensure CM files were downloaded
     $cmsourcepath = "c:\$CM"
     if (!(Test-Path $cmsourcepath)) {
+        $cmurl = $ThisVM.thisParams.cmDownloadUrl
         Write-DscStatus "Downloading $CM installation source..."
-        if ($CM -eq "CMTP") {
-            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2077212&clcid=0x409"
-        }
-        else {
-            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
-        }
-
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
 
         if (!(Test-Path $cmsourcepath)) {
@@ -666,7 +660,7 @@ else {
                 else {
                     $SQLServiceAccountPRI = Get-ADComputer -Identity $PSVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
                 }
-                
+
                 if ($user) {
                     Set-ADUser -Identity $SQLServiceAccountPRI -PrincipalsAllowedToDelegateToAccount $SQLServiceAccountCAS
                 }

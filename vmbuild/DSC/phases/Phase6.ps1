@@ -231,7 +231,7 @@ Configuration Phase6
         $nextDepend = "[InstallADK]ADKInstall"
         if (-not $ThisVM.thisParams.ParentSiteServer) {
 
-            $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
+            $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
             if ($CM -eq "CMTP") {
                 $CMDownloadStatus = "Downloading Configuration Manager technical preview"
             }
@@ -242,9 +242,10 @@ Configuration Phase6
             }
 
             DownloadSCCM DownLoadSCCM {
-                CM        = $CM
-                Ensure    = "Present"
-                DependsOn = "[WriteStatus]DownLoadSCCM"
+                CM            = $CM
+                CMDownloadUrl = $ThisVM.thisParams.cmDownloadUrl
+                Ensure        = "Present"
+                DependsOn     = "[WriteStatus]DownLoadSCCM"
             }
 
             FileReadAccessShare CMSourceSMBShare {

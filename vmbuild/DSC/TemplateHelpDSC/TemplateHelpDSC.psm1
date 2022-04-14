@@ -680,6 +680,9 @@ class DownloadSCCM {
     [DscProperty(Key)]
     [string] $CM
 
+    [DscProperty(Key)]
+    [string] $CMDownloadUrl
+
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
@@ -688,18 +691,12 @@ class DownloadSCCM {
 
     [void] Set() {
         $_CM = $this.CM
+        $_CMURL = $this.CMDownloadUrl
         $cmpath = "c:\temp\$_CM.exe"
         $cmsourcepath = "c:\$_CM"
-
         Write-Verbose "Downloading $_CM installation source..."
-        if ($_CM -eq "CMTP") {
-            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2077212&clcid=0x409"
-        }
-        else {
-            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
-        }
 
-        Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
+        Start-BitsTransfer -Source $_CMURL -Destination $cmpath -Priority Foreground -ErrorAction Stop
         if (Test-Path $cmsourcepath) {
             Remove-Item -Path $cmsourcepath -Recurse -Force | Out-Null
         }
