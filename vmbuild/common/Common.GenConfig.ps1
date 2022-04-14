@@ -776,7 +776,7 @@ function ConvertTo-DeployConfigEx {
                     }
                 }
                 $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
-                $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadUrl" -Value $url.downloadUrl  -Force
+                $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
             }
             "Primary" {
                 $reportingSecondaries = @()
@@ -814,7 +814,7 @@ function ConvertTo-DeployConfigEx {
                 }
                 else {
                     $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadUrl" -Value $url.downloadUrl  -Force
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
                 }
 
                 # --- ClientPush

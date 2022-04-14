@@ -1878,9 +1878,7 @@ function Wait-ForVm {
         try {
             Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus
         }
-        catch {
-
-        }
+        catch {}
         $readyOobe = $false
         $wwahostrunning = $false
         $readySmb = $false
@@ -1890,6 +1888,11 @@ function Wait-ForVm {
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
+
+            try {
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State"
+            }
+            catch {}
 
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
@@ -1978,7 +1981,6 @@ function Wait-ForVm {
                 Start-Sleep -Seconds $WaitSeconds
                 $ready = $true
             }
-
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
 
         if (-not $ready) {
