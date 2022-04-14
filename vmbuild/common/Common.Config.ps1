@@ -1736,14 +1736,7 @@ Function Show-Summary {
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true -and ($containsPS -or $containsSecondary)) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
-
-
-            if ($deployConfig.cmOptions.updateToLatest -eq $true) {
-                Write-GreenCheck "ConfigMgr will be updated to latest"
-            }
-            else {
-                Write-RedX "ConfigMgr will NOT updated to latest"
-            }
+            
             $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PS) {
                 foreach ($PSVM in $PS) {

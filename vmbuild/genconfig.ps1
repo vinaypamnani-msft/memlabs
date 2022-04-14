@@ -853,7 +853,7 @@ function get-CMOptionsSummary {
 
     $options = $Global:Config.cmOptions
     $ver = "[$($options.version)]".PadRight(21)
-    $Output = "$ver [Install $($options.install)] [Update $($options.updateToLatest)] [Push Clients $($options.pushClientToDomainMembers)]"
+    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)]"
     return $Output
 }
 
@@ -5021,7 +5021,6 @@ function Add-NewVMForRole {
             $newCmOptions = [PSCustomObject]@{
                 version                   = "current-branch"
                 install                   = $true
-                updateToLatest            = $false
                 pushClientToDomainMembers = $true
             }
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
