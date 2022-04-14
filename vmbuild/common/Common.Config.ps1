@@ -145,6 +145,14 @@ function Get-FilesForConfiguration {
         }
     }
 
+    foreach ($file in (Get-LinuxImages).Name) {
+        if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file) { continue }
+        $worked = Download-LinuxImage $file
+        if (-not $worked) {
+            $allSuccess = $false
+        }
+    }
+
     return $allSuccess
 }
 
@@ -1701,11 +1709,11 @@ Function Download-LinuxImage {
     $linux = Get-LinuxImages
 
     $image = ($linux | Where-Object { $_.name -eq $name })
-    Get-FileWithHash -FileName $($name + ".zip") -FileDisplayName $image.disk.archiveRelativePath -FileUrl $image.disk.uri -hashAlg $($image.disk.hash.split(":")[0]) -ExpectedHash $($image.disk.hash.Split(":")[1])
-    if (-not (test-path $($Global:Common.AzureImagePath + $image.Name + ".vhdx") -PathType Leaf)) {
+    Get-FileWithHash -FileName $($name + ".zip") -FileDisplayName $name -FileUrl $image.disk.uri -hashAlg $($image.disk.hash.split(":")[0]) -ExpectedHash $($image.disk.hash.Split(":")[1])
+    if (-not (test-path $($Global:Common.AzureImagePath + "\" + $image.Name + ".vhdx") -PathType Leaf)) {
         Expand-Archive -Path $("azureFiles\" + $name + ".zip") -DestinationPath $($Global:Common.AzureImagePath) -Force
         Get-FileWithHash -FileName $($name + ".zip") -FileDisplayName $image.disk.archiveRelativePath -FileUrl $image.disk.uri -hashAlg $($image.disk.hash.split(":")[0]) -ExpectedHash $($image.disk.hash.Split(":")[1])
-        move-item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) $($Global:Common.AzureImagePath + $image.Name + ".vhdx")
+        move-item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) $($Global:Common.AzureImagePath + "\" + $image.Name + ".vhdx")
     }
 }
 

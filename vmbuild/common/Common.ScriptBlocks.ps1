@@ -57,7 +57,19 @@ $global:VM_Create = {
 
         # Determine which OS image file to use for the VM
         $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
-        $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
+        if ($imageFile) {
+            $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
+        }
+        if (-not $vhdxPath) {
+            $linuxFile = (Get-LinuxImages).Name | Where-Object { $_ -eq $currentItem.operatingSystem }
+            if ($linuxFile) {
+                $vhdxPath = Join-Path $Common.AzureImagePath $($linuxFile + ".vhdx")
+            }
+            if (-not $vhdxPath) {
+                throw "Could not find $($currentItem.operatingSystem) in file list"
+            }
+        }
+
 
         # Set base VM path
         $virtualMachinePath = Join-Path $deployConfig.vmOptions.basePath $deployConfig.vmOptions.domainName
@@ -107,6 +119,10 @@ $global:VM_Create = {
                 $HashArguments.Add("SwitchName2", "cluster")
             }
 
+            if ($currentItem.role -eq "Linux") {
+                $HashArguments.Add("DiskControllerType", "IDE")
+            }
+
             $created = New-VirtualMachine @HashArguments
 
             if (-not ($created -eq $true)) {
@@ -114,7 +130,7 @@ $global:VM_Create = {
                 return
             }
 
-            if ($currentItem.role -eq "OSDClient") {
+            if ($currentItem.role -in ("OSDClient", "Linux")) {
                 New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
                 return

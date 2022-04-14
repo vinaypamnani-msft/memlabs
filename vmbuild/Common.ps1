@@ -1487,6 +1487,8 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $true)]
         [string]$SwitchName,
         [Parameter(Mandatory = $false)]
+        [string]$DiskControllerType = "SCSI",
+        [Parameter(Mandatory = $false)]
         [string]$SwitchName2,
         [Parameter(Mandatory = $false)]
         [object]$AdditionalDisks,
@@ -1636,7 +1638,7 @@ function New-VirtualMachine {
 
         Write-Progress2 $Activity -Status "Adding OS Disk to VM" -percentcomplete 65 -force
         Write-Log "$VmName`: Adding virtual disk $osDiskPath"
-        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | out-null
+        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType $DiskControllerType -ControllerNumber 0 | out-null
 
         Write-Progress2 $Activity -Status "Adding DVD disk to VM" -percentcomplete 70 -force
         Write-Log "$VmName`: Adding a DVD drive"
