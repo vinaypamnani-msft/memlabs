@@ -2944,10 +2944,7 @@ function Set-SupportedOptions {
         "SQLAO"
     )
 
-    $cmVersions = @(
-        "current-branch",
-        "tech-preview"
-    )
+    $cmVersions += Get-CMVersions
 
     $operatingSystems = $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" } | Sort-Object
 
@@ -2963,6 +2960,29 @@ function Set-SupportedOptions {
     }
 
     $Common.Supported = $supported
+
+}
+
+function Get-CMVersions
+{
+    $cmVersions = @()
+    foreach ($version in $Common.AzureFileList.CMVersions) {
+        $cmversions += $version.versions
+    }
+    $cmVersions = $cmVersions | Sort-Object -Descending
+    return $cmVersions
+}
+
+function Get-CMBaselineVersion
+{
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $CMVersion
+    )
+
+    return ($Common.AzureFileList.CMVersions | Where-Object { $_.versions -contains $CMVersion })
 
 }
 
