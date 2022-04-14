@@ -120,7 +120,7 @@ configuration Phase3
 
                 DownloadSCCM DownLoadSCCM {
                     CM            = $CM
-                    CMDownloadUrl = $ThisVM.thisParams.cmDownloadUrl
+                    CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
                     Ensure        = "Present"
                     DependsOn     = $prevDepend
                 }

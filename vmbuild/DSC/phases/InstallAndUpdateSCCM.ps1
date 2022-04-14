@@ -9,7 +9,6 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get required values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-$UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CurrentRole = $ThisVM.role
@@ -302,8 +301,13 @@ if (-not $exists) {
     Write-DscStatus "Failed to add 'vmbuildadmin' account as Full Administrator in ConfigMgr"
 }
 
-# Check if we should update to the  latest version
-if ($UpdateToLatest) {
+# Check if we should update
+$UpdateRequired = $false
+if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and $deployConfig.cmOptions.version -ne $ThisVM.thisParams.cmDownloadVersion.baselineVersion) {
+    $UpdateRequired = $true
+}
+
+if ($UpdateRequired) {
 
     # Update actions file
     $Configuration.UpgradeSCCM.Status = 'Running'
@@ -410,7 +414,7 @@ if ($UpdateToLatest) {
     # Check for updates
     $retrytimes = 0
     $downloadretrycount = 0
-    $updatepack = Get-UpdatePack
+    $updatepack = Get-UpdatePack -UpdateVersion $deployConfig.cmOptions.version
     if ($updatepack -ne "") {
         Write-DscStatus "Found '$($updatepack.Name)' update."
     }
@@ -557,7 +561,7 @@ if ($UpdateToLatest) {
 
             #Get if there are any other updates need to be installed
             Write-DscStatus "Checking if another update is available..."
-            $updatepack = Get-UpdatePack
+            $updatepack = Get-UpdatePack -UpdateVersion $deployConfig.cmOptions.version
             if ($updatepack -ne "") {
                 Write-DscStatus "Found another update: '$($updatepack.Name)'."
             }
@@ -597,7 +601,7 @@ if ($UpdateToLatest) {
 else {
 
     # Write action completed, PS can start when UpgradeSCCM.EndTime is not empty
-    $Configuration.UpgradeSCCM.Status = 'NotRequested'
+    $Configuration.UpgradeSCCM.Status = 'Completed'
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration.UpgradeSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile

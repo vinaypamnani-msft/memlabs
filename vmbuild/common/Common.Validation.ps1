@@ -160,9 +160,9 @@ function Test-ValidCmOptions {
     }
 
     # updateToLatest
-    if ($ConfigObject.cmOptions.updateToLatest -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.updateToLatest has an invalid value [$($ConfigObject.cmOptions.updateToLatest)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
-    }
+    # if ($ConfigObject.cmOptions.updateToLatest -isnot [bool]) {
+    #     Add-ValidationMessage -Message "CM Options Validation: cmOptions.updateToLatest has an invalid value [$($ConfigObject.cmOptions.updateToLatest)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    # }
 
     # installDPMPRoles
     #if ($ConfigObject.cmOptions.installDPMPRoles -isnot [bool]) {

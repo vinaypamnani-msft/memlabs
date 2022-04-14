@@ -251,12 +251,19 @@ function Write-ScriptWorkFlowData {
 
 function Get-UpdatePack {
 
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $UpdateVersion
+    )
+
     Write-DscStatus "Get CM Update..." -NoStatus
 
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
     $CMPSSuppressFastNotUsedCheck = $true
 
-    $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -notlike "*hotfix*"} # filter hotfixes
+    $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion"} # filter hotfixes
     $getupdateretrycount = 0
     while ($updatepacklist.Count -eq 0) {
 
@@ -270,7 +277,7 @@ function Get-UpdatePack {
         Invoke-CMSiteUpdateCheck -ErrorAction Ignore
         Start-Sleep 120
 
-        $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -notlike "*hotfix*"} # filter hotfixes
+        $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion"} # filter hotfixes
     }
 
     $updatepack = ""
