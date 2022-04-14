@@ -295,7 +295,7 @@ function Test-ValidVmSupported {
         # Supported DSC Roles for Existing Scenario
         if ($Common.Supported.RolesForExisting -notcontains $vm.role -and $vm.role -ne "DC") {
             # DC is caught in Test-ValidDC
-            if ($role -ne "Linux") {
+            if ($vm.role -ne "Linux") {
                 $supportedRoles = $Common.Supported.RolesForExisting -join ", "
                 Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
             }
@@ -304,8 +304,10 @@ function Test-ValidVmSupported {
     else {
         # Supported DSC Roles
         if ($Common.Supported.Roles -notcontains $vm.role) {
-            $supportedRoles = $Common.Supported.Roles -join ", "
-            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for a new environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            if ($vm.role -ne "Linux") {
+                $supportedRoles = $Common.Supported.Roles -join ", "
+                Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for a new environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            }
         }
     }
 
