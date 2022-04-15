@@ -2806,6 +2806,8 @@ function Get-FileWithHash {
             Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
             $return.download = $true
         }
+    }else{
+        $return.download = $true
     }
 
     if ($return.download) {
