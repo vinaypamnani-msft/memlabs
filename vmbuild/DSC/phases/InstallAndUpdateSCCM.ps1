@@ -558,13 +558,6 @@ if ($UpdateRequired) {
                 # Wait for copying files finished
                 Start-Sleep 600
             }
-
-            #Get if there are any other updates need to be installed
-            Write-DscStatus "Checking if another update is available..."
-            $updatepack = Get-UpdatePack -UpdateVersion $deployConfig.cmOptions.version
-            if ($updatepack -ne "") {
-                Write-DscStatus "Found another update: '$($updatepack.Name)'."
-            }
         }
 
         if ($updatepack.State -eq 196607 -or $updatepack.State -eq 262143 ) {
