@@ -5282,9 +5282,9 @@ function Select-VirtualMachines {
                     }
                     $SiteCode = $result
                 }
-                $os = Select-OSForNew -Role $role
+                #$os = Select-OSForNew -Role $role
 
-                $machineName = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config -OperatingSystem $os -parentSiteCode $parentSiteCode -SiteCode $siteCode -ReturnMachineName $true
+                $machineName = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config  -parentSiteCode $parentSiteCode -SiteCode $siteCode -ReturnMachineName $true
                 if ($role -eq "DC") {
                     $Global:Config.vmOptions.domainName = select-NewDomainName
                     $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
