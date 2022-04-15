@@ -198,6 +198,8 @@ function Read-YesorNoWithTimeout {
         [string] $currentValue,
         [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
         [switch] $HideHelp,
+        [Parameter(Mandatory = $false, HelpMessage = "Default Value")]
+        [string] $Default,
         [Parameter(Mandatory = $false, HelpMessage = "Timeout")]
         [int] $timeout = 10
 
@@ -222,6 +224,11 @@ function Read-YesorNoWithTimeout {
         }
     }
     Write-Host
+    if ([String]::IsNullOrWhiteSpace($YNresponse)) {
+        if ($Default) {
+            return $Default
+        }
+    }
     return $YNresponse
 }
 

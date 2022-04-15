@@ -407,7 +407,7 @@ function Get-ConfigurationData {
                 }
 
                 if (-not $snapshot) {
-                    $response = Read-YesorNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp
+                    $response = Read-YesorNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
                     if (-not ($response -eq "n")) {
                         Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment "MemLabs Phase6 AutoSnapshot"
                     }

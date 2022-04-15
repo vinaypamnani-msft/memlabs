@@ -1051,6 +1051,18 @@ $global:VM_Config = {
                                         $FailStopWatch.Start()
                                     }
                                     Write-ProgressElapsed -stopwatch $FailStopWatch -timespan $FailtimeSpan -text "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) (Currently Retrying) : $msg"
+                                    if ($msg.Contains("ADServerDownException")) {
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: ADServerDownException from VM. Restarting the VM" -Warning
+                                        Stop-VM2 -name $currentItem.vmName
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Stopped"
+
+                                        Start-VM2 -Name $currentItem.vmName
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 60 seconds to check status."
+
+                                        Start-Sleep -Seconds 60
+                                        $state = Get-VM2 -Name $currentItem.vmName
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Current State: $($state.state)"
+                                    }
                                     if (-not $failure) {
                                         continue
                                     }

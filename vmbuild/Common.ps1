@@ -153,9 +153,9 @@ Function Write-Progress2Impl {
             if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
                 $Activityvalue = $Activity.TrimEnd()
 
-                if ($Activityvalue.Contains("`n")) {
-                    Write-Log "$Activity contains new-line"
-                }
+               # if ($Activityvalue.Contains("`n")) {
+               #     Write-Log "$Activity contains new-line"
+               # }
                 $PSBoundParameters['Activity'] = $Activityvalue
             }
 
@@ -163,9 +163,9 @@ Function Write-Progress2Impl {
             if ($PSBoundParameters.TryGetValue('Status', [ref]$StatusValue)) {
                 $StatusValue = $StatusValue.TrimEnd()
 
-                if ($StatusValue.Contains("`n")) {
-                    Write-Log "$StatusValue contains new-line"
-                }
+                #if ($StatusValue.Contains("`n")) {
+                #    Write-Log "$StatusValue contains new-line"
+                #}
                 $PSBoundParameters['Status'] = $StatusValue
             }
 

@@ -460,7 +460,7 @@ function select-RestoreSnapshotDomain {
         $DeleteVMs = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
     }
 
-    $startAll = Read-YesorNoWithTimeout -Prompt "Start All vms after restore? (Y/n)" -HideHelp
+    $startAll = Read-YesorNoWithTimeout -Prompt "Start All vms after restore? (Y/n)" -HideHelp -Default "y"
     if ($startAll -and ($startAll.ToLowerInvariant() -eq "n" -or $startAll.ToLowerInvariant() -eq "no")) {
         $startAll = $null
     }
@@ -800,7 +800,7 @@ function Select-DeleteDomain {
         }
         if ($response -eq "D") {
             Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
-            $response2 = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180
+            $response2 = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
                     Remove-Domain -DomainName $domain
@@ -809,7 +809,7 @@ function Select-DeleteDomain {
             }
         }
         else {
-            $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $($response)? (Y/n)" -HideHelp -timeout 180
+            $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $($response)? (Y/n)" -HideHelp -timeout 180 -Default "y"
 
             if ($response2 -and ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no")) {
                 continue
@@ -829,7 +829,7 @@ function Select-DeletePending {
     get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
     Write-Host "Please confirm these VM's are not currently in process of being deployed."
     Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
-    $response = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180
+    $response = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
             Remove-InProgress
@@ -1809,7 +1809,7 @@ function Show-ExistingNetwork {
 
         get-list -Type VM -DomainName $domain | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
 
-        $response = Read-YesorNoWithTimeout -Prompt "Add new VMs to this domain? (Y/n)" -HideHelp
+        $response = Read-YesorNoWithTimeout -Prompt "Add new VMs to this domain? (Y/n)" -HideHelp -Default "y"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                 continue
@@ -1824,7 +1824,7 @@ function Show-ExistingNetwork {
 
     $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" -and ($_.Role -eq "CAS" -or $_.Role -eq "Primary" -or $_.Role -eq "DC") } | Measure-Object).Count
     if ($TotalStoppedVMs -gt 0) {
-        $response = Read-YesorNoWithTimeout -Prompt "$TotalStoppedVMs Critical VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp
+        $response = Read-YesorNoWithTimeout -Prompt "$TotalStoppedVMs Critical VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp -Default "y"
         if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
         }
         else {
@@ -3424,8 +3424,28 @@ Function Get-CMVersionMenu {
     )
 
     $valid = $false
+
+    $cmVersions = @()
+    foreach ($cmVersion in $($Common.Supported.CmVersions)){
+
+        switch ($cmVersion) {
+            "current-branch" {
+                $cmVersions += "$cmVersion (Installs the latest baseline version of CM)"
+            }
+
+            "Tech-preview" {
+                $cmVersions += "$cmVersion (Installs the latest tech preview version of CM)"
+            }
+
+            default {
+                $cmVersions += $cmVersion
+            }
+        }
+
+    }
+
     while ($valid -eq $false) {
-        $property."$name" = Get-Menu "Select ConfigMgr Version" $($Common.Supported.CmVersions) $CurrentValue -Test:$false
+        $property."$name" = Get-Menu "Select ConfigMgr Version" $($cmVersions) $CurrentValue -Test:$false -split
         if (Get-TestResult -SuccessOnWarning) {
             return
         }
@@ -3689,7 +3709,7 @@ function Get-AdditionalValidations {
             $newName = Get-NewMachineName -vm $property
             if ($($property.vmName) -ne $newName) {
                 $rename = $true
-                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
                 if (-not [String]::IsNullOrWhiteSpace($response)) {
                     if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                         $rename = $false
@@ -3704,7 +3724,7 @@ function Get-AdditionalValidations {
             $newName = Get-NewMachineName -vm $property
             if ($($property.vmName) -ne $newName) {
                 $rename = $true
-                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
                 if (-not [String]::IsNullOrWhiteSpace($response)) {
                     if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                         $rename = $false
@@ -3748,7 +3768,7 @@ function Get-AdditionalValidations {
                     $newSQLName = $($property.SiteCode) + "SQLAO1"
                 }
                 $rename = $true
-                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.RemoteSQLVM) to $($newSQLName)? (Y/n)" -HideHelp
+                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.RemoteSQLVM) to $($newSQLName)? (Y/n)" -HideHelp -Default "y"
                 if (-not [String]::IsNullOrWhiteSpace($response)) {
                     if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                         $rename = $false
@@ -3769,7 +3789,7 @@ function Get-AdditionalValidations {
             }
             if ($($property.vmName) -ne $newName) {
                 $rename = $true
-                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
                 if (-not [String]::IsNullOrWhiteSpace($response)) {
                     if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                         $rename = $false
@@ -4204,7 +4224,7 @@ function Select-Options {
                         $newName = Get-NewMachineName -vm $property
                         if ($($property.vmName) -ne $newName) {
                             $rename = $true
-                            $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                            $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
                             if (-not [String]::IsNullOrWhiteSpace($response)) {
                                 if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                                     $rename = $false
@@ -4295,7 +4315,7 @@ function Select-Options {
                         $newName = Get-NewMachineName -vm $property
                         if ($($property.vmName) -ne $newName) {
                             $rename = $true
-                            $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp
+                            $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
                             if (-not [String]::IsNullOrWhiteSpace($response)) {
                                 if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                                     $rename = $false
@@ -5382,7 +5402,7 @@ function Select-VirtualMachines {
                                     $newName = Get-NewMachineName -vm $virtualMachine
                                     if ($($virtualMachine.vmName) -ne $newName) {
                                         $rename = $true
-                                        $response = Read-YesorNoWithTimeout -Prompt "Rename $($virtualMachine.vmName) to $($newName)? (Y/n)" -HideHelp
+                                        $response = Read-YesorNoWithTimeout -Prompt "Rename $($virtualMachine.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
                                         if (-not [String]::IsNullOrWhiteSpace($response)) {
                                             if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                                                 $rename = $false
@@ -5404,7 +5424,7 @@ function Select-VirtualMachines {
                                 $newName = Get-NewMachineName -vm $virtualMachine
                                 if ($($virtualMachine.vmName) -ne $newName) {
                                     $rename = $true
-                                    $response = Read-YesorNoWithTimeout -Prompt "Rename $($virtualMachine.vmName) to $($newName)? (Y/n)" -HideHelp
+                                    $response = Read-YesorNoWithTimeout -Prompt "Rename $($virtualMachine.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
                                     if (-not [String]::IsNullOrWhiteSpace($response)) {
                                         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                                             $rename = $false
@@ -5512,7 +5532,7 @@ function Select-VirtualMachines {
                     $i = $i + 1
                     if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                         #if ($i -eq $response) {
-                        $response = Read-YesorNoWithTimeout -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (Y/n)" -HideHelp
+                        $response = Read-YesorNoWithTimeout -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (Y/n)" -HideHelp -Default "y"
                         if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
                         }
                         else {
@@ -5746,7 +5766,7 @@ do {
                 Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
             }
             Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
-            $response = Read-YesorNoWithTimeout -Prompt "Everything correct? (Y/n)" -HideHelp -timeout 180
+            $response = Read-YesorNoWithTimeout -Prompt "Everything correct? (Y/n)" -HideHelp -timeout 180 -Default "y"
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
                     $valid = $false
@@ -5776,7 +5796,7 @@ if ($InternalUseOnly.IsPresent) {
     if ($domainExists -and ($return.DeployNow)) {
         write-host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "This configuration will make modifications to $($Global:Config.vmOptions.DomainName)"
         Write-OrangePoint -NoIndent "Without a snapshot, if something fails it may not be possible to recover"
-        $response = Read-YesorNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (y/N)" -HideHelp
+        $response = Read-YesorNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (y/N)" -HideHelp -Default "n"
         if (-not [String]::IsNullOrWhiteSpace($response) -and $response.ToLowerInvariant() -eq "y") {
             Select-StopDomain -domain $Global:Config.vmOptions.DomainName -response "C"
             $filename = $splitpath = Split-Path -Path $return.ConfigFileName -Leaf
