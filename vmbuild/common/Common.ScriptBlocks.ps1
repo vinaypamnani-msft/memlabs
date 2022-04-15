@@ -925,6 +925,9 @@ $global:VM_Config = {
                     $percent = [Math]::Min($attempts, 100)
                     Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
                     foreach ($node in $nonReadyNodes) {
+                        if (-not $node) {
+                            continue
+                        }
                         $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
                         if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
                             Write-Log "[Phase $Phase]: Node $node is NOT ready."
