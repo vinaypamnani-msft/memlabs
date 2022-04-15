@@ -2978,6 +2978,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "Primary" { return $ServerList }
         "Secondary" { return $ServerList }
         "FileServer" { return $ServerList }
+        "Sqlserver" { return $ServerList }
         "DPMP" { return $ServerList }
         "SQLAO" { return $ServerList }
         "DomainMember" {
