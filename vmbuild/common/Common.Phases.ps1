@@ -172,7 +172,7 @@ function Start-PhaseJobs {
         }
 
         # Skip everything for OSDClient, nothing for us to do
-        if ($Phase -gt 1 -and $currentItem.role -eq "OSDClient") {
+        if ($Phase -gt 1 -and $currentItem.role -notin ("OSDClient", "Linux")) {
             continue
         }
 

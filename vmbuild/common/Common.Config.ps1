@@ -140,6 +140,7 @@ function Get-FilesForConfiguration {
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file.id) { continue }
         $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
+            Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
             $allSuccess = $false
         }
     }
@@ -148,6 +149,7 @@ function Get-FilesForConfiguration {
         if (-not $DownloadAll -and $sqlVersionsToGet -notcontains $file.id) { continue }
         $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
+            Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
             $allSuccess = $false
         }
     }
@@ -156,6 +158,7 @@ function Get-FilesForConfiguration {
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file) { continue }
         $worked = Download-LinuxImage $file
         if (-not $worked) {
+            Write-Log -Verbose "$file Failed to download via Download-LinuxImage"
             $allSuccess = $false
         }
     }
@@ -1701,7 +1704,17 @@ function Convert-vmNotesToOldFormat {
 
 Function Get-LinuxImages {
     $linuxJson = Join-Path $Global:Common.TempPath "LinuxHyperVGallery.json"
-    & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+
+    if (Test-Path $linuxJson -PathType Leaf) {
+        #Get a new copy if the existing one is over 5 hours old
+        if (Get-Childitem $linuxJson  | Where-Object { $_.LastWriteTime -lt (get-date).AddHours(-5) }) {
+            & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+        }
+    }
+    else {
+        # Get a copy if the file doesnt exist
+        & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+    }
     $linux = Get-Content $linuxJson | convertfrom-json
     return ($linux.images | Where-Object { $_.config.secureboot -ne $true })
 }
@@ -1716,12 +1729,51 @@ Function Download-LinuxImage {
     $linux = Get-LinuxImages
 
     $image = ($linux | Where-Object { $_.name -eq $name })
-    Get-FileWithHash -FileName $($name + ".zip") -FileDisplayName $name -FileUrl $image.disk.uri -hashAlg $($image.disk.hash.split(":")[0]) -ExpectedHash $($image.disk.hash.Split(":")[1])
-    if (-not (test-path $($Global:Common.AzureImagePath + "\" + $image.Name + ".vhdx") -PathType Leaf)) {
-        Expand-Archive -Path $("azureFiles\" + $name + ".zip") -DestinationPath $($Global:Common.AzureImagePath) -Force
-        Get-FileWithHash -FileName $($name + ".zip") -FileDisplayName $image.disk.archiveRelativePath -FileUrl $image.disk.uri -hashAlg $($image.disk.hash.split(":")[0]) -ExpectedHash $($image.disk.hash.Split(":")[1])
-        move-item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) $($Global:Common.AzureImagePath + "\" + $image.Name + ".vhdx")
+    #Download the file is hash does not match
+
+    $fileZip = $($image.name + ".zip")
+    $fileVHDX = $($image.name + ".vhdx")
+
+    #This is where Get-FileWithHash puts the resulting file
+    $fullfileZip = Join-Path $Global:Common.AzureFilesPath $fileZip
+
+    #This is where the VHDX is going to end up
+    $fullfileVHDX = Join-Path $Global:Common.AzureImagePath $fileVHDX
+
+    $url = $image.disk.uri
+
+    $hashAlg = $($image.disk.hash.split(":")[0])
+    $expectedHash = $($image.disk.hash.Split(":")[1])
+
+    $success = Get-FileWithHash -FileName $($fileZip) -FileDisplayName $name -FileUrl $url  -hashAlg $hashAlg -ExpectedHash $expectedHash
+    if (-not $success.success) {
+        write-log -failure  "Could not download $($url)"
+        return $false
     }
+    # If we did not download a new file, and the file already exists.. Exit
+    if (-not $success.download) {
+        if (test-path $fullfileVHDX -PathType Leaf) {
+            return $true
+        }
+    }
+
+    # If we downloaded a new file, or one didnt exist
+
+    # If we downloaded a new file, delete the old one
+    if (test-path $fullfileVHDX -PathType Leaf) {
+        Remove-Item $fullfileVHDX -force
+    }
+
+    # If the intermediate file exists, delete it so we can extract a new one.
+    if (test-path $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -PathType Leaf) {
+        Remove-Item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -force
+    }
+
+    #Expand the downloaded file
+    Expand-Archive -Path $fullfileZip -DestinationPath $($Global:Common.AzureImagePath) -Force
+    # Move it to its final name
+    move-item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) $fullfileVHDX -Force
+    return $true
 }
 
 Function Show-Summary {

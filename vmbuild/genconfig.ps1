@@ -2002,10 +2002,10 @@ function Select-RolesForExisting {
 
             switch ($item) {
                 "CAS" { $existingRoles2 += "CAS and Primary" }
-                "DomainMember" {
-                    $existingRoles2 += "DomainMember (Server)"
-                    $existingRoles2 += "DomainMember (Client)"
-                }
+                #"DomainMember" {
+                #    $existingRoles2 += "DomainMember (Server)"
+                #    $existingRoles2 += "DomainMember (Client)"
+                #}
                 "PassiveSite" {}
                 Default { $existingRoles2 += $item }
             }
@@ -2067,6 +2067,10 @@ function Select-OSForNew {
         $OSList = $Common.Supported.OperatingSystems | Where-Object { $_ -like "*Server*" }
     }
 
+    if ($Role -eq "Linux") {
+        $defaultValue = $null
+        $OSList = (Get-LinuxImages).Name
+    }
     if ($Role -eq "InternetClient") {
         $defaultValue = "Windows 10 Latest (64-bit)"
     }
@@ -2955,8 +2959,10 @@ function get-ValidResponse {
 
 Function Get-SupportedOperatingSystemsForRole {
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "vm")]
-        [string] $role
+        [Parameter(Mandatory = $true, HelpMessage = "role")]
+        [string] $role,
+        [Parameter(Mandatory = $false, HelpMessage = "vm")]
+        [object] $vm = $null
     )
 
     $ServerList = $Common.Supported.OperatingSystems | Where-Object { $_ -like 'Server*' }
@@ -2973,7 +2979,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "DPMP" { return $ServerList }
         "SQLAO" { return $ServerList }
         "DomainMember" {
-            if ($vm.SqlVersion) {
+            if ($vm -and $vm.SqlVersion) {
                 return $ServerList
             }
             else {
@@ -3008,7 +3014,7 @@ Function Get-OperatingSystemMenu {
 
     $valid = $false
     while ($valid -eq $false) {
-        $OSList = Get-SupportedOperatingSystemsForRole -role $property.Role
+        $OSList = Get-SupportedOperatingSystemsForRole -role $property.Role -vm $CurrentValue
         if ($null -eq $OSList ) {
             return
         }
@@ -4756,7 +4762,9 @@ function Add-NewVMForRole {
 
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
         if ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
+            $OSList = Get-SupportedOperatingSystemsForRole -role $role
             $operatingSystem = "Windows 10 Latest (64-bit)"
+            $OperatingSystem = Get-Menu "Select OS Version" $OSList -Test:$false -CurrentValue $operatingSystem
         }
         else {
             if ($role -eq "Linux") {
@@ -4769,8 +4777,9 @@ function Add-NewVMForRole {
                 }
             }
             else {
-
+                $OSList = Get-SupportedOperatingSystemsForRole -role $role
                 $OperatingSystem = "Server 2022"
+                $OperatingSystem = Get-Menu "Select OS Version" $OSList -Test:$false -CurrentValue $operatingSystem
             }
         }
     }
@@ -4798,7 +4807,6 @@ function Add-NewVMForRole {
             memory          = $memory
             virtualProcs    = $vprocs
             vmGeneration    = 1
-            tpmEnabled      = $false
         }
     }
     else {
@@ -4815,7 +4823,7 @@ function Add-NewVMForRole {
     if ($network) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
     }
-    if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC")) {
+    if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC", "Linux")) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
     }
 

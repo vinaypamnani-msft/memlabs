@@ -153,9 +153,9 @@ Function Write-Progress2Impl {
             if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
                 $Activityvalue = $Activity.TrimEnd()
 
-               # if ($Activityvalue.Contains("`n")) {
-               #     Write-Log "$Activity contains new-line"
-               # }
+                # if ($Activityvalue.Contains("`n")) {
+                #     Write-Log "$Activity contains new-line"
+                # }
                 $PSBoundParameters['Activity'] = $Activityvalue
             }
 
@@ -2492,7 +2492,7 @@ function Get-Tools {
             $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
 
-        if (-not $worked) {
+        if (-not $worked.success) {
             $allSuccess = $false
         }
 
@@ -2725,9 +2725,11 @@ function Get-FileFromStorage {
         }
 
         $fileUrl = "$($StorageConfig.StorageLocation)/$($filename)"
-        $success = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -HashAlg $hashAlg -UseCDN:$UseCDN -WhatIf:$WhatIf
+        $worked = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -HashAlg $hashAlg -UseCDN:$UseCDN -WhatIf:$WhatIf
+        $success = $($worked.success)
     }
 
+    Write-Log -Verbose "Returning $success"
     return $success
 }
 
@@ -2760,8 +2762,10 @@ function Get-FileWithHash {
     $localImagePath = Join-Path $Common.AzureFilesPath $FileName
     $localImageHashPath = "$localImagePath.$hashAlg"
 
-    $success = $false
-    $download = $true
+    $return = [PSCustomObject]@{
+        success  = $true
+        download = $false
+    }
 
     Write-Log "Downloading/Verifying '$FileDisplayName'" -SubActivity
 
@@ -2773,13 +2777,14 @@ function Get-FileWithHash {
         }
         else {
             # Download if file present, but hashFile isn't there.
-            Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Hash Missing. Downloading '$FileName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
+            #Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Hash Missing. Downloading '$FileName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
 
             # Calculate file hash, save to local hash file
-            Write-Log "Calculating $hashAlg hash for $FileName in $($Common.AzureFilesPath)..."
-            $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
-            $localFileHash = $hashFileResult.Hash
-            $localFileHash | Out-File -FilePath $localImageHashPath -Force
+            #Write-Log "Calculating $hashAlg hash for $FileName in $($Common.AzureFilesPath)..."
+            #$hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+            #$localFileHash = $hashFileResult.Hash
+            #$localFileHash | Out-File -FilePath $localImageHashPath -Force
+            $return.download = $true
         }
 
         if ($localFileHash -eq $ExpectedHash) {
@@ -2787,25 +2792,26 @@ function Get-FileWithHash {
             if ($ForceDownload.IsPresent) {
                 Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
                 Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                $return.download = $true
             }
             else {
                 # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
-                $download = $false
-                $success = $true
+                $return.download = $false
+                $return.success = $true
             }
         }
         else {
             Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
             Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
             Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
-            $download = $true
+            $return.download = $true
         }
     }
 
-    if ($download) {
+    if ($return.download) {
         $worked = Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Downloading '$FileName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
         if (-not $worked) {
-            $success = $false
+            $return.success = $false
         }
         else {
             # Calculate file hash, save to local hash file
@@ -2815,21 +2821,21 @@ function Get-FileWithHash {
             if ($localFileHash -eq $ExpectedHash) {
                 $localFileHash | Out-File -FilePath $localImageHashPath -Force
                 Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
-                $success = $true
+                $return.success = $true
             }
             else {
                 if ($IgnoreHashFailure) {
-                    $success = $true
+                    $return.success = $true
                 }
                 else {
                     Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
-                    $success = $false
+                    $return.success = $false
                 }
             }
         }
     }
 
-    return $success
+    return $return
 }
 
 $QuickEditCodeSnippet = @"
@@ -2967,8 +2973,7 @@ function Set-SupportedOptions {
 
 }
 
-function Get-CMVersions
-{
+function Get-CMVersions {
     $cmVersions = @()
     foreach ($version in $Common.AzureFileList.CMVersions) {
         $cmversions += $version.versions
@@ -2977,8 +2982,7 @@ function Get-CMVersions
     return $cmVersions
 }
 
-function Get-CMBaselineVersion
-{
+function Get-CMBaselineVersion {
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -2990,8 +2994,7 @@ function Get-CMBaselineVersion
 
 }
 
-function Get-CMLatestBaselineVersion
-{
+function Get-CMLatestBaselineVersion {
     [CmdletBinding()]
     param (
         [Parameter()]
@@ -3003,8 +3006,7 @@ function Get-CMLatestBaselineVersion
 
 }
 
-function Get-CMLatestVersion
-{
+function Get-CMLatestVersion {
     [CmdletBinding()]
     param (
         [Parameter()]
