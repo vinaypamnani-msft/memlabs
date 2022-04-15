@@ -444,7 +444,9 @@ function New-RDCManFileFromHyperV {
                     $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)"
                 }
                 else {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                    if ($vm.Role -eq "DomainMember") {
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                    }
                 }
             }
 
@@ -493,7 +495,7 @@ function New-RDCManFileFromHyperV {
             }
             $ForceOverwrite = $true
             $vmID = $null
-            if ($vm.Role -eq "OSDClient" -or $vm.Role -eq "AADClient") {
+            if ($vm.Role -in ("OSDClient", "AADClient", "Linux")) {
                 $vmID = $vm.vmId
             }
 
@@ -501,12 +503,13 @@ function New-RDCManFileFromHyperV {
                 $shouldSave = $true
             }
         }
-        try{
-        $return = Add-RDCManSmartGroupToGroup -vmListFull $vmListFull -findgroup $findGroup -existing $existing
-        if ($return) {
-            $shouldSave = $true
+        try {
+            $return = Add-RDCManSmartGroupToGroup -vmListFull $vmListFull -findgroup $findGroup -existing $existing
+            if ($return) {
+                $shouldSave = $true
+            }
         }
-        }catch {}
+        catch {}
 
         $CurrentSmartGroups = $findgroup.SelectNodes('smartGroup')
         foreach ($item in $CurrentSmartGroups) {
@@ -622,8 +625,8 @@ function New-RDCManFileFromHyperV {
 
         #Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
         Start-Process "C:\tools\RDCMan.exe" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-        $i =0
-        while ($i -lt 3){
+        $i = 0
+        while ($i -lt 3) {
             Set-RdcManMin
             start-sleep -Seconds 1
             $i++
