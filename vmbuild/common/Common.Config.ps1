@@ -1731,7 +1731,7 @@ Function Download-LinuxImage {
     $image = ($linux | Where-Object { $_.name -eq $name })
     #Download the file is hash does not match
 
-    $fileZip = $($image.name + ".zip")
+    $fileZip = $("os\" + $image.name + ".zip")
     $fileVHDX = $($image.name + ".vhdx")
 
     #This is where Get-FileWithHash puts the resulting file
