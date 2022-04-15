@@ -1965,6 +1965,7 @@ function Format-Roles {
             "SQLAO" { $newRoles += "$($role.PadRight($padding))`t[SQL High Availability Always On Cluster]" }
             "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain. Can be a SQL Server]" }
             "DomainMember (Client)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Client OS joined to the domain]" }
+            "SqlServer" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS and SQL that is joined to the domain.]" }
             "WorkgroupMember" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access]" }
             "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]" }
             "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]" }
@@ -2002,10 +2003,11 @@ function Select-RolesForExisting {
 
             switch ($item) {
                 "CAS" { $existingRoles2 += "CAS and Primary" }
-                #"DomainMember" {
-                #    $existingRoles2 += "DomainMember (Server)"
-                #    $existingRoles2 += "DomainMember (Client)"
-                #}
+                "DomainMember" {
+                    $existingRoles2 += "DomainMember (Server)"
+                    $existingRoles2 += "DomainMember (Client)"
+                    $existingRoles2 += "Sqlserver"
+                }
                 "PassiveSite" {}
                 Default { $existingRoles2 += $item }
             }
@@ -3432,7 +3434,7 @@ Function Get-CMVersionMenu {
     $valid = $false
 
     $cmVersions = @()
-    foreach ($cmVersion in $($Common.Supported.CmVersions)){
+    foreach ($cmVersion in $($Common.Supported.CmVersions)) {
 
         switch ($cmVersion) {
             "current-branch" {
@@ -4778,7 +4780,12 @@ function Add-NewVMForRole {
             }
             else {
                 $OSList = Get-SupportedOperatingSystemsForRole -role $role
-                $OperatingSystem = "Server 2022"
+                if ($role.Contains("Client")) {
+                    $operatingSystem = "Windows 10 Latest (64-bit)"
+                }
+                else {
+                    $OperatingSystem = "Server 2022"
+                }
                 $OperatingSystem = Get-Menu "Select OS Version" $OSList -Test:$false -CurrentValue $operatingSystem
             }
         }
@@ -5220,7 +5227,7 @@ function Select-VirtualMachines {
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n") {
                 #$role = Select-RolesForNew
-                $role = Select-RolesForExisting -enhance:$false
+                $role = Select-RolesForExisting -enhance:$true
                 if (-not $role) {
                     return
                 }
