@@ -2512,7 +2512,7 @@ function Get-Tools {
             # File downloaded
             $extractIfZip = $tool.ExtractFolderIfZip
             if (Test-Path $downloadPath) {
-                if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
+                if ($downloadPath.ToLowerInvariant().EndsWith(".zip") -and $extractIfZip -eq $true) {
                     Write-Log "Extracting $fileName to $fileDestination."
                     Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
                 }
@@ -2649,7 +2649,7 @@ function Copy-ToolToVM {
     $toolFileName = Split-Path $tool.url -Leaf
     $fileTargetRelative = Join-Path $tool.Target $toolFileName
 
-    if ($toolFileName.EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+    if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
         $fileTargetRelative = $tool.Target
     }
 

@@ -310,7 +310,7 @@ $global:VM_Create = {
             $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
 
             # SQL Iso Path
-            $sqlIso = $sqlFiles.filename | Where-Object { $_.EndsWith(".iso") }
+            $sqlIso = $sqlFiles.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
             $sqlIsoPath = Join-Path $Common.AzureFilesPath $sqlIso
 
             # Add SQL ISO to guest

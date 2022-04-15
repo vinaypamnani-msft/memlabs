@@ -16,7 +16,7 @@ function Get-UserConfiguration {
     }
 
     # Add extension
-    if (-not $Configuration.EndsWith(".json")) {
+    if (-not $Configuration.ToLowerInvariant().EndsWith(".json")) {
         $Configuration = "$Configuration.json"
     }
 

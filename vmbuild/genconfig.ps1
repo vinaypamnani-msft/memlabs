@@ -1627,7 +1627,7 @@ function Select-Config {
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property LastWriteTime
     write-host $ConfigPath
-    if ($ConfigPath.EndsWith("tests")) {
+    if ($ConfigPath.ToLowerInvariant().("tests")) {
         $files = $files | sort-Object -Property Name
     }
     $responseValid = $false
@@ -3512,44 +3512,52 @@ function Get-AdditionalValidations {
     Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
     switch ($name) {
         "E" {
-            if (-not ($value.EndsWith("GB")) -and (-not ($value.EndsWith("MB")))) {
-                if ($CurrentValue.EndsWith("GB")) {
+            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
+                if ($CurrentValue.ToUpper().EndsWith("GB")) {
                     $property.$name = $value.Trim() + "GB"
                 }
-                if ($CurrentValue.EndsWith("MB")) {
+                if ($CurrentValue.ToUpper().EndsWith("MB")) {
                     $property.$name = $value.Trim() + "MB"
                 }
             }
+            $value = $property."$($Name)"
+            $property.$name = $value.ToUpperInvariant()
         }
         "F" {
-            if (-not ($value.EndsWith("GB")) -and (-not ($value.EndsWith("MB")))) {
-                if ($CurrentValue.EndsWith("GB")) {
+            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
+                if ($CurrentValue.ToUpper().EndsWith("GB")) {
                     $property.$name = $value.Trim() + "GB"
                 }
-                if ($CurrentValue.EndsWith("MB")) {
+                if ($CurrentValue.ToUpper().EndsWith("MB")) {
                     $property.$name = $value.Trim() + "MB"
                 }
             }
+            $value = $property."$($Name)"
+            $property.$name = $value.ToUpperInvariant()
         }
         "G" {
-            if (-not ($value.EndsWith("GB")) -and (-not ($value.EndsWith("MB")))) {
-                if ($CurrentValue.EndsWith("GB")) {
+            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
+                if ($CurrentValue.ToUpper().EndsWith("GB")) {
                     $property.$name = $value.Trim() + "GB"
                 }
-                if ($CurrentValue.EndsWith("MB")) {
+                if ($CurrentValue.ToUpper().EndsWith("MB")) {
                     $property.$name = $value.Trim() + "MB"
                 }
             }
+            $value = $property."$($Name)"
+            $property.$name = $value.ToUpperInvariant()
         }
         "memory" {
-            if (-not ($value.EndsWith("GB")) -and (-not ($value.EndsWith("MB")))) {
-                if ($CurrentValue.EndsWith("GB")) {
+            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
+                if ($CurrentValue.ToUpper().EndsWith("GB")) {
                     $property.$name = $value.Trim() + "GB"
                 }
-                if ($CurrentValue.EndsWith("MB")) {
+                if ($CurrentValue.ToUpper().EndsWith("MB")) {
                     $property.$name = $value.Trim() + "MB"
                 }
             }
+            $value = $property."$($Name)"
+            $property.$name = $value.ToUpperInvariant()
         }
 
         "tpmEnabled" {
@@ -4472,7 +4480,7 @@ function get-VMString {
     )
 
     $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(19, " ")
-    $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(16, " ")
+    $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(17, " ")
     $mem = $($virtualMachine.memory).PadLEft(4, " ")
     $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
     $Network = $config.vmOptions.Network
@@ -5688,7 +5696,7 @@ function Save-Config {
         $filename = Join-Path $configDir $filename
     }
 
-    if (!$filename.EndsWith(".json")) {
+    if (!$filename.ToLowerInvariant().EndsWith(".json")) {
         $filename += ".json"
     }
 
