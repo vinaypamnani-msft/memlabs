@@ -155,7 +155,7 @@ Function Read-SingleKeyWithTimeout {
                 $key = $null
             }
         }
-        if ($Prompt) {
+        if ($Prompt -and -not $stopTimeout) {
             switch (($i++ % 128) / 32) {
                 0 { $charsToDeleteNextTime = Write-Prompt -Color MediumSpringGreen }
                 1 { $charsToDeleteNextTime = Write-Prompt -Color Red }
@@ -181,12 +181,52 @@ Function Read-SingleKeyWithTimeout {
 }
 
 function write-help {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Default Value")]
+        [switch] $AllowEscape,
+        [Parameter(Mandatory = $false, HelpMessage = "hint for help to show we will return")]
+        [bool] $return = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "hint for help to show we will return")]
+        [bool] $timeout = $false
+
+    )
     $color = $Global:Common.Colors.GenConfigHelp
-    Write-Host2 -ForegroundColor $color "Press " -NoNewline
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
-    Write-Host2 -ForegroundColor $color " to skip a section or " -NoNewline
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-    Write-Host2 -ForegroundColor $color " to exit without saving."
+    if ($timeout) {
+        Write-Host2 -ForegroundColor $color "Press " -NoNewline
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Space]" -NoNewline
+        Write-Host2 -ForegroundColor $color " to stop the countdown or " -NoNewline
+    }
+    if (-not $AllowEscape) {
+        if ($return) {
+            Write-Host2 -ForegroundColor $color "Press " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to return to the previous menu or " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to exit without saving."
+        }
+        else {
+            Write-Host2 -ForegroundColor $color "Select an option or " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to exit without saving."
+        }
+    }
+    else {
+        if ($return) {
+            Write-Host2 -ForegroundColor $color "Press " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to return to the previous menu or " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to exit without saving."
+        }
+        else {
+            Write-Host2 -ForegroundColor $color "Press " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to skip this section or " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to exit without saving."
+        }
+    }
 }
 
 function Read-YesorNoWithTimeout {
@@ -204,9 +244,16 @@ function Read-YesorNoWithTimeout {
         [int] $timeout = 10
 
     )
-
+    if ($timeout -gt 0) {
+        $TimeoutHelp = $true
+    }
     if (-not $HideHelp.IsPresent) {
-        write-help
+        if ($Default) {
+            write-help -AllowEscape -timeout:$timeoutHelp
+        }
+        else {
+            write-help -timeout:$timeoutHelp
+        }
     }
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {

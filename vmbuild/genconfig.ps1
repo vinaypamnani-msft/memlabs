@@ -68,19 +68,19 @@ Function Select-ToolsMenu {
     $customOptions = [ordered]@{"1" = "Update Tools On all Currently Running VMs (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
     $customOptions += [ordered]@{"2" = "Copy Optional Tools (eg Windbg)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
 
-    $response = Get-Menu -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false
+    $response = Get-Menu -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false -return
 
     switch ($response.ToLowerInvariant()) {
         "1" {
             $customOptions2 = [ordered]@{"A" = "All Tools" }
             $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name
-            $tool = Get-Menu -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false
+            $tool = Get-Menu -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
             if (-not $tool) {
                 return
             }
             $customOptions2 = [ordered]@{"A" = "All VMs" }
             $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName
-            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false
+            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
             if (-not $vmName) {
                 return
             }
@@ -110,13 +110,13 @@ Function Select-ToolsMenu {
         }
         "2" {
             $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name
-            $tool = Get-Menu -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false
+            $tool = Get-Menu -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false -return
             if (-not $tool) {
                 return
             }
             $customOptions2 = [ordered]@{"A" = "All VMs listed above" }
             $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName
-            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false
+            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
             if (-not $vmName) {
                 return
             }
@@ -315,7 +315,7 @@ function Select-DomainMenu {
         return
     }
 
-    $domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false
+    $domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false -return
     if ([string]::isnullorwhitespace($domain)) {
         return $null
     }
@@ -350,7 +350,7 @@ function Select-DomainMenu {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
         $customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
-        $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false
+        $response = Get-Menu -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
 
         write-Verbose "1 response $response"
         if (-not $response) {
@@ -443,7 +443,7 @@ function select-RestoreSnapshotDomain {
         Write-OrangePoint "No snapshots found for $domain"
         return
     }
-    $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots -test:$false
+    $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots -test:$false -return
     if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
         return
     }
@@ -545,7 +545,7 @@ function select-DeleteSnapshotDomain {
         Write-OrangePoint "No snapshots found for $domain"
         return
     }
-    $response = get-menu -Prompt "Select Snapshot to merge/delete" -OptionArray $snapshots -additionalOptions @{"A" = "All Snapshots" } -test:$false
+    $response = get-menu -Prompt "Select Snapshot to merge/delete" -OptionArray $snapshots -additionalOptions @{"A" = "All Snapshots" } -test:$false -return
     if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
         return
     }
@@ -793,7 +793,7 @@ function Select-DeleteDomain {
             return
         }
         $customOptions = [ordered]@{"D" = "Delete All VMs" }
-        $response = Get-Menu -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false
+        $response = Get-Menu -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false -return
 
         if ([string]::IsNullOrWhiteSpace($response)) {
             return
@@ -1502,10 +1502,10 @@ function Select-NewDomainConfig {
             Write-Host
             Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigTip "Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
 
-            $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions -test:$false
-            #if ([string]::IsNullOrWhiteSpace($response)) {
-            #    return
-            #}
+            $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions -test:$false -return
+            if ([string]::IsNullOrWhiteSpace($response)) {
+                return
+            }
         }
 
 
@@ -1515,7 +1515,7 @@ function Select-NewDomainConfig {
         $version = $null
         switch ($response.ToLowerInvariant()) {
             "1" {
-                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "CAS" -Domain $templateDomain -ConfigToModify $newconfig -SiteCode "CS1" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
@@ -1523,7 +1523,7 @@ function Select-NewDomainConfig {
             }
 
             "2" {
-                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -SiteCode "PS1" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
@@ -1531,7 +1531,7 @@ function Select-NewDomainConfig {
 
             }
             "3" {
-                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -SiteCode "CTP" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
@@ -1543,7 +1543,7 @@ function Select-NewDomainConfig {
                 $version = "tech-preview"
             }
             "4" {
-                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
             }
@@ -1695,7 +1695,7 @@ function Select-Config {
 
         }
 
-        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -split -test:$false
+        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -split -test:$false -return
 
         $responseValid = $true
         if (-not $response) {
@@ -1802,7 +1802,7 @@ function Show-ExistingNetwork {
     }
 
     while ($true) {
-        $domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -Split -test:$false
+        $domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -Split -test:$false -return
         if ([string]::isnullorwhitespace($domain)) {
             return $null
         }
@@ -1906,7 +1906,7 @@ function Show-ExistingNetwork {
             Write-Host "No siteservers found that are elegible for HA"
             return
         }
-        $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false
+        $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
         if ([string]::IsNullOrWhiteSpace($result)) {
             return
         }
@@ -2614,7 +2614,12 @@ function Read-Host2 {
         [switch] $HideHelp
     )
     if (-not $HideHelp.IsPresent) {
-        write-help
+        if ($currentValue) {
+            write-help -AllowEscape
+        }
+        else {
+            write-help
+        }
     }
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
@@ -2639,10 +2644,18 @@ function Read-Single {
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
         [int] $timeout = 0,
         [Parameter(Mandatory = $false, HelpMessage = "Use Read-Host after keypress")]
-        [switch] $useReadHost
+        [switch] $useReadHost,
+        [Parameter(Mandatory = $false, HelpMessage = "hint for help to show we will return")]
+        [bool] $return = $false
     )
+
     if (-not $HideHelp.IsPresent) {
-        write-help
+        if ($currentValue) {
+            write-help -AllowEscape -return:$return -timeout:$useReadHost
+        }
+        else {
+            write-help -return:$return -timeout:$useReadHost
+        }
     }
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
@@ -2680,7 +2693,9 @@ function Get-Menu {
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
         [int] $timeout = 0,
         [Parameter(Mandatory = $false, HelpMessage = "Hide Help")]
-        [bool] $HideHelp = $false
+        [bool] $HideHelp = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Hint for help to show we will return from this menu on enter")]
+        [switch] $return
     )
 
 
@@ -2774,7 +2789,7 @@ function Get-Menu {
     }
     $totalOptions = $preOptions + $additionalOptions
 
-    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout -HideHelp:$HideHelp
+    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout -HideHelp:$HideHelp -return:$return
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         $i = 0
@@ -2824,7 +2839,9 @@ function get-ValidResponse {
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
         [int] $timeout = 0,
         [Parameter(Mandatory = $false, HelpMessage = "Hide Help")]
-        [bool] $HideHelp = $false
+        [bool] $HideHelp = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Hint for help to show we will return")]
+        [bool] $return = $false
 
     )
 
@@ -2842,7 +2859,7 @@ function get-ValidResponse {
             Write-Verbose "5 else get-ValidResponse max = $max"
             if ($first) {
                 Write-Verbose "6 else get-ValidResponse max = $max"
-                $response = Read-Single -Prompt $prompt $currentValue -timeout:$timeout -HideHelp:$HideHelp
+                $response = Read-Single -Prompt $prompt $currentValue -timeout:$timeout -HideHelp:$HideHelp -return:$return
             }
             else {
                 Write-Verbose "7 else get-ValidResponse max = $max"
@@ -3326,7 +3343,7 @@ Function Get-remoteSQLVM {
         $additionalOptions += [ordered] @{ "N" = "Remote SQL (Create a new SQL VM)" }
         $additionalOptions += [ordered] @{ "A" = "Remote SQL Always On Cluster (Create a new SQL Cluster)" }
         #}
-        $result = Get-Menu "Select SQL Options" $($validVMs) $CurrentValue -Test:$false -additionalOptions $additionalOptions
+        $result = Get-Menu "Select SQL Options" $($validVMs) $CurrentValue -Test:$false -additionalOptions $additionalOptions -return
 
         if (-not $result) {
             return
@@ -3383,7 +3400,7 @@ Function Get-domainUser {
         $additionalOptions = @{ "N" = "New User" }
 
 
-        $result = Get-Menu "Select User" $($users) $CurrentValue -Test:$false -additionalOptions $additionalOptions
+        $result = Get-Menu "Select User" $($users) $CurrentValue -Test:$false -additionalOptions $additionalOptions -return
 
         if (-not $result) {
             return
@@ -5277,7 +5294,7 @@ function Select-VirtualMachines {
                         Write-Host "No siteservers found that are elegible for HA"
                         return
                     }
-                    $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false
+                    $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
                     if ([string]::IsNullOrWhiteSpace($result)) {
                         return
                     }
