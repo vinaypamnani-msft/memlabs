@@ -329,7 +329,7 @@ function Add-ExistingVMsToDeployConfig {
     # Add Primary to list, when adding DPMP
     $DPMPs = $config.virtualMachines | Where-Object { $_.role -eq "DPMP" }
     foreach ($dpmp in $DPMPS) {
-        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -SmartUpdate:$false
+        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -type VM -SmartUpdate:$false
         if ($DPMPPrimary) {
             Add-ExistingVMToDeployConfig -vmName $DPMPPrimary -configToModify $config
         }
