@@ -333,6 +333,10 @@ function Add-ExistingVMsToDeployConfig {
         if ($DPMPPrimary) {
             Add-ExistingVMToDeployConfig -vmName $DPMPPrimary -configToModify $config
         }
+        # Add remote SQL to list
+        if ($DPMPPrimary.RemoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $DPMPPrimary.RemoteSQLVM -configToModify $config
+        }
     }
 
     # Add FS to list, when adding SQLAO
