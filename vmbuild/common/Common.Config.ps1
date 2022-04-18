@@ -331,7 +331,7 @@ function Add-ExistingVMsToDeployConfig {
     foreach ($dpmp in $DPMPS) {
         $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -type VM -SmartUpdate:$false
         if ($DPMPPrimary) {
-            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary -configToModify $config
+            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary.vmName -configToModify $config
         }
         # Add remote SQL to list
         if ($DPMPPrimary.RemoteSQLVM) {
