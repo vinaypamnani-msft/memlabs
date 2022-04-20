@@ -73,6 +73,7 @@ if (Test-Path $cm_svc_file) {
 
 $DPs = @()
 $MPs = @()
+$PullDPs = @()
 $ValidSiteCodes = @($SiteCode)
 $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
 $ValidSiteCodes += $ReportingSiteCodes
@@ -80,9 +81,18 @@ $ValidSiteCodes += $ReportingSiteCodes
 foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" } ) {
     if ($dpmp.siteCode -in $ValidSiteCodes) {
         if ($dpmp.installDP) {
-            $DPs += [PSCustomObject]@{
-                ServerName     = $dpmp.vmName
-                ServerSiteCode = $dpmp.siteCode
+            if ($dpmp.enablePullDP) {
+                $PullDPs += [PSCustomObject]@{
+                    ServerName     = $dpmp.vmName
+                    ServerSiteCode = $dpmp.siteCode
+                    SourceDP       = $dpmp.pullDPSourceDP
+                }
+            }
+            else {
+                $DPs += [PSCustomObject]@{
+                    ServerName     = $dpmp.vmName
+                    ServerSiteCode = $dpmp.siteCode
+                }
             }
         }
         if ($dpmp.installMP) {
@@ -101,15 +111,18 @@ foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DP
 
 # Trim nulls/blanks
 $DPNames = $DPs.ServerName | Where-Object { $_ -and $_.Trim() }
+$PullDPNames = $PullDPs.ServerName | Where-Object { $_ -and $_.Trim() }
 $MPNames = $MPs.ServerName | Where-Object { $_ -and $_.Trim() }
 
 Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
 Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
+Write-DscStatus "Pull DP role to be installed on '$($PullDPNames -join ',')'"
 Write-DscStatus "Client push candidates are '$ClientNames'"
 
 foreach ($DP in $DPs) {
 
     if ([string]::IsNullOrWhiteSpace($DP.ServerName)) {
+        Write-DscStatus "Found an empty DP ServerName. Skipping"
         continue
     }
 
@@ -120,11 +133,29 @@ foreach ($DP in $DPs) {
 foreach ($MP in $MPs) {
 
     if ([string]::IsNullOrWhiteSpace($MP.ServerName)) {
+        Write-DscStatus "Found an empty MP ServerName. Skipping"
         continue
     }
 
     $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
     Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode
+}
+
+foreach ($PDP in $PullDPs) {
+
+    if ([string]::IsNullOrWhiteSpace($PDP.ServerName)) {
+        Write-DscStatus "Found an empty Pull DP ServerName. Skipping"
+        continue
+    }
+
+    if ([string]::IsNullOrWhiteSpace($PDP.SourceDP)) {
+        Write-DscStatus "Found Pull DP $($PDP.ServerName) with empty SourceDP. Skipping"
+        continue
+    }
+
+    $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
+    $SourceDPFQDN = $DP.SourceDP.Trim() + "." + $DomainFullName
+    Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN
 }
 
 # Force install DP/MP on PS Site Server if none present
