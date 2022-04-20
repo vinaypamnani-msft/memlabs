@@ -3756,7 +3756,7 @@ function Get-AdditionalValidations {
         }
         "enablePullDP" {
             if ($value -eq $true) {
-                $server = select-PullDPMenu -CurrentValue $value -CurrentVM $property
+                $server = select-PullDPMenu -CurrentVM $property
                 $property | Add-Member -MemberType NoteProperty -Name "pullDPSourceDP" -Value $server -Force
 
             }
@@ -3767,8 +3767,15 @@ function Get-AdditionalValidations {
         }
         "installDP" {
             if ($value -eq $false) {
+                $pullDPs = $Global:Config.virtualMachines | Where-Object { $_.pullDPSourceDP -eq $property.VmName }
+                if ($pullDPs) {
+                    Write-Log "$($pullDPs.vmName) is using this as a source.  Please remove before removing this DP"
+                    $property.InstallDP = $true
+                    return
+                }else {
                 $property.PsObject.Members.Remove("enablePullDP")
                 $property.PsObject.Members.Remove("pullDPSourceDP")
+                }
             }
             else {
                 $property | Add-Member -MemberType NoteProperty -Name "enablePullDP" -Value $false -Force
