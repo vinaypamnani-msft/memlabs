@@ -186,6 +186,9 @@ function New-DeployConfig {
         $virtualMachines = $configObject.virtualMachines
         foreach ($item in $virtualMachines) {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
+            if ($item.pullDPSourceDP) {
+                $item.pullDPSourceDP = $configObject.vmOptions.prefix + $item.pullDPSourceDP
+            }
         }
 
         $PSVMs = $virtualMachines | Where-Object { $_.role -eq "Primary" }

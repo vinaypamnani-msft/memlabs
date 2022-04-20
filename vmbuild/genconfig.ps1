@@ -3754,7 +3754,25 @@ function Get-AdditionalValidations {
                 }
             }
         }
+        "enablePullDP" {
+            if ($value -eq $true) {
+                $server = select-PullDPMenu -CurrentValue $value -CurrentVM $property
+                $property | Add-Member -MemberType NoteProperty -Name "pullDPSourceDP" -Value $server -Force
+
+            }
+            else {
+                $property.PsObject.Members.Remove("pullDPSourceDP")
+            }
+
+        }
         "installDP" {
+            if ($value -eq $false) {
+                $property.PsObject.Members.Remove("enablePullDP")
+                $property.PsObject.Members.Remove("pullDPSourceDP")
+            }
+            else {
+                $property | Add-Member -MemberType NoteProperty -Name "enablePullDP" -Value $false -Force
+            }
             $newName = Get-NewMachineName -vm $property
             if ($($property.vmName) -ne $newName) {
                 $rename = $true
@@ -4274,6 +4292,10 @@ function Select-Options {
                 }
                 "remoteContentLibVM" {
                     $property.remoteContentLibVM = select-FileServerMenu -HA:$true -CurrentValue $value
+                    continue MainLoop
+                }
+                "pullDPSourceDP" {
+                    $property.pullDPSourceDP = select-PullDPMenu  -CurrentValue $value -CurrentVM $Property
                     continue MainLoop
                 }
                 "fileServerVM" {
@@ -5027,6 +5049,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $true
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $true
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enablePullDP' -Value $false
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
                 if ($test) {
@@ -5153,7 +5176,35 @@ function Add-NewVMForRole {
 }
 
 
+function select-PullDPMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentValue")]
+        [string] $CurrentValue = $null,
+        [Parameter(Mandatory = $true, HelpMessage = "CurrentVM")]
+        [object] $CurrentVM
+    )
+    #Get-PSCallStack | Out-Host
+    $result = $null
+    if ((Get-ListOfPossibleDPMP -Config $ConfigToModify -siteCode $CurrentVM.SiteCode).Count -eq 0) {
+        $result = "n"
+    }
 
+    $additionalOptions += @{ "N" = "Create a DP VM" }
+
+    while ([string]::IsNullOrWhiteSpace($result)) {
+        $result = Get-Menu "Select Source DP VM" $(Get-ListOfPossibleDPMP -Config $ConfigToModify -siteCode $CurrentVM.SiteCode) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
+    }
+    switch ($result.ToLowerInvariant()) {
+        "n" {
+            write-Log "Added new DPMP for SiteCode $($currentVM.SiteCode)"
+            $result = Add-NewVMForRole -Role "DPMP" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true -SiteCode $CurrentVM.SiteCode
+        }
+    }
+    return $result
+}
 function select-FileServerMenu {
     [CmdletBinding()]
     param (
@@ -5217,6 +5268,41 @@ function Get-ListOfPossibleFileServers {
     return $FSList
 }
 
+function Get-ListOfPossibleDPMP {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $Config = $global:config,
+        [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
+        [string] $siteCode
+
+
+    )
+    $FSList = @()
+    $FS = $Config.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and $_.enablePullDP -eq $false -and $_.SiteCode -eq $SiteCode}
+    foreach ($item in $FS) {
+
+            $FSList += $item.vmName
+
+    }
+    $domain = $Config.vmOptions.DomainName
+    if ($null -ne $domain) {
+        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and $_.enablePullDP -eq $false -and $_.SiteCode -eq $SiteCode}
+        foreach ($item in $FSFromList) {
+            $FSList += $item.vmName
+        }
+    }
+    else {
+        if ($null -ne $Config ) {
+            Write-Verbose $Config | ConvertTo-Json | Out-Host
+        }
+        else {
+            write-host "Config was null!"
+            Get-PSCallStack | Out-Host
+        }
+    }
+    return $FSList
+}
 
 function Select-VirtualMachines {
     [CmdletBinding()]
