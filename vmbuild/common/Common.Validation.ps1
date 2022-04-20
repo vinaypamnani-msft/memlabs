@@ -175,7 +175,26 @@ function Test-ValidCmOptions {
     }
 
 }
+function Test-MachineNameExists {
+    param (
+        [string] $name,
+        [object] $ReturnObject,
+        [object] $config
 
+    )
+
+    if (-not $name) {
+        throw "Test-ValidMachineName called without a VMName"
+    }
+
+    write-log "Testing $name" -Verbose
+
+    $vm = Get-List2 -deployConfig $config -SmartUpdate | where-object { $_.vmName -eq $name }
+
+    if (-not $vm) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid reference VM: $name. VM does not exist." -ReturnObject $ReturnObject -Warning
+    }
+}
 
 function Test-ValidMachineName {
     param (
@@ -249,18 +268,22 @@ function Test-ValidVmSupported {
 
     if ($VM.remoteSQLVM) {
         Test-ValidMachineName $VM.remoteSQLVM -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.remoteSQLVM -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.fileServerVM) {
         Test-ValidMachineName $VM.fileServerVM -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.fileServerVM -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.pullDPSourceDP) {
         Test-ValidMachineName $VM.pullDPSourceDP -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.pullDPSourceDP -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.OtherNode) {
         Test-ValidMachineName $VM.OtherNode -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.OtherNode -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.AlwaysOnListenerName) {
@@ -269,6 +292,7 @@ function Test-ValidVmSupported {
 
     if ($VM.remoteContentLibVM) {
         Test-ValidMachineName $VM.remoteContentLibVM -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.remoteContentLibVM -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.ClusterName) {
