@@ -255,6 +255,10 @@ function Test-ValidVmSupported {
         Test-ValidMachineName $VM.fileServerVM -ReturnObject $ReturnObject
     }
 
+    if ($VM.pullDPSourceDP) {
+        Test-ValidMachineName $VM.pullDPSourceDP -ReturnObject $ReturnObject
+    }
+
     if ($VM.OtherNode) {
         Test-ValidMachineName $VM.OtherNode -ReturnObject $ReturnObject
     }

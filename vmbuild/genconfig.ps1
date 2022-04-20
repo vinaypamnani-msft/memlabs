@@ -5279,7 +5279,7 @@ function Get-ListOfPossibleDPMP {
 
     )
     $FSList = @()
-    $FS = $Config.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and $_.enablePullDP -eq $false -and $_.SiteCode -eq $SiteCode}
+    $FS = $Config.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode}
     foreach ($item in $FS) {
 
             $FSList += $item.vmName
@@ -5287,7 +5287,7 @@ function Get-ListOfPossibleDPMP {
     }
     $domain = $Config.vmOptions.DomainName
     if ($null -ne $domain) {
-        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and $_.enablePullDP -eq $false -and $_.SiteCode -eq $SiteCode}
+        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode}
         foreach ($item in $FSFromList) {
             $FSList += $item.vmName
         }

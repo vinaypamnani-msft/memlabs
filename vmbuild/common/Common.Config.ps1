@@ -186,7 +186,8 @@ function New-DeployConfig {
         $virtualMachines = $configObject.virtualMachines
         foreach ($item in $virtualMachines) {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
-            if ($item.pullDPSourceDP) {
+            if ($item.pullDPSourceDP -and -not $item.pullDPSourceDP.StartsWith($configObject.vmOptions.prefix)) {
+
                 $item.pullDPSourceDP = $configObject.vmOptions.prefix + $item.pullDPSourceDP
             }
         }
@@ -339,6 +340,10 @@ function Add-ExistingVMsToDeployConfig {
         # Add remote SQL to list
         if ($DPMPPrimary.RemoteSQLVM) {
             Add-RemoteSQLVMToDeployConfig -vmName $DPMPPrimary.RemoteSQLVM -configToModify $config
+        }
+
+        if ($DPMPPrimary.pullDPSourceDP) {
+            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary.pullDPSourceDP -configToModify $config
         }
     }
 
