@@ -184,6 +184,59 @@ function Install-DP {
     } until ($dpinstalled -or $installFailure)
 }
 
+function Install-PullDP {
+    param (
+        [Parameter()]
+        [string]
+        $ServerFQDN,
+        [string]
+        $ServerSiteCode,
+        [string]
+        $SourceDPFQDN
+    )
+
+    $i = 0
+    $installFailure = $false
+    $DPFQDN = $ServerFQDN
+
+    do {
+
+        $i++
+
+        # Create Site system Server
+        #============
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
+        if (-not $SystemServer) {
+            Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
+            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 15
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
+        }
+
+        # Install Pull DP
+        #=================
+        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
+        if (-not $dpinstalled) {
+            Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role as a Pull DP, with Source DP $SourceDPFQDN."
+            $Date = [DateTime]::Now.AddYears(30)
+            Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
+            $dpinstalled = $true
+        }
+
+        if ($i -gt 10) {
+            Write-DscStatus "No Progress after $i tries, Giving up on $DPFQDN SiteCode: $ServerSiteCode ."
+            $installFailure = $true
+        }
+
+        Start-Sleep -Seconds 10
+
+    } until ($dpinstalled -or $installFailure)
+}
+
 function Install-MP {
     param (
         [string]
