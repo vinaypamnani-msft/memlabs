@@ -3120,6 +3120,78 @@ Function Set-ParentSiteCodeMenu {
     }
 }
 
+
+
+Function Get-SiteCodeForWSUS {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue,
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [string] $Domain
+    )
+    $valid = $false
+    $ConfigToCheck = $Global:Config
+    #Get-PSCallStack | out-host
+    while ($valid -eq $false) {
+        $siteCodes = @()
+        $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } )
+        if ($tempSiteCodes) {
+            foreach ($tempSiteCode in $tempSiteCodes) {
+                $siteCodes += "$($tempSiteCode.SiteCode) (New Primary Server - $($tempSiteCode.vmName))"
+            }
+        }
+        $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" })
+        if ($tempSiteCodes) {
+            foreach ($tempSiteCode in $tempSiteCodes) {
+                if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
+                    $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName))"
+                }
+            }
+        }
+        $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "CAS" })
+        if ($tempSiteCodes) {
+            foreach ($tempSiteCode in $tempSiteCodes) {
+                if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
+                    $siteCodes += "$($tempSiteCode.SiteCode) (New CAS Server - $($tempSiteCode.vmName))"
+                }
+            }
+        }
+        if ($Domain) {
+            #$siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
+            #$siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object -ExpandProperty SiteCode -Unique
+            foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object SiteCode, Network, VmName -Unique)) {
+                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
+            }
+            foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object SiteCode, Network, VmName -Unique)) {
+                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
+            }
+            foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "CAS" | Select-Object SiteCode, Network, VmName -Unique)) {
+                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
+            }
+            if ($siteCodes.Length -eq 0) {
+                Write-Host
+                write-host "No valid site codes are eligible to accept this SUP"
+                return $null
+            }
+            else {
+                #write-host $siteCodes
+            }
+            $result = $null
+            $Options = [ordered]@{ "X" = "StandAlone WSUS" }
+            while (-not $result) {
+                $result = Get-Menu -Prompt "Select sitecode to connect SUP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -AdditionalOptions $options -Test:$false -Split
+            }
+            if ($result -and ($result.ToLowerInvariant() -eq "x")) {
+                return $null
+            }
+            else {
+                return $result
+            }
+        }
+    }
+}
+
 Function Get-SiteCodeForDPMP {
     [CmdletBinding()]
     param (
@@ -3191,8 +3263,14 @@ Function Get-SiteCodeMenu {
         [Object] $ConfigToCheck = $global:config
     )
 
-    #Get-PSCallStack | out-host
-    $result = Get-SiteCodeForDPMP -CurrentValue $CurrentValue -Domain $configToCheck.vmoptions.domainName
+    if ($property.Role -eq "DPMP") {
+        #Get-PSCallStack | out-host
+        $result = Get-SiteCodeForDPMP -CurrentValue $CurrentValue -Domain $configToCheck.vmoptions.domainName
+    }
+
+    if ($property.Role -eq "WSUS") {
+        $result = Get-SiteCodeForWSUS -CurrentValue $CurrentValue -Domain $configToCheck.vmoptions.domainName
+    }
 
     if (-not $result) {
         return
@@ -3772,9 +3850,10 @@ function Get-AdditionalValidations {
                     Write-Log "$($pullDPs.vmName) is using this as a source.  Please remove before removing this DP"
                     $property.InstallDP = $true
                     return
-                }else {
-                $property.PsObject.Members.Remove("enablePullDP")
-                $property.PsObject.Members.Remove("pullDPSourceDP")
+                }
+                else {
+                    $property.PsObject.Members.Remove("enablePullDP")
+                    $property.PsObject.Members.Remove("pullDPSourceDP")
                 }
             }
             else {
@@ -4897,6 +4976,9 @@ function Add-NewVMForRole {
                 }
                 else {
                     Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
+                    if (-not $virtualMachine.SiteCode) {
+                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+                    }
                 }
             }
             else {
@@ -5307,15 +5389,15 @@ function Get-ListOfPossibleDPMP {
 
     )
     $FSList = @()
-    $FS = $Config.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode}
+    $FS = $Config.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode }
     foreach ($item in $FS) {
 
-            $FSList += $item.vmName
+        $FSList += $item.vmName
 
     }
     $domain = $Config.vmOptions.DomainName
     if ($null -ne $domain) {
-        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode}
+        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode }
         foreach ($item in $FSFromList) {
             $FSList += $item.vmName
         }
@@ -5649,7 +5731,25 @@ function Select-VirtualMachines {
                                     }
                                     if ($diskscount -le $neededDisks) {
                                         write-host
-                                        write-redx "ConfiigMgr is configured to install to the disk we are trying to remove. Can not remove"
+                                        write-redx "ConfigMgr is configured to install to the disk we are trying to remove. Can not remove"
+                                        Continue VMLoop
+                                    }
+                                }
+
+                                if ($virtualMachine.contentDir) {
+                                    $neededDisks = 0
+                                    if ($virtualMachine.contentDir.StartsWith("E:")) {
+                                        $neededDisks = 1
+                                    }
+                                    if ($virtualMachine.contentDir.StartsWith("F:")) {
+                                        $neededDisks = 2
+                                    }
+                                    if ($virtualMachine.contentDir.StartsWith("G:")) {
+                                        $neededDisks = 3
+                                    }
+                                    if ($diskscount -le $neededDisks) {
+                                        write-host
+                                        write-redx "WSUS is configured to use to the disk we are trying to remove. Can not remove"
                                         Continue VMLoop
                                     }
                                 }
