@@ -153,9 +153,9 @@ foreach ($PDP in $PullDPs) {
         continue
     }
 
-    $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
-    $SourceDPFQDN = $DP.SourceDP.Trim() + "." + $DomainFullName
-    Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN
+    $DPFQDN = $PDP.ServerName.Trim() + "." + $DomainFullName
+    $SourceDPFQDN = $PDP.SourceDP.Trim() + "." + $DomainFullName
+    Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN
 }
 
 # Force install DP/MP on PS Site Server if none present
