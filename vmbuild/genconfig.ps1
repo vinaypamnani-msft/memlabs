@@ -4093,6 +4093,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "cmInstallDir") {
         $sorted += "cmInstallDir"
     }
+    if ($members.Name -contains "installSUP") {
+        $sorted += "installSUP"
+    }
     if ($members.Name -contains "parentSiteCode") {
         $sorted += "parentSiteCode"
     }
@@ -4140,6 +4143,7 @@ function Get-SortedProperties {
         "tpmEnabled" {}
         "installSSMS" {}
         "installCA" {}
+        "installSUP" {}
 
         Default { $sorted += $_ }
     }
@@ -4164,8 +4168,14 @@ function Get-AdditionalInformation {
 
         "RemoteSQLVM" {
             $remoteSQL = $global:config.virtualMachines | Where-Object { $_.vmName -eq $data }
-            if ($remoteSQL.OtherNode) {
-                $data = $data.PadRight(20) + "[SQL Always On Cluster]"
+            $name = $($global:config.vmOptions.Prefix + $data)
+            if ($remoteSQL) {
+                if ($remoteSQL.OtherNode) {
+                    $data = $data.PadRight(21) + "($name) [SQL Always On Cluster]"
+                }
+                else {
+                    $data = $data.PadRight(21) + "($name)"
+                }
             }
         }
         "ClusterName" {
@@ -4179,6 +4189,7 @@ function Get-AdditionalInformation {
         "vmName" {
             $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
         }
+
         "memory" {
             #add Available memory
         }
@@ -4500,7 +4511,7 @@ function Select-Options {
                         write-host2 -ForegroundColor Khaki "siteCode can not be manually modified on a Passive server."
                         continue MainLoop
                     }
-                    if ($property.role -eq "DPMP") {
+                    if ($property.role -in ("DPMP", "WSUS")) {
                         Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
                         $newName = Get-NewMachineName -vm $property
                         if ($($property.vmName) -ne $newName) {
@@ -4566,7 +4577,7 @@ function Select-Options {
                     if (-not [String]::IsNullOrWhiteSpace($response2)) {
                         if ($property."$($Name)" -is [Int]) {
                             try {
-                            $property."$($Name)" = [Int]$response2
+                                $property."$($Name)" = [Int]$response2
                             }
                             catch {}
                         }
@@ -5441,7 +5452,7 @@ function Get-ListOfPossibleSQLServers {
     $FS = $Config.virtualMachines | Where-Object { $_.sqlVersion }
     foreach ($item in $FS) {
         $existing = $null
-        $existing = $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and $_.RemoteSQLVM -eq $item.vmName) -or ($_.InstallSUP) }
+        $existing = $Config.virtualMachines | Where-Object  { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
         if (-not $existing) {
             $SQLList += $item.vmName
         }
@@ -5451,8 +5462,8 @@ function Get-ListOfPossibleSQLServers {
         $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.sqlVersion }
         foreach ($item in $FSFromList) {
             $existing = $null
-            $existing = get-list -type VM -domain $domain | Where-Object  Where-Object { ($_.Role -eq "WSUS" -and $_.RemoteSQLVM -eq $item.vmName) -or ($_.InstallSUP) }
-            $existing += $Config.virtualMachines | Where-Object  Where-Object { ($_.Role -eq "WSUS" -and $_.RemoteSQLVM -eq $item.vmName) -or ($_.InstallSUP) }
+            $existing = get-list -type VM -domain $domain | Where-Object  { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
+            $existing += $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
             if (-not $existing) {
                 $SQLList += $item.vmName
             }
