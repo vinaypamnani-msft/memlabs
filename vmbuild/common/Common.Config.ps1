@@ -332,6 +332,15 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
+    # Add Primary to list, when adding SUP
+    $SUPs = $config.virtualMachines | Where-Object { $_.installSUP -eq $true }
+    foreach ($sup in $SUPs) {
+        $SUPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $sup.siteCode -type VM -SmartUpdate:$false
+        if ($SUPPrimary) {
+            Add-ExistingVMToDeployConfig -vmName $SUPPrimary.vmName -configToModify $config
+        }
+    }
+
     # Add FS to list, when adding SQLAO
     $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
     foreach ($SQLAOVM in $SQLAOVMs) {
