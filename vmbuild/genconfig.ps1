@@ -3333,12 +3333,12 @@ Function Set-SiteServerLocalSql {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
     }
     if ($virtualMachine.Role -eq "WSUS") {
-    $virtualMachine.virtualProcs = 4
-    $virtualMachine.memory = "6GB"
+        $virtualMachine.virtualProcs = 4
+        $virtualMachine.memory = "6GB"
     }
     else {
         $virtualMachine.virtualProcs = 8
-    $virtualMachine.memory = "10GB"
+        $virtualMachine.memory = "10GB"
     }
 
 
@@ -5366,7 +5366,7 @@ function select-RemoteSQLMenu {
 
     $additionalOptions = @{}
 
-        $additionalOptions += @{ "N" = "Create new SQL Server" }
+    $additionalOptions += @{ "N" = "Create new SQL Server" }
 
     while ([string]::IsNullOrWhiteSpace($result)) {
         $result = Get-Menu "Select SQL VM" $(Get-ListOfPossibleSQLServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
@@ -5419,16 +5419,25 @@ function Get-ListOfPossibleSQLServers {
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [object] $Config = $global:config
     )
-    $FSList = @()
+    $SQLList = @()
     $FS = $Config.virtualMachines | Where-Object { $_.sqlVersion }
     foreach ($item in $FS) {
-        $FSList += $item.vmName
+        $existing = $null
+        $existing = $Config.virtualMachines | Where-Object { $_.Role -eq "WSUS" -and $_.RemoteSQLVM -eq $item.vmName }
+        if (-not $existing) {
+            $SQLList += $item.vmName
+        }
     }
     $domain = $Config.vmOptions.DomainName
     if ($null -ne $domain) {
-        $FSFromList = get-list -type VM -domain $domain | Where-Object {  $_.sqlVersion  }
+        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.sqlVersion }
         foreach ($item in $FSFromList) {
-            $FSList += $item.vmName
+            $existing = $null
+            $existing = get-list -type VM -domain $domain | Where-Object { $_.Role -eq "WSUS" -and $_.RemoteSQLVM -eq $item.vmName }
+            $existing += $Config.virtualMachines | Where-Object { $_.Role -eq "WSUS" -and $_.RemoteSQLVM -eq $item.vmName }
+            if (-not $existing) {
+                $SQLList += $item.vmName
+            }
         }
     }
     else {
@@ -5440,7 +5449,7 @@ function Get-ListOfPossibleSQLServers {
             Get-PSCallStack | Out-Host
         }
     }
-    return $FSList
+    return $SQLList
 }
 function Get-ListOfPossibleFileServers {
     [CmdletBinding()]
