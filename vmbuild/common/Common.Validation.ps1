@@ -445,7 +445,7 @@ function Test-ValidVmProcs {
     }
     else {
         $virtualProcs = $VM.virtualProcs
-        if ($virtualProcs -gt 16 -or $virtualProcs -lt 1) {
+        if ([int]$virtualProcs -gt 16 -or [int]$virtualProcs -lt 1) {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] virtualProcs value [$virtualProcs] is invalid. Specify a value from 1-16." -ReturnObject $ReturnObject -Failure
         }
     }

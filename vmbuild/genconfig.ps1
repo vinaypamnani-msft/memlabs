@@ -4565,7 +4565,10 @@ function Select-Options {
                     }
                     if (-not [String]::IsNullOrWhiteSpace($response2)) {
                         if ($property."$($Name)" -is [Int]) {
+                            try {
                             $property."$($Name)" = [Int]$response2
+                            }
+                            catch {}
                         }
                         else {
                             if ($value -is [bool]) {
