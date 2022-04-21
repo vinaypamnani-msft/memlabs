@@ -3142,14 +3142,14 @@ Function Get-SiteCodeForWSUS {
                 $siteCodes += "$($tempSiteCode.SiteCode) (New Primary Server - $($tempSiteCode.vmName))"
             }
         }
-        $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" })
-        if ($tempSiteCodes) {
-            foreach ($tempSiteCode in $tempSiteCodes) {
-                if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-                    $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName))"
-                }
-            }
-        }
+        #$tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" })
+        #if ($tempSiteCodes) {
+        #    foreach ($tempSiteCode in $tempSiteCodes) {
+        #        if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
+        #            $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName))"
+        #        }
+        #    }
+        #}
         $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "CAS" })
         if ($tempSiteCodes) {
             foreach ($tempSiteCode in $tempSiteCodes) {
@@ -3164,9 +3164,9 @@ Function Get-SiteCodeForWSUS {
             foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object SiteCode, Network, VmName -Unique)) {
                 $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
             }
-            foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object SiteCode, Network, VmName -Unique)) {
-                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
-            }
+            #foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object SiteCode, Network, VmName -Unique)) {
+            #    $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
+            #}
             foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "CAS" | Select-Object SiteCode, Network, VmName -Unique)) {
                 $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
             }
