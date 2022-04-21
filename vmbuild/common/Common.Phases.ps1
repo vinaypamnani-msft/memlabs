@@ -725,7 +725,7 @@ function Get-Phase7ConfigurationData {
         )
     }
 
-    if ($deployConfig.cmOptions.Install) {
+    if ($deployConfig.cmOptions.Install -ne $false) {
 
         $fsVMsAdded = @()
         foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP") }) {

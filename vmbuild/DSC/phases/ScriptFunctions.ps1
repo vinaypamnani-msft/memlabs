@@ -305,8 +305,8 @@ function Install-SUP {
 
         $installed = Get-CMSoftwareUpdatePoint -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
-            Write-DscStatus "MP Role not detected on $ServerFQDN. Adding Management Point role."
-            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN | Out-File $global:StatusLog -Append
+            Write-DscStatus "SUP Role not detected on $ServerFQDN. Adding Software Update Point role."
+            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531| Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 60
         }
         else {

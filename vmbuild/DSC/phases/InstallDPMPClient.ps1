@@ -179,7 +179,7 @@ foreach ($SUP in $SUPs) {
     }
 
     $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
-    Install-MP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode
+    Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode
 }
 
 foreach ($PDP in $PullDPs) {
@@ -222,8 +222,10 @@ if ($configureSUP) {
     $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2022/1/1 00:00:00"
     try {
         if ($topSite) {
-            Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent"
-            Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard
+            Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent to set classifications"
+            Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
+            Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent to set products"
+            Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
         }
     }
     catch {
@@ -239,6 +241,12 @@ if ($configureSUP) {
             if ($syncState.LastSyncState -eq 6702) {
                 $finished = $true
             }
+
+            if ($syncState.LastSyncState -eq "" -or $null -eq $syncState.LastSyncState) {
+                Write-DscStatus "SUM Sync not detected as running. Running Sync to refresh products."
+                Sync-CMSoftwareUpdate
+                Start-Sleep -Seconds 120
+            }
             if (-not $finished) {
                 $i++
                 Start-Sleep -Seconds 60
@@ -251,8 +259,26 @@ if ($configureSUP) {
         } until ($finished -or $timedOut)
 
         if ($finished) {
+            $i = 0
             Write-DscStatus "SUM Sync finished. Running Set-CMSoftwareUpdatePointComponent again."
-            Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard
+            $configured = $false
+            do {
+                try {
+                    Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
+                    $configured = $true
+                }
+                catch {
+                    $i++
+                    Start-Sleep -Seconds 20
+                }
+            } until ($configured -or $i -gt 10)
+
+            if ($configured) {
+                Write-DscStatus "SUM Component Configuration successful."
+            }
+            else {
+                Write-DscStatus "SUM Component Configuration failed."
+            }
         }
     }
 }

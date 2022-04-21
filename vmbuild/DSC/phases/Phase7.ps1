@@ -229,7 +229,7 @@ Configuration Phase7
         }
 
         $nextDepend = "[InstallADK]ADKInstall"
-        if (-not $ThisVM.thisParams.ParentSiteServer) {
+        if (-not $ThisVM.thisParams.ParentSiteServer -and -not $ThisVM.hidden) {
 
             $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
             if ($CM -eq "CMTP") {
