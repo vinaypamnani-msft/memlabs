@@ -4887,6 +4887,9 @@ function Add-NewVMForRole {
         "WSUS" {
             $virtualMachine.Memory = "6GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $true
+            $disk = [PSCustomObject]@{"E" = "250GB" }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'contentDir' -Value "E:\WSUS"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
                 if ($test) {
