@@ -34,10 +34,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 6)]
+    [ValidateRange(2, 7)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 6)]
+    [ValidateRange(2, 7)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
@@ -134,6 +134,10 @@ function Write-Phase {
         }
 
         6 {
+            Write-Log "Phase $Phase - Install WSUS" -Activity
+        }
+
+        7 {
             Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
         }
     }
@@ -387,7 +391,7 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 6
+    $maxPhase = 7
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {

@@ -2001,8 +2001,6 @@ class InstallFeatureForSCCM {
 
         if ($IsServerOS) {
 
-
-
             #
             #
             #
@@ -2011,9 +2009,9 @@ class InstallFeatureForSCCM {
             #
             #
 
-
             # Always install BITS
             Install-WindowsFeature BITS, BITS-IIS-Ext
+
             # Always install IIS
             Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
             Install-WindowsFeature Web-WMI, Web-Metabase
@@ -2093,9 +2091,8 @@ class InstallFeatureForSCCM {
             if ($_Role -contains "Service connection point") {
                 #installed .net 4.5 or later
             }
-            if ($_Role -contains "Software update point") {
-                #default iis configuration
-                Install-WindowsFeature web-server
+            if ($_Role -contains "WSUS") {
+                Install-WindowsFeature "UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI"
             }
             if ($_Role -contains "State migration point") {
                 #iis

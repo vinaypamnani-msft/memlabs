@@ -396,10 +396,11 @@ function Get-ConfigurationData {
         "3" { $cd = Get-Phase3ConfigurationData -deployConfig $deployConfig }
         "4" { $cd = Get-Phase4ConfigurationData -deployConfig $deployConfig }
         "5" { $cd = Get-Phase5ConfigurationData -deployConfig $deployConfig }
-        "6" {
-            $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig
+        "6" { $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig }
+        "7" {
+            $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig
             if ($cd) {
-                $autoSnapshotName = "MemLabs Phase6 AutoSnapshot"
+                $autoSnapshotName = "MemLabs AutoSnapshot"
                 $snapshot = $null
                 $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
                 if ($dc) {
@@ -409,7 +410,7 @@ function Get-ConfigurationData {
                 if (-not $snapshot) {
                     $response = Read-YesorNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
                     if (-not ($response -eq "n")) {
-                        Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment "MemLabs Phase6 AutoSnapshot"
+                        Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
                     }
                 }
             }
@@ -582,6 +583,7 @@ function Get-Phase4ConfigurationData {
 
     return $cd
 }
+
 function Get-Phase5ConfigurationData {
     param (
         [object]$deployConfig
@@ -654,7 +656,59 @@ function Get-Phase5ConfigurationData {
     }
     return $cd
 }
+
 function Get-Phase6ConfigurationData {
+    param (
+        [object]$deployConfig
+    )
+
+    $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+
+    # Configuration Data
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName = $dc.vmName
+                Role     = 'DC'
+            }
+        )
+    }
+
+    $NumberOfNodesAdded = 0
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.Role -eq "WSUS" -or $_.installSUP -eq $true }) {
+
+        $global:preparePhasePercent++
+
+        # Filter out workgroup machines
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux") {
+            continue
+        }
+
+        $newItem = @{
+            NodeName = $vm.vmName
+            Role     = "WSUS"
+        }
+        $cd.AllNodes += $newItem
+        if ($vm.Role -ne "DC") {
+            $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+        }
+    }
+
+    $all = @{
+        NodeName                    = "*"
+        PSDscAllowDomainUser        = $true
+        PSDscAllowPlainTextPassword = $true
+    }
+    $cd.AllNodes += $all
+
+    if ($NumberOfNodesAdded -eq 0) {
+        return
+    }
+
+    return $cd
+}
+
+function Get-Phase7ConfigurationData {
     param (
         [object]$deployConfig
     )
