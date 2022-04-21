@@ -930,7 +930,9 @@ function Select-MainMenu {
             $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -in ("DC", "BDC") }
             $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -notin ("DC", "BDC") } | Sort-Object { $_.vmName }
 
-            $global:config.virtualMachines = $virtualMachines
+            if ($virtualMachines) {
+                $global:config.virtualMachines = $virtualMachines
+            }
         }
         foreach ($virtualMachine in $global:config.virtualMachines) {
             if ($null -eq $virtualMachine) {
@@ -1250,13 +1252,21 @@ function Get-NewMachineName {
 
     if ($role -eq "DPMP") {
         $RoleName = $siteCode + $role
-
+        if ($vm.enablePullDP) {
+            $RoleName = $siteCode + "PDPMP"
+        }
         if ($InstallMP -and -not $InstallDP) {
             $RoleName = $siteCode + "MP"
 
         }
         if ($InstallDP -and -not $InstallMP) {
-            $RoleName = $siteCode + "DP"
+            if ($vm.enablePullDP) {
+
+                $RoleName = $siteCode + "PDP"
+            }
+            else {
+                $RoleName = $siteCode + "DP"
+            }
 
         }
 
@@ -1960,7 +1970,7 @@ function Format-Roles {
             "Primary" { $newRoles += "$($role.PadRight($padding))`t[New Primary site (Standalone or join a CAS)]" }
             "Secondary" { $newRoles += "$($role.PadRight($padding))`t[New Secondary site (Attach to Primary)]" }
             "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]" }
-            "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site]" }
+            "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site. Can be a Pull DP]" }
             "DomainMember" { $newRoles += "$($role.PadRight($padding))`t[New VM joined to the domain. Can be a standalone SQL server on server OS]" }
             "SQLAO" { $newRoles += "$($role.PadRight($padding))`t[SQL High Availability Always On Cluster]" }
             "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain. Can be a SQL Server]" }
@@ -1970,6 +1980,7 @@ function Format-Roles {
             "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]" }
             "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]" }
             "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]" }
+            "WSUS" { $newRoles += "$($role.PadRight($padding))`t[Standalone WSUS or SUP for a site]" }
             default { $newRoles += $role }
         }
     }
@@ -3808,24 +3819,26 @@ function Get-AdditionalValidations {
         }
         "vmName" {
 
-            $CASVMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }
-            $PRIVMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
-
             $Passives = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
             $SQLAOs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.OtherNode }
             #This is a SQL Server being renamed.  Lets check if we need to update CAS or PRI
-            if (($Property.Role -eq "DomainMember") -and ($null -ne $Property.sqlVersion)) {
-                foreach ($PRIVM in $PRIVMs) {
-                    if (($null -ne $PRIVM.remoteSQLVM) -and $PRIVM.remoteSQLVM -eq $CurrentValue) {
-                        $PRIVM.remoteSQLVM = $value
-                    }
-                }
-                foreach ($CASVM in $CASVMs) {
-                    if (($null -ne $CASVM.remoteSQLVM) -and ($CASVM.remoteSQLVM -eq $CurrentValue)) {
-                        $CASVM.remoteSQLVM = $value
+            if ($Property.sqlVersion) {
+                foreach ($testvm in $Global:Config.virtualMachines | Where-Object { $_.remoteSQLVM }) {
+                    if ($testvm.remoteSQLVM -eq $CurrentValue) {
+                        $testvm.remoteSQLVM = $value
                     }
                 }
             }
+
+            if ($Property.Role -eq "DPMP") {
+                # pullDPSourceDP
+                foreach ($pullDP in $Global:Config.virtualMachines | Where-Object { $_.pullDPSourceDP }) {
+                    if ($pullDP.pullDPSourceDP -eq $CurrentValue) {
+                        $pullDP.pullDPSourceDP = $value
+                    }
+                }
+            }
+
             if ($Property.Role -eq "FileServer" -and $null -ne $SQLAOs) {
                 foreach ($SQLAO in $SQAOs) {
                     if ($SQLAO.FileServerVM -eq $CurrentValue) {
