@@ -3332,8 +3332,15 @@ Function Set-SiteServerLocalSql {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
     }
-    $virtualMachine.virtualProcs = 8
+    if ($virtualMachine.Role -eq "WSUS") {
+    $virtualMachine.virtualProcs = 4
+    $virtualMachine.memory = "6GB"
+    }
+    else {
+        $virtualMachine.virtualProcs = 8
     $virtualMachine.memory = "10GB"
+    }
+
 
     if ($null -eq $virtualMachine.additionalDisks) {
         $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
@@ -3399,7 +3406,7 @@ Function Get-remoteSQLVM {
 
     $valid = $false
     while ($valid -eq $false) {
-        $additionalOptions = [ordered]@{ "L" = "Local SQL (Installed on Site Server)" }
+        $additionalOptions = [ordered]@{ "L" = "Local SQL (Installed on this Server)" }
 
         $validVMs = $Global:Config.virtualMachines | Where-Object { ($_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion) -or ($_.Role -eq "SQLAO" -and $_.OtherNode ) } | Select-Object -ExpandProperty vmName
 
@@ -3419,8 +3426,15 @@ Function Get-remoteSQLVM {
         }
 
         #if (($validVMs | Measure-Object).Count -eq 0) {
-        $additionalOptions += [ordered] @{ "N" = "Remote SQL (Create a new SQL VM)" }
-        $additionalOptions += [ordered] @{ "A" = "Remote SQL Always On Cluster (Create a new SQL Cluster)" }
+
+        if ($property.Role -eq "WSUS") {
+            $additionalOptions += [ordered] @{ "R" = "Remote SQL" }
+            $additionalOptions += [ordered] @{ "W" = "Use Local WID for SQL" }
+        }
+        else {
+            $additionalOptions += [ordered] @{ "N" = "Remote SQL (Create a new SQL VM)" }
+            $additionalOptions += [ordered] @{ "A" = "Remote SQL Always On Cluster (Create a new SQL Cluster)" }
+        }
         #}
         $result = Get-Menu "Select SQL Options" $($validVMs) $CurrentValue -Test:$false -additionalOptions $additionalOptions -return
 
@@ -3436,11 +3450,24 @@ Function Get-remoteSQLVM {
                 Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name -network:$property.network
                 Set-SiteServerRemoteSQL $property $name
             }
+            "r" {
+                $sqlVMName = select-RemoteSQLMenu -ConfigToModify  $global:config -currentValue $property.remoteSQLVM
+                #$name = $($property.SiteCode) + "SQL"
+                #Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name -network:$property.network
+                Set-SiteServerRemoteSQL $property $sqlVMName
+            }
             "a" {
                 $name1 = $($property.SiteCode) + "SQLAO1"
                 $name2 = $($property.SiteCode) + "SQLAO2"
                 Add-NewVMForRole -Role "SQLAO" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name1 -Name2 $Name2 -network:$property.network -SiteCode $($property.SiteCode)
                 Set-SiteServerRemoteSQL $property $name1
+            }
+            "w" {
+                $virtualMachine.PsObject.Members.Remove('sqlVersion')
+                $virtualMachine.PsObject.Members.Remove('sqlInstanceName')
+                $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
+                $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
+
             }
             Default {
                 if ([string]::IsNullOrWhiteSpace($result)) {
@@ -5323,6 +5350,35 @@ function select-PullDPMenu {
     }
     return $result
 }
+function select-RemoteSQLMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentValue")]
+        [string] $CurrentValue = $null
+    )
+    #Get-PSCallStack | Out-Host
+    $result = $null
+    if ((Get-ListOfPossibleSQLServers -Config $ConfigToModify).Count -eq 0) {
+        $result = "n"
+    }
+
+    $additionalOptions = @{}
+
+        $additionalOptions += @{ "N" = "Create new SQL Server" }
+
+    while ([string]::IsNullOrWhiteSpace($result)) {
+        $result = Get-Menu "Select SQL VM" $(Get-ListOfPossibleSQLServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
+    }
+    switch ($result.ToLowerInvariant()) {
+        "n" {
+            $result = Add-NewVMForRole -Role "SqlServer" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true
+        }
+    }
+    return $result
+}
+
 function select-FileServerMenu {
     [CmdletBinding()]
     param (
@@ -5355,6 +5411,36 @@ function select-FileServerMenu {
         }
     }
     return $result
+}
+
+function Get-ListOfPossibleSQLServers {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $Config = $global:config
+    )
+    $FSList = @()
+    $FS = $Config.virtualMachines | Where-Object { $_.sqlVersion }
+    foreach ($item in $FS) {
+        $FSList += $item.vmName
+    }
+    $domain = $Config.vmOptions.DomainName
+    if ($null -ne $domain) {
+        $FSFromList = get-list -type VM -domain $domain | Where-Object {  $_.sqlVersion  }
+        foreach ($item in $FSFromList) {
+            $FSList += $item.vmName
+        }
+    }
+    else {
+        if ($null -ne $Config ) {
+            Write-Verbose $Config | ConvertTo-Json | Out-Host
+        }
+        else {
+            write-host "Config was null!"
+            Get-PSCallStack | Out-Host
+        }
+    }
+    return $FSList
 }
 function Get-ListOfPossibleFileServers {
     [CmdletBinding()]
@@ -5556,19 +5642,28 @@ function Select-VirtualMachines {
 
                                     if ($virtualMachine.Role -notin ("DC", "BDC")) {
                                         if ($null -eq $virtualMachine.sqlVersion) {
-                                            if ($virtualMachine.Role -eq "Secondary") {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
-                                            }
-                                            else {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
+                                            switch ($virtualMachine.Role) {
+                                                "Secondary" {
+                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
+                                                }
+                                                "WSUS" {
+                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                                }
+                                                Default {
+                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
+                                                }
                                             }
                                         }
                                         else {
-                                            if ($virtualMachine.Role -eq "Secondary") {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
-                                            }
-                                            else {
-                                                if ($virtualMachine.Role -ne "SQLAO") {
+
+                                            switch ($virtualMachine.Role) {
+                                                "Secondary" {
+                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
+                                                }
+                                                "WSUS" {
+                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                                }
+                                                Default {
                                                     $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
                                                 }
                                             }
@@ -5619,7 +5714,7 @@ function Select-VirtualMachines {
                                 }
                             }
                             if ($newValue -eq "S") {
-                                if ($virtualMachine.Role -eq "Primary" -or $virtualMachine.Role -eq "CAS") {
+                                if ($virtualMachine.Role -in ("Primary", "CAS", "WSUS")) {
                                     Get-remoteSQLVM -property $virtualMachine
                                     continue VMLoop
                                 }

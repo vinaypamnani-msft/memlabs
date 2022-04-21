@@ -190,15 +190,10 @@ function New-DeployConfig {
 
                 $item.pullDPSourceDP = $configObject.vmOptions.prefix + $item.pullDPSourceDP
             }
-        }
 
-        $PSVMs = $virtualMachines | Where-Object { $_.role -eq "Primary" }
-        foreach ($PSVM in $PSVMs) {
-            if ($PSVM) {
-                # Add prefix to remote SQL
-                if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-                    $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
-                }
+            if ($item.remoteSQLVM -and -not $item.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+
+                $item.remoteSQLVM = $configObject.vmOptions.prefix + $item.remoteSQLVM
             }
         }
 
@@ -226,16 +221,6 @@ function New-DeployConfig {
                 # Add prefix to FS
                 if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
                     $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
-                }
-            }
-        }
-
-        $CSVMs = $virtualMachines | Where-Object { $_.role -eq "CAS" }
-        if ($CSVMs) {
-            foreach ($CSVM in $CSVMs) {
-                # Add prefix to remote SQL
-                if ($CSVM.remoteSQLVM -and -not $CSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-                    $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
                 }
             }
         }
