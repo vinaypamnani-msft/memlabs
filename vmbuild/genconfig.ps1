@@ -2997,6 +2997,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "FileServer" { return $ServerList }
         "Sqlserver" { return $ServerList }
         "DPMP" { return $ServerList }
+        "WSUS" { return $ServerList }
         "SQLAO" { return $ServerList }
         "DomainMember" {
             if ($vm -and $vm.SqlVersion) {
@@ -3257,7 +3258,7 @@ Function Get-SiteCodeMenu {
         [Object] $property,
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
-        [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
         [Object] $CurrentValue,
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [Object] $ConfigToCheck = $global:config
@@ -3276,7 +3277,7 @@ Function Get-SiteCodeMenu {
         return
     }
     if ($result.ToLowerInvariant() -eq "x") {
-        $property."$name" = $null
+        $property.PsObject.Members.Remove($name)
     }
     else {
         $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -Force
@@ -3811,6 +3812,13 @@ function Get-AdditionalValidations {
                         $Passive.remoteContentLibVM = $value
                     }
                 }
+            }
+        }
+
+        "installSUP" {
+            Get-SiteCodeMenu -property $property -name "siteCode" -ConfigToCheck $Global:Config
+            if (-not $property.siteCode) {
+                $property.installSUP = $false
             }
         }
         "installMP" {
