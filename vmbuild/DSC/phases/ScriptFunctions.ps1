@@ -281,6 +281,49 @@ function Install-MP {
     } until ($mpinstalled -or $installFailure)
 }
 
+function Install-SUP {
+    param (
+        [string]
+        $ServerFQDN,
+        [string]
+        $ServerSiteCode
+    )
+
+    $i = 0
+    $installFailure = $false
+
+    do {
+
+        $i++
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+        if (-not $SystemServer) {
+            Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
+            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 15
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+        }
+
+        $installed = Get-CMSoftwareUpdatePoint -SiteSystemServerName $ServerFQDN
+        if (-not $installed) {
+            Write-DscStatus "MP Role not detected on $ServerFQDN. Adding Management Point role."
+            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-DscStatus "SUP Role detected on $ServerFQDN"
+            $installed = $true
+        }
+
+        if ($i -gt 10) {
+            Write-DscStatus "No Progress for SUP Role after $i tries, Giving up."
+            $installFailure = $true
+        }
+
+        Start-Sleep -Seconds 10
+
+    } until ($installed -or $installFailure)
+}
+
 function Write-ScriptWorkFlowData {
     param (
         [object]
