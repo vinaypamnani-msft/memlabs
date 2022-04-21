@@ -432,6 +432,15 @@ function New-RDCManFileFromHyperV {
 
             }
 
+            if ($vm.Role -eq "WSUS") {
+                if ($vm.installSUP) {
+                    $c | Add-Member -MemberType NoteProperty -Name "SUPForSiteServer" -Value "$($vm.SiteCode)"
+                }
+                else {
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                }
+            }
+
             if ($vm.SqlVersion) {
                 $PrimaryNode = $vm
                 if ($vm.role -eq "SQLAO") {

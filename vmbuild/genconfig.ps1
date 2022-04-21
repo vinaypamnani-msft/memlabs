@@ -1250,6 +1250,15 @@ function Get-NewMachineName {
     #    }
     #}
 
+
+    if ($role -eq "WSUS") {
+        if ($vm.installSUP) {
+            $RoleName = $siteCode + "SUP"
+        }else{
+            $RoleName -eq $role
+        }
+    }
+
     if ($role -eq "DPMP") {
         $RoleName = $siteCode + $role
         if ($vm.enablePullDP) {
