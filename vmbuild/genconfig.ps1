@@ -4884,6 +4884,24 @@ function Add-NewVMForRole {
     $existingDPMP = $null
     $NewFSServer = $null
     switch ($Role) {
+        "WSUS" {
+            $virtualMachine.Memory = "6GB"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $true
+            if (-not $SiteCode) {
+                $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
+                if ($test) {
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
+                }
+                else {
+                    Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
+                }
+            }
+            else {
+                #write-log "Adding new DPMP for sitecode $newSiteCode"
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
+            }
+
+        }
         "SqlServer" {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"

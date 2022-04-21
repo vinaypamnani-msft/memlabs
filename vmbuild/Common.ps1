@@ -2936,7 +2936,8 @@ function Set-SupportedOptions {
         "WorkgroupMember",
         "InternetClient",
         "AADClient",
-        "OSDClient"
+        "OSDClient",
+        "WSUS"
 
     )
 
@@ -2953,7 +2954,8 @@ function Set-SupportedOptions {
         "InternetClient",
         "AADClient",
         "OSDClient",
-        "SQLAO"
+        "SQLAO",
+        "WSUS"
     )
 
     $cmVersions += Get-CMVersions
