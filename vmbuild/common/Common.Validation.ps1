@@ -830,11 +830,11 @@ function Test-ValidRoleDPMP {
     }
 
     if ($VM.pullDPSourceDP) {
-       $source = Get-List2 -DeployConfig $ConfigObject | Where-Object {$_.vmName -eq $VM.pullDPSourceDP} {
-            if ($VM.SiteCode -ne $source.SiteCode) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which does not match Source DP [$($source.vmName)] sitecode [$($source.siteCode)]" -ReturnObject $ReturnObject -Warning
-            }
+        $source = Get-List2 -DeployConfig $ConfigObject | Where-Object { $_.vmName -eq $VM.pullDPSourceDP }
+        if ($VM.SiteCode -ne $source.SiteCode) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which does not match Source DP [$($source.vmName)] sitecode [$($source.siteCode)]" -ReturnObject $ReturnObject -Warning
         }
+
     }
 
 }
