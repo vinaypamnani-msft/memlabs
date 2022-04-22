@@ -44,7 +44,7 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
     return $false
 }
 
-$topSite = Get-CMSite | Where-Object {$_.ReportingSiteCode -eq "" }
+$topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
 $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
 $SUPs = @()
@@ -105,69 +105,63 @@ $classificationsToAdd = @("Critical Updates", "Security Updates", "Updates")
 if ($configureSUP) {
     Write-DscStatus "Configuring SUP, and adding Products [$($productsToAdd -join ',')] and Classifications [$($classificationsToAdd -join ',')]"
     $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2022/1/1 00:00:00"
-    try {
-        if ($topSite) {
-            Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent to set classifications"
-            Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
-            Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent to set products"
-            Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
+    $attempts = 0
+    $configured = $false
+    do {
+        try {
+            if ($topSite) {
+                $attempts++
+                Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent. Attempt #$attempt"
+                Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
+                $configured = $true
+            }
         }
-    }
-    catch {
-        # Run sync to refresh categories, wait for sync, then try again?
-        Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products."
-        Sync-CMSoftwareUpdate
-        Start-Sleep -Seconds 120 # Sync waits for 2 mins anyway, so sleep before even checking status
-        $finished = $timedOut = $false
-        $i = 0
-        do {
-            $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" }
-
-            if ($syncState.LastSyncState -eq "" -or $null -eq $syncState.LastSyncState) {
-                Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+        catch {
+            # Run sync to refresh categories, wait for sync, then try again?
+            if (-not $syncTimeout) {
+                Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products."
                 Sync-CMSoftwareUpdate
-                Start-Sleep -Seconds 120
-            }
-
-            Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
-            if ($syncState.LastSyncState -eq 6702) {
-                $finished = $true
-            }
-
-            if (-not $finished) {
-                $i++
-                Start-Sleep -Seconds 60
-            }
-
-            if ($i -gt 15) {
-                $timedOut = $true
-                Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
-            }
-        } until ($finished -or $timedOut)
-
-        if ($finished) {
-            $i = 0
-            Write-DscStatus "SUM Sync finished. Running Set-CMSoftwareUpdatePointComponent again."
-            $configured = $false
-            do {
-                try {
-                    Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
-                    $configured = $true
-                }
-                catch {
-                    $i++
-                    Start-Sleep -Seconds 20
-                }
-            } until ($configured -or $i -gt 10)
-
-            if ($configured) {
-                Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync."
-                Start-Sleep -Seconds 30
-                Sync-CMSoftwareUpdate
+                Start-Sleep -Seconds 120 # Sync waits for 2 mins anyway, so sleep before even checking status
             }
             else {
-                Write-DscStatus "SUM Component Configuration failed."
+                Write-DscStatus "Timed out while waiting for sync to finish. Monitoring again..."
             }
+            $syncFinished = $syncTimeout = $false
+            $i = 0
+            do {
+                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" }
+
+                if ($syncState.LastSyncState -eq "" -or $null -eq $syncState.LastSyncState) {
+                    Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+                    Sync-CMSoftwareUpdate
+                    Start-Sleep -Seconds 120
+                }
+
+                Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
+                if ($syncState.LastSyncState -eq 6702) {
+                    $syncFinished = $true
+                    Write-DscStatus "SUM Sync finished."
+                }
+
+                if (-not $syncFinished) {
+                    $i++
+                    Start-Sleep -Seconds 60
+                }
+
+                if ($i -gt 15) {
+                    $syncTimeout = $true
+                    Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
+                }
+            } until ($syncFinished -or $syncTimeout)
         }
+    } until ($configured -or $attempt -ge 5)
+
+    if ($configured) {
+        Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync."
+        Start-Sleep -Seconds 30
+        Sync-CMSoftwareUpdate
+    }
+    else {
+        Write-DscStatus "SUM Component Configuration failed."
     }
 }
