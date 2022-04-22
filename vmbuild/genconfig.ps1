@@ -1254,7 +1254,8 @@ function Get-NewMachineName {
     if ($role -eq "WSUS") {
         if ($vm.installSUP) {
             $RoleName = $siteCode + "SUP"
-        }else{
+        }
+        else {
             $RoleName -eq $role
         }
     }
@@ -3869,6 +3870,26 @@ function Get-AdditionalValidations {
             if (-not $property.siteCode) {
                 $property.installSUP = $false
             }
+            else {
+                if ($property.Role -ne "WSUS") {
+                    if ($value -eq $true) {
+                        $property | Add-Member -MemberType NoteProperty -Name "wsusContentDir" -Value "E:\WSUS" -Force
+                        if ($null -eq $property.additionalDisks) {
+                            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
+                            $property | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                        }
+                        else {
+
+                            if ($null -eq $property.additionalDisks.E) {
+                                $property.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "250GB"
+                            }
+                        }
+                    }
+                    else {
+                        $property.PsObject.Members.Remove("wsusContentDir")
+                    }
+                }
+            }
         }
         "installMP" {
             if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -eq "Secondary") {
@@ -5093,7 +5114,6 @@ function Add-NewVMForRole {
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS"
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
@@ -5129,7 +5149,6 @@ function Add-NewVMForRole {
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS"
 
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
@@ -5150,6 +5169,7 @@ function Add-NewVMForRole {
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             if (-not $test -and (-not $network)) {
@@ -5464,7 +5484,7 @@ function Get-ListOfPossibleSQLServers {
     $FS = $Config.virtualMachines | Where-Object { $_.sqlVersion }
     foreach ($item in $FS) {
         $existing = $null
-        $existing = $Config.virtualMachines | Where-Object  { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
+        $existing = $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
         if (-not $existing) {
             $SQLList += $item.vmName
         }
@@ -5474,7 +5494,7 @@ function Get-ListOfPossibleSQLServers {
         $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.sqlVersion }
         foreach ($item in $FSFromList) {
             $existing = $null
-            $existing = get-list -type VM -domain $domain | Where-Object  { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
+            $existing = get-list -type VM -domain $domain | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
             $existing += $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
             if (-not $existing) {
                 $SQLList += $item.vmName

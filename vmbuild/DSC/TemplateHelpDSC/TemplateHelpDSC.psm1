@@ -3037,21 +3037,23 @@ class ConfigureWSUS {
 
     [void] Set() {
         try {
-            # Create directory for WSUS storage
-            $wsusContentPath = 'C:\wsus'
-            New-Item -Path $wsusContentPath -ItemType Directory
 
-            # Populate Sql server/instance details
-            $sqlInstance = '' # Leave blank if default instance MSSQLSERVER
-            $sqlServerName = $ENV:COMPUTERNAME
+            try {
+                New-Item -Path $this.ContentPath -ItemType Directory -Force
+            }
+            catch {}
 
-            $sqlInstanceName = "$sqlServerName\$sqlInstance"
-            $sqlInstanceName = $sqlInstanceName.TrimEnd('\')
+            try {
+                New-Alias -Name WsusUtil -Value 'C:\Program Files\Update Services\Tools\WsusUtil.exe'
+            }
+            catch {}
 
-            # Configure WSUS to use the WID in your specified location
-            New-Alias -Name WsusUtil -Value 'C:\Program Files\Update Services\Tools\WsusUtil.exe'
-
-            WsusUtil postinstall SQL_INSTANCE_NAME=$this.SqlServer CONTENT_DIR=$this.ContentPath
+            if ($this.SqlServer) {
+                WsusUtil postinstall SQL_INSTANCE_NAME=$this.SqlServer CONTENT_DIR=$this.ContentPath
+            }
+            else {
+                WsusUtil postinstall CONTENT_DIR=$this.ContentPath
+            }
         }
         catch {
             Write-Verbose "Failed to Configure WSUS"
@@ -3062,21 +3064,17 @@ class ConfigureWSUS {
     [bool] Test() {
 
         try {
-            $_ClusterName = $this.ClusterName
-            $badNodes = foreach ($c in Get-ClusterResource -Cluster $_ClusterName) {
-                $c | Get-ClusterOwnerNode | Where-Object { $_.OwnerNodes.Count -ne 2 }
+            $wsus = get-WsusServer
+            if ($wsus) {
+                return $true
             }
 
-            if ($badNodes.Count -gt 0) {
-                return $false
-            }
-
-            return $true
+            return $false
         }
         catch {
-            Write-Verbose "Failed to Find Cluster Resources."
+            Write-Verbose "Failed to Find WSUS Server"
             Write-Verbose "$_"
-            return $true
+            return $false
         }
     }
 
