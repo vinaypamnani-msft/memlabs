@@ -957,7 +957,7 @@ function ConvertTo-DeployConfigEx {
             $cm_admin = "$DNAME\$DomainAdminName"
             $vm_admin = "$DNAME\vmbuildadmin"
             $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, $vm_admin, 'BUILTIN\Administrators')
-            $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName -and $_.vmName -ne $thisVM.vmName}
+            $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName -and $_.role -in ("Primary", "Secondary", "Cas")}
 
             if (-not $SiteServerVM) {
                 $OtherNode = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $thisVM.vmName }
@@ -968,7 +968,7 @@ function ConvertTo-DeployConfigEx {
             }
 
             if (-not $SiteServerVM) {
-                $SiteServerVM = Get-List -Type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
+                $SiteServerVM = Get-List -Type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName -and $_.role -in ("Primary", "Secondary", "Cas")}
             }
             if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
                 $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
@@ -976,7 +976,7 @@ function ConvertTo-DeployConfigEx {
             if (-not $SiteServerVM -and $thisVM.Role -in "Primary", "CAS") {
                 $SiteServerVM = $thisVM
             }
-            if ($SiteServerVM) {
+            if ($SiteServerVM -and $SiteServerVM.SiteCode) {
                 Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
                 $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.siteCode -type VM
                 if ($passiveNodeVM) {

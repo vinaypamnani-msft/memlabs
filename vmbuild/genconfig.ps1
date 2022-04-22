@@ -4850,7 +4850,7 @@ function get-VMString {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
                 $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $virtualMachine.vmName }
 
-                if ($siteVM) {
+                if ($siteVM -and $siteVM.SiteCode) {
                     $color = $ColorMap[$($siteVM.SiteCode)]
                 }
 
