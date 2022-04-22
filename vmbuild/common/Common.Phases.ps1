@@ -728,7 +728,7 @@ function Get-Phase7ConfigurationData {
     if ($deployConfig.cmOptions.Install -ne $false) {
 
         $fsVMsAdded = @()
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP") }) {
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP", "WSUS") }) {
 
             $global:preparePhasePercent++
 
@@ -758,8 +758,10 @@ function Get-Phase7ConfigurationData {
                     NodeName = $remoteSQL.vmName
                     Role     = "SqlServer"
                 }
-                $cd.AllNodes += $newItem
-                $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                if ($cd.AllNodes.NodeName -notcontains $($newItem.NodeName)) {
+                    $cd.AllNodes += $newItem
+                    $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                }
                 if ($remoteSQL.OtherNode) {
 
                     if ($fsVMsAdded -notcontains $remoteSQL.fileServerVM) {
@@ -776,8 +778,10 @@ function Get-Phase7ConfigurationData {
                         NodeName = $remoteSQL.OtherNode
                         Role     = "SqlServer"
                     }
-                    $cd.AllNodes += $newItem
-                    $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                    if ($cd.AllNodes.NodeName -notcontains $($newItem.NodeName)) {
+                        $cd.AllNodes += $newItem
+                        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                    }
                 }
             }
         }

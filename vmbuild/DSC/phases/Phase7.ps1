@@ -43,6 +43,14 @@ Configuration Phase7
         }
     }
 
+    Node $AllNodes.Where{ $_.Role -eq 'WSUS' }.NodeName
+    {
+        WriteStatus Complete {
+            DependsOn = $nextDepend
+            Status    = "Complete!"
+        }
+    }
+
     Node $AllNodes.Where{ $_.Role -eq 'SqlServer' }.NodeName
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }

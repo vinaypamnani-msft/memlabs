@@ -5493,8 +5493,8 @@ function Get-ListOfPossibleSQLServers {
     if ($null -ne $domain) {
         $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.sqlVersion }
         foreach ($item in $FSFromList) {
-            $existing = $null
-            $existing = get-list -type VM -domain $domain | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
+            $existing = @()
+            $existing += get-list -type VM -domain $domain | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
             $existing += $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
             if (-not $existing) {
                 $SQLList += $item.vmName
