@@ -3045,20 +3045,13 @@ class ConfigureWSUS {
                 write-verbose ("$_")
             }
 
-            try {
-                New-Alias -Name WsusUtil -Value 'C:\Program Files\Update Services\Tools\WsusUtil.exe'
-            }
-            catch {
-                write-verbose ("$_")
-            }
-
             if ($this.SqlServer) {
-                write-verbose ("running:  WsusUtil postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
-                WsusUtil postinstall SQL_INSTANCE_NAME=$this.SqlServer CONTENT_DIR=$this.ContentPath
+                write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
+                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)
             }
             else {
-                write-verbose ("running:  WsusUtil postinstall CONTENT_DIR=$($this.ContentPath)")
-                WsusUtil postinstall CONTENT_DIR=$this.ContentPath
+                write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)")
+                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)
             }
         }
         catch {
