@@ -5038,7 +5038,7 @@ function Add-NewVMForRole {
             $virtualMachine.Memory = "6GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $true
             $disk = [PSCustomObject]@{"E" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'contentDir' -Value "E:\WSUS"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
@@ -5093,6 +5093,7 @@ function Add-NewVMForRole {
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS"
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
@@ -5128,6 +5129,8 @@ function Add-NewVMForRole {
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS"
+
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
@@ -5886,15 +5889,15 @@ function Select-VirtualMachines {
                                     }
                                 }
 
-                                if ($virtualMachine.contentDir) {
+                                if ($virtualMachine.wsusContentDir) {
                                     $neededDisks = 0
-                                    if ($virtualMachine.contentDir.StartsWith("E:")) {
+                                    if ($virtualMachine.wsusContentDir.StartsWith("E:")) {
                                         $neededDisks = 1
                                     }
-                                    if ($virtualMachine.contentDir.StartsWith("F:")) {
+                                    if ($virtualMachine.wsusContentDir.StartsWith("F:")) {
                                         $neededDisks = 2
                                     }
-                                    if ($virtualMachine.contentDir.StartsWith("G:")) {
+                                    if ($virtualMachine.wsusContentDir.StartsWith("G:")) {
                                         $neededDisks = 3
                                     }
                                     if ($diskscount -le $neededDisks) {

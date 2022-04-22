@@ -59,7 +59,7 @@ configuration Phase6
         }
 
         WriteStatus ConfigureWSUS {
-            Status = "Configuring WSUS to use ContentDir [$($thisVM.ContentDir)] and DB [$sqlServer]"
+            Status = "Configuring WSUS to use ContentDir [$($thisVM.wsusContentDir)] and DB [$sqlServer]"
         }
 
         if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
@@ -67,7 +67,7 @@ configuration Phase6
             {
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
                 Ensure     = 'Present'
-                ContentDir = $thisVM.ContentDir
+                ContentDir = $thisVM.wsusContentDir
                 SqlServer  = $sqlServer
                 PsDscRunAsCredential = $Admincreds
             }
@@ -77,8 +77,7 @@ configuration Phase6
             {
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
                 Ensure     = 'Present'
-                ContentDir = $thisVM.ContentDir
-                PsDscRunAsCredential = $Admincreds
+                ContentDir = $thisVM.wsusContentDir
             }
         }
 
