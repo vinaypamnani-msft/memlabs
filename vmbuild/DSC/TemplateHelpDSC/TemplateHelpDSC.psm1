@@ -3037,27 +3037,41 @@ class ConfigureWSUS {
 
     [void] Set() {
         try {
-
+            write-verbose ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
                 New-Item -Path $this.ContentPath -ItemType Directory -Force
             }
-            catch {}
+            catch {
+                write-verbose ("$_")
+            }
 
             try {
                 New-Alias -Name WsusUtil -Value 'C:\Program Files\Update Services\Tools\WsusUtil.exe'
             }
-            catch {}
+            catch {
+                write-verbose ("$_")
+            }
 
             if ($this.SqlServer) {
+                write-verbose ("running:  WsusUtil postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
                 WsusUtil postinstall SQL_INSTANCE_NAME=$this.SqlServer CONTENT_DIR=$this.ContentPath
             }
             else {
+                write-verbose ("running:  WsusUtil postinstall CONTENT_DIR=$($this.ContentPath)")
                 WsusUtil postinstall CONTENT_DIR=$this.ContentPath
             }
         }
         catch {
             Write-Verbose "Failed to Configure WSUS"
             Write-Verbose "$_"
+        }
+        try {
+            $wsus = get-WsusServer
+        }
+        catch {
+            Write-Verbose "Failed to Configure WSUS"
+            Write-Verbose "$_"
+            throw
         }
     }
 
