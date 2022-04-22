@@ -2797,6 +2797,7 @@ class ADServicePrincipalName2 {
     }
 }
 
+
 [DscResource()]
 class ActiveDirectorySPN {
     [DscProperty(Key)]
@@ -3021,6 +3022,65 @@ class ActiveDirectorySPN {
     }
 
     [ActiveDirectorySPN] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class ConfigureWSUS {
+    [DscProperty(Key)]
+    [string] $ContentPath
+
+    [DscProperty()]
+    [string]$SqlServer
+
+    [void] Set() {
+        try {
+            # Create directory for WSUS storage
+            $wsusContentPath = 'C:\wsus'
+            New-Item -Path $wsusContentPath -ItemType Directory
+
+            # Populate Sql server/instance details
+            $sqlInstance = '' # Leave blank if default instance MSSQLSERVER
+            $sqlServerName = $ENV:COMPUTERNAME
+
+            $sqlInstanceName = "$sqlServerName\$sqlInstance"
+            $sqlInstanceName = $sqlInstanceName.TrimEnd('\')
+
+            # Configure WSUS to use the WID in your specified location
+            New-Alias -Name WsusUtil -Value 'C:\Program Files\Update Services\Tools\WsusUtil.exe'
+
+            WsusUtil postinstall SQL_INSTANCE_NAME=$this.SqlServer CONTENT_DIR=$this.ContentPath
+        }
+        catch {
+            Write-Verbose "Failed to Configure WSUS"
+            Write-Verbose "$_"
+        }
+    }
+
+    [bool] Test() {
+
+        try {
+            $_ClusterName = $this.ClusterName
+            $badNodes = foreach ($c in Get-ClusterResource -Cluster $_ClusterName) {
+                $c | Get-ClusterOwnerNode | Where-Object { $_.OwnerNodes.Count -ne 2 }
+            }
+
+            if ($badNodes.Count -gt 0) {
+                return $false
+            }
+
+            return $true
+        }
+        catch {
+            Write-Verbose "Failed to Find Cluster Resources."
+            Write-Verbose "$_"
+            return $true
+        }
+    }
+
+    [ConfigureWSUS] Get() {
         return $this
     }
 

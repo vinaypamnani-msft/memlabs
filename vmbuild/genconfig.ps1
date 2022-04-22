@@ -6201,7 +6201,7 @@ if ($InternalUseOnly.IsPresent) {
     if ($domainExists -and ($return.DeployNow)) {
         write-host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "This configuration will make modifications to $($Global:Config.vmOptions.DomainName)"
         Write-OrangePoint -NoIndent "Without a snapshot, if something fails it may not be possible to recover"
-        $response = Read-YesorNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (y/N)" -HideHelp -Default "n"
+        $response = Read-YesorNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (y/N)" -HideHelp -Default "n" -timeout 30
         if (-not [String]::IsNullOrWhiteSpace($response) -and $response.ToLowerInvariant() -eq "y") {
             Select-StopDomain -domain $Global:Config.vmOptions.DomainName -response "C"
             $filename = $splitpath = Split-Path -Path $return.ConfigFileName -Leaf

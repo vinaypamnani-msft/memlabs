@@ -32,10 +32,10 @@ configuration Phase6
         if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
             $wsusFeatures += "UpdateServices-DB"
             if ($thisVM.remoteSQLVM) {
-                $sqlServer = $thisVM.remoteSQLVM + "." + $DomainName
+                $sqlServer = $thisVM.remoteSQLVM
             }
             else {
-                $sqlServer = $thisVM.vmName + "." + $DomainName
+                $sqlServer = $thisVM.vmName
             }
 
             if ($thisVM.sqlInstanceName -and $thisVM.sqlInstanceName -ne "MSSQLSERVER") {
@@ -54,7 +54,7 @@ configuration Phase6
         {
             Name                 = $wsusFeatures
             Ensure               = 'Present'
-            IncludeAllSubFeature = $true
+            IncludeAllSubFeature = $false
             DependsOn            = "[WriteStatus]UpdateServices"
         }
 
@@ -69,6 +69,7 @@ configuration Phase6
                 Ensure     = 'Present'
                 ContentDir = $thisVM.ContentDir
                 SqlServer  = $sqlServer
+                PsDscRunAsCredential = $Admincreds
             }
         }
         else {
@@ -77,6 +78,7 @@ configuration Phase6
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
                 Ensure     = 'Present'
                 ContentDir = $thisVM.ContentDir
+                PsDscRunAsCredential = $Admincreds
             }
         }
 

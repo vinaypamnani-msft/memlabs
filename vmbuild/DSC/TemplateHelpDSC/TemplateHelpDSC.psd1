@@ -45,7 +45,8 @@ DscResourcesToExport = @(
     'ActiveDirectorySPN',
     'ClusterRemoveUnwantedIPs',
     'ClusterSetOwnerNodes',
-    'ADServicePrincipalName2'
+    'ADServicePrincipalName2',
+    'ConfigureWSUS'
 
 )
 
