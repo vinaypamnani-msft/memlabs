@@ -1,3 +1,4 @@
+# ScriptFunctions.ps1
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
 $global:StatusLog = "C:\staging\DSC\InstallCMLog.txt"
 
