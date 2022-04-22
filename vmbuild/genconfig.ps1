@@ -3162,14 +3162,23 @@ Function Get-SiteCodeForWSUS {
 
 
     foreach ($item in $topLevelSiteServers) {
-        $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
 
         $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $item.SiteCode }
+
         if ($existingSUP) {
+            if ($item.role -ne "CAS") {
+                # If we have an existingSUP on the top level, add the site code only if its a Primary Top Level Site
+                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
+            }
+            # We have an existingSUP on the top level.. Add all children of the top level site
             $childSiteServers = ($list2 | where-object { $_.role -in ("CAS", "Primary") -and $_.ParentSiteCode -eq $item.SiteCode })
             foreach ($item2 in $childSiteServers) {
                 $sitecodes += "$($item2.SiteCode) ($($item2.vmName), $($item2.Network) Parent: $($item.SiteCode))"
             }
+        }
+        else {
+            # We dont have an existing SUP on the top level.. Only add the TopLevel as options. No Children Allowed.
+            $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
         }
     }
 
