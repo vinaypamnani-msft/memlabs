@@ -379,6 +379,22 @@ function Add-ExistingVMsToDeployConfig {
             }
         }
     }
+
+    $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" }
+    foreach ($sup in $wsus) {
+        if ($sup.InstallSUP) {
+            $ss = Get-SiteServerForSiteCode -deployConfig $config -sitecode $sup.siteCode -type VM -SmartUpdate:$false
+            if ($ss) {
+                Add-ExistingVMToDeployConfig -vmName $ss.vmName -configToModify $config
+                if ($ss.RemoteSQLVM) {
+                    Add-RemoteSQLVMToDeployConfig -vmName $ss.RemoteSQLVM -configToModify $config
+                }
+            }
+        }
+        if ($sup.RemoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $sup.RemoteSQLVM -configToModify $config
+        }
+    }
 }
 
 function Add-ExistingVMToDeployConfig {
