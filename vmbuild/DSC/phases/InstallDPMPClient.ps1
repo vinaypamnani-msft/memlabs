@@ -275,6 +275,7 @@ if ($configureSUP) {
 
             if ($configured) {
                 Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync."
+                Start-Sleep -Seconds 30
                 Sync-CMSoftwareUpdate
             }
             else {
