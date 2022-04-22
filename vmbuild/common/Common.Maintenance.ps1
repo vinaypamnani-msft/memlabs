@@ -7,11 +7,14 @@ function Start-Maintenance {
         [object]$DeployConfig
     )
 
-    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
+    $applyNewOnly = $false
     if ($DeployConfig) {
+        $allVMs =$DeployConfig.virtualMachines | Where-Object { -not $_.hidden }
         $vmsNeedingMaintenance = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden } | Sort-Object vmName
+        $applyNewOnly = $true
     }
     else {
+        $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
         $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     }
 
@@ -42,12 +45,7 @@ function Start-Maintenance {
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
         $i++
         Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
-        if ($DeployConfig) {
-            $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNew
-        }
-        else {
-            $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyExisting
-        }
+        $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
         if ($worked) { $countWorked++ } else {
             $failedDomains += $vm.domain
             $countFailed++
@@ -77,12 +75,7 @@ function Start-Maintenance {
             $countSkipped++
         }
         else {
-            if ($DeployConfig) {
-                $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNew
-            }
-            else {
-                $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyExisting
-            }
+            $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
             if ($worked) { $countWorked++ } else { $countFailed++ }
         }
     }
@@ -145,10 +138,8 @@ function Start-VMMaintenance {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VMName")]
         [object] $VMName,
-        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to existing")]
-        [switch] $ApplyExisting,
         [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
-        [switch] $ApplyNew
+        [switch] $ApplyNewOnly
     )
 
     $vmNoteObject = Get-VMNote -VMName $VMName
@@ -176,15 +167,14 @@ function Start-VMMaintenance {
 
     Write-Log "$VMName`: VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion. Performing maintenance..." -Highlight
 
-    if ($ApplyExisting.IsPresent) {
+    if ($ApplyNewOnly.IsPresent) {
+        $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
+    }
+    else {
         $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
     }
 
-    if ($ApplyNew.IsPresent) {
-        $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
-    }
-
-    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes
+    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -ApplyNewOnly:$ApplyNewOnly
 
     if ($worked) {
         Write-Log "$VMName`: VM maintenance completed successfully." -Success
@@ -205,7 +195,9 @@ function Start-VMFixes {
         [Parameter(Mandatory = $true, HelpMessage = "VMFixes")]
         [object] $VMFixes,
         [Parameter(Mandatory = $false, HelpMessage = "SkipVMShutdown")]
-        [switch] $SkipVMShutdown
+        [switch] $SkipVMShutdown,
+        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
+        [switch] $ApplyNewOnly
     )
 
     Write-Log "$VMName`: Applying fixes to the virtual machine." -Verbose
@@ -214,7 +206,7 @@ function Start-VMFixes {
     $toStop = @()
 
     foreach ($vmFix in $VMFixes | Sort-Object FixVersion ) {
-        $status = Start-VMFix -vmName $VMName -vmFix $vmFix
+        $status = Start-VMFix -vmName $VMName -vmFix $vmFix -ApplyNewOnly:$ApplyNewOnly
         $toStop += $status.VMsToStop
         $success = $status.Success
         if (-not $success) {
@@ -243,7 +235,9 @@ function Start-VMFix {
         [Parameter(Mandatory = $true, HelpMessage = "vmName")]
         [string] $vmName,
         [Parameter(Mandatory = $true, HelpMessage = "vmFix")]
-        [object] $vmFix
+        [object] $vmFix,
+        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
+        [switch] $ApplyNewOnly
     )
 
     $return = [PSCustomObject]@{
@@ -259,7 +253,7 @@ function Start-VMFix {
     $fixName = $vmFix.FixName
     $fixVersion = $vmFix.FixVersion
 
-    if ($vmNote.memLabsVersion -ge $fixVersion) {
+    if ($vmNote.memLabsVersion -ge $fixVersion -and -not $ApplyNewOnly.IsPresent) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) has been applied already."
         $return.Success = $true
         return $return

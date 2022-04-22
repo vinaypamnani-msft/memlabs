@@ -231,15 +231,6 @@ $global:VM_Create = {
         # This gets set to true later, if a required fix failed to get applied. When version isn't updated, VM Maintenance could attempt fix again.
         $skipVersionUpdate = $false
 
-        $Fix_DefaultProfile = {
-            $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
-            $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
-            $path3 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat"
-            if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse | Out-Null }
-            if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse | Out-Null }
-            if (Test-Path $path3) { Remove-Item -Path $path3 -Force | Out-Null }
-        }
-
         $Fix_LocalAccount = {
             Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
         }
@@ -263,12 +254,6 @@ $global:VM_Create = {
         }
 
         if ($createVM) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile"
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
-                $skipVersionUpdate = $true
-            }
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Updating Password Expiration for vmbuildadmin account."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix Local Account Password Expiration"
