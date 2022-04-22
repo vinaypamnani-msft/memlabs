@@ -694,6 +694,7 @@ function ConvertTo-DeployConfigEx {
         $thisParams = [pscustomobject]@{}
         if ($thisVM.domainUser) {
             $accountLists.LocalAdminAccounts += $thisVM.domainUser
+            $accountLists.SQLSysAdminAccounts += $deployConfig.vmOptions.domainNetBiosName + "\" +$thisVM.domainUser
         }
 
         #Get the current network from get-list or config
@@ -966,6 +967,9 @@ function ConvertTo-DeployConfigEx {
             $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, $vm_admin, 'BUILTIN\Administrators')
             $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName}
 
+            if ($SiteServerVM) {
+                Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+            }
             if (-not $SiteServerVM) {
                 $OtherNode = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $thisVM.vmName }
 
@@ -977,15 +981,17 @@ function ConvertTo-DeployConfigEx {
             if (-not $SiteServerVM) {
                 $SiteServerVM = Get-List -Type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
             }
+
+            if ($SiteServerVM) {
+                Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+            }
             if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
                 $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
             }
             if (-not $SiteServerVM -and $thisVM.Role -in "Primary", "CAS") {
                 $SiteServerVM = $thisVM
             }
-            if ($SiteServerVM) {
-                Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-            }
+
             if ($SiteServerVM -and $SiteServerVM.SiteCode) {
                 Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
                 $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.siteCode -type VM
