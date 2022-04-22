@@ -819,6 +819,17 @@ function ConvertTo-DeployConfigEx {
                     }
                 }
             }
+            "WSUS" {
+                if ($thisVM.InstallSUP) {
+                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                    Add-VMToAccountLists -thisVM $thisVM -VM $SS -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
+
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
+                    if ($PassiveVM) {
+                        Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
+                    }
+                }
+            }
             "CAS" {
                 $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $thisVM.siteCode }
                 if ($primaryVM) {
@@ -946,7 +957,7 @@ function ConvertTo-DeployConfigEx {
             $cm_admin = "$DNAME\$DomainAdminName"
             $vm_admin = "$DNAME\vmbuildadmin"
             $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, $vm_admin, 'BUILTIN\Administrators')
-            $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
+            $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName -and $_.vmName -ne $thisVM.vmName}
 
             if (-not $SiteServerVM) {
                 $OtherNode = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $thisVM.vmName }
