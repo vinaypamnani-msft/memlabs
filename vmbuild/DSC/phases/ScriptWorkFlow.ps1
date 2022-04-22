@@ -191,6 +191,9 @@ if ($scenario -eq "Hierarchy") {
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
 
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSUP.ps1"
+        . $ScriptFile $ConfigFilePath $LogPath
+
     }
     elseif ($CurrentRole -eq "Primary") {
 
