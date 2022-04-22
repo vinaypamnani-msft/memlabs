@@ -121,13 +121,13 @@ if ($configureSUP) {
         $i = 0
         do {
             $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" }
-            Write-DscStatus "Waiting for SUM Sync to finish. Current State: $($syncState.LastSyncState)"
+            Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
             if ($syncState.LastSyncState -eq 6702) {
                 $finished = $true
             }
 
             if ($syncState.LastSyncState -eq "" -or $null -eq $syncState.LastSyncState) {
-                Write-DscStatus "SUM Sync not detected as running. Running Sync to refresh products."
+                Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
                 Sync-CMSoftwareUpdate
                 Start-Sleep -Seconds 120
             }
