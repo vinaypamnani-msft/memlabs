@@ -63,27 +63,25 @@ configuration Phase6
         }
 
         if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
-            UpdateServicesServer UpdateServices
+            ConfigureWSUS UpdateServices
             {
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
-                Ensure     = 'Present'
                 ContentDir = $thisVM.wsusContentDir
                 SqlServer  = $sqlServer
                 PsDscRunAsCredential = $Admincreds
             }
         }
         else {
-            UpdateServicesServer UpdateServices
+            ConfigureWSUS UpdateServices
             {
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
-                Ensure     = 'Present'
                 ContentDir = $thisVM.wsusContentDir
             }
         }
 
         WriteStatus Complete {
             Status    = "Complete!"
-            DependsOn = "[UpdateServicesServer]UpdateServices"
+            DependsOn = "[ConfigureWSUS]UpdateServices"
         }
     }
 
