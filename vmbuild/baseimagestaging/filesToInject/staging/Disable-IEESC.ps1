@@ -9,6 +9,6 @@ if (-not (Test-Path $flagPath)) {
     Rundll32 iesetup.dll, IEHardenAdmin, 1, True
     Set-ItemProperty -Path $AdminKey -Name "IsInstalled" -Value 0 -Force
     Set-ItemProperty -Path $UserKey -Name "IsInstalled" -Value 0 -Force
-    Stop-Process -Name Explorer -Force -ErrorAction SilentlyContinue
+    # Stop-Process -Name Explorer -Force -ErrorAction SilentlyContinue
     "IE Enhanced Security Configuration (ESC) has been disabled." | Out-File $flagPath -Force
 }
