@@ -66,7 +66,7 @@ configuration Phase6
             ConfigureWSUS UpdateServices
             {
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
-                ContentDir = $thisVM.wsusContentDir
+                ContentPath = $thisVM.wsusContentDir
                 SqlServer  = $sqlServer
                 PsDscRunAsCredential = $Admincreds
             }
@@ -75,7 +75,7 @@ configuration Phase6
             ConfigureWSUS UpdateServices
             {
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
-                ContentDir = $thisVM.wsusContentDir
+                ContentPath = $thisVM.wsusContentDir
             }
         }
 
