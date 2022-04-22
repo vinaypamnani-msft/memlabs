@@ -1,4 +1,4 @@
-#InstallSUP.PS1
+#InstallSUP.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

@@ -181,6 +181,9 @@ if ($scenario -eq "Standalone") {
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
     . $ScriptFile $ConfigFilePath $LogPath
 
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSUP.ps1"
+    . $ScriptFile $ConfigFilePath $LogPath
+
 }
 
 if ($scenario -eq "Hierarchy") {
@@ -209,6 +212,9 @@ if ($scenario -eq "Hierarchy") {
 
         #Install DP/MP/Client
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+        . $ScriptFile $ConfigFilePath $LogPath
+
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSUP.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
     }
 }
