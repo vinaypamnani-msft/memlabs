@@ -3149,70 +3149,92 @@ Function Get-SiteCodeForWSUS {
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Current value")]
         [Object] $CurrentValue,
-        [Parameter(Mandatory = $false, HelpMessage = "Config")]
-        [string] $Domain
+        [Parameter(Mandatory = $true, HelpMessage = "Config")]
+        [Object] $Config
+
     )
-    $valid = $false
-    $ConfigToCheck = $Global:Config
-    #Get-PSCallStack | out-host
-    while ($valid -eq $false) {
-        $siteCodes = @()
-        $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } )
-        if ($tempSiteCodes) {
-            foreach ($tempSiteCode in $tempSiteCodes) {
-                $siteCodes += "$($tempSiteCode.SiteCode) (New Primary Server - $($tempSiteCode.vmName))"
-            }
-        }
-        #$tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" })
-        #if ($tempSiteCodes) {
-        #    foreach ($tempSiteCode in $tempSiteCodes) {
-        #        if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-        #            $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName))"
-        #        }
-        #    }
-        #}
-        $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "CAS" })
-        if ($tempSiteCodes) {
-            foreach ($tempSiteCode in $tempSiteCodes) {
-                if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-                    $siteCodes += "$($tempSiteCode.SiteCode) (New CAS Server - $($tempSiteCode.vmName))"
-                }
-            }
-        }
-        if ($Domain) {
-            #$siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object -ExpandProperty SiteCode -Unique
-            #$siteCodes += Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object -ExpandProperty SiteCode -Unique
-            foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object SiteCode, Network, VmName -Unique)) {
-                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
-            }
-            #foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Secondary" | Select-Object SiteCode, Network, VmName -Unique)) {
-            #    $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
-            #}
-            foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "CAS" | Select-Object SiteCode, Network, VmName -Unique)) {
-                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
-            }
-            if ($siteCodes.Length -eq 0) {
-                Write-Host
-                write-host "No valid site codes are eligible to accept this SUP"
-                return $null
-            }
-            else {
-                #write-host $siteCodes
-            }
-            $result = $null
-            $Options = [ordered]@{ "X" = "StandAlone WSUS" }
-            while (-not $result) {
-                $result = Get-Menu -Prompt "Select sitecode to connect SUP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -AdditionalOptions $options -Test:$false -Split
-            }
-            if ($result -and ($result.ToLowerInvariant() -eq "x")) {
-                return $null
-            }
-            else {
-                return $result
+
+    $siteCodes = @()
+
+    $list2 = Get-List2 -deployConfig $Config
+
+    $topLevelSiteServers = ($list2 | where-object { $_.role -in ("CAS", "Primary") -and -not $_.ParentSiteCode })
+
+
+    foreach ($item in $topLevelSiteServers) {
+        $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
+
+        $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $item.SiteCode }
+        if ($existingSUP) {
+            $childSiteServers = ($list2 | where-object { $_.role -in ("CAS", "Primary") -and $_.ParentSiteCode -eq $item.SiteCode })
+            foreach ($item2 in $childSiteServers) {
+                $sitecodes += "$($item2.SiteCode) ($($item2.vmName), $($item2.Network) Parent: $($item.SiteCode))"
             }
         }
     }
+
+    $result = $null
+    $Options = [ordered]@{ "X" = "StandAlone WSUS" }
+    while (-not $result) {
+        $result = Get-Menu -Prompt "Select sitecode to connect SUP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -AdditionalOptions $options -Test:$false -Split
+    }
+    if ($result -and ($result.ToLowerInvariant() -eq "x")) {
+        return $null
+    }
+    else {
+        return $result
+    }
+
 }
+#   #Get-PSCallStack | out-host
+#   while ($valid -eq $false) {
+#       $siteCodes = @()
+#       $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } )
+#       if ($tempSiteCodes) {
+#           foreach ($tempSiteCode in $tempSiteCodes) {
+#               $siteCodes += "$($tempSiteCode.SiteCode) (New Primary Server - $($tempSiteCode.vmName))"
+#           }
+#       }
+#
+#       $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "CAS" })
+#       if ($tempSiteCodes) {
+#           foreach ($tempSiteCode in $tempSiteCodes) {
+#               if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
+#                   $siteCodes += "$($tempSiteCode.SiteCode) (New CAS Server - $($tempSiteCode.vmName))"
+#               }
+#           }
+#       }
+#       if ($Domain) {
+#
+#           foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "Primary" | Select-Object SiteCode, Network, VmName -Unique)) {
+#               $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
+#           }
+#
+#           foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "CAS" | Select-Object SiteCode, Network, VmName -Unique)) {
+#               $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
+#           }
+#           if ($siteCodes.Length -eq 0) {
+#               Write-Host
+#               write-host "No valid site codes are eligible to accept this SUP"
+#               return $null
+#           }
+#           else {
+#               #write-host $siteCodes
+#           }
+#           $result = $null
+#           $Options = [ordered]@{ "X" = "StandAlone WSUS" }
+#           while (-not $result) {
+#               $result = Get-Menu -Prompt "Select sitecode to connect SUP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -AdditionalOptions $options -Test:$false -Split
+#           }
+#           if ($result -and ($result.ToLowerInvariant() -eq "x")) {
+#               return $null
+#           }
+#           else {
+#               return $result
+#           }
+#       }
+#   }
+#}
 
 Function Get-SiteCodeForDPMP {
     [CmdletBinding()]
@@ -3291,7 +3313,7 @@ Function Get-SiteCodeMenu {
     }
 
     if ($property.Role -eq "WSUS") {
-        $result = Get-SiteCodeForWSUS -CurrentValue $CurrentValue -Domain $configToCheck.vmoptions.domainName
+        $result = Get-SiteCodeForWSUS -CurrentValue $CurrentValue -Config $configToCheck
     }
 
     if (-not $result) {
@@ -3866,28 +3888,45 @@ function Get-AdditionalValidations {
         }
 
         "installSUP" {
-            Get-SiteCodeMenu -property $property -name "siteCode" -ConfigToCheck $Global:Config
-            if (-not $property.siteCode) {
-                $property.installSUP = $false
+            if ($value -eq $true) {
+                Get-SiteCodeMenu -property $property -name "siteCode" -ConfigToCheck $Global:Config
+                if (-not $property.siteCode) {
+                    $property.installSUP = $false
+                }
+
+                if ($property.ParentSiteCode) {
+                    $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $property.ParentSiteCode -type VM -SmartUpdate:$false
+
+                    if ($Parent.ParentSiteCode) {
+                        $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $Parent.ParentSiteCode -type VM -SmartUpdate:$false
+                    }
+                    $list2 = Get-List2 -deployConfig $Global:Config
+                    $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
+                    if (-not $existingSUP) {
+                        $property.installSUP = $false
+                        Write-RedX "SUP role can not be installed on downlevel sites until the top level site ($($Parent.SiteCode)) has a SUP"
+                    }
+
+                }
+
+                if ($property.Role -ne "WSUS") {
+                    $property | Add-Member -MemberType NoteProperty -Name "wsusContentDir" -Value "E:\WSUS" -Force
+                    if ($null -eq $property.additionalDisks) {
+                        $disk = [PSCustomObject]@{"E" = "250GB" }
+                        $property | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                    }
+                    else {
+
+                        if ($null -eq $property.additionalDisks.E) {
+                            $property.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "250GB"
+                        }
+                    }
+                }
+
             }
             else {
                 if ($property.Role -ne "WSUS") {
-                    if ($value -eq $true) {
-                        $property | Add-Member -MemberType NoteProperty -Name "wsusContentDir" -Value "E:\WSUS" -Force
-                        if ($null -eq $property.additionalDisks) {
-                            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
-                            $property | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-                        }
-                        else {
-
-                            if ($null -eq $property.additionalDisks.E) {
-                                $property.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "250GB"
-                            }
-                        }
-                    }
-                    else {
-                        $property.PsObject.Members.Remove("wsusContentDir")
-                    }
+                    $property.PsObject.Members.Remove("wsusContentDir")
                 }
             }
         }
