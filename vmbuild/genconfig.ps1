@@ -1256,7 +1256,7 @@ function Get-NewMachineName {
             $RoleName = $siteCode + "SUP"
         }
         else {
-            $RoleName -eq $role
+            $RoleName = $role
         }
     }
 
