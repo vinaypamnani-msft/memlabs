@@ -732,6 +732,10 @@ function Get-Phase7ConfigurationData {
 
             $global:preparePhasePercent++
 
+            if ($vm.Role -eq "WSUS" -and -not $vm.InstallSUP) {
+                continue
+            }
+
             $newItem = @{
                 NodeName = $vm.vmName
                 Role     = $vm.Role
