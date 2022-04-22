@@ -113,8 +113,6 @@ foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DP
     }
 }
 
-
-
 # Trim nulls/blanks
 $DPNames = $DPs.ServerName | Where-Object { $_ -and $_.Trim() }
 $PullDPNames = $PullDPs.ServerName | Where-Object { $_ -and $_.Trim() }

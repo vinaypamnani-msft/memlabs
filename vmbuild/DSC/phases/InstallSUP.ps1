@@ -13,7 +13,6 @@ $DomainFullName = $deployConfig.vmOptions.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 
-
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -45,12 +44,14 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
     return $false
 }
 
+$topSite = Get-CMSite | Where-Object {$_.ReportingSiteCode -eq "" }
+$thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
+
 $SUPs = @()
 $ValidSiteCodes = @($SiteCode)
 $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
 $ValidSiteCodes += $ReportingSiteCodes
 
-$configureSUP = $false
 foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -eq $true } ) {
     if ($sup.siteCode -in $ValidSiteCodes) {
         $secondarysite = Get-CMSite -SiteCode $sup.siteCode | Where-Object { $_.Type -eq 1 }
@@ -61,7 +62,6 @@ foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -e
                     ServerName     = $sup.vmName
                     ServerSiteCode = $sup.siteCode
                 }
-                $configureSUP = $true
             }
             else {
                 Write-DscStatus "Skip SUP role for $($sup.vmName) since it's a remote site system in Secondary site"
@@ -72,19 +72,22 @@ foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -e
                 ServerName     = $sup.vmName
                 ServerSiteCode = $sup.siteCode
             }
-            $configureSUP = $true
         }
     }
 }
 
 # Trim nulls/blanks
-
 $SUPNames = $SUPs.ServerName | Where-Object { $_ -and $_.Trim() }
-
 Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
 
+# Check if a SUP Exists on this site
+$configureSUP = $false
+$existingSUPs = Get-CMSoftwareUpdatePoint -SiteCode $SiteCode
+if ($thisSiteIsTopSite -and -not $existingSUPs -and $SUPs.Count -gt 0) {
+    $configureSUP = $true
+}
 
-
+# Install SUP
 foreach ($SUP in $SUPs) {
 
     if ([string]::IsNullOrWhiteSpace($SUP.ServerName)) {
@@ -96,13 +99,11 @@ foreach ($SUP in $SUPs) {
     Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode
 }
 
-
 # Configure SUP
 $productsToAdd = @("Windows 10, version 1903 and later", "Microsoft Server operating system-21H2")
 $classificationsToAdd = @("Critical Updates", "Security Updates", "Updates")
 if ($configureSUP) {
-    Write-DscStatus "Configuring SUP, and adding Products and Classifications."
-    $topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
+    Write-DscStatus "Configuring SUP, and adding Products [$($productsToAdd -join ',')] and Classifications [$($classificationsToAdd -join ',')]"
     $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2022/1/1 00:00:00"
     try {
         if ($topSite) {
@@ -121,16 +122,18 @@ if ($configureSUP) {
         $i = 0
         do {
             $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" }
-            Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
-            if ($syncState.LastSyncState -eq 6702) {
-                $finished = $true
-            }
 
             if ($syncState.LastSyncState -eq "" -or $null -eq $syncState.LastSyncState) {
                 Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
                 Sync-CMSoftwareUpdate
                 Start-Sleep -Seconds 120
             }
+
+            Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
+            if ($syncState.LastSyncState -eq 6702) {
+                $finished = $true
+            }
+
             if (-not $finished) {
                 $i++
                 Start-Sleep -Seconds 60
@@ -168,9 +171,3 @@ if ($configureSUP) {
         }
     }
 }
-
-
-# Update actions file
-$Configuration.InstallClient.Status = 'Completed'
-$Configuration.InstallClient.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
