@@ -1,10 +1,22 @@
 
 function Start-Maintenance {
 
-    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
-    $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
-    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "If present, maintenance runs only for machines in DeployConfig")]
+        [object]$DeployConfig
+    )
 
+    $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
+    if ($DeployConfig) {
+        $vmsNeedingMaintenance = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden } | Sort-Object vmName
+    }
+    else {
+        $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
+    }
+
+    # Filter in-progress
+    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
     $vmCount = ($vmsNeedingMaintenance | Measure-Object).Count
     $countNotNeeded = $allVMs.Count - $vmCount
 
@@ -30,7 +42,12 @@ function Start-Maintenance {
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
         $i++
         Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
-        $worked = Start-VMMaintenance -VMName $vm.vmName
+        if ($DeployConfig) {
+            $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNew
+        }
+        else {
+            $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyExisting
+        }
         if ($worked) { $countWorked++ } else {
             $failedDomains += $vm.domain
             $countFailed++
@@ -60,7 +77,12 @@ function Start-Maintenance {
             $countSkipped++
         }
         else {
-            $worked = Start-VMMaintenance -VMName $vm.vmName
+            if ($DeployConfig) {
+                $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNew
+            }
+            else {
+                $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyExisting
+            }
             if ($worked) { $countWorked++ } else { $countFailed++ }
         }
     }
@@ -122,7 +144,11 @@ function Start-VMMaintenance {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VMName")]
-        [object] $VMName
+        [object] $VMName,
+        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to existing")]
+        [switch] $ApplyExisting,
+        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
+        [switch] $ApplyNew
     )
 
     $vmNoteObject = Get-VMNote -VMName $VMName
@@ -150,7 +176,14 @@ function Start-VMMaintenance {
 
     Write-Log "$VMName`: VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion. Performing maintenance..." -Highlight
 
-    $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
+    if ($ApplyExisting.IsPresent) {
+        $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
+    }
+
+    if ($ApplyNew.IsPresent) {
+        $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
+    }
+
     $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes
 
     if ($worked) {
@@ -184,7 +217,11 @@ function Start-VMFixes {
         $status = Start-VMFix -vmName $VMName -vmFix $vmFix
         $toStop += $status.VMsToStop
         $success = $status.Success
-        if (-not $success) { break }
+        if (-not $success) {
+            $resetVersion = [int]($vmFix.FixVersion) - 1
+            Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
+            break
+        }
     }
 
     if ($toStop.Count -ne 0 -and -not $SkipVMShutdown.IsPresent) {
@@ -193,17 +230,6 @@ function Start-VMFixes {
             if ($vmNote.role -ne "DC") {
                 Write-Log "$vm`: Shutting down VM." -Verbose
                 Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
-                #$i = 0
-                #do {
-                #    $i++
-                #    Stop-VM -Name $vm -Force -ErrorVariable StopError -ErrorAction SilentlyContinue
-                #    Start-Sleep -Seconds 3
-                #}
-                #until ($i -ge 5 -or $StopError.Count -eq 0)
-
-                #if ($StopError.Count -ne 0) {
-                #    Write-Log "$vm`: Failed to stop the VM. $StopError" -Warning
-                #}
             }
         }
     }
@@ -292,6 +318,16 @@ function Start-VMFix {
 
     if ($vmFix.RunAsAccount) {
         $HashArguments.Add("VmDomainAccount", $vmFix.RunAsAccount)
+    }
+
+    if ($vmFix.InjectFiles) {
+        $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
+        foreach($file in $vmFix.InjectFiles) {
+            $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+            $targetPathInVM = "C:\staging\$file"
+            Write-Log "$VmName`: Copying $file to the VM [$targetPathInVM]..." -Verbose
+            Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
+        }
     }
 
     $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
@@ -435,7 +471,7 @@ function Get-VMFixes {
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("DC")
-        NotAppliesToRoles = @("OSDClient")
+        NotAppliesToRoles = @("OSDClient", "Linux")
         DependentVMs      = @()
         ScriptBlock       = $Fix_DomainAccount
         ArgumentList      = @($vmNote.adminName)
@@ -460,7 +496,7 @@ function Get-VMFixes {
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
-        NotAppliesToRoles = @("DC", "OSDClient")
+        NotAppliesToRoles = @("DC", "OSDClient", "Linux")
         DependentVMs      = @()
         ScriptBlock       = $Fix_LocalAccount
     }
@@ -484,7 +520,7 @@ function Get-VMFixes {
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
-        NotAppliesToRoles = @("OSDClient")
+        NotAppliesToRoles = @("OSDClient", "Linux")
         DependentVMs      = @()
         ScriptBlock       = $Fix_DefaultProfile
     }
@@ -563,10 +599,69 @@ function Get-VMFixes {
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("CASorStandalonePrimary")
-        NotAppliesToRoles = @("OSDClient")
+        NotAppliesToRoles = @("OSDClient", "Linux")
         DependentVMs      = @($dc.vmName, $vmNote.remoteSQLVM)
         ScriptBlock       = $Fix_CMFullAdmin
+    }
+
+    # Disable IE Enhanced Security for all usres via Scheduled task
+    $Fix_DisableIEESC = {
+
+        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) {
+            if ($os.Producttype -eq 1) {
+                return $true # workstation OS, fix not applicable
+            }
+        }
+        else {
+            return $false # failed to determine OS type, fail
+        }
+
+        $taskName = "Disable-IEESC"
+        $filePath = "$env:systemdrive\staging\Disable-IEESC.ps1"
+
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
+        }
+
+        # Action
+        $taskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $taskArgs = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
+        $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
+
+        # Trigger
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+
+        # Principal
+        $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
+
+        # Task
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Disable IE Ehannced Security"
+
+        Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+        if ($null -ne $task){
+            return $true
+        }
+        else {
+            return $false
+        }
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-DisableIEESC"
+        FixVersion        = "220422"
+        AppliesToThisVM   = $false
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("OSDClient", "Linux")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_DisableIEESC
         RunAsAccount      = $vmNote.adminName
+        InjectFiles       = @("Disable-IEESC.ps1") # must exist in filesToInject\staging dir
     }
 
     # ========================

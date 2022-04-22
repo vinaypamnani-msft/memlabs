@@ -169,6 +169,7 @@ try {
     Set-QuickEdit -DisableQuickEdit
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
+    ### Run maintenance
     Start-Maintenance
 
     # Get config
@@ -449,6 +450,8 @@ try {
         Write-Host
     }
     else {
+        Start-Maintenance -DeployConfig $deployConfig
+        Write-Host
         Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
     }
 
