@@ -2259,7 +2259,7 @@ function Get-EnhancedSubnetList {
     $rolesToShow = @("Primary", "CAS", "Secondary")
 
     if ($configToCheck) {
-        $FullList = get-list2 -deployConfig $ConfigToCheck -SmartUpdate
+        $FullList = get-list2 -deployConfig $ConfigToCheck
         $domain = $ConfigToCheck.vmoptions.DomainName
     }
     else {
