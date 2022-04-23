@@ -111,7 +111,7 @@ if ($configureSUP) {
         try {
             if ($topSite) {
                 $attempts++
-                Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent. Attempt #$attempt"
+                Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent. Attempt #$attempts"
                 Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
                 $configured = $true
             }
@@ -154,7 +154,7 @@ if ($configureSUP) {
                 }
             } until ($syncFinished -or $syncTimeout)
         }
-    } until ($configured -or $attempt -ge 5)
+    } until ($configured -or $attempts -ge 5)
 
     if ($configured) {
         Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync."
