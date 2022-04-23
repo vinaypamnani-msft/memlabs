@@ -97,7 +97,10 @@ Function Write-Progress2Impl {
         ${SourceId},
 
         [switch]
-        ${force}
+        ${force},
+
+        [switch]
+        ${log}
     )
     dynamicparam {
 
@@ -169,12 +172,17 @@ Function Write-Progress2Impl {
                 $PSBoundParameters['Status'] = $StatusValue
             }
 
-            if ($Global:LastStatus -ne $Status + $Percent) {
-                Write-Log "Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
-                $Global:LastStatus = $Status + $Percent
+            if ($log) {
+                Write-Log "Activity: $Activity  Status: $Status" -LogOnly
             }
             else {
-                #Write-Log "Ignored Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
+                if ($Global:LastStatus -ne $Status + $Percent) {
+                    Write-Log "Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
+                    $Global:LastStatus = $Status + $Percent
+                }
+                else {
+                    #Write-Log "Ignored Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
+                }
             }
 
             $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
@@ -2806,7 +2814,8 @@ function Get-FileWithHash {
             Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
             $return.download = $true
         }
-    }else{
+    }
+    else {
         $return.download = $true
     }
 
