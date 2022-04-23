@@ -1976,6 +1976,20 @@ Function Show-Summary {
             }
         }
     },
+    @{Label = "Roles"; Expression = {
+            $roles = @()
+            if ($_.InstallCA) { $roles += "CA" }
+            if ($_.InstallSUP) { $roles += "SUP" }
+            if ($_.InstallMP) { $roles += "MP" }
+            if ($_.InstallDP) {
+                if ($_.pullDPSourceDP) { $roles += "Pull DP" }
+                else {
+                    $roles += "DP"
+                }
+            }
+            $roles -join ","
+        }
+    },
     #@{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
     @{Label = "Disks"; Expression = {
             $Disks = @("C")

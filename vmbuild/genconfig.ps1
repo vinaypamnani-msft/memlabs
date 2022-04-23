@@ -4777,7 +4777,11 @@ function get-VMString {
         if ($virtualMachine.parentSiteCode) {
             $SiteCode += "->$($virtualMachine.parentSiteCode)"
         }
-        $name += "  CM  [SiteCode $SiteCode ($($virtualMachine.cmInstallDir))]".PadRight(39, " ")
+        $name += "  CM  [SiteCode $SiteCode ($($virtualMachine.cmInstallDir))]"
+        if ($virtualMachine.installSUP) {
+            $name += " [SUP]"
+        }
+        $name = $name.PadRight(39," ")
     }
 
     if ($virtualMachine.siteCode -and -not $virtualMachine.cmInstallDir) {
@@ -4791,7 +4795,11 @@ function get-VMString {
                 $temp += " [MP]"
             }
             if ($virtualMachine.installDP) {
+                if ($virtualMachine.pullDPSourceDP) {
+                    $temp += " [Pull DP]"
+                }else {
                 $temp += " [DP]"
+                }
             }
         }
         if ($virtualMachine.installSUP) {
