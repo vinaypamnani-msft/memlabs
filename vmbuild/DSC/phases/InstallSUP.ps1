@@ -114,6 +114,8 @@ if ($configureSUP) {
                 Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent. Attempt #$attempts"
                 Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
                 $configured = $true
+                Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting 2 mins for WCM to configure WSUS."
+                Start-Sleep -Seconds 120  # Sleep for 2 mins to let WCM config WSUS
             }
         }
         catch {
@@ -158,7 +160,7 @@ if ($configureSUP) {
 
     if ($configured) {
         Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync."
-        Start-Sleep -Seconds 30
+        Start-Sleep -Seconds 15
         Sync-CMSoftwareUpdate
     }
     else {
