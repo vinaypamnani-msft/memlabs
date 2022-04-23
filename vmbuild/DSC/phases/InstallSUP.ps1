@@ -148,7 +148,7 @@ if ($configureSUP) {
                     Start-Sleep -Seconds 60
                 }
 
-                if ($i -gt 15) {
+                if ($i -gt 20) {
                     $syncTimeout = $true
                     Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
                 }
