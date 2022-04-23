@@ -53,6 +53,7 @@ Function Write-Progress2 {
         Write-Progress2Impl @Args @PSBoundParameters | out-null
     }
     catch {
+        Write-Exception -ExceptionInfo $_
         write-Log "Write-Progress $args $_"
     }
 }
@@ -148,6 +149,14 @@ Function Write-Progress2Impl {
             if ($force -or $PSBoundParameters.TryGetValue('force', [ref]$forcevalue)) {
                 $PSBoundParameters.remove("force")
                 $force = $true
+                $OriginalProgressPreference = $Global:ProgressPreference
+                $Global:ProgressPreference = 'Continue'
+            }
+
+            $logvalue = $null
+            if ($force -or $PSBoundParameters.TryGetValue('log', [ref]$logvalue)) {
+                $PSBoundParameters.remove("log")
+                $log = $true
                 $OriginalProgressPreference = $Global:ProgressPreference
                 $Global:ProgressPreference = 'Continue'
             }
