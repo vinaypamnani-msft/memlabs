@@ -1025,6 +1025,18 @@ function Test-Configuration {
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing DC" -PercentComplete 35
         Test-ValidRoleDC -ConfigObject $deployConfig -ReturnObject $return
 
+        # WSUS Validations
+        # ================
+
+        if ($vm.Role -eq "WSUS" -or $vm.InstallSUP) {
+            if (-not $vm.wsusContentDir) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a wsusContentDir." -ReturnObject $return -Failure
+            }
+            if ($vm.InstallSup -and -not $vm.SiteCode) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a SiteCode." -ReturnObject $return -Failure
+            }
+        }
+
         # CAS Validations
         # ==============
         if ($containsCS) {
