@@ -666,10 +666,10 @@ function Select-StartDomain {
 
 
         $vmsname = $notRunning | Select-Object -ExpandProperty vmName
-        $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" }
+        $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
 
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None" -timeout:10
+            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "C" -timeout:10
         }
         else {
             $response = $preResponse
@@ -677,7 +677,7 @@ function Select-StartDomain {
         }
 
 
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "X") {
             return
         }
         if ($response -eq "A" -or $response -eq "C") {
