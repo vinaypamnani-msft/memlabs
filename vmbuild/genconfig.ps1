@@ -4794,6 +4794,9 @@ function get-VMString {
                 $temp += " [DP]"
             }
         }
+        if ($virtualMachine.installSUP) {
+            $temp += " [SUP]"
+        }
         $name += $temp.PadRight(39, " ")
     }
 
@@ -4878,6 +4881,11 @@ function get-VMString {
             }
             "DPMP" {
                 $color = $ColorMap[$($virtualMachine.SiteCode)]
+            }
+            "WSUS" {
+                if ($virtualMachine.SiteCode) {
+                    $color = $ColorMap[$($virtualMachine.SiteCode)]
+                }
             }
             "SQLAO" {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
