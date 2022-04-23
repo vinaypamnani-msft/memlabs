@@ -163,8 +163,8 @@ Function Write-Progress2Impl {
 
             $Activityvalue = $null
             if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
-                $Activityvalue = $Activity.TrimEnd()
-
+                $Activityvalue = $Activity.Trim()
+                $Activityvalue = "  " +  $Activityvalue
                 # if ($Activityvalue.Contains("`n")) {
                 #     Write-Log "$Activity contains new-line"
                 # }
