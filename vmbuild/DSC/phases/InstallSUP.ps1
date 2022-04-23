@@ -49,8 +49,10 @@ $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
 $SUPs = @()
 $ValidSiteCodes = @($SiteCode)
-$ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
-$ValidSiteCodes += $ReportingSiteCodes
+if ($ThisVM.role -eq "Primary") {
+    $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
+    $ValidSiteCodes += $ReportingSiteCodes
+}
 
 foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -eq $true } ) {
     if ($sup.siteCode -in $ValidSiteCodes) {
@@ -131,7 +133,7 @@ if ($configureSUP) {
             $syncFinished = $syncTimeout = $false
             $i = 0
             do {
-                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" }
+                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode }
 
                 if ($syncState.LastSyncState -eq "" -or $null -eq $syncState.LastSyncState) {
                     Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
@@ -139,10 +141,12 @@ if ($configureSUP) {
                     Start-Sleep -Seconds 120
                 }
 
-                Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
-                if ($syncState.LastSyncState -eq 6702) {
-                    $syncFinished = $true
-                    Write-DscStatus "SUM Sync finished."
+                if ($syncState.LastSyncState -ne "") {
+                    Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
+                    if ($syncState.LastSyncState -eq 6702) {
+                        $syncFinished = $true
+                        Write-DscStatus "SUM Sync finished."
+                    }
                 }
 
                 if (-not $syncFinished) {
