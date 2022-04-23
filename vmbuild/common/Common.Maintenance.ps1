@@ -59,10 +59,6 @@ function Start-Maintenance {
         $vmNote = Get-VMNote $dc.vmName
         if ($vmNote.memlabsVersion -le "211125.1") {
             $criticalDomains += $dc.domain
-            write-log "Adding $($dc.domain) to Critical List" -LogOnly
-        }
-        else {
-            #write-host "Not Adding $($dc.domain) to Critical List"
         }
     }
 
@@ -88,6 +84,7 @@ function Start-Maintenance {
     Write-Host
     Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -SubActivity
     Write-Progress2 -Id $progressId -Activity $text -Completed
+    Write-Progress2 -Activity "VM Maintenance" -Completed
 }
 
 function Show-FailedDomains {
@@ -161,11 +158,11 @@ function Start-VMMaintenance {
 
     # This should never happen, unless Get-List provides outdated version, so check again with current VMNote object
     if ($vmVersion -ge $latestFixVersion) {
-        Write-Log "$VMName`: VM Version ($vmVersion) is up-to-date."
+        Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: VM Version ($vmVersion) is up-to-date."
         return $true
     }
 
-    Write-Log "$VMName`: VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion. Performing maintenance..." -Highlight
+    Write-Progress2 -Log -Activity "VM Maintenance" -Status  "$VMName`: VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion. Performing maintenance..."
 
     if ($ApplyNewOnly.IsPresent) {
         $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
@@ -177,7 +174,7 @@ function Start-VMMaintenance {
     $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -ApplyNewOnly:$ApplyNewOnly
 
     if ($worked) {
-        Write-Log "$VMName`: VM maintenance completed successfully." -Success
+        Write-Progress2 -Log -Activity "VM Maintenance" -Status  "$VMName`: VM maintenance completed successfully."
     }
     else {
         Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log." -Failure
@@ -200,7 +197,7 @@ function Start-VMFixes {
         [switch] $ApplyNewOnly
     )
 
-    Write-Log "$VMName`: Applying fixes to the virtual machine." -Verbose
+    Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: Applying fixes to the virtual machine."
 
     $success = $false
     $toStop = @()
@@ -220,7 +217,7 @@ function Start-VMFixes {
         foreach ($vm in $toStop) {
             $vmNote = Get-VMNote -VMName $vm
             if ($vmNote.role -ne "DC") {
-                Write-Log "$vm`: Shutting down VM." -Verbose
+                Write-Progress2 -Activity "VM Maintenance" -Status  "$vm`: Shutting down VM."
                 Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
             }
         }
@@ -254,24 +251,24 @@ function Start-VMFix {
     $fixVersion = $vmFix.FixVersion
 
     if ($vmNote.memLabsVersion -ge $fixVersion -and -not $ApplyNewOnly.IsPresent) {
-        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) has been applied already."
+        Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: Fix '$fixName' ($fixVersion) has been applied already."
         $return.Success = $true
         return $return
     }
 
     if (-not $vmFix.AppliesToThisVM) {
-        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) is not applicable. Updating version to '$fixVersion'"
+        Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: Fix '$fixName' ($fixVersion) is not applicable. Updating version to '$fixVersion'"
         Set-VMNote -VMName $vmName -vmVersion $fixVersion
         $return.Success = $true
         return $return
     }
 
-    Write-Log "$VMName`: Fix '$fixName' ($fixVersion) is applicable. Applying fix now." -Verbose
+    Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: Fix '$fixName' ($fixVersion) is applicable. Applying fix now."
 
     # Start dependent VM's
     if ($vmFix.DependentVMs) {
         $dependentVMs = $vmFix.DependentVMs
-        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) requires '$($dependentVMs -join ',')' to be running."
+        Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: Fix '$fixName' ($fixVersion) requires '$($dependentVMs -join ',')' to be running."
         foreach ($vm in $dependentVMs) {
             if ([string]::IsNullOrWhiteSpace($vm)) { continue }
             $note = Get-VMNote -VMName $vm
@@ -281,7 +278,6 @@ function Start-VMFix {
             }
 
             if ($status.StartFailed) {
-                # Write-Log "$VMName`: VM could not be started to apply fix '$fixName'."
                 return $return
             }
         }
@@ -294,7 +290,6 @@ function Start-VMFix {
     }
 
     if ($status.StartFailed) {
-        # Write-Log "$VMName`: VM could not be started to apply fix '$fixName'."
         return $return
     }
 
@@ -319,7 +314,7 @@ function Start-VMFix {
         foreach($file in $vmFix.InjectFiles) {
             $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
             $targetPathInVM = "C:\staging\$file"
-            Write-Log "$VmName`: Copying $file to the VM [$targetPathInVM]..." -Verbose
+            Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VmName`: Copying $file to the VM [$targetPathInVM]..."
             Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
         }
     }
@@ -346,7 +341,7 @@ function Start-VMFix {
         }
     }
     else {
-        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
+        Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
         Set-VMNote -vmName $VMName -vmVersion $fixVersion
         $return.Success = $true
     }
@@ -383,14 +378,14 @@ function Start-VMIfNotRunning {
     }
 
     if ($vm.State -ne "Running") {
-        Write-Log "$VMName`: Starting VM for maintenance and waiting for it to be ready to connect."
+        Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: Starting VM for maintenance and waiting for it to be ready to connect."
         $started = Start-VM2 -Name $VMName -Passthru
         if ($started) {
             $return.StartedVM = $true
             if ($WaitForConnect.IsPresent) {
                 $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2 -Quiet
                 if (-not $connected) {
-                    Write-Log "$VMName`: Could not connect to the VM after waiting for 2 minutes."
+                    Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: Could not connect to the VM after waiting for 2 minutes."
                     $return.ConnectFailed = $true
                 }
             }
@@ -401,7 +396,7 @@ function Start-VMIfNotRunning {
         }
     }
     else {
-        if (-not $Quiet.IsPresent) { Write-Log "$VMName`: VM is already running." -Verbose }
+        if (-not $Quiet.IsPresent) { Write-Progress2 -Log -Activity "VM Maintenance" -Status "$VMName`: VM is already running." }
     }
 
     return $return
