@@ -872,7 +872,9 @@ function Test-Configuration {
         [Parameter(Mandatory = $true, ParameterSetName = "ConfigFile", HelpMessage = "Configuration File")]
         [string]$FilePath,
         [Parameter(Mandatory = $true, ParameterSetName = "ConfigObject", HelpMessage = "Configuration File")]
-        [object]$InputObject
+        [object]$InputObject,
+        [Parameter(Mandatory = $false, HelpMessage = "Fast Mode")]
+        [switch]$Fast
         #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
         #[bool] $fast = $false
     )
@@ -1207,14 +1209,16 @@ function Test-Configuration {
 
         # Total Memory
         # =============
-        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
-        $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
-        $totalMemory = $totalMemory.Sum / 1GB
-        $availableMemory = Get-AvailableMemoryGB
+        if (-not $fast) {
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
+            $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
+            $totalMemory = $totalMemory.Sum / 1GB
+            $availableMemory = Get-AvailableMemoryGB
 
-        if ($totalMemory -gt $availableMemory) {
-            if (-not $enableDebug) {
-                Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB]." -ReturnObject $return -Warning
+            if ($totalMemory -gt $availableMemory) {
+                if (-not $enableDebug) {
+                    Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB]." -ReturnObject $return -Warning
+                }
             }
         }
 
@@ -1243,14 +1247,18 @@ function Test-Configuration {
             Get-List -type VM -SmartUpdate | Out-Null
         }
 
-        # Add existing VM's
-        Write-Progress2 -Activity "Validating Configuration" -Status "Adding Existing" -PercentComplete 90
-        Add-ExistingVMsToDeployConfig -config $deployConfig
+        if (-not $fast) {
+            # Add existing VM's
+            Write-Progress2 -Activity "Validating Configuration" -Status "Adding Existing" -PercentComplete 90
+            Add-ExistingVMsToDeployConfig -config $deployConfig
 
-        # Add thisParams
-        $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
-        $return.DeployConfig = $deployConfigEx
-
+            # Add thisParams
+            $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
+            $return.DeployConfig = $deployConfigEx
+        }
+        else {
+            $return.DeployConfig = $deployConfig
+        }
 
 
         if ($global:SkipValidation) {

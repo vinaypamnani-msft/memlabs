@@ -4718,7 +4718,7 @@ Function Get-TestResult {
         return $true
     }
     try {
-        $c = Test-Configuration -InputObject $Config
+        $c = Test-Configuration -InputObject $Config -Fast
         $valid = $c.Valid
         if ($valid -eq $false) {
             Write-Host2 "`r`n>>>>>>>>>>>>>>  ERROR: Validation Failures were encountered:`r`n" -ForegroundColor Crimson
