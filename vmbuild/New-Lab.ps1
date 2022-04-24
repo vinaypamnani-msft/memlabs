@@ -469,8 +469,9 @@ finally {
         Write-Host
     }
 
+    Get-Job | Stop-Job
     if (-not $global:Common.DevBranch) {
-        Get-Job | Stop-Job
+        Get-Job | Remove-Job
     }
 
     # Close PS Sessions

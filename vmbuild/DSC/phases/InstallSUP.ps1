@@ -12,10 +12,37 @@ $DomainFullName = $deployConfig.vmOptions.domainName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$CSName = $ThisVM.thisParams.ParentSiteServer
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+
+$Configuration.InstallSUP.Status = "Running"
+$Configuration.InstallSUP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
+# Wait for CS
+if ($CSName) {
+    # Read Actions file on CAS
+    $LogFolder = Split-Path $LogPath -Leaf
+    $CSFilePath = "\\$CSName\$LogFolder"
+    $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.json"
+
+    # Wait for ScriptWorkflow.json to exist on CAS
+    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    Write-DscStatus "Waiting for $CSName to finish SUM Configuration. Current Status: $($CSConfiguration.InstallSUP.Status)."
+    while ($CSConfiguration.InstallSUP.Status -ne "Completed") {
+        Write-DscStatus "Waiting for $CSName to finish SUM Configuration. Current Status: $($CSConfiguration.InstallSUP.Status)" -NoLog -RetrySeconds 30
+        Start-Sleep -Seconds 30
+        try {
+            $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Stop | ConvertFrom-Json
+        }
+        catch {
+            Write-DscStatus "Failed to check Status on $CSName from $CSConfigurationFile. $_"
+        }
+    }
+}
 
 # Read Site Code from registry
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -123,7 +150,7 @@ if ($configureSUP) {
         catch {
             # Run sync to refresh categories, wait for sync, then try again?
             if (-not $syncTimeout) {
-                Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products."
+                Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products. Attempt #$attempts"
                 Sync-CMSoftwareUpdate
                 Start-Sleep -Seconds 120 # Sync waits for 2 mins anyway, so sleep before even checking status
             }
@@ -163,7 +190,7 @@ if ($configureSUP) {
     } until ($configured -or $attempts -ge 5)
 
     if ($configured) {
-        Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync."
+        Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync and exiting."
         Start-Sleep -Seconds 15
         Sync-CMSoftwareUpdate
     }
@@ -171,3 +198,7 @@ if ($configureSUP) {
         Write-DscStatus "SUM Component Configuration failed."
     }
 }
+
+$Configuration.InstallSUP.Status = 'Completed'
+$Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
