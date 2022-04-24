@@ -154,11 +154,10 @@ Function Write-Progress2Impl {
             }
 
             $logvalue = $null
-            if ($force -or $PSBoundParameters.TryGetValue('log', [ref]$logvalue)) {
+            $writeLog = $false
+            if ($log -eq $true -or $PSBoundParameters.TryGetValue('log', [ref]$logvalue)) {
                 $PSBoundParameters.remove("log")
-                $log = $true
-                $OriginalProgressPreference = $Global:ProgressPreference
-                $Global:ProgressPreference = 'Continue'
+                $writeLog = $true
             }
 
             $Activityvalue = $null
@@ -181,7 +180,7 @@ Function Write-Progress2Impl {
                 $PSBoundParameters['Status'] = $StatusValue
             }
 
-            if ($log) {
+            if ($writeLog) {
                 Write-Log "Activity: $Activity  Status: $Status" -LogOnly
             }
             else {

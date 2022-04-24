@@ -12,10 +12,37 @@ $DomainFullName = $deployConfig.vmOptions.domainName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$CSName = $ThisVM.thisParams.ParentSiteServer
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+
+$Configuration.InstallSUP.Status = "Running"
+$Configuration.InstallSUP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
+# Wait for CS
+if ($CSName) {
+    # Read Actions file on CAS
+    $LogFolder = Split-Path $LogPath -Leaf
+    $CSFilePath = "\\$CSName\$LogFolder"
+    $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.json"
+
+    # Wait for ScriptWorkflow.json to exist on CAS
+    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    Write-DscStatus "Waiting for $CSName to finish SUM Configuration. Current Status: $($CSConfiguration.InstallSUP.Status)."
+    while ($CSConfiguration.InstallSUP.Status -ne "Completed") {
+        Write-DscStatus "Waiting for $CSName to finish SUM Configuration. Current Status: $($CSConfiguration.InstallSUP.Status)" -NoLog -RetrySeconds 30
+        Start-Sleep -Seconds 30
+        try {
+            $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Stop | ConvertFrom-Json
+        }
+        catch {
+            Write-DscStatus "Failed to check Status on $CSName from $CSConfigurationFile. $_"
+        }
+    }
+}
 
 # Read Site Code from registry
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -49,8 +76,10 @@ $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
 $SUPs = @()
 $ValidSiteCodes = @($SiteCode)
-$ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
-$ValidSiteCodes += $ReportingSiteCodes
+if ($ThisVM.role -eq "Primary") {
+    $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
+    $ValidSiteCodes += $ReportingSiteCodes
+}
 
 foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -eq $true } ) {
     if ($sup.siteCode -in $ValidSiteCodes) {
@@ -121,7 +150,7 @@ if ($configureSUP) {
         catch {
             # Run sync to refresh categories, wait for sync, then try again?
             if (-not $syncTimeout) {
-                Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products."
+                Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products. Attempt #$attempts"
                 Sync-CMSoftwareUpdate
                 Start-Sleep -Seconds 120 # Sync waits for 2 mins anyway, so sleep before even checking status
             }
@@ -131,7 +160,7 @@ if ($configureSUP) {
             $syncFinished = $syncTimeout = $false
             $i = 0
             do {
-                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" }
+                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode }
 
                 if ($syncState.LastSyncState -eq "" -or $null -eq $syncState.LastSyncState) {
                     Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
@@ -139,10 +168,12 @@ if ($configureSUP) {
                     Start-Sleep -Seconds 120
                 }
 
-                Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
-                if ($syncState.LastSyncState -eq 6702) {
-                    $syncFinished = $true
-                    Write-DscStatus "SUM Sync finished."
+                if ($syncState.LastSyncState -ne "") {
+                    Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
+                    if ($syncState.LastSyncState -eq 6702) {
+                        $syncFinished = $true
+                        Write-DscStatus "SUM Sync finished."
+                    }
                 }
 
                 if (-not $syncFinished) {
@@ -159,7 +190,7 @@ if ($configureSUP) {
     } until ($configured -or $attempts -ge 5)
 
     if ($configured) {
-        Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync."
+        Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync and exiting."
         Start-Sleep -Seconds 15
         Sync-CMSoftwareUpdate
     }
@@ -167,3 +198,7 @@ if ($configureSUP) {
         Write-DscStatus "SUM Component Configuration failed."
     }
 }
+
+$Configuration.InstallSUP.Status = 'Completed'
+$Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
