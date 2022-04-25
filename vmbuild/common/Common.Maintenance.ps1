@@ -158,12 +158,17 @@ function Start-VMMaintenance {
     }
 
     # This should never happen, unless Get-List provides outdated version, so check again with current VMNote object
-    if ($vmVersion -ge $latestFixVersion) {
+    if ($vmVersion -ge $latestFixVersion -and -not $ApplyNewOnly.IsPresent) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "VM Version ($vmVersion) is up-to-date."
         return $true
     }
 
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM (version $vmVersion) is NOT up-to-date. Required Version is $latestFixVersion. Performing maintenance..."
+    if ($ApplyNewOnly.IsPresent) {
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Newly deployed VM is NOT up-to-date. Required Hotfix Version is $latestFixVersion. Performing maintenance..."
+    }
+    else {
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM (version $vmVersion) is NOT up-to-date. Required Hotfix Version is $latestFixVersion. Performing maintenance..."
+    }
 
     if ($ApplyNewOnly.IsPresent) {
         $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
