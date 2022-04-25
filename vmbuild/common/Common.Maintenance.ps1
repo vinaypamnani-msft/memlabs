@@ -146,7 +146,7 @@ function Start-VMMaintenance {
         return $false
     }
 
-    $global:MaintenanceActivity = $vm.vmName
+    $global:MaintenanceActivity = $VMName
     $latestFixVersion = $Common.LatestHotfixVersion
     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
     $vmVersion = $vmNoteObject.memLabsVersion
