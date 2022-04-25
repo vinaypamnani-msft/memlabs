@@ -44,7 +44,6 @@ function Start-Maintenance {
     $failedDomains = @()
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
         $i++
-        $global:MaintenanceActivity = $vm.vmName
         Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
         if ($worked) { $countWorked++ } else {
@@ -66,7 +65,6 @@ function Start-Maintenance {
     # Perform maintenance on other VM's
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
         $i++
-        $global:MaintenanceActivity = $vm.vmName
         Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         if ($vm.domain -in $criticalDomains) {
             Write-Log "$($vm.vmName)`: Maintenance skipped, DC maintenance failed." -Highlight
@@ -148,6 +146,7 @@ function Start-VMMaintenance {
         return $false
     }
 
+    $global:MaintenanceActivity = $vm.vmName
     $latestFixVersion = $Common.LatestHotfixVersion
     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
     $vmVersion = $vmNoteObject.memLabsVersion
