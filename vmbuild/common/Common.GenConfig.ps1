@@ -628,7 +628,7 @@ function Invoke-StopVMs {
         if ($vm.State -eq "Running") {
             $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
             if (-not $quiet) {
-                Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
+                Write-GreenCheck "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
             }
             stop-vm -VM $VM2 -force -AsJob | Out-Null
         }

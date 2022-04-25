@@ -666,10 +666,10 @@ function Select-StartDomain {
 
 
         $vmsname = $notRunning | Select-Object -ExpandProperty vmName
-        $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" }
+        $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
 
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "None" -timeout:10
+            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "C" -timeout:10
         }
         else {
             $response = $preResponse
@@ -677,7 +677,7 @@ function Select-StartDomain {
         }
 
 
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "X") {
             return
         }
         if ($response -eq "A" -or $response -eq "C") {
@@ -4823,6 +4823,8 @@ function get-VMString {
         $name += "$($virtualMachine.sqlInstanceName) ($($virtualMachine.sqlInstanceDir))]"
     }
 
+    write-log "Name is $name" -verbose
+
     $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen", "%MediumSeaGreen", "%SpringGreen", "%Lime", "%LimeGreen")
     $PRIColors = @("%LightSkyBlue", "%CornflowerBlue", "%RoyalBlue", "%SlateBlue", "%DeepSkyBlue", "%Turquoise", "%Cyan", "%MediumTurquoise", "%Aquamarine", "%SteelBlue", "%Blue")
     $SECColors = @("%SandyBrown", "%Chocolate", "%Peru", "%DarkGoldenRod", "%Orange", "%RosyBrown", "%SaddleBrown", "%Tan", "%DarkSalmon", "%GoldenRod")
@@ -4892,7 +4894,10 @@ function get-VMString {
             }
             "WSUS" {
                 if ($virtualMachine.SiteCode) {
+                    try{
                     $color = $ColorMap[$($virtualMachine.SiteCode)]
+                    }
+                    catch{}
                 }
             }
             "SQLAO" {
@@ -4912,10 +4917,12 @@ function get-VMString {
             }
             "DomainMember" {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $virtualMachine.vmName }
+                $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $virtualMachine.vmName -and $_.role -in ("CAS", "Primary", "Secondary") } | Select-Object -First 1
 
                 if ($siteVM -and $siteVM.SiteCode) {
+                    try{
                     $color = $ColorMap[$($siteVM.SiteCode)]
+                    }catch{}
                 }
 
             }
@@ -4923,9 +4930,11 @@ function get-VMString {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
             }
         }
-        $name = $name + $color
+        Write-log "Setting $name to $color for $($virtualMachine.Role)" -verbose
+        $name = $name.TrimEnd() + $color
     }
 
+    Write-log "Color for $($virtualMachine.Role) is $name" -verbose
     return "$name"
 }
 
@@ -5048,7 +5057,7 @@ function Add-NewVMForRole {
         if ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
             $OSList = Get-SupportedOperatingSystemsForRole -role $role
             $operatingSystem = "Windows 10 Latest (64-bit)"
-            $OperatingSystem = Get-Menu "Select OS Version" $OSList -Test:$false -CurrentValue $operatingSystem
+            $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
         }
         else {
             if ($role -eq "Linux") {
@@ -5057,7 +5066,7 @@ function Add-NewVMForRole {
                     $OperatingSystem = "Linux Unknown"
                 }
                 else {
-                    $OperatingSystem = Get-Menu "Select OS Version" $OSList -Test:$false
+                    $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false
                 }
             }
             else {
@@ -5068,7 +5077,7 @@ function Add-NewVMForRole {
                 else {
                     $OperatingSystem = "Server 2022"
                 }
-                $OperatingSystem = Get-Menu "Select OS Version" $OSList -Test:$false -CurrentValue $operatingSystem
+                $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
             }
         }
     }
@@ -5833,7 +5842,7 @@ function Select-VirtualMachines {
                                     Remove-VMFromConfig -vmName $PassiveNode.vmName -ConfigToModify $global:config
                                 }
                                 else {
-                                    Add-NewVMForRole -Role "PassiveSite" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.vmName + "-P")  -SiteCode $virtualMachine.siteCode
+                                    Add-NewVMForRole -Role "PassiveSite" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.vmName + "-P")  -SiteCode $virtualMachine.siteCode -OperatingSystem $virtualMachine.OperatingSystem
                                 }
                                 continue VMLoop
 
