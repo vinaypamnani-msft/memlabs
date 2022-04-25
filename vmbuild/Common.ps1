@@ -163,7 +163,7 @@ Function Write-Progress2Impl {
             $Activityvalue = $null
             if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
                 $Activityvalue = $Activity.Trim()
-                $Activityvalue = "  " +  $Activityvalue
+                $Activityvalue = "  " + $Activityvalue
                 # if ($Activityvalue.Contains("`n")) {
                 #     Write-Log "$Activity contains new-line"
                 # }
@@ -2390,7 +2390,13 @@ function Get-StorageConfig {
             # Get file list
             #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
             $fileListUrl = $fileListLocation + "?$($StorageConfig.StorageToken)"
-            $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+            try {
+                $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+            }
+            catch {
+                start-sleep -second 5
+                $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+            }
             if (-not $response) {
                 $Common.FatalError = "Failed to download file list."
             }

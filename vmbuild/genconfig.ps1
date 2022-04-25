@@ -5554,20 +5554,20 @@ function Get-ListOfPossibleSQLServers {
         [object] $Config = $global:config
     )
     $SQLList = @()
-    $FS = $Config.virtualMachines | Where-Object { $_.sqlVersion }
-    foreach ($item in $FS) {
-        $existing = $null
-        $existing = $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
+    $SQL = $Config.virtualMachines | Where-Object { $_.sqlVersion }
+    foreach ($item in $SQL) {
+        $existing = @()
+        $existing += $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item.vmName -eq $_.vmName) }
         if (-not $existing) {
             $SQLList += $item.vmName
         }
     }
     $domain = $Config.vmOptions.DomainName
     if ($null -ne $domain) {
-        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.sqlVersion }
-        foreach ($item in $FSFromList) {
+        $SQLFromList = get-list -type VM -domain $domain | Where-Object { $_.sqlVersion }
+        foreach ($item in $SQLFromList) {
             $existing = @()
-            $existing += get-list -type VM -domain $domain | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
+            $existing += get-list -type VM -domain $domain | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item.vmName -eq $_.vmName) }
             $existing += $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
             if (-not $existing) {
                 $SQLList += $item.vmName
