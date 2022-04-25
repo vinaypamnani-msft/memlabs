@@ -315,16 +315,20 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
+
+    # If any machine has a RemoteSQLVM, add it.  This will also add the OtherNode
+    $vms = $config.virtualMachines
+    foreach ($vm in $vms) {
+        if ($vm.RemoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
+        }
+    }
     # Add Primary to list, when adding DPMP
     $DPMPs = $config.virtualMachines | Where-Object { $_.role -eq "DPMP" }
     foreach ($dpmp in $DPMPS) {
         $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -type VM -SmartUpdate:$false
         if ($DPMPPrimary) {
             Add-ExistingVMToDeployConfig -vmName $DPMPPrimary.vmName -configToModify $config
-        }
-        # Add remote SQL to list
-        if ($DPMPPrimary.RemoteSQLVM) {
-            Add-RemoteSQLVMToDeployConfig -vmName $DPMPPrimary.RemoteSQLVM -configToModify $config
         }
 
         if ($DPMPPrimary.pullDPSourceDP) {
@@ -390,9 +394,6 @@ function Add-ExistingVMsToDeployConfig {
                     Add-RemoteSQLVMToDeployConfig -vmName $ss.RemoteSQLVM -configToModify $config
                 }
             }
-        }
-        if ($sup.RemoteSQLVM) {
-            Add-RemoteSQLVMToDeployConfig -vmName $sup.RemoteSQLVM -configToModify $config
         }
     }
 }

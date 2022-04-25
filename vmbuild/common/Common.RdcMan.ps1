@@ -448,7 +448,7 @@ function New-RDCManFileFromHyperV {
                         $primaryNode = $vmListFull | Where-Object { $_.OtherNode -eq $vm.vmName }
                     }
                 }
-                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName }
+                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName -and $_.Role -in "Primary","CAS" }
                 if ($SiteServer) {
                     $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)"
                 }
