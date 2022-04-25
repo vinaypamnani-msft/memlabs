@@ -76,7 +76,7 @@ Configuration Phase7
 
 
         $WaitFor = @()
-        $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $node.NodeName }
+        $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $node.NodeName -and $_.role -in "CAS", "Primary"}
         if ($serverToWait) {
             $WaitFor += $serverToWait.vmName
         }
