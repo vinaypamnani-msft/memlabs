@@ -4781,7 +4781,7 @@ function get-VMString {
         if ($virtualMachine.installSUP) {
             $name += " [SUP]"
         }
-        $name = $name.PadRight(39," ")
+        $name = $name.PadRight(39, " ")
     }
 
     if ($virtualMachine.siteCode -and -not $virtualMachine.cmInstallDir) {
@@ -4797,8 +4797,9 @@ function get-VMString {
             if ($virtualMachine.installDP) {
                 if ($virtualMachine.pullDPSourceDP) {
                     $temp += " [Pull DP]"
-                }else {
-                $temp += " [DP]"
+                }
+                else {
+                    $temp += " [DP]"
                 }
             }
         }
@@ -4894,10 +4895,10 @@ function get-VMString {
             }
             "WSUS" {
                 if ($virtualMachine.SiteCode) {
-                    try{
-                    $color = $ColorMap[$($virtualMachine.SiteCode)]
+                    try {
+                        $color = $ColorMap[$($virtualMachine.SiteCode)]
                     }
-                    catch{}
+                    catch {}
                 }
             }
             "SQLAO" {
@@ -4920,9 +4921,10 @@ function get-VMString {
                 $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $virtualMachine.vmName -and $_.role -in ("CAS", "Primary", "Secondary") } | Select-Object -First 1
 
                 if ($siteVM -and $siteVM.SiteCode) {
-                    try{
-                    $color = $ColorMap[$($siteVM.SiteCode)]
-                    }catch{}
+                    try {
+                        $color = $ColorMap[$($siteVM.SiteCode)]
+                    }
+                    catch {}
                 }
 
             }
@@ -5077,7 +5079,9 @@ function Add-NewVMForRole {
                 else {
                     $OperatingSystem = "Server 2022"
                 }
-                $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
+                if ($null -ne $OSList) {
+                    $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
+                }
             }
         }
     }
