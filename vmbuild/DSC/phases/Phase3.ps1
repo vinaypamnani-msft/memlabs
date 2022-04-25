@@ -106,7 +106,7 @@ configuration Phase3
             }
 
             $nextDepend = "[InstallADK]ADKInstall"
-            if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite") {
+            if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite" -and -not $ThisVM.hidden) {
 
                 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
                 $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
