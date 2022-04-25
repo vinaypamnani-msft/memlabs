@@ -82,7 +82,7 @@ Configuration Phase7
         }
         if ($ThisVm.role -eq "SQLAO" -and (-not $ThisVM.OtherNode)) {
             $primaryNode = $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $node.NodeName }
-            $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName }
+            $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName -and $_.role -in "CAS", "Primary" }
             if ($serverToWait) {
                 $WaitFor += $serverToWait.vmName
             }
