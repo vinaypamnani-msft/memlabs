@@ -1112,7 +1112,7 @@ function Update-VMInformation {
     )
 
     try {
-        $vmNoteObject = $vm.Notes | convertFrom-Json
+        $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
     }
     catch {
         Write-Log "Could not convert notes $($vm.Notes) from vm $($vm.Name)" -LogOnly -Failure
