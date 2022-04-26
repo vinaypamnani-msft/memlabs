@@ -434,6 +434,7 @@ if ($UpdateRequired) {
 
         # Get update info
         $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name | Where-Object { $_.State -ne 196612 }
+        if (-not $updatepack) { break }
 
         # Invoke update download
         while ($updatepack.State -eq 327682 -or $updatepack.State -eq 262145 -or $updatepack.State -eq 327679) {
@@ -552,7 +553,7 @@ if ($UpdateRequired) {
                 $fileversion = (Get-Item ($path + '\cd.latest\SMSSETUP\BIN\X64\setup.exe')).VersionInfo.FileVersion.split('.')[2]
 
                 while ($fileversion -ne $toplevelsite.BuildNumber) {
-                    Start-Sleep 120
+                    Start-Sleep 60
                     $fileversion = (Get-Item ($path + '\cd.latest\SMSSETUP\BIN\X64\setup.exe')).VersionInfo.FileVersion.split('.')[2]
                 }
 
