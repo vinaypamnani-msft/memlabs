@@ -9,7 +9,7 @@ function Start-Maintenance {
 
     $applyNewOnly = $false
     if ($DeployConfig) {
-        $allVMs =$DeployConfig.virtualMachines | Where-Object { -not $_.hidden }
+        $allVMs = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden }
         $vmsNeedingMaintenance = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden } | Sort-Object vmName
         $applyNewOnly = $true
     }
@@ -71,7 +71,13 @@ function Start-Maintenance {
             $countSkipped++
         }
         else {
-            $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
+            try {
+                $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
+            }
+            catch {
+                write-exception $_
+                $worked = $false
+            }
             if ($worked) { $countWorked++ } else { $countFailed++ }
         }
     }
@@ -112,8 +118,8 @@ function Show-FailedDomains {
         $newLine = $line -replace '\x1b\[[0-9;]*m'
         Write-Host2 -ForegroundColor Yellow "  #" -NoNewLine
         #subtract the 3 chars displayed above
-        $Len = $longestMinus1 -3
-        Write-Host2 " $newLine".PadRight($len, " ").Replace($newLine,$line) -ForegroundColor Turquoise -NoNewLine
+        $Len = $longestMinus1 - 3
+        Write-Host2 " $newLine".PadRight($len, " ").Replace($newLine, $line) -ForegroundColor Turquoise -NoNewLine
         Write-Host2 -ForeGroundColor Yellow "#"
     }
     Write-Host2 ("  #".PadRight($longestMinus1, " ") + "#") -ForegroundColor Yellow
@@ -317,7 +323,7 @@ function Start-VMFix {
 
     if ($vmFix.InjectFiles) {
         $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
-        foreach($file in $vmFix.InjectFiles) {
+        foreach ($file in $vmFix.InjectFiles) {
             $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
             $targetPathInVM = "C:\staging\$file"
             Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM [$targetPathInVM]..."
@@ -637,7 +643,7 @@ function Get-VMFixes {
         Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 
-        if ($null -ne $task){
+        if ($null -ne $task) {
             return $true
         }
         else {
