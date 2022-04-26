@@ -433,7 +433,7 @@ if ($UpdateRequired) {
         }
 
         # Get update info
-        $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+        $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name | Where-Object { $_.State -ne 196612 }
 
         # Invoke update download
         while ($updatepack.State -eq 327682 -or $updatepack.State -eq 262145 -or $updatepack.State -eq 327679) {
