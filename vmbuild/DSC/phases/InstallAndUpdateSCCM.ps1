@@ -423,8 +423,13 @@ if ($UpdateRequired) {
         Write-DscStatus "No updates found."
     }
 
+    $updateCompleted = $false
     # Work on update
     while ($updatepack -ne "") {
+
+        if ($updateCompleted) {
+            break
+        }
 
         # Set failure if retry exhausted
         if ($retrytimes -eq 3) {
@@ -433,8 +438,18 @@ if ($UpdateRequired) {
         }
 
         # Get update info
-        $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name | Where-Object { $_.State -ne 196612 }
-        if (-not $updatepack) { break }
+        $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+
+        if (-not $updatepack) {
+            start-sleep -Seconds 300
+            $retrytimes++
+            continue
+        }
+        if ($updatepack.state -eq 199612 ) {
+            $updateCompleted = $true
+            break
+        }
+
 
         # Invoke update download
         while ($updatepack.State -eq 327682 -or $updatepack.State -eq 262145 -or $updatepack.State -eq 327679) {
@@ -559,7 +574,13 @@ if ($UpdateRequired) {
 
                 # Wait for copying files finished
                 Start-Sleep 600
+                $updateCompleted = $true
             }
+        }
+
+        if ($updatepack.state -eq 199612 ) {
+            $updateCompleted = $true
+            break
         }
 
         if ($updatepack.State -eq 196607 -or $updatepack.State -eq 262143 ) {
