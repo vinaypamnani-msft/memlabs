@@ -133,7 +133,7 @@ $global:VM_Create = {
             }
 
             if ($currentItem.role -in ("OSDClient", "Linux")) {
-                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion
+                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
                 return
             }
@@ -298,7 +298,7 @@ $global:VM_Create = {
 
             # Set vm note
             if (-not $skipVersionUpdate) {
-                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true -UpdateVersion
+                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
             }
         }
 
@@ -475,7 +475,7 @@ $global:VM_Config = {
                 }
             }
             # Update VMNote and set new version, this code doesn't run when VM_Create failed
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -UpdateVersion
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted
             return
         }
 
@@ -1314,7 +1314,7 @@ $global:VM_Config = {
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
         if ($using:Phase -gt 1 -and -not $currentItem.hidden) {
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete
         }
 
         if (-not $complete) {
