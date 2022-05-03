@@ -1815,7 +1815,7 @@ function New-VirtualMachine {
 
 function Get-AvailableMemoryGB {
     $availableMemory = Get-CimInstance win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-    $availableMemory = ($availableMemory - ("5GB" / 1kB)) * 1KB / 1GB
+    $availableMemory = ($availableMemory - ("8GB" / 1kB)) * 1KB / 1GB
     $availableMemory = [Math]::Round($availableMemory, 2)
     if ($availableMemory -lt 0) {
         $availableMemory = 0

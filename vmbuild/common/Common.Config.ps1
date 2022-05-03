@@ -1950,7 +1950,7 @@ Function Show-Summary {
         $totalMemory = $fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
         $totalMemory = $totalMemory.Sum / 1GB
         $availableMemory = Get-AvailableMemoryGB
-        Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine"
+        Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine [8GB Buffer]"
     }
 
     if (-not $Common.DevBranch) {

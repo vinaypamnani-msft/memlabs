@@ -741,6 +741,8 @@ function ConvertTo-DeployConfigEx {
                         $DomainAccountsUPN += @($vm.SqlAgentAccount)
                     }
                 }
+                $DomainAccountsUPN += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
+                $DomainAccountsUPN = $DomainAccountsUPN | Where-Object { $_ } | Select-Object -Unique
 
                 if ($DomainAccountsUPN.Count -gt 0) {
                     $DomainAccountsUPN = $DomainAccountsUPN | Select-Object -Unique
@@ -751,10 +753,10 @@ function ConvertTo-DeployConfigEx {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
                 }
 
-                $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
+                #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentAccount } | Select-Object -ExpandProperty SQLAgentAccount -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SqlServiceAccount } | Select-Object -ExpandProperty SqlServiceAccount -Unique
-                $accountLists.DomainAccounts = $accountLists.DomainAccounts | Select-Object -Unique
+                #$accountLists.DomainAccounts = $accountLists.DomainAccounts | Select-Object -Unique
 
                 $ServersToWaitOn = @()
                 $thisPSName = $null
