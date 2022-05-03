@@ -1026,7 +1026,9 @@ function Get-VMSizeCached {
 
     if ($vmCacheEntry) {
         if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
-            return $vmCacheEntry
+            if ($vmCacheEntry.diskSize -and $vmCacheEntry.diskSize -gt 0) {
+                return $vmCacheEntry
+            }
         }
     }
 
@@ -1112,7 +1114,7 @@ function Update-VMInformation {
     )
 
     try {
-        $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
+        $vmNoteObject = $vm.Notes | convertFrom-Json
     }
     catch {
         Write-Log "Could not convert notes $($vm.Notes) from vm $($vm.Name)" -LogOnly -Failure
@@ -1248,7 +1250,7 @@ function Update-VMFromHyperV {
     )
     if (-not $vmNoteObject) {
         try {
-            $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
+            $vmNoteObject = $vm.Notes | convertFrom-Json
         }
         catch {
             Write-Log -LogOnly -Failure "Could not convert Notes Object on $($vm.Name) $vmNoteObject"
