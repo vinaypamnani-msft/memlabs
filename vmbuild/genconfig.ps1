@@ -931,7 +931,7 @@ function Select-MainMenu {
             $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -notin ("DC", "BDC") } | Sort-Object { $_.vmName }
 
             if ($virtualMachines) {
-                $global:config.virtualMachines = $virtualMachines
+                $global:Config.virtualMachines = $virtualMachines
             }
         }
         foreach ($virtualMachine in $global:config.virtualMachines) {
@@ -6042,16 +6042,20 @@ function Select-VirtualMachines {
                         }
                         else {
                             if ($virtualMachine.role -eq "FileServer") {
-                                $passiveVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-                                if ($passiveVMs) {
-                                    foreach ($passiveVM in $PassiveVMs) {
-                                        if ($passiveVM.remoteContentLibVM -eq $virtualMachine.vmName) {
-                                            Write-Host
-                                            write-host2 -ForegroundColor Khaki "This VM is currently used as the RemoteContentLib for $($passiveVM.vmName) and can not be deleted at this time."
-                                            $removeVM = $false
-                                        }
+
+                                foreach ($testVM in $global:config.virtualMachine) {
+                                    if ($testVM.remoteContentLibVM -eq $virtualMachine.vmName) {
+                                        Write-Host
+                                        write-host2 -ForegroundColor Khaki "This VM is currently used as the RemoteContentLib for $($testVM.vmName) and can not be deleted at this time."
+                                        $removeVM = $false
+                                    }
+                                    if ($testVM.fileServerVM -eq $virtualMachine.vmName) {
+                                        Write-Host
+                                        write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($testVM.vmName) and can not be deleted at this time."
+                                        $removeVM = $false
                                     }
                                 }
+
                                 $SQLAOVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.fileServerVM }
                                 if ($SQLAOVMs) {
                                     foreach ($SQLAOVM in $SQLAOVMs) {
