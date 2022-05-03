@@ -1,3 +1,4 @@
+# InstallAndUpdateSCCM.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -9,7 +10,6 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get required values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-$UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CurrentRole = $ThisVM.role
@@ -76,14 +76,8 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
     # Ensure CM files were downloaded
     $cmsourcepath = "c:\$CM"
     if (!(Test-Path $cmsourcepath)) {
+        $cmurl = $ThisVM.thisParams.cmDownloadUrl
         Write-DscStatus "Downloading $CM installation source..."
-        if ($CM -eq "CMTP") {
-            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2077212&clcid=0x409"
-        }
-        else {
-            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
-        }
-
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
 
         if (!(Test-Path $cmsourcepath)) {
@@ -217,7 +211,8 @@ SysCenterId=
             $success++
             Write-DscStatus "Pre-Req downloading complete Success Count $success out of 2."
         }
-        else { #If we didnt find it, increment fail count, and bail after 10 fails
+        else {
+            #If we didnt find it, increment fail count, and bail after 10 fails
             $success = 0
             $fail++
             if ($fail -ge 10) {
@@ -236,16 +231,16 @@ SysCenterId=
 
     # Install CM
     $CMInstallationFile = "c:\$CM\SMSSETUP\BIN\X64\Setup.exe"
+    $CMFileVersion = Get-Item -Path $CMInstallationFile -ErrorAction SilentlyContinue
 
-
-    Write-DscStatus "Starting Install of CM from $CMInstallationFile"
+    Write-DscStatus "Starting Install of CM from $CMInstallationFile [$($CMFileVersion.VersionInfo.FileVersion)]"
     start-sleep -seconds 4
 
     Write-DscStatusSetup
 
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
 
-    Write-DscStatus "Installation finished."
+    Write-DscStatus "Installation finished [$($CMFileVersion.VersionInfo.FileVersion)]."
 
     # Write action completed
     $Configuration.InstallSCCM.Status = 'Completed'
@@ -307,8 +302,13 @@ if (-not $exists) {
     Write-DscStatus "Failed to add 'vmbuildadmin' account as Full Administrator in ConfigMgr"
 }
 
-# Check if we should update to the  latest version
-if ($UpdateToLatest) {
+# Check if we should update
+$UpdateRequired = $false
+if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and $deployConfig.cmOptions.version -ne $ThisVM.thisParams.cmDownloadVersion.baselineVersion) {
+    $UpdateRequired = $true
+}
+
+if ($UpdateRequired) {
 
     # Update actions file
     $Configuration.UpgradeSCCM.Status = 'Running'
@@ -415,7 +415,7 @@ if ($UpdateToLatest) {
     # Check for updates
     $retrytimes = 0
     $downloadretrycount = 0
-    $updatepack = Get-UpdatePack
+    $updatepack = Get-UpdatePack -UpdateVersion $deployConfig.cmOptions.version
     if ($updatepack -ne "") {
         Write-DscStatus "Found '$($updatepack.Name)' update."
     }
@@ -423,8 +423,13 @@ if ($UpdateToLatest) {
         Write-DscStatus "No updates found."
     }
 
+    $updateCompleted = $false
     # Work on update
     while ($updatepack -ne "") {
+
+        if ($updateCompleted) {
+            break
+        }
 
         # Set failure if retry exhausted
         if ($retrytimes -eq 3) {
@@ -434,6 +439,17 @@ if ($UpdateToLatest) {
 
         # Get update info
         $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+
+        if (-not $updatepack) {
+            start-sleep -Seconds 300
+            $retrytimes++
+            continue
+        }
+        if ($updatepack.state -eq 199612 ) {
+            $updateCompleted = $true
+            break
+        }
+
 
         # Invoke update download
         while ($updatepack.State -eq 327682 -or $updatepack.State -eq 262145 -or $updatepack.State -eq 327679) {
@@ -552,20 +568,19 @@ if ($UpdateToLatest) {
                 $fileversion = (Get-Item ($path + '\cd.latest\SMSSETUP\BIN\X64\setup.exe')).VersionInfo.FileVersion.split('.')[2]
 
                 while ($fileversion -ne $toplevelsite.BuildNumber) {
-                    Start-Sleep 120
+                    Start-Sleep 60
                     $fileversion = (Get-Item ($path + '\cd.latest\SMSSETUP\BIN\X64\setup.exe')).VersionInfo.FileVersion.split('.')[2]
                 }
 
                 # Wait for copying files finished
                 Start-Sleep 600
+                $updateCompleted = $true
             }
+        }
 
-            #Get if there are any other updates need to be installed
-            Write-DscStatus "Checking if another update is available..."
-            $updatepack = Get-UpdatePack
-            if ($updatepack -ne "") {
-                Write-DscStatus "Found another update: '$($updatepack.Name)'."
-            }
+        if ($updatepack.state -eq 199612 ) {
+            $updateCompleted = $true
+            break
         }
 
         if ($updatepack.State -eq 196607 -or $updatepack.State -eq 262143 ) {
@@ -602,7 +617,7 @@ if ($UpdateToLatest) {
 else {
 
     # Write action completed, PS can start when UpgradeSCCM.EndTime is not empty
-    $Configuration.UpgradeSCCM.Status = 'NotRequested'
+    $Configuration.UpgradeSCCM.Status = 'Completed'
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration.UpgradeSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
@@ -626,6 +641,57 @@ else {
         #Set each Primary to Started
         foreach ($PSVM in $PSVMs) {
 
+            # Set Delegation for CMPivot
+            try {
+                if ($SQLVM) {
+                    if ($SQLVM.SqlServiceAccount) {
+                        if ($SQLVM.SqlServiceAccount -ne "LocalSystem") {
+                            $SQLServiceAccountCAS = Get-ADUser -Identity $SQLVM.SqlServiceAccount -Properties PrincipalsAllowedToDelegateToAccount
+                        }
+                        else {
+                            $SQLServiceAccountCAS = Get-ADComputer -Identity $SQLVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                        }
+                    }
+                    else {
+                        $SQLServiceAccountCAS = Get-ADComputer -Identity $SQLVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                    }
+                }
+                else {
+                    $SQLServiceAccountCAS = Get-ADComputer -Identity $ThisVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+
+                }
+
+                $user = $false
+                if ($PSVM.remoteSQLVM) {
+                    $PriSQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $($PSVM.remoteSQLVM) }
+                    if ($PriSQLVM.SqlServiceAccount) {
+                        if ($PriSQLVM.SqlServiceAccount -ne "LocalSystem") {
+                            $SQLServiceAccountPRI = Get-ADUser -Identity $PriSQLVM.SqlServiceAccount -Properties PrincipalsAllowedToDelegateToAccount
+                            $user = $true
+                        }
+                        else {
+                            $SQLServiceAccountPRI = Get-ADComputer -Identity $PriSQLVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                        }
+                    }
+                    else {
+                        $SQLServiceAccountPRI = Get-ADComputer -Identity $PriSQLVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                    }
+                }
+                else {
+                    $SQLServiceAccountPRI = Get-ADComputer -Identity $PSVM.vmName -Properties PrincipalsAllowedToDelegateToAccount
+                }
+
+                if ($user) {
+                    Set-ADUser -Identity $SQLServiceAccountPRI -PrincipalsAllowedToDelegateToAccount $SQLServiceAccountCAS
+                }
+                else {
+                    Set-ADComputer -Identity $SQLServiceAccountPRI -PrincipalsAllowedToDelegateToAccount $SQLServiceAccountCAS
+                }
+            }
+            catch {
+                Write-DscStatus "Delegation failed $_"
+                start-sleep -seconds 60
+            }
             $propName = "PSReadyToUse" + $PSVM.VmName
             if (-not $Configuration.$propName) {
                 $PSReadytoUse = @{

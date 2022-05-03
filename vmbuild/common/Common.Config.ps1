@@ -16,7 +16,7 @@ function Get-UserConfiguration {
     }
 
     # Add extension
-    if (-not $Configuration.EndsWith(".json")) {
+    if (-not $Configuration.ToLowerInvariant().EndsWith(".json")) {
         $Configuration = "$Configuration.json"
     }
 
@@ -52,11 +52,23 @@ function Get-UserConfiguration {
                     $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $vm.AlwaysOnName
                 }
                 if ($null -eq ($vm.AlwaysOnListenerName)) {
-                    $vm| Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $vm.AlwaysOnName
+                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $vm.AlwaysOnName
                 }
                 $vm.PsObject.properties.Remove('AlwaysOnName')
 
             }
+        }
+
+        if ($null -ne $config.cmOptions.updateToLatest ) {
+            if ($config.cmOptions.updateToLatest -eq $true) {
+                $config.cmOptions.version = Get-CMLatestVersion
+            }
+            $config.cmOptions.PsObject.properties.Remove('updateToLatest')
+        }
+
+        if ($null -eq $config.vmOptions.domainNetBiosName ) {
+            $netbiosName = $config.vmOptions.domainName.Split(".")[0]
+            $config.vmOptions | Add-Member -MemberType NoteProperty -Name "domainNetBiosName" -Value $netbiosName
         }
 
         if ($null -ne $config.cmOptions.installDPMPRoles) {
@@ -128,6 +140,7 @@ function Get-FilesForConfiguration {
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file.id) { continue }
         $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
+            Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
             $allSuccess = $false
         }
     }
@@ -136,6 +149,16 @@ function Get-FilesForConfiguration {
         if (-not $DownloadAll -and $sqlVersionsToGet -notcontains $file.id) { continue }
         $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
+            Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
+            $allSuccess = $false
+        }
+    }
+
+    foreach ($file in (Get-LinuxImages).Name) {
+        if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file) { continue }
+        $worked = Download-LinuxImage $file
+        if (-not $worked) {
+            Write-Log -Verbose "$file Failed to download via Download-LinuxImage"
             $allSuccess = $false
         }
     }
@@ -163,15 +186,14 @@ function New-DeployConfig {
         $virtualMachines = $configObject.virtualMachines
         foreach ($item in $virtualMachines) {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
-        }
+            if ($item.pullDPSourceDP -and -not $item.pullDPSourceDP.StartsWith($configObject.vmOptions.prefix)) {
 
-        $PSVMs = $virtualMachines | Where-Object { $_.role -eq "Primary" }
-        foreach ($PSVM in $PSVMs) {
-            if ($PSVM) {
-                # Add prefix to remote SQL
-                if ($PSVM.remoteSQLVM -and -not $PSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-                    $PSVM.remoteSQLVM = $configObject.vmOptions.prefix + $PSVM.remoteSQLVM
-                }
+                $item.pullDPSourceDP = $configObject.vmOptions.prefix + $item.pullDPSourceDP
+            }
+
+            if ($item.remoteSQLVM -and -not $item.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
+
+                $item.remoteSQLVM = $configObject.vmOptions.prefix + $item.remoteSQLVM
             }
         }
 
@@ -199,16 +221,6 @@ function New-DeployConfig {
                 # Add prefix to FS
                 if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
                     $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
-                }
-            }
-        }
-
-        $CSVMs = $virtualMachines | Where-Object { $_.role -eq "CAS" }
-        if ($CSVMs) {
-            foreach ($CSVM in $CSVMs) {
-                # Add prefix to remote SQL
-                if ($CSVM.remoteSQLVM -and -not $CSVM.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-                    $CSVM.remoteSQLVM = $configObject.vmOptions.prefix + $CSVM.remoteSQLVM
                 }
             }
         }
@@ -303,12 +315,33 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
+
+    # If any machine has a RemoteSQLVM, add it.  This will also add the OtherNode
+    $vms = $config.virtualMachines
+    foreach ($vm in $vms) {
+        if ($vm.RemoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
+        }
+    }
     # Add Primary to list, when adding DPMP
     $DPMPs = $config.virtualMachines | Where-Object { $_.role -eq "DPMP" }
     foreach ($dpmp in $DPMPS) {
-        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -SmartUpdate:$false
+        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -type VM -SmartUpdate:$false
         if ($DPMPPrimary) {
-            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary -configToModify $config
+            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary.vmName -configToModify $config
+        }
+
+        if ($DPMPPrimary.pullDPSourceDP) {
+            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary.pullDPSourceDP -configToModify $config
+        }
+    }
+
+    # Add Primary to list, when adding SUP
+    $SUPs = $config.virtualMachines | Where-Object { $_.installSUP -eq $true }
+    foreach ($sup in $SUPs) {
+        $SUPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $sup.siteCode -type VM -SmartUpdate:$false
+        if ($SUPPrimary) {
+            Add-ExistingVMToDeployConfig -vmName $SUPPrimary.vmName -configToModify $config
         }
     }
 
@@ -347,6 +380,19 @@ function Add-ExistingVMsToDeployConfig {
             Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
             if ($primary.RemoteSQLVM) {
                 Add-RemoteSQLVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
+            }
+        }
+    }
+
+    $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" }
+    foreach ($sup in $wsus) {
+        if ($sup.InstallSUP) {
+            $ss = Get-SiteServerForSiteCode -deployConfig $config -sitecode $sup.siteCode -type VM -SmartUpdate:$false
+            if ($ss) {
+                Add-ExistingVMToDeployConfig -vmName $ss.vmName -configToModify $config
+                if ($ss.RemoteSQLVM) {
+                    Add-RemoteSQLVMToDeployConfig -vmName $ss.RemoteSQLVM -configToModify $config
+                }
             }
         }
     }
@@ -440,9 +486,10 @@ function Add-VMToAccountLists {
             continue
         }
 
-        $DomainName = $deployConfig.parameters.domainName
-        $DName = $DomainName.Split(".")[0]
+        $DomainName = $deployConfig.vmOptions.domainName
+        #$DName = $DomainName.Split(".")[0]
 
+        $DName = $deployConfig.vmOptions.domainNetBiosName
         if ($SQLSysAdminAccounts) {
             $accountLists.SQLSysAdminAccounts += "$DNAME\$($vmToAdd.vmName)$"
         }
@@ -491,8 +538,8 @@ function Get-SQLAOConfig {
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
     $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
-    $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
-
+    #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+    $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     if (-not ($PrimaryAO.ClusterIPAddress)) {
         $vm = Get-List2 -deployConfig $deployConfig -SmartUpdate | where-object { $_.vmName -eq $PrimaryAO.vmName }
         if ($vm.ClusterIPAddress) {
@@ -1065,7 +1112,7 @@ function Update-VMInformation {
     )
 
     try {
-        $vmNoteObject = $vm.Notes | convertFrom-Json
+        $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
     }
     catch {
         Write-Log "Could not convert notes $($vm.Notes) from vm $($vm.Name)" -LogOnly -Failure
@@ -1201,7 +1248,7 @@ function Update-VMFromHyperV {
     )
     if (-not $vmNoteObject) {
         try {
-            $vmNoteObject = $vm.Notes | convertFrom-Json
+            $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
         }
         catch {
             Write-Log -LogOnly -Failure "Could not convert Notes Object on $($vm.Name) $vmNoteObject"
@@ -1678,6 +1725,80 @@ function Convert-vmNotesToOldFormat {
 
 }
 
+Function Get-LinuxImages {
+    $linuxJson = Join-Path $Global:Common.TempPath "LinuxHyperVGallery.json"
+
+    if (Test-Path $linuxJson -PathType Leaf) {
+        #Get a new copy if the existing one is over 5 hours old
+        if (Get-Childitem $linuxJson  | Where-Object { $_.LastWriteTime -lt (get-date).AddHours(-5) }) {
+            & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+        }
+    }
+    else {
+        # Get a copy if the file doesnt exist
+        & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+    }
+    $linux = Get-Content $linuxJson | convertfrom-json
+    return ($linux.images | Where-Object { $_.config.secureboot -ne $true })
+}
+
+Function Download-LinuxImage {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string] $name
+    )
+
+    $linux = Get-LinuxImages
+
+    $image = ($linux | Where-Object { $_.name -eq $name })
+    #Download the file is hash does not match
+
+    $fileZip = $("os\" + $image.name + ".zip")
+    $fileVHDX = $($image.name + ".vhdx")
+
+    #This is where Get-FileWithHash puts the resulting file
+    $fullfileZip = Join-Path $Global:Common.AzureFilesPath $fileZip
+
+    #This is where the VHDX is going to end up
+    $fullfileVHDX = Join-Path $Global:Common.AzureImagePath $fileVHDX
+
+    $url = $image.disk.uri
+
+    $hashAlg = $($image.disk.hash.split(":")[0])
+    $expectedHash = $($image.disk.hash.Split(":")[1])
+
+    $success = Get-FileWithHash -FileName $($fileZip) -FileDisplayName $name -FileUrl $url  -hashAlg $hashAlg -ExpectedHash $expectedHash
+    if (-not $success.success) {
+        write-log -failure  "Could not download $($url)"
+        return $false
+    }
+    # If we did not download a new file, and the file already exists.. Exit
+    if (-not $success.download) {
+        if (test-path $fullfileVHDX -PathType Leaf) {
+            return $true
+        }
+    }
+
+    # If we downloaded a new file, or one didnt exist
+
+    # If we downloaded a new file, delete the old one
+    if (test-path $fullfileVHDX -PathType Leaf) {
+        Remove-Item $fullfileVHDX -force
+    }
+
+    # If the intermediate file exists, delete it so we can extract a new one.
+    if (test-path $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -PathType Leaf) {
+        Remove-Item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -force
+    }
+
+    #Expand the downloaded file
+    Expand-Archive -Path $fullfileZip -DestinationPath $($Global:Common.AzureImagePath) -Force
+    # Move it to its final name
+    move-item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) $fullfileVHDX -Force
+    return $true
+}
+
 Function Show-Summary {
     [CmdletBinding()]
     param (
@@ -1698,13 +1819,6 @@ Function Show-Summary {
         if ($deployConfig.cmOptions.install -eq $true -and ($containsPS -or $containsSecondary)) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
 
-
-            if ($deployConfig.cmOptions.updateToLatest -eq $true) {
-                Write-GreenCheck "ConfigMgr will be updated to latest"
-            }
-            else {
-                Write-RedX "ConfigMgr will NOT updated to latest"
-            }
             $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PS) {
                 foreach ($PSVM in $PS) {
@@ -1861,6 +1975,20 @@ Function Show-Summary {
             else {
                 $deployConfig.vmOptions.network + " [Default]"
             }
+        }
+    },
+    @{Label = "Roles"; Expression = {
+            $roles = @()
+            if ($_.InstallCA) { $roles += "CA" }
+            if ($_.InstallSUP) { $roles += "SUP" }
+            if ($_.InstallMP) { $roles += "MP" }
+            if ($_.InstallDP) {
+                if ($_.pullDPSourceDP) { $roles += "Pull DP" }
+                else {
+                    $roles += "DP"
+                }
+            }
+            $roles -join ","
         }
     },
     #@{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },

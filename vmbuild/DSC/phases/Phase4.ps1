@@ -15,8 +15,8 @@ configuration Phase4
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
-    $NetBiosDomainName = $DomainName.Split(".")[0]
-
+    #$NetBiosDomainName = $DomainName.Split(".")[0]
+    $NetBiosDomainName = $deployConfig.vmOptions.domainNetBiosName
     $SQLInstanceDir = "C:\Program Files\Microsoft SQL Server"
     $SQLInstanceName = "MSSQLSERVER"
     $sqlUpdateEnabled = $false

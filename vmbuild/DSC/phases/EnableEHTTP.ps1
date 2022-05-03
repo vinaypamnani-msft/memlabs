@@ -1,6 +1,7 @@
 param(
     [string]$ConfigFilePath,
-    [string]$LogPath
+    [string]$LogPath,
+    [bool]$FirstRun
 )
 
 # Read config json
@@ -50,10 +51,12 @@ Set-Location "$($SiteCode):\" @initParams
 $enabled = $false
 $attempts = 0
 $maxAttempts = 30
-if ($ThisVM.hidden) {
+
+if (-not $FirstRun) {
     # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
     $attempts = $maxAttempts
 }
+
 Write-DscStatus "Enabling e-HTTP" -NoStatus
 do {
     $attempts++

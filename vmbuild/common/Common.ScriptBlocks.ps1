@@ -56,8 +56,22 @@ $global:VM_Create = {
         }
 
         # Determine which OS image file to use for the VM
-        $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
-        $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
+        if ($currentItem.role -notin "OSDClient") {
+            $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
+            if ($imageFile) {
+                $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
+            }
+            if (-not $vhdxPath) {
+                $linuxFile = (Get-LinuxImages).Name | Where-Object { $_ -eq $currentItem.operatingSystem }
+                if ($linuxFile) {
+                    $vhdxPath = Join-Path $Common.AzureImagePath $($linuxFile + ".vhdx")
+                }
+                if (-not $vhdxPath) {
+                    throw "Could not find $($currentItem.operatingSystem) in file list"
+                }
+            }
+        }
+
 
         # Set base VM path
         $virtualMachinePath = Join-Path $deployConfig.vmOptions.basePath $deployConfig.vmOptions.domainName
@@ -107,6 +121,10 @@ $global:VM_Create = {
                 $HashArguments.Add("SwitchName2", "cluster")
             }
 
+            if ($currentItem.role -eq "Linux") {
+                $HashArguments.Add("DiskControllerType", "IDE")
+            }
+
             $created = New-VirtualMachine @HashArguments
 
             if (-not ($created -eq $true)) {
@@ -114,8 +132,8 @@ $global:VM_Create = {
                 return
             }
 
-            if ($currentItem.role -eq "OSDClient") {
-                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -UpdateVersion
+            if ($currentItem.role -in ("OSDClient", "Linux")) {
+                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
                 return
             }
@@ -280,7 +298,7 @@ $global:VM_Create = {
 
             # Set vm note
             if (-not $skipVersionUpdate) {
-                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true -UpdateVersion
+                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
             }
         }
 
@@ -294,7 +312,7 @@ $global:VM_Create = {
             $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
 
             # SQL Iso Path
-            $sqlIso = $sqlFiles.filename | Where-Object { $_.EndsWith(".iso") }
+            $sqlIso = $sqlFiles.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
             $sqlIsoPath = Join-Path $Common.AzureFilesPath $sqlIso
 
             # Add SQL ISO to guest
@@ -457,7 +475,7 @@ $global:VM_Config = {
                 }
             }
             # Update VMNote and set new version, this code doesn't run when VM_Create failed
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted -UpdateVersion
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted
             return
         }
 
@@ -809,7 +827,8 @@ $global:VM_Config = {
                 $cd | ConvertTo-Json -Depth 5 | Out-File "C:\staging\DSC\Phase$($Phase)_CD.json" -Force -Confirm:$false
 
                 # Create domain creds
-                $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+                #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+                $netbiosName = $deployConfig.vmOptions.domainNetBiosName
                 $user = "$netBiosName\$($using:Common.LocalAdmin.UserName)"
                 $domainCreds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
 
@@ -865,7 +884,8 @@ $global:VM_Config = {
                 }
                 else {
                     # Use domainCreds instead of local Creds for multi-node DSC
-                    $userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
+                    #$userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
+                    $userdomain = $deployConfig.vmOptions.domainNetBiosName
                     $user = "$userdomain\$($using:Common.LocalAdmin.UserName)"
                     $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
                     "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
@@ -907,6 +927,9 @@ $global:VM_Config = {
                     $percent = [Math]::Min($attempts, 100)
                     Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
                     foreach ($node in $nonReadyNodes) {
+                        if (-not $node) {
+                            continue
+                        }
                         $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
                         if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
                             Write-Log "[Phase $Phase]: Node $node is NOT ready."
@@ -1033,6 +1056,18 @@ $global:VM_Config = {
                                         $FailStopWatch.Start()
                                     }
                                     Write-ProgressElapsed -stopwatch $FailStopWatch -timespan $FailtimeSpan -text "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) (Currently Retrying) : $msg"
+                                    if ($msg.Contains("ADServerDownException")) {
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: ADServerDownException from VM. Restarting the VM" -Warning
+                                        Stop-VM2 -name $currentItem.vmName
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Stopped"
+
+                                        Start-VM2 -Name $currentItem.vmName
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 60 seconds to check status."
+
+                                        Start-Sleep -Seconds 60
+                                        $state = Get-VM2 -Name $currentItem.vmName
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Current State: $($state.state)"
+                                    }
                                     if (-not $failure) {
                                         continue
                                     }
@@ -1279,7 +1314,7 @@ $global:VM_Config = {
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
         if ($using:Phase -gt 1 -and -not $currentItem.hidden) {
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -UpdateVersion
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete
         }
 
         if (-not $complete) {

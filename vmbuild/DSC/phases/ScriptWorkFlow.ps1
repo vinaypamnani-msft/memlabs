@@ -1,3 +1,4 @@
+# ScriptWorkflow.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -20,9 +21,11 @@ $containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq 
 
 # Script Workflow json file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
+$firstRun = $true
 
 if (Test-Path -Path $ConfigurationFile) {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $firstRun = $false
 }
 if (-not ($configuration.ScriptWorkflow)) {
     $Configuration = $null
@@ -139,7 +142,7 @@ if (-not $Configuration) {
         }
     }
 
-    if ($containsPassive) {
+    if ($containsSecondary) {
         $Actions += @{
             InstallSecondary = @{
                 Status    = 'NotStart'
@@ -150,6 +153,15 @@ if (-not $Configuration) {
     }
 
     $Configuration = New-Object -TypeName psobject -Property $Actions
+}
+
+if (-not $Configuration.InstallSUP) {
+    $item = [PSCustomObject]@{
+        Status    = 'NotStart'
+        StartTime = ''
+        EndTime   = ''
+    }
+    $Configuration | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $item
 }
 
 $Configuration.ScriptWorkflow.Status = "Running"
@@ -168,16 +180,23 @@ if ($scenario -eq "Standalone") {
 
     #Install CM and Config
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
+    Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
     if ($containsSecondary) {
         # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
+        Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
     #Install DP/MP/Client
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSUP.ps1"
+    Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
 }
@@ -188,6 +207,11 @@ if ($scenario -eq "Hierarchy") {
 
         #Install CM and Config
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSUP.ps1"
+        Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
     }
@@ -195,16 +219,23 @@ if ($scenario -eq "Hierarchy") {
 
         #Install CM and Config
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
+        Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
+            Set-Location $LogPath
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
         #Install DP/MP/Client
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSUP.ps1"
+        Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
     }
 }
@@ -212,6 +243,7 @@ if ($scenario -eq "Hierarchy") {
 if ($containsPassive) {
     # Install Passive Site Server
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
+    Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 }
 
@@ -225,4 +257,4 @@ $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
 $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
-. $ScriptFile $ConfigFilePath $LogPath
+. $ScriptFile $ConfigFilePath $LogPath $firstRun

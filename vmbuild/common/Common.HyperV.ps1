@@ -170,9 +170,7 @@ function Stop-VM2 {
             return
         }
 
-        Write-Log "${Name}: Stopping VM" -HostOnly
-
-
+        Write-Log "${Name}: Stopping VM" -LogOnly
 
         if ($vm) {
             $i = 0

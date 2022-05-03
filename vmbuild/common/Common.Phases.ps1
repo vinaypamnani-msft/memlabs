@@ -172,7 +172,7 @@ function Start-PhaseJobs {
         }
 
         # Skip everything for OSDClient, nothing for us to do
-        if ($Phase -gt 1 -and $currentItem.role -eq "OSDClient") {
+        if ($Phase -gt 1 -and $currentItem.role -in ("OSDClient", "Linux")) {
             continue
         }
 
@@ -384,7 +384,8 @@ function Get-ConfigurationData {
         [object]$deployConfig
     )
 
-    $netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+    #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
+    $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     if (-not $netbiosName) {
         write-Log -Failure "[Phase $Phase] Could not get Netbios name from 'deployConfig.vmOptions.domainName' "
         return
@@ -395,10 +396,11 @@ function Get-ConfigurationData {
         "3" { $cd = Get-Phase3ConfigurationData -deployConfig $deployConfig }
         "4" { $cd = Get-Phase4ConfigurationData -deployConfig $deployConfig }
         "5" { $cd = Get-Phase5ConfigurationData -deployConfig $deployConfig }
-        "6" {
-            $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig
+        "6" { $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig }
+        "7" {
+            $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig
             if ($cd) {
-                $autoSnapshotName = "MemLabs Phase6 AutoSnapshot"
+                $autoSnapshotName = "MemLabs AutoSnapshot"
                 $snapshot = $null
                 $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
                 if ($dc) {
@@ -406,9 +408,9 @@ function Get-ConfigurationData {
                 }
 
                 if (-not $snapshot) {
-                    $response = Read-YesorNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp
+                    $response = Read-YesorNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
                     if (-not ($response -eq "n")) {
-                        Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment "MemLabs Phase6 AutoSnapshot"
+                        Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
                     }
                 }
             }
@@ -487,7 +489,7 @@ function Get-Phase2ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -notin "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
+        if ($vm.role -notin "WorkgroupMember", "AADClient", "InternetClient", "OSDClient", "Linux") {
             if (-not $vm.Hidden) {
                 return $cd
             }
@@ -517,7 +519,7 @@ function Get-Phase3ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient", "Linux") {
             continue
         }
 
@@ -561,7 +563,7 @@ function Get-Phase4ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux") {
             continue
         }
 
@@ -581,6 +583,7 @@ function Get-Phase4ConfigurationData {
 
     return $cd
 }
+
 function Get-Phase5ConfigurationData {
     param (
         [object]$deployConfig
@@ -653,7 +656,59 @@ function Get-Phase5ConfigurationData {
     }
     return $cd
 }
+
 function Get-Phase6ConfigurationData {
+    param (
+        [object]$deployConfig
+    )
+
+    $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+
+    # Configuration Data
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName = $dc.vmName
+                Role     = 'DC'
+            }
+        )
+    }
+
+    $NumberOfNodesAdded = 0
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.Role -eq "WSUS" -or $_.installSUP -eq $true }) {
+
+        $global:preparePhasePercent++
+
+        # Filter out workgroup machines
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux") {
+            continue
+        }
+
+        $newItem = @{
+            NodeName = $vm.vmName
+            Role     = "WSUS"
+        }
+        $cd.AllNodes += $newItem
+        if ($vm.Role -ne "DC") {
+            $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+        }
+    }
+
+    $all = @{
+        NodeName                    = "*"
+        PSDscAllowDomainUser        = $true
+        PSDscAllowPlainTextPassword = $true
+    }
+    $cd.AllNodes += $all
+
+    if ($NumberOfNodesAdded -eq 0) {
+        return
+    }
+
+    return $cd
+}
+
+function Get-Phase7ConfigurationData {
     param (
         [object]$deployConfig
     )
@@ -670,12 +725,16 @@ function Get-Phase6ConfigurationData {
         )
     }
 
-    if ($deployConfig.cmOptions.Install) {
+    if ($deployConfig.cmOptions.Install -ne $false) {
 
         $fsVMsAdded = @()
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP") }) {
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP", "WSUS") }) {
 
             $global:preparePhasePercent++
+
+            if ($vm.Role -eq "WSUS" -and -not $vm.InstallSUP) {
+                continue
+            }
 
             $newItem = @{
                 NodeName = $vm.vmName
@@ -703,8 +762,10 @@ function Get-Phase6ConfigurationData {
                     NodeName = $remoteSQL.vmName
                     Role     = "SqlServer"
                 }
-                $cd.AllNodes += $newItem
-                $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                if ($cd.AllNodes.NodeName -notcontains $($newItem.NodeName)) {
+                    $cd.AllNodes += $newItem
+                    $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                }
                 if ($remoteSQL.OtherNode) {
 
                     if ($fsVMsAdded -notcontains $remoteSQL.fileServerVM) {
@@ -721,8 +782,10 @@ function Get-Phase6ConfigurationData {
                         NodeName = $remoteSQL.OtherNode
                         Role     = "SqlServer"
                     }
-                    $cd.AllNodes += $newItem
-                    $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                    if ($cd.AllNodes.NodeName -notcontains $($newItem.NodeName)) {
+                        $cd.AllNodes += $newItem
+                        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                    }
                 }
             }
         }

@@ -78,7 +78,8 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName value [$($ConfigObject.vmOptions.domainName)] contains invalid characters, is too long, or too short. You must specify a valid Domain name. For example: contoso.com." -ReturnObject $ReturnObject -Failure
         }
 
-        $netBiosDomain = $ConfigObject.vmOptions.domainName.Split(".")[0]
+        #$netBiosDomain = $ConfigObject.vmOptions.domainName.Split(".")[0]
+        $netBiosDomain = $ConfigObject.vmOptions.domainNetBiosName
         if ($netBiosDomain.Length -gt 15) {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.domainName [$($ConfigObject.vmOptions.domainName)] is too long. Netbios domain name [$netBiosDomain] must be less than 15 chars." -ReturnObject $ReturnObject -Failure
         }
@@ -150,7 +151,7 @@ function Test-ValidCmOptions {
 
     # version
     if ($Common.Supported.CMVersions -notcontains $ConfigObject.cmOptions.version) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions contains invalid CM Version [$($ConfigObject.cmOptions.version)]. Must be either 'current-branch' or 'tech-preview'." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions contains invalid CM Version [$($ConfigObject.cmOptions.version)]. Must be one of [$($Common.Supported.CMVersions -join ',')]." -ReturnObject $ReturnObject -Failure
     }
 
     # install
@@ -159,9 +160,9 @@ function Test-ValidCmOptions {
     }
 
     # updateToLatest
-    if ($ConfigObject.cmOptions.updateToLatest -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.updateToLatest has an invalid value [$($ConfigObject.cmOptions.updateToLatest)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
-    }
+    # if ($ConfigObject.cmOptions.updateToLatest -isnot [bool]) {
+    #     Add-ValidationMessage -Message "CM Options Validation: cmOptions.updateToLatest has an invalid value [$($ConfigObject.cmOptions.updateToLatest)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    # }
 
     # installDPMPRoles
     #if ($ConfigObject.cmOptions.installDPMPRoles -isnot [bool]) {
@@ -174,14 +175,34 @@ function Test-ValidCmOptions {
     }
 
 }
+function Test-MachineNameExists {
+    param (
+        [string] $name,
+        [object] $ReturnObject,
+        [object] $config
 
+    )
+
+    if (-not $name) {
+        throw "Test-ValidMachineName called without a VMName"
+    }
+
+    write-log "Testing $name" -Verbose
+
+    $vm = Get-List2 -deployConfig $config -SmartUpdate | where-object { $_.vmName -eq $name }
+
+    if (-not $vm) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid reference VM: $name. VM does not exist." -ReturnObject $ReturnObject -Warning
+    }
+}
 
 function Test-ValidMachineName {
     param (
-        [string] $name
+        [string] $name,
+        [object] $ReturnObject
     )
 
-    if (-not $VM) {
+    if (-not $name) {
         throw "Test-ValidMachineName called without a VMName"
     }
 
@@ -196,6 +217,9 @@ function Test-ValidMachineName {
         Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters in $name." -ReturnObject $ReturnObject -Failure
     }
 
+    if ($name -eq $env:COMPUTERNAME) {
+        Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Can not be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Warning
+    }
 }
 
 function Test-ValidUserName {
@@ -207,7 +231,7 @@ function Test-ValidUserName {
     if (-not $name) {
         return
     }
-    if ($name -in "Administrator", "vmBuildAdmin" , "default" , "cm_svc" ,"guest") {
+    if ($name -in "Administrator", "vmBuildAdmin" , "default" , "cm_svc" , "guest") {
         Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] can not be a Reserved Name, as these accounts exist by default and can not be added" -ReturnObject $return -Warning
     }
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
@@ -240,41 +264,52 @@ function Test-ValidVmSupported {
     if (-not ($vmName.StartsWith( $($ConfigObject.vmOptions.prefix) ) ) ) {
         $vmName = $($ConfigObject.vmOptions.prefix) + $vmName
     }
-    Test-ValidMachineName $vmName
+    Test-ValidMachineName $vmName -ReturnObject $ReturnObject
 
     if ($VM.remoteSQLVM) {
-        Test-ValidMachineName $VM.remoteSQLVM
+        Test-ValidMachineName $VM.remoteSQLVM -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.remoteSQLVM -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.fileServerVM) {
-        Test-ValidMachineName $VM.fileServerVM
+        Test-ValidMachineName $VM.fileServerVM -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.fileServerVM -ReturnObject $ReturnObject -config $ConfigObject
+    }
+
+    if ($VM.pullDPSourceDP) {
+        Test-ValidMachineName $VM.pullDPSourceDP -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.pullDPSourceDP -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.OtherNode) {
-        Test-ValidMachineName $VM.OtherNode
+        Test-ValidMachineName $VM.OtherNode -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.OtherNode -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.AlwaysOnListenerName) {
-        Test-ValidMachineName $VM.AlwaysOnListenerName
+        Test-ValidMachineName $VM.AlwaysOnListenerName -ReturnObject $ReturnObject
     }
 
     if ($VM.remoteContentLibVM) {
-        Test-ValidMachineName $VM.remoteContentLibVM
+        Test-ValidMachineName $VM.remoteContentLibVM -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.remoteContentLibVM -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.ClusterName) {
-        Test-ValidMachineName $VM.ClusterName
+        Test-ValidMachineName $VM.ClusterName -ReturnObject $ReturnObject
     }
 
     if ($VM.SqlInstanceName) {
-        Test-ValidMachineName $VM.SqlInstanceName
+        Test-ValidMachineName $VM.SqlInstanceName -ReturnObject $ReturnObject
     }
 
 
     # Supported OS
     if ($VM.role -ne "OSDClient") {
         if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
-            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+            if ((Get-LinuxImages).Name -notcontains $vm.operatingSystem) {
+                Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+            }
         }
     }
 
@@ -288,15 +323,19 @@ function Test-ValidVmSupported {
         # Supported DSC Roles for Existing Scenario
         if ($Common.Supported.RolesForExisting -notcontains $vm.role -and $vm.role -ne "DC") {
             # DC is caught in Test-ValidDC
-            $supportedRoles = $Common.Supported.RolesForExisting -join ", "
-            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            if ($vm.role -ne "Linux") {
+                $supportedRoles = $Common.Supported.RolesForExisting -join ", "
+                Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            }
         }
     }
     else {
         # Supported DSC Roles
         if ($Common.Supported.Roles -notcontains $vm.role) {
-            $supportedRoles = $Common.Supported.Roles -join ", "
-            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for a new environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            if ($vm.role -ne "Linux") {
+                $supportedRoles = $Common.Supported.Roles -join ", "
+                Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for a new environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
+            }
         }
     }
 
@@ -406,7 +445,7 @@ function Test-ValidVmProcs {
     }
     else {
         $virtualProcs = $VM.virtualProcs
-        if ($virtualProcs -gt 16 -or $virtualProcs -lt 1) {
+        if ([int]$virtualProcs -gt 16 -or [int]$virtualProcs -lt 1) {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] virtualProcs value [$virtualProcs] is invalid. Specify a value from 1-16." -ReturnObject $ReturnObject -Failure
         }
     }
@@ -790,6 +829,14 @@ function Test-ValidRoleDPMP {
         }
     }
 
+    if ($VM.pullDPSourceDP) {
+        $source = Get-List2 -DeployConfig $ConfigObject | Where-Object { $_.vmName -eq $VM.pullDPSourceDP }
+        if ($VM.SiteCode -ne $source.SiteCode) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which does not match Source DP [$($source.vmName)] sitecode [$($source.siteCode)]" -ReturnObject $ReturnObject -Warning
+        }
+
+    }
+
 }
 
 function Test-SingleRole {
@@ -825,7 +872,9 @@ function Test-Configuration {
         [Parameter(Mandatory = $true, ParameterSetName = "ConfigFile", HelpMessage = "Configuration File")]
         [string]$FilePath,
         [Parameter(Mandatory = $true, ParameterSetName = "ConfigObject", HelpMessage = "Configuration File")]
-        [object]$InputObject
+        [object]$InputObject,
+        [Parameter(Mandatory = $false, HelpMessage = "Fast Mode")]
+        [switch]$Fast
         #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
         #[bool] $fast = $false
     )
@@ -914,6 +963,7 @@ function Test-Configuration {
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing Vm Options" -PercentComplete 7
         Test-ValidVmOptions -ConfigObject $deployConfig -ReturnObject $return
 
+        Test-ValidMachineName $deployConfig.vmOptions.domainNetBiosName -ReturnObject $return
         # CM Options
         # ===========
 
@@ -976,6 +1026,18 @@ function Test-Configuration {
         # ==============
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing DC" -PercentComplete 35
         Test-ValidRoleDC -ConfigObject $deployConfig -ReturnObject $return
+
+        # WSUS Validations
+        # ================
+
+        if ($vm.Role -eq "WSUS" -or $vm.InstallSUP) {
+            if (-not $vm.wsusContentDir) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a wsusContentDir." -ReturnObject $return -Failure
+            }
+            if ($vm.InstallSup -and -not $vm.SiteCode) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a SiteCode." -ReturnObject $return -Failure
+            }
+        }
 
         # CAS Validations
         # ==============
@@ -1131,7 +1193,7 @@ function Test-Configuration {
         # tech preview and hierarchy
         if ($deployConfig.cmOptions.version -eq "tech-preview") {
             $anyPS = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "Primary" }
-            if($anyPS.Count -gt 1) {
+            if ($anyPS.Count -gt 1) {
                 Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with more than one Primary; Tech Preview doesn't support support multiple sites." -ReturnObject $return -Warning
             }
             if ($anyPS.Count -eq 1) {
@@ -1147,14 +1209,16 @@ function Test-Configuration {
 
         # Total Memory
         # =============
-        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
-        $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
-        $totalMemory = $totalMemory.Sum / 1GB
-        $availableMemory = Get-AvailableMemoryGB
+        if (-not $fast) {
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
+            $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
+            $totalMemory = $totalMemory.Sum / 1GB
+            $availableMemory = Get-AvailableMemoryGB
 
-        if ($totalMemory -gt $availableMemory) {
-            if (-not $enableDebug) {
-                Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB]." -ReturnObject $return -Warning
+            if ($totalMemory -gt $availableMemory) {
+                if (-not $enableDebug) {
+                    Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB]." -ReturnObject $return -Warning
+                }
             }
         }
 
@@ -1183,14 +1247,18 @@ function Test-Configuration {
             Get-List -type VM -SmartUpdate | Out-Null
         }
 
-        # Add existing VM's
-        Write-Progress2 -Activity "Validating Configuration" -Status "Adding Existing" -PercentComplete 90
-        Add-ExistingVMsToDeployConfig -config $deployConfig
+        if (-not $fast) {
+            # Add existing VM's
+            Write-Progress2 -Activity "Validating Configuration" -Status "Adding Existing" -PercentComplete 90
+            Add-ExistingVMsToDeployConfig -config $deployConfig
 
-        # Add thisParams
-        $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
-        $return.DeployConfig = $deployConfigEx
-
+            # Add thisParams
+            $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
+            $return.DeployConfig = $deployConfigEx
+        }
+        else {
+            $return.DeployConfig = $deployConfig
+        }
 
 
         if ($global:SkipValidation) {

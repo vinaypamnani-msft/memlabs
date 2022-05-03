@@ -34,10 +34,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 6)]
+    [ValidateRange(2, 7)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 6)]
+    [ValidateRange(2, 7)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
@@ -134,6 +134,10 @@ function Write-Phase {
         }
 
         6 {
+            Write-Log "Phase $Phase - Install WSUS" -Activity
+        }
+
+        7 {
             Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
         }
     }
@@ -165,6 +169,7 @@ try {
     Set-QuickEdit -DisableQuickEdit
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
+    ### Run maintenance
     Start-Maintenance
 
     # Get config
@@ -387,7 +392,7 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 6
+    $maxPhase = 7
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -445,6 +450,8 @@ try {
         Write-Host
     }
     else {
+        Start-Maintenance -DeployConfig $deployConfig
+        Write-Host
         Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
     }
 
@@ -462,8 +469,9 @@ finally {
         Write-Host
     }
 
+    Get-Job | Stop-Job
     if (-not $global:Common.DevBranch) {
-        Get-Job | Stop-Job
+        Get-Job | Remove-Job
     }
 
     # Close PS Sessions

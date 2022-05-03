@@ -1,3 +1,7 @@
+# InstallDPMPClient.ps1
+
+
+
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -7,15 +11,17 @@ param(
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get reguired values from config
-$DomainFullName = $deployConfig.parameters.domainName
+$DomainFullName = $deployConfig.vmOptions.domainName
 $DomainName = $DomainFullName.Split(".")[0]
+$NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
+
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 
 # bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
 $ClientNames = $thisVM.thisParams.ClientPush
-$cm_svc = "$DomainName\cm_svc"
+$cm_svc = "$NetbiosDomainName\cm_svc"
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
 
 # Read Actions file
@@ -71,6 +77,7 @@ if (Test-Path $cm_svc_file) {
 
 $DPs = @()
 $MPs = @()
+$PullDPs = @()
 $ValidSiteCodes = @($SiteCode)
 $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
 $ValidSiteCodes += $ReportingSiteCodes
@@ -78,9 +85,18 @@ $ValidSiteCodes += $ReportingSiteCodes
 foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" } ) {
     if ($dpmp.siteCode -in $ValidSiteCodes) {
         if ($dpmp.installDP) {
-            $DPs += [PSCustomObject]@{
-                ServerName     = $dpmp.vmName
-                ServerSiteCode = $dpmp.siteCode
+            if ($dpmp.enablePullDP) {
+                $PullDPs += [PSCustomObject]@{
+                    ServerName     = $dpmp.vmName
+                    ServerSiteCode = $dpmp.siteCode
+                    SourceDP       = $dpmp.pullDPSourceDP
+                }
+            }
+            else {
+                $DPs += [PSCustomObject]@{
+                    ServerName     = $dpmp.vmName
+                    ServerSiteCode = $dpmp.siteCode
+                }
             }
         }
         if ($dpmp.installMP) {
@@ -99,15 +115,18 @@ foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DP
 
 # Trim nulls/blanks
 $DPNames = $DPs.ServerName | Where-Object { $_ -and $_.Trim() }
+$PullDPNames = $PullDPs.ServerName | Where-Object { $_ -and $_.Trim() }
 $MPNames = $MPs.ServerName | Where-Object { $_ -and $_.Trim() }
 
 Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
 Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
+Write-DscStatus "Pull DP role to be installed on '$($PullDPNames -join ',')'"
 Write-DscStatus "Client push candidates are '$ClientNames'"
 
 foreach ($DP in $DPs) {
 
     if ([string]::IsNullOrWhiteSpace($DP.ServerName)) {
+        Write-DscStatus "Found an empty DP ServerName. Skipping"
         continue
     }
 
@@ -118,11 +137,30 @@ foreach ($DP in $DPs) {
 foreach ($MP in $MPs) {
 
     if ([string]::IsNullOrWhiteSpace($MP.ServerName)) {
+        Write-DscStatus "Found an empty MP ServerName. Skipping"
         continue
     }
 
     $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
     Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode
+}
+
+
+foreach ($PDP in $PullDPs) {
+
+    if ([string]::IsNullOrWhiteSpace($PDP.ServerName)) {
+        Write-DscStatus "Found an empty Pull DP ServerName. Skipping"
+        continue
+    }
+
+    if ([string]::IsNullOrWhiteSpace($PDP.SourceDP)) {
+        Write-DscStatus "Found Pull DP $($PDP.ServerName) with empty SourceDP. Skipping"
+        continue
+    }
+
+    $DPFQDN = $PDP.ServerName.Trim() + "." + $DomainFullName
+    $SourceDPFQDN = $PDP.SourceDP.Trim() + "." + $DomainFullName
+    Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN
 }
 
 # Force install DP/MP on PS Site Server if none present
@@ -261,18 +299,26 @@ foreach ($client in $ClientNameList) {
         continue
     }
 
+    $failCount = 0
+    $success = $true
     while ($machinelist -notcontains $client) {
+        if ($failCount -gt 30) {
+            $success = $false
+            break
+        }
         Invoke-CMSystemDiscovery
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
         Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
         Start-Sleep -Seconds 30
         $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
+        $failCount++
     }
-
-    Write-DscStatus "Pushing client to $client."
-    Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true | Out-File $global:StatusLog -Append
-    Start-Sleep -Seconds 5
+    if ($success) {
+        Write-DscStatus "Pushing client to $client."
+        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true | Out-File $global:StatusLog -Append
+        Start-Sleep -Seconds 5
+    }
 }
 
 # Update actions file

@@ -155,7 +155,7 @@ Function Read-SingleKeyWithTimeout {
                 $key = $null
             }
         }
-        if ($Prompt) {
+        if ($Prompt -and -not $stopTimeout) {
             switch (($i++ % 128) / 32) {
                 0 { $charsToDeleteNextTime = Write-Prompt -Color MediumSpringGreen }
                 1 { $charsToDeleteNextTime = Write-Prompt -Color Red }
@@ -181,12 +181,52 @@ Function Read-SingleKeyWithTimeout {
 }
 
 function write-help {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Default Value")]
+        [switch] $AllowEscape,
+        [Parameter(Mandatory = $false, HelpMessage = "hint for help to show we will return")]
+        [bool] $return = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "hint for help to show we will return")]
+        [bool] $timeout = $false
+
+    )
     $color = $Global:Common.Colors.GenConfigHelp
-    Write-Host2 -ForegroundColor $color "Press " -NoNewline
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
-    Write-Host2 -ForegroundColor $color " to skip a section or " -NoNewline
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-    Write-Host2 -ForegroundColor $color " to exit without saving."
+    if ($timeout) {
+        Write-Host2 -ForegroundColor $color "Press " -NoNewline
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Space]" -NoNewline
+        Write-Host2 -ForegroundColor $color " to stop the countdown or " -NoNewline
+    }
+    if (-not $AllowEscape) {
+        if ($return) {
+            Write-Host2 -ForegroundColor $color "Press " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to return to the previous menu or " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to exit without saving."
+        }
+        else {
+            Write-Host2 -ForegroundColor $color "Select an option or " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to exit without saving."
+        }
+    }
+    else {
+        if ($return) {
+            Write-Host2 -ForegroundColor $color "Press " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to return to the previous menu or " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to exit without saving."
+        }
+        else {
+            Write-Host2 -ForegroundColor $color "Press " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to skip this section or " -NoNewline
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+            Write-Host2 -ForegroundColor $color " to exit without saving."
+        }
+    }
 }
 
 function Read-YesorNoWithTimeout {
@@ -198,13 +238,22 @@ function Read-YesorNoWithTimeout {
         [string] $currentValue,
         [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
         [switch] $HideHelp,
+        [Parameter(Mandatory = $false, HelpMessage = "Default Value")]
+        [string] $Default,
         [Parameter(Mandatory = $false, HelpMessage = "Timeout")]
         [int] $timeout = 10
 
     )
-
+    if ($timeout -gt 0) {
+        $TimeoutHelp = $true
+    }
     if (-not $HideHelp.IsPresent) {
-        write-help
+        if ($Default) {
+            write-help -AllowEscape -timeout:$timeoutHelp
+        }
+        else {
+            write-help -timeout:$timeoutHelp
+        }
     }
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
@@ -222,6 +271,11 @@ function Read-YesorNoWithTimeout {
         }
     }
     Write-Host
+    if ([String]::IsNullOrWhiteSpace($YNresponse)) {
+        if ($Default) {
+            return $Default
+        }
+    }
     return $YNresponse
 }
 
@@ -574,7 +628,7 @@ function Invoke-StopVMs {
         if ($vm.State -eq "Running") {
             $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
             if (-not $quiet) {
-                Write-Host "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
+                Write-GreenCheck "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
             }
             stop-vm -VM $VM2 -force -AsJob | Out-Null
         }
@@ -640,6 +694,7 @@ function ConvertTo-DeployConfigEx {
         $thisParams = [pscustomobject]@{}
         if ($thisVM.domainUser) {
             $accountLists.LocalAdminAccounts += $thisVM.domainUser
+            $accountLists.SQLSysAdminAccounts += $deployConfig.vmOptions.domainNetBiosName + "\" + $thisVM.domainUser
         }
 
         #Get the current network from get-list or config
@@ -765,6 +820,17 @@ function ConvertTo-DeployConfigEx {
                     }
                 }
             }
+            "WSUS" {
+                if ($thisVM.InstallSUP) {
+                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                    Add-VMToAccountLists -thisVM $thisVM -VM $SS -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
+
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
+                    if ($PassiveVM) {
+                        Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
+                    }
+                }
+            }
             "CAS" {
                 $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $thisVM.siteCode }
                 if ($primaryVM) {
@@ -775,6 +841,8 @@ function ConvertTo-DeployConfigEx {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
                     }
                 }
+                $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
             }
             "Primary" {
                 $reportingSecondaries = @()
@@ -809,6 +877,10 @@ function ConvertTo-DeployConfigEx {
                     if ($CASPassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                     }
+                }
+                else {
+                    $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
                 }
 
                 # --- ClientPush
@@ -864,6 +936,13 @@ function ConvertTo-DeployConfigEx {
         }
 
 
+
+        #if ($thisVM.RemoteSQLVM) {
+
+        #    $sql = get-list2 -DeployConfig $deployConfig | Where-Object { $_.vmName -eq $thisVM.RemoteSQLVM }
+        #    Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts
+        #}
+
         #Get the CU URL, and SQL permissions
         if ($thisVM.sqlVersion) {
             $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $thisVM.sqlVersion }
@@ -880,13 +959,17 @@ function ConvertTo-DeployConfigEx {
             }
 
             $DomainAdminName = $deployConfig.vmOptions.adminName
-            $DomainName = $deployConfig.parameters.domainName
-            $DName = $DomainName.Split(".")[0]
+            $DomainName = $deployConfig.vmOptions.domainName
+            #$DName = $DomainName.Split(".")[0]
+            $DName = $deployConfig.vmOptions.domainNetBiosName
             $cm_admin = "$DNAME\$DomainAdminName"
             $vm_admin = "$DNAME\vmbuildadmin"
             $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, $vm_admin, 'BUILTIN\Administrators')
             $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
 
+            if ($SiteServerVM) {
+                Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+            }
             if (-not $SiteServerVM) {
                 $OtherNode = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $thisVM.vmName }
 
@@ -898,39 +981,46 @@ function ConvertTo-DeployConfigEx {
             if (-not $SiteServerVM) {
                 $SiteServerVM = Get-List -Type VM -domain $deployConfig.vmOptions.DomainName | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
             }
+
+            if ($SiteServerVM) {
+                Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+            }
             if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
                 $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
             }
             if (-not $SiteServerVM -and $thisVM.Role -in "Primary", "CAS") {
                 $SiteServerVM = $thisVM
             }
-            if ($SiteServerVM) {
-                Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteServerVM.siteCode -type VM
-                if ($passiveNodeVM) {
-                    Add-VMToAccountLists -thisVM $thisVM -VM $passiveNodeVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                }
 
-                if ($SiteServerVM.Role -eq "Primary") {
-                    $CASVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "CAS" -and $_.SiteCode -eq $SiteServerVM.ParentSiteCode }
-                    if ($CASVM) {
-                        $thisParams | Add-Member -MemberType NoteProperty -Name "CAS" -Value $CASVM.vmName -Force
-                        Add-VMToAccountLists -thisVM $thisVM -VM $CASVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                        $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM
-                        if ($CASPassiveVM) {
-                            Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts   -WaitOnDomainJoin
+            foreach ($SSVM in $SiteServerVM) {
+                if ($SSVM -and $SSVM.SiteCode) {
+                    Add-VMToAccountLists -thisVM $thisVM -VM $SSVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+                    $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SSVM.siteCode -type VM
+                    if ($passiveNodeVM) {
+                        Add-VMToAccountLists -thisVM $thisVM -VM $passiveNodeVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+                    }
+
+                    if ($SSVM.Role -eq "Primary") {
+                        $CASVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "CAS" -and $_.SiteCode -eq $SSVM.ParentSiteCode }
+                        if ($CASVM) {
+                            $thisParams | Add-Member -MemberType NoteProperty -Name "CAS" -Value $CASVM.vmName -Force
+                            Add-VMToAccountLists -thisVM $thisVM -VM $CASVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+                            $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM
+                            if ($CASPassiveVM) {
+                                Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts   -WaitOnDomainJoin
+                            }
                         }
                     }
-                }
 
-                if ($SiteServerVM.Role -eq "CAS") {
-                    $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $SiteServerVM.siteCode }
-                    if ($primaryVM) {
-                        $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
-                        Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                        $primaryPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
-                        if ($primaryPassiveVM) {
-                            Add-VMToAccountLists -thisVM $thisVM -VM $primaryPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts   -WaitOnDomainJoin
+                    if ($SSVM.Role -eq "CAS") {
+                        $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $SSVM.siteCode }
+                        if ($primaryVM) {
+                            $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
+                            Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+                            $primaryPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                            if ($primaryPassiveVM) {
+                                Add-VMToAccountLists -thisVM $thisVM -VM $primaryPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts   -WaitOnDomainJoin
+                            }
                         }
                     }
                 }
@@ -1063,10 +1153,10 @@ namespace Api
  }
 }
 "@
-try{
-    Add-Type -TypeDefinition $TypeDef -ErrorAction SilentlyContinue
-}
-catch{}
+    try {
+        Add-Type -TypeDefinition $TypeDef -ErrorAction SilentlyContinue
+    }
+    catch {}
 
     $Win32ShowWindowAsync = Add-Type -memberDefinition @"
     [DllImport("user32.dll")]

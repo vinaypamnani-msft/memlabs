@@ -55,10 +55,10 @@ function Remove-VirtualMachine {
             $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinu
         }
 
-        $cachediskFile = Join-Path $global:common.CachePath ($($vm.vmID).toString() + ".disk.json")
+        $cachediskFile = Join-Path $global:common.CachePath ($($vmTest.vmID).toString() + ".disk.json")
         if (Test-Path $cachediskFile) { Remove-Item -path $cachediskFile -Force -WhatIf:$WhatIf | Out-Null }
 
-        $cachenetFile = Join-Path $global:common.CachePath ($($vm.vmID).toString() + ".network.json")
+        $cachenetFile = Join-Path $global:common.CachePath ($($vmTest.vmID).toString() + ".network.json")
         if (Test-Path $cachenetFile) { Remove-Item -path $cachenetFile -Force -WhatIf:$WhatIf | Out-Null }
 
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf
@@ -106,7 +106,7 @@ function Remove-Orphaned {
 
         if (-not $vm.Domain) {
             # Prompt for delete, likely no json object in vm notes
-            $response = Read-YesorNoWithTimeout -Prompt "  VM $($vm.VmName) may be orphaned. Delete? [y/N]" -HideHelp
+            $response = Read-YesorNoWithTimeout -Prompt "  VM $($vm.VmName) may be orphaned. Delete? [y/N]" -HideHelp -Default "n"
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
             }
@@ -128,7 +128,7 @@ function Remove-Orphaned {
     foreach ($scope in $scopes) {
         $scopeId = $scope.ScopeId.ToString() # This requires us to replace "Internet" with subnet
         if ($vmNetworksInUse2 -notcontains $scopeId) {
-            $response = Read-YesorNoWithTimeout -Prompt "  DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -HideHelp
+            $response = Read-YesorNoWithTimeout -Prompt "  DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -HideHelp -Default "n"
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-DhcpScope -ScopeId $scopeId -WhatIf:$WhatIf
             }
@@ -148,7 +148,7 @@ function Remove-Orphaned {
         }
 
         if (-not $inUse) {
-            $response = Read-YesorNoWithTimeout -Prompt "  Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -HideHelp
+            $response = Read-YesorNoWithTimeout -Prompt "  Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -HideHelp -Default "n"
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-VMSwitch2 -NetworkName $switch.Name
             }

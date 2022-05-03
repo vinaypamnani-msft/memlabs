@@ -432,6 +432,15 @@ function New-RDCManFileFromHyperV {
 
             }
 
+            if ($vm.Role -eq "WSUS") {
+                if ($vm.installSUP) {
+                    $c | Add-Member -MemberType NoteProperty -Name "SUPForSiteServer" -Value "$($vm.SiteCode)"
+                }
+                else {
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                }
+            }
+
             if ($vm.SqlVersion) {
                 $PrimaryNode = $vm
                 if ($vm.role -eq "SQLAO") {
@@ -439,12 +448,14 @@ function New-RDCManFileFromHyperV {
                         $primaryNode = $vmListFull | Where-Object { $_.OtherNode -eq $vm.vmName }
                     }
                 }
-                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName }
+                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName -and $_.Role -in "Primary","CAS" }
                 if ($SiteServer) {
                     $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)"
                 }
                 else {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                    if ($vm.Role -eq "DomainMember") {
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                    }
                 }
             }
 
@@ -454,7 +465,7 @@ function New-RDCManFileFromHyperV {
             $rolename = ""
             $ForceOverwrite = $false
             switch ($vm.Role) {
-                "DomainMember" { if ($null -eq $vm.SqlVersion) { $rolename = "[AD] " } }
+                #"DomainMember" { if ($null -eq $vm.SqlVersion) { $rolename = "[AD] " } }
                 "InternetClient" {
                     $ForceOverwrite = $true
                     $rolename = "[Internet] "
@@ -493,7 +504,7 @@ function New-RDCManFileFromHyperV {
             }
             $ForceOverwrite = $true
             $vmID = $null
-            if ($vm.Role -eq "OSDClient" -or $vm.Role -eq "AADClient") {
+            if ($vm.Role -in ("OSDClient", "AADClient", "Linux")) {
                 $vmID = $vm.vmId
             }
 
@@ -501,12 +512,13 @@ function New-RDCManFileFromHyperV {
                 $shouldSave = $true
             }
         }
-        try{
-        $return = Add-RDCManSmartGroupToGroup -vmListFull $vmListFull -findgroup $findGroup -existing $existing
-        if ($return) {
-            $shouldSave = $true
+        try {
+            $return = Add-RDCManSmartGroupToGroup -vmListFull $vmListFull -findgroup $findGroup -existing $existing
+            if ($return) {
+                $shouldSave = $true
+            }
         }
-        }catch {}
+        catch {}
 
         $CurrentSmartGroups = $findgroup.SelectNodes('smartGroup')
         foreach ($item in $CurrentSmartGroups) {
@@ -529,6 +541,22 @@ function New-RDCManFileFromHyperV {
             $clonedSG = $SmartGroupToClone.clone()
             $clonedSG.properties.name = "OSD Clients"
             $clonedSG.ruleGroup.rule.value = "OSDClient"
+            [void]$findgroup.AppendChild($clonedSG)
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnlyDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
+        }
+        $clonedSG = $SmartGroupToClone.clone()
+        if ($roles -contains "Linux") {
+            $clonedSG = $SmartGroupToClone.clone()
+            $clonedSG.properties.name = "Linux"
+            $clonedSG.ruleGroup.rule.value = "Linux"
             [void]$findgroup.AppendChild($clonedSG)
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
@@ -622,8 +650,8 @@ function New-RDCManFileFromHyperV {
 
         #Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
         Start-Process "C:\tools\RDCMan.exe" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-        $i =0
-        while ($i -lt 3){
+        $i = 0
+        while ($i -lt 3) {
             Set-RdcManMin
             start-sleep -Seconds 1
             $i++

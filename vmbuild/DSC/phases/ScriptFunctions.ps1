@@ -1,3 +1,4 @@
+# ScriptFunctions.ps1
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
 $global:StatusLog = "C:\staging\DSC\InstallCMLog.txt"
 
@@ -184,6 +185,59 @@ function Install-DP {
     } until ($dpinstalled -or $installFailure)
 }
 
+function Install-PullDP {
+    param (
+        [Parameter()]
+        [string]
+        $ServerFQDN,
+        [string]
+        $ServerSiteCode,
+        [string]
+        $SourceDPFQDN
+    )
+
+    $i = 0
+    $installFailure = $false
+    $DPFQDN = $ServerFQDN
+
+    do {
+
+        $i++
+
+        # Create Site system Server
+        #============
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
+        if (-not $SystemServer) {
+            Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
+            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 15
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
+        }
+
+        # Install Pull DP
+        #=================
+        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
+        if (-not $dpinstalled) {
+            Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role as a Pull DP, with Source DP $SourceDPFQDN."
+            $Date = [DateTime]::Now.AddYears(30)
+            Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
+            $dpinstalled = $true
+        }
+
+        if ($i -gt 10) {
+            Write-DscStatus "No Progress after $i tries, Giving up on $DPFQDN SiteCode: $ServerSiteCode ."
+            $installFailure = $true
+        }
+
+        Start-Sleep -Seconds 10
+
+    } until ($dpinstalled -or $installFailure)
+}
+
 function Install-MP {
     param (
         [string]
@@ -228,6 +282,49 @@ function Install-MP {
     } until ($mpinstalled -or $installFailure)
 }
 
+function Install-SUP {
+    param (
+        [string]
+        $ServerFQDN,
+        [string]
+        $ServerSiteCode
+    )
+
+    $i = 0
+    $installFailure = $false
+
+    do {
+
+        $i++
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+        if (-not $SystemServer) {
+            Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
+            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 15
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+        }
+
+        $installed = Get-CMSoftwareUpdatePoint -SiteSystemServerName $ServerFQDN
+        if (-not $installed) {
+            Write-DscStatus "SUP Role not detected on $ServerFQDN. Adding Software Update Point role."
+            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531| Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-DscStatus "SUP Role detected on $ServerFQDN"
+            $installed = $true
+        }
+
+        if ($i -gt 10) {
+            Write-DscStatus "No Progress for SUP Role after $i tries, Giving up."
+            $installFailure = $true
+        }
+
+        Start-Sleep -Seconds 10
+
+    } until ($installed -or $installFailure)
+}
+
 function Write-ScriptWorkFlowData {
     param (
         [object]
@@ -251,12 +348,19 @@ function Write-ScriptWorkFlowData {
 
 function Get-UpdatePack {
 
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $UpdateVersion
+    )
+
     Write-DscStatus "Get CM Update..." -NoStatus
 
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
     $CMPSSuppressFastNotUsedCheck = $true
 
-    $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -notlike "*hotfix*"} # filter hotfixes
+    $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion"} # filter hotfixes
     $getupdateretrycount = 0
     while ($updatepacklist.Count -eq 0) {
 
@@ -270,7 +374,7 @@ function Get-UpdatePack {
         Invoke-CMSiteUpdateCheck -ErrorAction Ignore
         Start-Sleep 120
 
-        $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -notlike "*hotfix*"} # filter hotfixes
+        $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion"} # filter hotfixes
     }
 
     $updatepack = ""

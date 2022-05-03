@@ -53,6 +53,7 @@ Function Write-Progress2 {
         Write-Progress2Impl @Args @PSBoundParameters | out-null
     }
     catch {
+        Write-Exception -ExceptionInfo $_
         write-Log "Write-Progress $args $_"
     }
 }
@@ -97,7 +98,10 @@ Function Write-Progress2Impl {
         ${SourceId},
 
         [switch]
-        ${force}
+        ${force},
+
+        [switch]
+        ${log}
     )
     dynamicparam {
 
@@ -149,13 +153,20 @@ Function Write-Progress2Impl {
                 $Global:ProgressPreference = 'Continue'
             }
 
+            $logvalue = $null
+            $writeLog = $false
+            if ($log -eq $true -or $PSBoundParameters.TryGetValue('log', [ref]$logvalue)) {
+                $PSBoundParameters.remove("log")
+                $writeLog = $true
+            }
+
             $Activityvalue = $null
             if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
-                $Activityvalue = $Activity.TrimEnd()
-
-                if ($Activityvalue.Contains("`n")) {
-                    Write-Log "$Activity contains new-line"
-                }
+                $Activityvalue = $Activity.Trim()
+                $Activityvalue = "  " + $Activityvalue
+                # if ($Activityvalue.Contains("`n")) {
+                #     Write-Log "$Activity contains new-line"
+                # }
                 $PSBoundParameters['Activity'] = $Activityvalue
             }
 
@@ -163,18 +174,23 @@ Function Write-Progress2Impl {
             if ($PSBoundParameters.TryGetValue('Status', [ref]$StatusValue)) {
                 $StatusValue = $StatusValue.TrimEnd()
 
-                if ($StatusValue.Contains("`n")) {
-                    Write-Log "$StatusValue contains new-line"
-                }
+                #if ($StatusValue.Contains("`n")) {
+                #    Write-Log "$StatusValue contains new-line"
+                #}
                 $PSBoundParameters['Status'] = $StatusValue
             }
 
-            if ($Global:LastStatus -ne $Status + $Percent) {
-                Write-Log "Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
-                $Global:LastStatus = $Status + $Percent
+            if ($writeLog) {
+                Write-Log "Activity: $Activity  Status: $Status" -LogOnly
             }
             else {
-                #Write-Log "Ignored Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
+                if ($Global:LastStatus -ne $Status + $Percent) {
+                    Write-Log "Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
+                    $Global:LastStatus = $Status + $Percent
+                }
+                else {
+                    #Write-Log "Ignored Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
+                }
             }
 
             $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
@@ -1487,6 +1503,8 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $true)]
         [string]$SwitchName,
         [Parameter(Mandatory = $false)]
+        [string]$DiskControllerType = "SCSI",
+        [Parameter(Mandatory = $false)]
         [string]$SwitchName2,
         [Parameter(Mandatory = $false)]
         [object]$AdditionalDisks,
@@ -1636,7 +1654,7 @@ function New-VirtualMachine {
 
         Write-Progress2 $Activity -Status "Adding OS Disk to VM" -percentcomplete 65 -force
         Write-Log "$VmName`: Adding virtual disk $osDiskPath"
-        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | out-null
+        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType $DiskControllerType -ControllerNumber 0 | out-null
 
         Write-Progress2 $Activity -Status "Adding DVD disk to VM" -percentcomplete 70 -force
         Write-Log "$VmName`: Adding a DVD drive"
@@ -1876,9 +1894,7 @@ function Wait-ForVm {
         try {
             Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $originalStatus
         }
-        catch {
-
-        }
+        catch {}
         $readyOobe = $false
         $wwahostrunning = $false
         $readySmb = $false
@@ -1888,6 +1904,11 @@ function Wait-ForVm {
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
+
+            try {
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State"
+            }
+            catch {}
 
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
@@ -1976,7 +1997,6 @@ function Wait-ForVm {
                 Start-Sleep -Seconds $WaitSeconds
                 $ready = $true
             }
-
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
 
         if (-not $ready) {
@@ -2370,7 +2390,13 @@ function Get-StorageConfig {
             # Get file list
             #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
             $fileListUrl = $fileListLocation + "?$($StorageConfig.StorageToken)"
-            $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+            try {
+                $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+            }
+            catch {
+                start-sleep -second 5
+                $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+            }
             if (-not $response) {
                 $Common.FatalError = "Failed to download file list."
             }
@@ -2488,7 +2514,7 @@ function Get-Tools {
             $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
 
-        if (-not $worked) {
+        if (-not $worked.success) {
             $allSuccess = $false
         }
 
@@ -2508,7 +2534,7 @@ function Get-Tools {
             # File downloaded
             $extractIfZip = $tool.ExtractFolderIfZip
             if (Test-Path $downloadPath) {
-                if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
+                if ($downloadPath.ToLowerInvariant().EndsWith(".zip") -and $extractIfZip -eq $true) {
                     Write-Log "Extracting $fileName to $fileDestination."
                     Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
                 }
@@ -2645,7 +2671,7 @@ function Copy-ToolToVM {
     $toolFileName = Split-Path $tool.url -Leaf
     $fileTargetRelative = Join-Path $tool.Target $toolFileName
 
-    if ($toolFileName.EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+    if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
         $fileTargetRelative = $tool.Target
     }
 
@@ -2721,9 +2747,11 @@ function Get-FileFromStorage {
         }
 
         $fileUrl = "$($StorageConfig.StorageLocation)/$($filename)"
-        $success = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -HashAlg $hashAlg -UseCDN:$UseCDN -WhatIf:$WhatIf
+        $worked = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -HashAlg $hashAlg -UseCDN:$UseCDN -WhatIf:$WhatIf
+        $success = $($worked.success)
     }
 
+    Write-Log -Verbose "Returning $success"
     return $success
 }
 
@@ -2756,8 +2784,10 @@ function Get-FileWithHash {
     $localImagePath = Join-Path $Common.AzureFilesPath $FileName
     $localImageHashPath = "$localImagePath.$hashAlg"
 
-    $success = $false
-    $download = $true
+    $return = [PSCustomObject]@{
+        success  = $true
+        download = $false
+    }
 
     Write-Log "Downloading/Verifying '$FileDisplayName'" -SubActivity
 
@@ -2769,13 +2799,14 @@ function Get-FileWithHash {
         }
         else {
             # Download if file present, but hashFile isn't there.
-            Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Hash Missing. Downloading '$FileName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
+            #Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Hash Missing. Downloading '$FileName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
 
             # Calculate file hash, save to local hash file
-            Write-Log "Calculating $hashAlg hash for $FileName in $($Common.AzureFilesPath)..."
-            $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
-            $localFileHash = $hashFileResult.Hash
-            $localFileHash | Out-File -FilePath $localImageHashPath -Force
+            #Write-Log "Calculating $hashAlg hash for $FileName in $($Common.AzureFilesPath)..."
+            #$hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+            #$localFileHash = $hashFileResult.Hash
+            #$localFileHash | Out-File -FilePath $localImageHashPath -Force
+            $return.download = $true
         }
 
         if ($localFileHash -eq $ExpectedHash) {
@@ -2783,25 +2814,29 @@ function Get-FileWithHash {
             if ($ForceDownload.IsPresent) {
                 Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
                 Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                $return.download = $true
             }
             else {
                 # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
-                $download = $false
-                $success = $true
+                $return.download = $false
+                $return.success = $true
             }
         }
         else {
             Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
             Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
             Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
-            $download = $true
+            $return.download = $true
         }
     }
+    else {
+        $return.download = $true
+    }
 
-    if ($download) {
+    if ($return.download) {
         $worked = Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Downloading '$FileName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
         if (-not $worked) {
-            $success = $false
+            $return.success = $false
         }
         else {
             # Calculate file hash, save to local hash file
@@ -2811,21 +2846,21 @@ function Get-FileWithHash {
             if ($localFileHash -eq $ExpectedHash) {
                 $localFileHash | Out-File -FilePath $localImageHashPath -Force
                 Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
-                $success = $true
+                $return.success = $true
             }
             else {
                 if ($IgnoreHashFailure) {
-                    $success = $true
+                    $return.success = $true
                 }
                 else {
                     Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
-                    $success = $false
+                    $return.success = $false
                 }
             }
         }
     }
 
-    return $success
+    return $return
 }
 
 $QuickEditCodeSnippet = @"
@@ -2924,7 +2959,8 @@ function Set-SupportedOptions {
         "WorkgroupMember",
         "InternetClient",
         "AADClient",
-        "OSDClient"
+        "OSDClient",
+        "WSUS"
 
     )
 
@@ -2941,13 +2977,11 @@ function Set-SupportedOptions {
         "InternetClient",
         "AADClient",
         "OSDClient",
-        "SQLAO"
+        "SQLAO",
+        "WSUS"
     )
 
-    $cmVersions = @(
-        "current-branch",
-        "tech-preview"
-    )
+    $cmVersions += Get-CMVersions
 
     $operatingSystems = $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" } | Sort-Object
 
@@ -2963,6 +2997,51 @@ function Set-SupportedOptions {
     }
 
     $Common.Supported = $supported
+
+}
+
+function Get-CMVersions {
+    $cmVersions = @()
+    foreach ($version in $Common.AzureFileList.CMVersions) {
+        $cmversions += $version.versions
+    }
+    $cmVersions = $cmVersions | Sort-Object -Descending
+    return $cmVersions
+}
+
+function Get-CMBaselineVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $CMVersion
+    )
+
+    return ($Common.AzureFileList.CMVersions | Where-Object { $_.versions -contains $CMVersion })
+
+}
+
+function Get-CMLatestBaselineVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $CMVersion
+    )
+
+    return ($Common.AzureFileList.CMVersions.baselineVersion | Where-Object { $_ -notin "tech-preview", "current-branch" } | Sort-Object -Descending | Select-Object -First 1)
+
+}
+
+function Get-CMLatestVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $CMVersion
+    )
+
+    return (Get-CMVersions | Where-Object { $_ -notin "tech-preview", "current-branch" } | Select-Object -First 1)
 
 }
 
@@ -3071,7 +3150,7 @@ if (-not $Common.Initialized) {
     $colors = Get-Colors
 
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "220413"
+        MemLabsVersion        = "220503"
         LatestHotfixVersion   = $latestHotfixVersion
         PS7                   = $PS7
         Initialized           = $true

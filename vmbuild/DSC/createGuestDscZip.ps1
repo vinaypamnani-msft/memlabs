@@ -39,7 +39,8 @@ try {
         'xDhcpServer',
         'NetworkingDsc',
         'xFailOverCluster',
-        'AccessControlDsc'
+        'AccessControlDsc',
+        'UpdateServicesDsc'
     )
 
     foreach ($module in $modules) {

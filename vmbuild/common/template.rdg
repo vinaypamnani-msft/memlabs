@@ -136,6 +136,11 @@
             <operator>Matches</operator>
             <value>"SQLForSiteServer"</value>
           </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"SUPForSiteServer"</value>
+          </rule>
         </ruleGroup>
       </smartGroup>
       <group>

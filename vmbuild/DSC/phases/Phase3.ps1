@@ -15,6 +15,7 @@ configuration Phase3
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
+    $NetBiosDomainName = $deployConfig.vmoptions.domainNetBiosName
 
     Node $AllNodes.NodeName
     {
@@ -25,9 +26,10 @@ configuration Phase3
         if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") {
             $featureRoles += "Site Server"
         }
-        #if ($ThisVM.role -eq "SQLAO") {
-        #    $featureRoles += "SQLAO"
-        #}
+
+        if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") {
+           $featureRoles += "WSUS"
+        }
 
         WriteStatus AddLocalAdmin {
             Status = "Adding required accounts [$($ThisVM.thisParams.LocalAdminAccounts -join ',')] to Administrators group"
@@ -39,8 +41,8 @@ configuration Phase3
             $i++
             $DscNodeName = "AddADUserToLocalAdminGroup$($i)"
             AddUserToLocalAdminGroup "$DscNodeName" {
-                Name       = $user
-                DomainName = $DomainName
+                Name              = $user
+                NetbiosDomainName = $NetBiosDomainName
             }
             $addUserDependancy += "[AddUserToLocalAdminGroup]$DscNodeName"
         }
@@ -104,10 +106,10 @@ configuration Phase3
             }
 
             $nextDepend = "[InstallADK]ADKInstall"
-            if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite") {
+            if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite" -and -not $ThisVM.hidden) {
 
                 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
-                $CMDownloadStatus = "Downloading Configuration Manager current branch (latest baseline version)"
+                $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
                 if ($CM -eq "CMTP") {
                     $CMDownloadStatus = "Downloading Configuration Manager technical preview"
                 }
@@ -118,9 +120,10 @@ configuration Phase3
                 }
 
                 DownloadSCCM DownLoadSCCM {
-                    CM        = $CM
-                    Ensure    = "Present"
-                    DependsOn = $prevDepend
+                    CM            = $CM
+                    CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
+                    Ensure        = "Present"
+                    DependsOn     = $prevDepend
                 }
 
                 FileReadAccessShare CMSourceSMBShare {

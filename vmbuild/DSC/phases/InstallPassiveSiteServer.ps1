@@ -1,3 +1,4 @@
+# InstallPassiveSiteServer.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -7,8 +8,9 @@ param(
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get reguired values from config
-$DomainFullName = $deployConfig.parameters.domainName
-$DomainName = $DomainFullName.Split(".")[0]
+$DomainFullName = $deployConfig.vmOptions.domainName
+#$DomainName = $DomainFullName.Split(".")[0]
+$DomainName = $deployConfig.vmOptions.domainNetBiosName
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"

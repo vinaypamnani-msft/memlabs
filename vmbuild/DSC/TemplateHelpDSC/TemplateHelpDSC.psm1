@@ -680,6 +680,9 @@ class DownloadSCCM {
     [DscProperty(Key)]
     [string] $CM
 
+    [DscProperty(Key)]
+    [string] $CMDownloadUrl
+
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
@@ -688,18 +691,12 @@ class DownloadSCCM {
 
     [void] Set() {
         $_CM = $this.CM
+        $_CMURL = $this.CMDownloadUrl
         $cmpath = "c:\temp\$_CM.exe"
         $cmsourcepath = "c:\$_CM"
-
         Write-Verbose "Downloading $_CM installation source..."
-        if ($_CM -eq "CMTP") {
-            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2077212&clcid=0x409"
-        }
-        else {
-            $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
-        }
 
-        Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
+        Start-BitsTransfer -Source $_CMURL -Destination $cmpath -Priority Foreground -ErrorAction Stop
         if (Test-Path $cmsourcepath) {
             Remove-Item -Path $cmsourcepath -Recurse -Force | Out-Null
         }
@@ -1583,23 +1580,26 @@ class AddUserToLocalAdminGroup {
     [string] $Name
 
     [DscProperty(Key)]
-    [string] $DomainName
+    [string] $NetbiosDomainName
 
     [void] Set() {
-        $_DomainName = $($this.DomainName).Split(".")[0]
+        $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
         $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
         $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
-        Write-Verbose "[$(Get-Date -format HH:mm:ss)] add $_Name to administrators group"
-        $GroupObj.Add("WinNT://$_DomainName/$_Name")
+        Write-Verbose "[$(Get-Date -format HH:mm:ss)] add $_DomainName\$_Name to administrators group"
+        if (-not $GroupObj.IsMember("WinNT://$_DomainName/$_Name")) {
+            $GroupObj.Add("WinNT://$_DomainName/$_Name")
+        }
 
     }
 
     [bool] Test() {
-        $_DomainName = $($this.DomainName).Split(".")[0]
+        $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
         $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
         $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
+        Write-Verbose "[$(Get-Date -format HH:mm:ss)] Testing $_DomainName\$_Name is in administrators group"
         if ($GroupObj.IsMember("WinNT://$_DomainName/$_Name") -eq $true) {
             return $true
         }
@@ -2001,8 +2001,6 @@ class InstallFeatureForSCCM {
 
         if ($IsServerOS) {
 
-
-
             #
             #
             #
@@ -2011,9 +2009,9 @@ class InstallFeatureForSCCM {
             #
             #
 
-
             # Always install BITS
             Install-WindowsFeature BITS, BITS-IIS-Ext
+
             # Always install IIS
             Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
             Install-WindowsFeature Web-WMI, Web-Metabase
@@ -2093,9 +2091,8 @@ class InstallFeatureForSCCM {
             if ($_Role -contains "Service connection point") {
                 #installed .net 4.5 or later
             }
-            if ($_Role -contains "Software update point") {
-                #default iis configuration
-                Install-WindowsFeature web-server
+            if ($_Role -contains "WSUS") {
+                Install-WindowsFeature "UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI"
             }
             if ($_Role -contains "State migration point") {
                 #iis
@@ -2189,6 +2186,9 @@ class SetupDomain {
     [System.Management.Automation.PSCredential] $SafemodeAdministratorPassword
 
     [void] Set() {
+
+        #Dead Code.
+
         $_DomainFullName = $this.DomainFullName
         $_SafemodeAdministratorPassword = $this.SafemodeAdministratorPassword
 
@@ -2196,6 +2196,8 @@ class SetupDomain {
         if (!$ADInstallState.Installed) {
             Install-WindowsFeature -Name AD-Domain-Services -IncludeAllSubFeature -IncludeManagementTools
         }
+
+
 
         $NetBIOSName = $_DomainFullName.split('.')[0]
         Import-Module ADDSDeployment
@@ -2795,6 +2797,7 @@ class ADServicePrincipalName2 {
     }
 }
 
+
 [DscResource()]
 class ActiveDirectorySPN {
     [DscProperty(Key)]
@@ -3019,6 +3022,70 @@ class ActiveDirectorySPN {
     }
 
     [ActiveDirectorySPN] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class ConfigureWSUS {
+    [DscProperty(Key)]
+    [string] $ContentPath
+
+    [DscProperty()]
+    [string]$SqlServer
+
+    [void] Set() {
+        try {
+            write-verbose ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
+            try {
+                New-Item -Path $this.ContentPath -ItemType Directory -Force
+            }
+            catch {
+                write-verbose ("$_")
+            }
+
+            if ($this.SqlServer) {
+                write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
+                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)
+            }
+            else {
+                write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)")
+                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)
+            }
+        }
+        catch {
+            Write-Verbose "Failed to Configure WSUS"
+            Write-Verbose "$_"
+        }
+        try {
+            $wsus = get-WsusServer
+        }
+        catch {
+            Write-Verbose "Failed to Configure WSUS"
+            Write-Verbose "$_"
+            throw
+        }
+    }
+
+    [bool] Test() {
+
+        try {
+            $wsus = get-WsusServer
+            if ($wsus) {
+                return $true
+            }
+
+            return $false
+        }
+        catch {
+            Write-Verbose "Failed to Find WSUS Server"
+            Write-Verbose "$_"
+            return $false
+        }
+    }
+
+    [ConfigureWSUS] Get() {
         return $this
     }
 

@@ -1,3 +1,4 @@
+# InstallPSForHierarchy.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -9,7 +10,6 @@ $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
-$UpdateToLatest = $deployConfig.cmOptions.updateToLatest
 $CSName = $ThisVM.thisParams.ParentSiteServer
 
 # Set Install Dir
@@ -72,15 +72,13 @@ while ($CSConfiguration.$("InstallSCCM").Status -ne "Completed") {
     $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
 }
 
-if ($UpdateToLatest) {
-    # Read CAS actions file, wait for upgrade to finish
-    Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr"
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-    while ($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed") {
-        Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 30
-        Start-Sleep -Seconds 30
-        $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
-    }
+# Read CAS actions file, wait for upgrade to finish
+Write-DscStatus "Checking if $CSName is upgrading ConfigMgr"
+$CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+while ($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed") {
+    Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 30
+    Start-Sleep -Seconds 30
+    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
 }
 
 # Write actions file, wait finished

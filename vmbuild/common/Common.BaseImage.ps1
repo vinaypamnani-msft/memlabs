@@ -61,7 +61,7 @@ function Get-ToolsForBaseImage {
             # File downloaded
             $extractIfZip = $item.ExtractFolderIfZip
             if (Test-Path $downloadPath) {
-                if ($downloadPath.EndsWith(".zip") -and $extractIfZip -eq $true) {
+                if ($downloadPath.ToLowerInvariant().EndsWith(".zip") -and $extractIfZip -eq $true) {
                     Write-Log "Extracting $fileName to $fileDestination."
                     Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
                 }
