@@ -397,8 +397,9 @@ function Get-ConfigurationData {
         "4" { $cd = Get-Phase4ConfigurationData -deployConfig $deployConfig }
         "5" { $cd = Get-Phase5ConfigurationData -deployConfig $deployConfig }
         "6" { $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig }
+        "7" { $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig}
         "7" {
-            $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig
+            $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
             if ($cd) {
                 $autoSnapshotName = "MemLabs AutoSnapshot"
                 $snapshot = $null
@@ -709,6 +710,12 @@ function Get-Phase6ConfigurationData {
 }
 
 function Get-Phase7ConfigurationData {
+    param (
+        [object]$deployConfig
+    )
+    return $null
+}
+function Get-Phase8ConfigurationData {
     param (
         [object]$deployConfig
     )

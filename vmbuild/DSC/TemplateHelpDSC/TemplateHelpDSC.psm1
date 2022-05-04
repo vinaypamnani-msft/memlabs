@@ -1688,6 +1688,7 @@ class OpenFirewallPortForSCCM {
 
         New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
         New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+        New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For RdcMan"
 
         if ($_Role -contains "DC") {
             #HTTP(S) Requests
@@ -1936,7 +1937,6 @@ class OpenFirewallPortForSCCM {
             }
 
             if ($_Role -contains "WorkgroupMember") {
-                New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For WorkgroupMember"
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
 

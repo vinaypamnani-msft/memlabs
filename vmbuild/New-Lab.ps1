@@ -34,10 +34,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 7)]
+    [ValidateRange(2, 8)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 7)]
+    [ValidateRange(2, 8)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
@@ -138,6 +138,10 @@ function Write-Phase {
         }
 
         7 {
+            Write-Log "Phase $Phase - Setup Reporting Services" -Activity
+        }
+
+        8 {
             Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
         }
     }
@@ -392,7 +396,7 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 7
+    $maxPhase = 8
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
