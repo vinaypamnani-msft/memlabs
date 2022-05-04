@@ -3090,3 +3090,98 @@ class ConfigureWSUS {
     }
 
 }
+
+#InstallPBIRS
+[DscResource()]
+class InstallPBIRS {
+    [DscProperty(Key)]
+    [string] $InstallPath
+
+    [DscProperty()]
+    [string]$SqlServer
+
+    [DscProperty()]
+    [string]$DownloadUrl
+
+    [DscProperty()]
+    #Must be PBIRS
+    [string]$RSInstance
+
+    [void] Set() {
+        try {
+            write-verbose ("Configuring PBIRS for $($this.SqlServer) in $($this.ContentPath)")
+
+
+            $pbirsSetup = "C:\temp\PowerBIReportServer.exe"
+            if (!(Test-Path $pbirsSetup)) {
+                Write-Verbose "Downloading PBIRS from $($this.DownloadUrl)..."
+                try {
+                    Start-BitsTransfer -Source $this.DownloadUrl -Destination $pbirsSetup -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    ipconfig /flushdns
+                    start-sleep -seconds 60
+                    Start-BitsTransfer -Source $this.DownloadUrl -Destination $pbirsSetup -Priority Foreground -ErrorAction Stop
+                }
+            }
+
+            try {
+                New-Item -Path $this.ContentPath -ItemType Directory -Force
+            }
+            catch {
+                write-verbose ("$_")
+            }
+
+            $PBIRSargs = "/quiet /InstallFolder=$($this.InstallPath) /IAcceptLicenseTerms /Edition=Dev /Log C:\staging\PBI.log"
+            Start-Process $pbirsSetup $PBIRSargs -Wait
+
+            try {
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+                Install-Module -Name ReportingServicesTools -Force -AllowClobber -Confirm:$false
+            }
+            catch {
+                Write-Verbose ("$_")
+            }
+
+            Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType ServiceAccount -Confirm:$false
+            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+            try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext } catch {}
+            Stop-Service PowerBIReportServer
+            Start-Service PowerBIReportServer
+            try {
+                Get-Service | Where-Object { $_.Name -eq "SQLSERVERAGENT" -or $_.Name -like "SqlAgent*" } | Start-Service
+            }
+            catch {}
+        }
+        catch {
+            Write-Verbose "Failed to Configure PBIRS"
+            Write-Verbose "$_"
+        }
+    }
+
+    [bool] Test() {
+
+        try {
+            $service = $null
+            if ($($this.RSInstance) -eq "PBIRS") {
+                $service = Get-Service PowerBIReportServer
+            }
+
+            if ($service) {
+                return $true
+            }
+
+            return $false
+        }
+        catch {
+            Write-Verbose "Failed to Find PBIRS Server"
+            Write-Verbose "$_"
+            return $false
+        }
+    }
+
+    [InstallPBIRS] Get() {
+        return $this
+    }
+
+}
