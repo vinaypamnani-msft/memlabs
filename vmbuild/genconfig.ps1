@@ -1252,24 +1252,34 @@ function Get-NewMachineName {
         }
     }
 
-    if ($vm.installDP -or $vm.enablePullDP) {
-        $RoleName = $siteCode + "DPMP"
-        if ($vm.enablePullDP) {
-            $RoleName = $siteCode + "PDPMP"
-        }
-        if ($InstallMP -and -not $InstallDP) {
-            $RoleName = $siteCode + "MP"
+    if ($role -eq "SiteSystem") {
+        $RoleName = ""
 
-        }
-        if ($InstallDP -and -not $InstallMP) {
+        if ($vm.installDP -or $vm.enablePullDP) {
+
             if ($vm.enablePullDP) {
-
-                $RoleName = $siteCode + "PDP"
+                $RoleName = $RoleName + "PDP"
             }
             else {
-                $RoleName = $siteCode + "DP"
+                $RoleName = $RoleName + "DP"
             }
+        }
+        if ($vm.installMP) {
+            $RoleName = $RoleName + "MP"
+        }
 
+        if ($vm.installRP) {
+            $RoleName = $RoleName + "RP"
+        }
+
+        if ($vm.installSUP) {
+            $RoleName = $RoleName + "SUP"
+        }
+
+        $RoleName = $siteCode + $RoleName
+
+        if ((($($ConfigToCheck.vmOptions.Prefix) + $RoleName).Length) -gt 14) {
+            $RoleName = $SiteCode + "SITESYS"
         }
 
     }
@@ -3887,7 +3897,9 @@ function Get-AdditionalValidations {
 
         "installSUP" {
             if ($value -eq $true) {
-                Get-SiteCodeMenu -property $property -name "siteCode" -ConfigToCheck $Global:Config
+                if (-not $property.siteCode) {
+                    Get-SiteCodeMenu -property $property -name "siteCode" -ConfigToCheck $Global:Config
+                }
                 if (-not $property.siteCode) {
                     $property.installSUP = $false
                 }
@@ -3956,6 +3968,19 @@ function Get-AdditionalValidations {
             else {
                 $property.PsObject.Members.Remove("pullDPSourceDP")
             }
+            $newName = Get-NewMachineName -vm $property
+            if ($($property.vmName) -ne $newName) {
+                $rename = $true
+                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
+                if (-not [String]::IsNullOrWhiteSpace($response)) {
+                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                        $rename = $false
+                    }
+                }
+                if ($rename -eq $true) {
+                    $property.vmName = $newName
+                }
+            }
 
         }
         "installDP" {
@@ -3974,6 +3999,36 @@ function Get-AdditionalValidations {
             else {
                 $property | Add-Member -MemberType NoteProperty -Name "enablePullDP" -Value $false -Force
             }
+            $newName = Get-NewMachineName -vm $property
+            if ($($property.vmName) -ne $newName) {
+                $rename = $true
+                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
+                if (-not [String]::IsNullOrWhiteSpace($response)) {
+                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                        $rename = $false
+                    }
+                }
+                if ($rename -eq $true) {
+                    $property.vmName = $newName
+                }
+            }
+        }
+        "installSUP" {
+            $newName = Get-NewMachineName -vm $property
+            if ($($property.vmName) -ne $newName) {
+                $rename = $true
+                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
+                if (-not [String]::IsNullOrWhiteSpace($response)) {
+                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                        $rename = $false
+                    }
+                }
+                if ($rename -eq $true) {
+                    $property.vmName = $newName
+                }
+            }
+        }
+        "installRP" {
             $newName = Get-NewMachineName -vm $property
             if ($($property.vmName) -ne $newName) {
                 $rename = $true
@@ -4160,9 +4215,6 @@ function Get-SortedProperties {
     if ($members.Name -contains "cmInstallDir") {
         $sorted += "cmInstallDir"
     }
-    if ($members.Name -contains "installSUP") {
-        $sorted += "installSUP"
-    }
     if ($members.Name -contains "parentSiteCode") {
         $sorted += "parentSiteCode"
     }
@@ -4184,6 +4236,21 @@ function Get-SortedProperties {
 
     if ($members.Name -contains "additionalDisks") {
         $sorted += "additionalDisks"
+    }
+    if ($members.Name -contains "installDP") {
+        $sorted += "installDP"
+    }
+    if ($members.Name -contains "enablePullDP") {
+        $sorted += "enablePullDP"
+    }
+    if ($members.Name -contains "installMP") {
+        $sorted += "installMP"
+    }
+    if ($members.Name -contains "installRP") {
+        $sorted += "installRP"
+    }
+    if ($members.Name -contains "installSUP") {
+        $sorted += "installSUP"
     }
 
     switch ($members.Name) {
@@ -4210,7 +4277,11 @@ function Get-SortedProperties {
         "tpmEnabled" {}
         "installSSMS" {}
         "installCA" {}
+        "enablePullDP" {}
         "installSUP" {}
+        "installDP" {}
+        "installMP" {}
+        "installRP" {}
 
         Default { $sorted += $_ }
     }
@@ -5321,6 +5392,8 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $true
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $true
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enablePullDP' -Value $false
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
