@@ -1849,7 +1849,8 @@ Function Show-Summary {
 
     Write-Verbose "ContainsPS: $containsPS ContainsSiteSystem: $containsSiteSystem ContainsMember: $containsMember ContainsPassive: $containsPassive"
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
-        if ($deployConfig.cmOptions.install -eq $true -and ($containsPS -or $containsSecondary)) {
+
+        if ($containsPS -or $containsSecondary) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
 
             $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
@@ -1888,50 +1889,26 @@ Function Show-Summary {
             Write-RedX "ConfigMgr will not be installed."
         }
 
-
-        if ($deployConfig.cmOptions.install -eq $true) {
-            $foundDP = $false
-            $foundMP = $false
-
-            $DPMP = $fixedConfig | Where-Object { $_.InstallDP -and $_.InstallMP }
-            if ($DPMP) {
-                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")"
-                $foundDP = $true
-                $foundMP = $true
-            }
-
-            $DPMP = $fixedConfig | Where-Object { $_.InstallDP -and -not $_.InstallMP }
-            if ($DPMP) {
-                Write-GreenCheck "DP role will be installed on $($DPMP.vmName -Join ",")"
-                $foundDP = $true
-            }
-            $DPMP = $fixedConfig | Where-Object { $_.InstallMP -and -not $_.InstallDP }
-            if ($DPMP) {
-                Write-GreenCheck "MP role will be installed on $($DPMP.vmName -Join ",")"
-                $foundMP = $true
-            }
-
-            if (-not $foundDP -or -not $foundMP) {
-                $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-                if ($PSVM) {
-                    if (-not $foundDP -and -not $foundMP) {
-                        Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)"
-                    }
-                    else {
-                        if (-not $foundDP) {
-                            Write-GreenCheck "DP role will be installed on Primary Site Server $($PSVM.vmName)"
-                        }
-                        if (-not $foundMP) {
-                            Write-GreenCheck "MP role will be installed on Primary Site Server $($PSVM.vmName)"
-                        }
-                    }
-                }
-            }
-
+        $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP}
+        if ($testSystem) {
+            Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"
         }
-        else {
-            Write-RedX "DPMP roles will not be installed"
+
+        $testSystem = $fixedConfig | Where-Object { $_.InstallMP }
+        if ($testSystem) {
+            Write-GreenCheck "MP role will be installed on $($testSystem.vmName -Join ",")"
         }
+
+        $testSystem = $fixedConfig | Where-Object { $_.installSUP }
+        if ($testSystem) {
+            Write-GreenCheck "SUP role will be installed on $($testSystem.vmName -Join ",")"
+        }
+
+        $testSystem = $fixedConfig | Where-Object { $_.installRP }
+        if ($testSystem) {
+            Write-GreenCheck "Reporting Point role will be installed on $($testSystem.vmName -Join ",")"
+        }
+
 
         if ($containsMember) {
             if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
