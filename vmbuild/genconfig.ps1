@@ -5480,7 +5480,6 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $true
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enablePullDP' -Value $false
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
                 if ($test) {
@@ -5493,6 +5492,10 @@ function Add-NewVMForRole {
                 if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $virtualMachine.siteCode) -eq "CAS") {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $false -force
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $false -force
+                }
+
+                if ($virtualMachine.installDP) {
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enablePullDP' -Value $false
                 }
             }
             else {

@@ -713,7 +713,50 @@ function Get-Phase7ConfigurationData {
     param (
         [object]$deployConfig
     )
-    return $null
+    $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+
+    # Configuration Data
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName = $dc.vmName
+                Role     = 'DC'
+            }
+        )
+    }
+
+    $NumberOfNodesAdded = 0
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true }) {
+
+        $global:preparePhasePercent++
+
+        # Filter out workgroup machines
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux") {
+            continue
+        }
+
+        $newItem = @{
+            NodeName = $vm.vmName
+            Role     = "PBIRS"
+        }
+        $cd.AllNodes += $newItem
+        if ($vm.Role -ne "DC") {
+            $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+        }
+    }
+
+    $all = @{
+        NodeName                    = "*"
+        PSDscAllowDomainUser        = $true
+        PSDscAllowPlainTextPassword = $true
+    }
+    $cd.AllNodes += $all
+
+    if ($NumberOfNodesAdded -eq 0) {
+        return
+    }
+
+    return $cd
 }
 function Get-Phase8ConfigurationData {
     param (

@@ -26,18 +26,45 @@ configuration Phase7
 
     Node $AllNodes.Where{ $_.Role -eq 'PBIRS' }.NodeName
     {
-
-        InstallPBIRS InstallPBIRS {
-            InstallPath = "E:\PBIRS"
-            SQLServer = "localhost"
-            DownloadUrl = "https://download.microsoft.com/download/7/0/A/70AD68EF-5085-4DF2-A3AB-D091244DDDBF/PowerBIReportServer.exe"
-            RSInstance = "PBIRS"
+        $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
+        if ($thisVM.SQLVersion) {
+            $SqlServer = $thisVM
         }
 
-        WriteStatus Complete {
-            Status    = "Complete!"
-            DependsOn = "[InstallPBIRS]InstallPBIRS"
+        if ($thisVM.RemoteSQLVM) {
+            $SqlServer = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $thisVM.RemoteSQLVM }
+        }
+
+        if (-not $SqlServer) {
+            #Find the Primary or CAS
+            $SiteServer = $deployConfig.VirtualMachines | where-object { $_.siteCode -eq $thisVM.siteCode -and $_.Role -in "CAS", "Primary" }
+
+            if ($SiteServer.SqlVersion) {
+                $SqlServer = $SiteServer
+            }
+
+            if ($SiteServer.RemoteSQLVM) {
+                $SqlServer = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $SiteServer.RemoteSQLVM }
+            }
+        }
+
+        $SqlServerInstance = $thisVM.vmName
+        if ($SqlServer.SqlInstanceName -and $SqlServer.SqlInstanceName -ne "MSSQLSERVER") {
+            $SqlServerInstance = $SqlServerInstance + "\" + $SqlServer.SqlInstanceName
         }
     }
+    InstallPBIRS InstallPBIRS {
+        InstallPath          = "C:\PBIRS"
+        SQLServer            = $SqlServerInstance
+        DownloadUrl          = "https://download.microsoft.com/download/7/0/A/70AD68EF-5085-4DF2-A3AB-D091244DDDBF/PowerBIReportServer.exe"
+        RSInstance           = "PBIRS"
+        PsDscRunAsCredential = $Admincreds
+    }
+
+    WriteStatus Complete {
+        Status    = "Complete!"
+        DependsOn = "[InstallPBIRS]InstallPBIRS"
+    }
+}
 
 }
