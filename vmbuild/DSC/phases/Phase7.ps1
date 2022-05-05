@@ -26,62 +26,17 @@ configuration Phase7
 
     Node $AllNodes.Where{ $_.Role -eq 'PBIRS' }.NodeName
     {
-        $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
-        $wsusFeatures = @("UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI")
-        $sqlServer = "WID"
-        if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
-            $wsusFeatures += "UpdateServices-DB"
-            if ($thisVM.remoteSQLVM) {
-                $sqlServer = $thisVM.remoteSQLVM
-            }
-            else {
-                $sqlServer = $thisVM.vmName
-            }
 
-            if ($thisVM.sqlInstanceName -and $thisVM.sqlInstanceName -ne "MSSQLSERVER") {
-                $sqlServer = $sqlServer + "\" + $thisVM.sqlInstanceName
-            }
-        }
-        else {
-            $wsusFeatures += "UpdateServices-WidDB"
-        }
-
-        WriteStatus UpdateServices {
-            Status = "Adding WSUS Features: $($wsusFeatures -join ',')"
-        }
-
-        WindowsFeatureSet UpdateServices
-        {
-            Name                 = $wsusFeatures
-            Ensure               = 'Present'
-            IncludeAllSubFeature = $false
-            DependsOn            = "[WriteStatus]UpdateServices"
-        }
-
-        WriteStatus ConfigureWSUS {
-            Status = "Configuring WSUS to use ContentDir [$($thisVM.wsusContentDir)] and DB [$sqlServer]"
-        }
-
-        if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
-            ConfigureWSUS UpdateServices
-            {
-                DependsOn  = @('[WindowsFeatureSet]UpdateServices')
-                ContentPath = $thisVM.wsusContentDir
-                SqlServer  = $sqlServer
-                PsDscRunAsCredential = $Admincreds
-            }
-        }
-        else {
-            ConfigureWSUS UpdateServices
-            {
-                DependsOn  = @('[WindowsFeatureSet]UpdateServices')
-                ContentPath = $thisVM.wsusContentDir
-            }ne
+        InstallPBIRS InstallPBIRS {
+            InstallPath = "E:\PBIRS"
+            SQLServer = "localhost"
+            DownloadUrl = "https://download.microsoft.com/download/7/0/A/70AD68EF-5085-4DF2-A3AB-D091244DDDBF/PowerBIReportServer.exe"
+            RSInstance = "PBIRS"
         }
 
         WriteStatus Complete {
             Status    = "Complete!"
-            DependsOn = "[ConfigureWSUS]UpdateServices"
+            DependsOn = "[InstallPBIRS]InstallPBIRS"
         }
     }
 
