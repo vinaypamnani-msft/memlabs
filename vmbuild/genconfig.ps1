@@ -3305,7 +3305,7 @@ Function Get-SiteCodeMenu {
         [Object] $ConfigToCheck = $global:config
     )
 
-    if ($property.Role -eq "DPMP") {
+    if ($property.Role -eq "SiteSystem") {
         #Get-PSCallStack | out-host
         $result = Get-SiteCodeForDPMP -CurrentValue $CurrentValue -Domain $configToCheck.vmoptions.domainName
     }
