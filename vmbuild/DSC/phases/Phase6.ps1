@@ -76,7 +76,7 @@ configuration Phase6
             {
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
                 ContentPath = $thisVM.wsusContentDir
-            }ne
+            }
         }
 
         WriteStatus Complete {
