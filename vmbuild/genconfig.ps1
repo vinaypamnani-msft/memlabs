@@ -1253,7 +1253,7 @@ function Get-NewMachineName {
     }
 
     if ($vm.installDP -or $vm.enablePullDP) {
-        $RoleName = $siteCode + $role
+        $RoleName = $siteCode + "DPMP"
         if ($vm.enablePullDP) {
             $RoleName = $siteCode + "PDPMP"
         }
