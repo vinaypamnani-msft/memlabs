@@ -57,6 +57,10 @@ function Get-UserConfiguration {
                 $vm.PsObject.properties.Remove('AlwaysOnName')
 
             }
+
+            if ($vm.role -eq "DPMP") {
+                $vm.role = "SiteSystem"
+            }
         }
 
         if ($null -ne $config.cmOptions.updateToLatest ) {
@@ -1296,6 +1300,10 @@ function Update-VMFromHyperV {
     }
     else {
         $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $false -Force
+    }
+
+    if ($vmObject.Role -eq "DPMP") {
+        $vmObject.Role = "SiteSystem"
     }
 
 }
