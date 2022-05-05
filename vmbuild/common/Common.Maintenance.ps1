@@ -472,7 +472,7 @@ function Get-VMFixes {
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("DC")
-        NotAppliesToRoles = @("OSDClient", "Linux")
+        NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
         DependentVMs      = @()
         ScriptBlock       = $Fix_DomainAccount
         ArgumentList      = @($vmNote.adminName)
@@ -497,7 +497,7 @@ function Get-VMFixes {
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
-        NotAppliesToRoles = @("DC", "OSDClient", "Linux")
+        NotAppliesToRoles = @("DC", "OSDClient", "Linux", "AADClient")
         DependentVMs      = @()
         ScriptBlock       = $Fix_LocalAccount
     }
@@ -521,7 +521,7 @@ function Get-VMFixes {
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
-        NotAppliesToRoles = @("OSDClient", "Linux")
+        NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
         DependentVMs      = @()
         ScriptBlock       = $Fix_DefaultProfile
     }
@@ -600,7 +600,7 @@ function Get-VMFixes {
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("CASorStandalonePrimary")
-        NotAppliesToRoles = @("OSDClient", "Linux")
+        NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
         DependentVMs      = @($dc.vmName, $vmNote.remoteSQLVM)
         ScriptBlock       = $Fix_CMFullAdmin
     }
@@ -658,7 +658,7 @@ function Get-VMFixes {
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
-        NotAppliesToRoles = @("OSDClient", "Linux")
+        NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
         DependentVMs      = @()
         ScriptBlock       = $Fix_DisableIEESC
         RunAsAccount      = $vmNote.adminName
