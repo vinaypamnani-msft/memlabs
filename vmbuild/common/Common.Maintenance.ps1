@@ -335,22 +335,22 @@ function Start-VMFix {
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
         $return.Success = $false
-        if ($Common.VerboseEnabled) {
-            $pull_Transcript = {
-                $filePath = "C:\staging\Fix\$($using:fixName).txt"
-                if (Test-Path $filePath) {
-                    Get-Content -Path $filePath -ErrorAction SilentlyContinue -Force
-                }
-            }
-            $HashArguments2 = @{
-                VmName       = $VMName
-                VMDomainName = $vmDomain
-                DisplayName  = "Pull-Fix-Transcript"
-                ScriptBlock  = $pull_Transcript
-            }
-            $result2 = Invoke-VmCommand @HashArguments2 -SuppressLog
-            if (-not $result2.ScriptBlockFailed) { $result2.ScriptBlockOutput | Out-Host }
-        }
+        # if ($Common.VerboseEnabled) {
+        #     $pull_Transcript = {
+        #         $filePath = "C:\staging\Fix\$($using:fixName).txt"
+        #         if (Test-Path $filePath) {
+        #             Get-Content -Path $filePath -ErrorAction SilentlyContinue -Force
+        #         }
+        #     }
+        #     $HashArguments2 = @{
+        #         VmName       = $VMName
+        #         VMDomainName = $vmDomain
+        #         DisplayName  = "Pull-Fix-Transcript"
+        #         ScriptBlock  = $pull_Transcript
+        #     }
+        #     $result2 = Invoke-VmCommand @HashArguments2 -SuppressLog
+        #     if (-not $result2.ScriptBlockFailed) { $result2.ScriptBlockOutput | Out-Host }
+        # }
     }
     else {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
@@ -531,66 +531,74 @@ function Get-VMFixes {
     $Fix_CMFullAdmin = {
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
         $transcriptPath = "C:\staging\Fix\Fix-CMFullAdmin.txt"
-        Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
-        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar
+        try {
 
-        if ($ErrVar.Count -ne 0) {
+
+            Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
+            $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar
+
+            if ($ErrVar.Count -ne 0) {
+                return $false
+            }
+
+            if ([string]::IsNullOrWhiteSpace($SiteCode)) {
+                # Deployment was done with cmOptions.Install=False, or site was uninstalled
+                return $true
+            }
+
+            $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
+
+            # Get CM module path
+            $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+            $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+            $uiInstallPath = $subKey.GetValue("UI Installation Directory")
+            $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
+            $initParams = @{}
+
+            $userName = "vmbuildadmin"
+            $userDomain = $env:USERDOMAIN
+            $domainUserName = "$userDomain\$userName"
+
+            $i = 0
+            do {
+                $i++
+
+                # Import the ConfigurationManager.psd1 module
+                if ($null -eq (Get-Module ConfigurationManager)) {
+                    Import-Module $modulePath -ErrorAction SilentlyContinue | out-null
+                }
+
+                # Connect to the site's drive if it is not already present
+                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
+
+                while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                    Start-Sleep -Seconds 10
+                    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
+                }
+
+                # Set the current location to be the site code.
+                Set-Location "$($SiteCode):\" @initParams | out-null
+
+                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
+
+                if (-not $exists) {
+                    New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+                        -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
+                    Start-Sleep -Seconds 30
+                    $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName } -ErrorAction SilentlyContinue
+                }
+            }
+            until ($exists -or $i -gt 5)
+
+            Stop-Transcript | out-null
+
+            if ($exists) { return $true }
+            else { return $false }
+        }
+        catch {
+            Stop-Transcript | out-null
             return $false
         }
-
-        if ([string]::IsNullOrWhiteSpace($SiteCode)) {
-            # Deployment was done with cmOptions.Install=False, or site was uninstalled
-            return $true
-        }
-
-        $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
-
-        # Get CM module path
-        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-        $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-        $uiInstallPath = $subKey.GetValue("UI Installation Directory")
-        $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-        $initParams = @{}
-
-        $userName = "vmbuildadmin"
-        $userDomain = $env:USERDOMAIN
-        $domainUserName = "$userDomain\$userName"
-
-        $i = 0
-        do {
-            $i++
-
-            # Import the ConfigurationManager.psd1 module
-            if ($null -eq (Get-Module ConfigurationManager)) {
-                Import-Module $modulePath -ErrorAction SilentlyContinue | out-null
-            }
-
-            # Connect to the site's drive if it is not already present
-            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
-
-            while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-                Start-Sleep -Seconds 10
-                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
-            }
-
-            # Set the current location to be the site code.
-            Set-Location "$($SiteCode):\" @initParams | out-null
-
-            $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
-
-            if (-not $exists) {
-                New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-                    -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
-                Start-Sleep -Seconds 30
-                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName } -ErrorAction SilentlyContinue
-            }
-        }
-        until ($exists -or $i -gt 5)
-
-        Stop-Transcript | out-null
-
-        if ($exists) { return $true }
-        else { return $false }
     }
 
     $fixesToPerform += [PSCustomObject]@{
