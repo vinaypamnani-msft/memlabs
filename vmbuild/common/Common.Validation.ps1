@@ -819,14 +819,15 @@ function Test-ValidRoleSiteSystem {
         $ssInConfig = $ConfigObject.virtualMachines | Where-Object { $_.sitecode -eq $VM.siteCode -and ($_.role -in "Primary", "Secondary", "CAS") }
         if (-not $ssInConfig) {
             $ssVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
-            if (($ssVM | Measure-Object).Count -eq 0) {}
+            if (($ssVM | Measure-Object).Count -eq 0) {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Site Server." -ReturnObject $ReturnObject -Warning
             }
-            else {
-                if ($ssVM.role -eq "CAS" -and -not $allowOnCAS) {
-                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a SiteSystem role (DP or MP) that is not allowed on CAS." -ReturnObject $ReturnObject -Warning
-                }
-            }
+        }
+    }
+    if (-not $allowOnCAS) {
+        $casVM = Get-List2 -DeployConfig $ConfigObject | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $VM.siteCode}
+        if ($casVM) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a SiteSystem role (DP or MP) that is not allowed on CAS." -ReturnObject $ReturnObject -Warning
         }
     }
 
