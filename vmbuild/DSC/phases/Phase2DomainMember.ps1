@@ -27,10 +27,10 @@
     # Firewall Roles
     $firewallRoles = @("DomainMember")
     if ($ThisVM.role -in "CAS", "Primary", "PassiveSite", "Secondary") {
-        $firewallRoles += @("Site Server", "Provider", "CM Console", "Management Point", "Distribution Point", "Software Update Point")
+        $firewallRoles += @("Site Server", "Provider", "CM Console", "Management Point", "Distribution Point", "Software Update Point", "Reporting Services Point")
     }
-    if ($ThisVM.role -eq "DPMP") {
-        $firewallRoles += @("Management Point", "Distribution Point", "Software Update Point")
+    if ($ThisVM.role -eq "SiteSystem") {
+        $firewallRoles += @("Management Point", "Distribution Point", "Software Update Point", "Reporting Services Point")
     }
 
     # Domain creds

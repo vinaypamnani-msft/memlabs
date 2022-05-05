@@ -948,15 +948,15 @@ function Test-Configuration {
         if ($deployConfig.virtualMachines) {
             $containsCS = $deployConfig.virtualMachines.role -contains "CAS"
             $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
-            $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
+            $containsSiteSystem = $deployConfig.virtualMachines.role -contains "SiteSystem"
             $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
             $containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
         }
         else {
-            $containsCS = $containsPS = $containsDPMP = $containsPassive = $containsSecondary = $false
+            $containsCS = $containsPS = $containsSiteSystem = $containsPassive = $containsSecondary = $false
         }
 
-        $needCMOptions = $containsCS -or $containsPS -or $containsDPMP -or $containsPassive -or $containsSecondary
+        $needCMOptions = $containsCS -or $containsPS -or $containsSiteSystem -or $containsPassive -or $containsSecondary
 
         # VM Options
         # ===========
@@ -1147,9 +1147,9 @@ function Test-Configuration {
 
         # DPMP Validations
         # =================
-        if ($containsDPMP) {
-            Write-Progress2 -Activity "Validating Configuration" -Status "Testing DPMP" -PercentComplete 60
-            $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
+        if ($containsSiteSystem) {
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Site System" -PercentComplete 60
+            $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
 
             foreach ($VM in $DPMPVM) {
                 Test-ValidRoleDPMP -VM $VM -ReturnObject $return

@@ -863,7 +863,7 @@ function get-VMSummary {
 
     $numVMs = ($vms | Measure-Object).Count
     $numDCs = ($vms | Where-Object { $_.Role -in ("DC", "BDC") } | Measure-Object).Count
-    $numDPMP = ($vms | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
+    $numDPMP = ($vms | Where-Object { $_.installDP -or $_.enablePullDP } | Measure-Object).Count
     $numPri = ($vms | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $numSec = ($vms | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
     $numCas = ($vms | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
@@ -1243,14 +1243,6 @@ function Get-NewMachineName {
         return $NewName
     }
 
-    #if ($role -eq "DPMP") {
-    #    $PSVM = $ConfigToCheck.VirtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1
-    #    if ($PSVM -and $PSVM.SiteCode) {
-    #        return $($PSVM.SiteCode) + $role
-    #    }
-    #}
-
-
     if ($role -eq "WSUS") {
         if ($vm.installSUP) {
             $RoleName = $siteCode + "SUP"
@@ -1260,7 +1252,7 @@ function Get-NewMachineName {
         }
     }
 
-    if ($role -eq "DPMP") {
+    if ($vm.installDP -or $vm.enablePullDP) {
         $RoleName = $siteCode + $role
         if ($vm.enablePullDP) {
             $RoleName = $siteCode + "PDPMP"
@@ -1745,7 +1737,7 @@ function Select-Config {
     if ($null -ne $configSelected.cmOptions.installDPMPRoles) {
         $configSelected.cmOptions.PsObject.properties.Remove('installDPMPRoles')
         foreach ($vm in $configSelected.virtualMachines) {
-            if ($vm.Role -eq "DPMP") {
+            if ($vm.Role -eq "SiteSystem") {
                 $vm | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
                 $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
             }
@@ -1766,7 +1758,7 @@ Function Get-DomainStatsLine {
     $ExistingCasCount = ($ListCache | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
     $ExistingPriCount = ($ListCache | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
     $ExistingSecCount = ($ListCache | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
-    $ExistingDPMPCount = ($ListCache | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
+    $ExistingDPMPCount = ($ListCache | Where-Object { $_.installDP -or $_.enablePullDP } | Measure-Object).Count
     $ExistingSQLCount = ($ListCache | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
     $ExistingSubnetCount = ($ListCache | Select-Object -Property Network -unique | measure-object).Count
     $TotalVMs = ($ListCache | Measure-Object).Count
@@ -1980,7 +1972,7 @@ function Format-Roles {
             "Primary" { $newRoles += "$($role.PadRight($padding))`t[New Primary site (Standalone or join a CAS)]" }
             "Secondary" { $newRoles += "$($role.PadRight($padding))`t[New Secondary site (Attach to Primary)]" }
             "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]" }
-            "DPMP" { $newRoles += "$($role.PadRight($padding))`t[New DP/MP for an existing Primary Site. Can be a Pull DP]" }
+            "SiteSystem" { $newRoles += "$($role.PadRight($padding))`t[New Site System for an existing Primary Site. Can be MP/DP/PullDP/etc.]" }
             "DomainMember" { $newRoles += "$($role.PadRight($padding))`t[New VM joined to the domain. Can be a standalone SQL server on server OS]" }
             "SQLAO" { $newRoles += "$($role.PadRight($padding))`t[SQL High Availability Always On Cluster]" }
             "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain. Can be a SQL Server]" }
@@ -2067,9 +2059,6 @@ function Select-RolesForNew {
     if ($global:config.VirtualMachines.role -contains "CAS") {
         $existingRoles.Remove("CAS")
     }
-    # if ($global:config.VirtualMachines.role -contains "DPMP") {
-    #     $existingRoles.Remove("DPMP")
-    # }
     $existingRoles.Remove("PassiveSite")
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles) -CurrentValue "DomainMember" -test:$false
     return $role
@@ -3017,7 +3006,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "Secondary" { return $ServerList }
         "FileServer" { return $ServerList }
         "Sqlserver" { return $ServerList }
-        "DPMP" { return $ServerList }
+        "SiteSystem" { return $ServerList }
         "WSUS" { return $ServerList }
         "SQLAO" { return $ServerList }
         "DomainMember" {
@@ -4082,7 +4071,7 @@ function Get-AdditionalValidations {
             }
             if ($property.role -eq "Primary") {
                 $VMs = @()
-                $VMs += $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                $VMs += $Global:Config.virtualMachines | Where-Object { $_.installDP -or $_.enablePullDP }
                 $VMs += $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
                 $SecVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Secondary" }
                 if ($VMs) {
@@ -4099,7 +4088,7 @@ function Get-AdditionalValidations {
             }
 
             if ($property.role -eq "Secondary") {
-                $VMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "DPMP" }
+                $VMs = $Global:Config.virtualMachines | Where-Object { $_.installDP -or $_.enablePullDP }
                 if ($VMs) {
                     foreach ($VM in $VMS) {
                         if ($VM.siteCode -eq $CurrentValue ) {
@@ -4589,7 +4578,7 @@ function Select-Options {
                         write-host2 -ForegroundColor Khaki "siteCode can not be manually modified on a Passive server."
                         continue MainLoop
                     }
-                    if ($property.role -in ("DPMP", "WSUS")) {
+                    if ($property.role -in ("SiteSystem", "WSUS")) {
                         Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
                         $newName = Get-NewMachineName -vm $property
                         if ($($property.vmName) -ne $newName) {
@@ -4790,7 +4779,7 @@ function get-VMString {
             $SiteCode += "->$($virtualMachine.parentSiteCode)"
         }
         $temp = "  CM  [SiteCode $SiteCode]"
-        if ($virtualMachine.role -eq "DPMP") {
+        if ($virtualMachine.installDP -or $virtualMachine.enablePullDP) {
             if ($virtualMachine.installMP) {
                 $temp += " [MP]"
             }
@@ -4890,7 +4879,7 @@ function get-VMString {
             "PassiveSite" {
                 $color = $ColorMap[$($virtualMachine.SiteCode)]
             }
-            "DPMP" {
+            "SiteSystem" {
                 $color = $ColorMap[$($virtualMachine.SiteCode)]
             }
             "WSUS" {
@@ -5230,7 +5219,7 @@ function Add-NewVMForRole {
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
-            $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "DPMP" } | Measure-Object).Count
+            $existingDPMP = ($ConfigToModify.virtualMachines | Where-Object { $_.installDP -or $_.enablePullDP } | Measure-Object).Count
             if (-not $test -and (-not $network)) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
@@ -5326,7 +5315,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'vmGeneration' -Value "2"
             $virtualMachine.PsObject.Members.Remove('operatingSystem')
         }
-        "DPMP" {
+        "SiteSystem" {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
@@ -5383,7 +5372,7 @@ function Add-NewVMForRole {
 
     $ConfigToModify.virtualMachines += $virtualMachine
 
-    if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "DPMP" -or $role -eq "Secondary") {
+    if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "SiteSystem" -or $role -eq "Secondary") {
         if ($null -eq $ConfigToModify.cmOptions) {
             $newCmOptions = [PSCustomObject]@{
                 version                   = "current-branch"
@@ -5483,7 +5472,7 @@ function select-PullDPMenu {
     switch ($result.ToLowerInvariant()) {
         "n" {
             write-Log "Added new DPMP for SiteCode $($currentVM.SiteCode)"
-            $result = Add-NewVMForRole -Role "DPMP" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true -SiteCode $CurrentVM.SiteCode
+            $result = Add-NewVMForRole -Role "SiteSystem" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true -SiteCode $CurrentVM.SiteCode
         }
     }
     return $result
@@ -5630,7 +5619,7 @@ function Get-ListOfPossibleDPMP {
 
     )
     $FSList = @()
-    $FS = $Config.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode }
+    $FS = $Config.virtualMachines | Where-Object { $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode }
     foreach ($item in $FS) {
 
         $FSList += $item.vmName
@@ -5638,7 +5627,7 @@ function Get-ListOfPossibleDPMP {
     }
     $domain = $Config.vmOptions.DomainName
     if ($null -ne $domain) {
-        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.role -eq "DPMP" -and $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode }
+        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode }
         foreach ($item in $FSFromList) {
             $FSList += $item.vmName
         }

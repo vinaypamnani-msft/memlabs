@@ -735,7 +735,7 @@ function Get-Phase8ConfigurationData {
     if ($deployConfig.cmOptions.Install -ne $false) {
 
         $fsVMsAdded = @()
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP", "WSUS") }) {
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "SiteSystem", "WSUS") }) {
 
             $global:preparePhasePercent++
 

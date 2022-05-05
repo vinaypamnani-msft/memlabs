@@ -74,7 +74,7 @@ function Get-UserConfiguration {
         if ($null -ne $config.cmOptions.installDPMPRoles) {
             $config.cmOptions.PsObject.properties.Remove('installDPMPRoles')
             foreach ($vm in $config.virtualMachines) {
-                if ($vm.Role -eq "DPMP") {
+                if ($vm.Role -eq "SiteSystem") {
                     $vm | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
                     $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
                 }
@@ -324,7 +324,7 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
     # Add Primary to list, when adding DPMP
-    $DPMPs = $config.virtualMachines | Where-Object { $_.role -eq "DPMP" }
+    $DPMPs = $config.virtualMachines | Where-Object { $_.installDP -or $_.enablePullDP }
     foreach ($dpmp in $DPMPS) {
         $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -type VM -SmartUpdate:$false
         if ($DPMPPrimary) {
@@ -634,7 +634,7 @@ function Get-ExistingForDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
-        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember", "Secondary")]
+        [ValidateSet("DC", "CAS", "Primary", "SiteSystem", "DomainMember", "Secondary")]
         [string]$Role
     )
 
@@ -733,7 +733,7 @@ function Get-ExistingForNetwork {
         [Parameter(Mandatory = $true, HelpMessage = "Network")]
         [string]$Network,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
-        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember", "Secondary")]
+        [ValidateSet("DC", "CAS", "Primary", "SiteSystem", "DomainMember", "Secondary")]
         [string]$Role,
         [Parameter(Mandatory = $false, HelpMessage = "VMName to exclude")]
         [string] $exclude = $null,
@@ -1177,7 +1177,12 @@ function Update-VMInformation {
         }
 
         # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
-        if ($vmNoteObject.role -eq "DPMP") {
+        if ($vmNoteObject.installDP -or $vmNoteObject.enablePullDP) {
+            if ($vmNoteObject.role -eq "DPMP") { # Rename Role to SiteSystem
+                $vmNoteObject.role = "SiteSystem"
+                Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+            }
+
             if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                 if ($vmState -eq "Running" -and (-not $inProgress)) {
                     try {
@@ -1827,7 +1832,7 @@ Function Show-Summary {
     #$CHECKMARK = ([char]8730)
     $containsPS = $fixedConfig.role -contains "Primary"
     $containsSecondary = $fixedConfig.role -contains "Secondary"
-    $containsDPMP = $fixedConfig.role -contains "DPMP"
+    # $containsDPMP = $fixedConfig.role -contains "DPMP"
     $containsMember = $fixedConfig.role -contains "DomainMember"
     $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
@@ -1877,19 +1882,19 @@ Function Show-Summary {
             $foundDP = $false
             $foundMP = $false
 
-            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and $_.InstallMP }
+            $DPMP = $fixedConfig | Where-Object { $_.InstallDP -and $_.InstallMP }
             if ($DPMP) {
                 Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")"
                 $foundDP = $true
                 $foundMP = $true
             }
 
-            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and -not $_.InstallMP }
+            $DPMP = $fixedConfig | Where-Object { $_.InstallDP -and -not $_.InstallMP }
             if ($DPMP) {
                 Write-GreenCheck "DP role will be installed on $($DPMP.vmName -Join ",")"
                 $foundDP = $true
             }
-            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallMP -and -not $_.InstallDP }
+            $DPMP = $fixedConfig | Where-Object { $_.InstallMP -and -not $_.InstallDP }
             if ($DPMP) {
                 Write-GreenCheck "MP role will be installed on $($DPMP.vmName -Join ",")"
                 $foundMP = $true

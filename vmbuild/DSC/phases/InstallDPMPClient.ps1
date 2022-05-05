@@ -82,32 +82,32 @@ $ValidSiteCodes = @($SiteCode)
 $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
 $ValidSiteCodes += $ReportingSiteCodes
 
-foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" } ) {
-    if ($dpmp.siteCode -in $ValidSiteCodes) {
-        if ($dpmp.installDP) {
-            if ($dpmp.enablePullDP) {
+foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" } ) {
+    if ($vm.siteCode -in $ValidSiteCodes) {
+        if ($vm.installDP) {
+            if ($vm.enablePullDP) {
                 $PullDPs += [PSCustomObject]@{
-                    ServerName     = $dpmp.vmName
-                    ServerSiteCode = $dpmp.siteCode
-                    SourceDP       = $dpmp.pullDPSourceDP
+                    ServerName     = $vm.vmName
+                    ServerSiteCode = $vm.siteCode
+                    SourceDP       = $vm.pullDPSourceDP
                 }
             }
             else {
                 $DPs += [PSCustomObject]@{
-                    ServerName     = $dpmp.vmName
-                    ServerSiteCode = $dpmp.siteCode
+                    ServerName     = $vm.vmName
+                    ServerSiteCode = $vm.siteCode
                 }
             }
         }
-        if ($dpmp.installMP) {
-            if ($dpmp.siteCode -notin $ReportingSiteCodes) {
+        if ($vm.installMP) {
+            if ($vm.siteCode -notin $ReportingSiteCodes) {
                 $MPs += [PSCustomObject]@{
-                    ServerName     = $dpmp.vmName
-                    ServerSiteCode = $dpmp.siteCode
+                    ServerName     = $vm.vmName
+                    ServerSiteCode = $vm.siteCode
                 }
             }
             else {
-                Write-DscStatus "Skip MP role for $($dpmp.vmName) since it's a remote site system in Secondary site"
+                Write-DscStatus "Skip MP role for $($vm.vmName) since it's a remote site system in Secondary site"
             }
         }
     }

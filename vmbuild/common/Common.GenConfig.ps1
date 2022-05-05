@@ -16,7 +16,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "Secondary" { return $ServerList }
         "FileServer" { return $ServerList }
         "SQLAO" { return $ServerList }
-        "DPMP" { return $ServerList }
+        "SiteSystem" { return $ServerList }
         "DomainMember" { return $AllList }
         "DomainMember (Server)" { return $ServerList }
         "DomainMember (Client)" { return $ClientList }
@@ -860,7 +860,7 @@ function ConvertTo-DeployConfigEx {
                 $AllSiteCodes += $thisVM.siteCode
 
 
-                foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -in $AllSiteCodes -and -not $_.hidden }) {
+                foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { ($_.installDP -or $_.enablePullDP) -and $_.siteCode -in $AllSiteCodes -and -not $_.hidden }) {
                     Add-VMToAccountLists -thisVM $thisVM -VM $dpmp  -accountLists $accountLists -deployConfig $deployconfig -WaitOnDomainJoin
                 }
 
