@@ -1144,8 +1144,6 @@ function Get-NewMachineName {
     $Domain = $vm.vmOptions.DomainName
     $OS = $vm.OperatingSystem
     $SiteCode = $vm.SiteCode
-    $InstallDP = $vm.InstallDP
-    $InstallMP = $vm.InstallMP
     $CurrentName = $vm.vmName
     $Role = $vm.Role
     $RoleName = $vm.Role
@@ -1274,6 +1272,10 @@ function Get-NewMachineName {
 
         if ($vm.installSUP) {
             $RoleName = $RoleName + "SUP"
+        }
+
+        if ($RoleName -eq "") {
+            $RoleName = "SITESYS"
         }
 
         $RoleName = $siteCode + $RoleName
@@ -3141,16 +3143,37 @@ Function Set-ParentSiteCodeMenu {
     }
 }
 
-
-
-Function Get-SiteCodeForWSUS {
+Function Get-ValidSiteCodesForRP {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
-        [Object] $CurrentValue,
         [Parameter(Mandatory = $true, HelpMessage = "Config")]
-        [Object] $Config
+        [Object] $Config,
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [Object] $CurrentVM
+    )
 
+    $allSiteCodes = @()
+
+    $list2 = Get-List2 -deployConfig $Config
+
+    $allSiteCodes = ($list2 | where-object { $_.role -in ("CAS", "Primary") }).SiteCode
+
+    $invalidSiteCodes = ($list2 | Where-Object { $_.installRP -and $_.vmName -ne $CurrentVM.vmName }).SiteCode
+
+    foreach ($siteCode in $invalidSiteCodes) {
+        $allSiteCodes = $allSiteCodes | where-object { $_ -ne $siteCode }
+    }
+
+    return $allSiteCodes
+}
+
+Function Get-ValidSiteCodesForWSUS {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Config")]
+        [Object] $Config,
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [Object] $CurrentVM
     )
 
     $siteCodes = @()
@@ -3162,7 +3185,7 @@ Function Get-SiteCodeForWSUS {
 
     foreach ($item in $topLevelSiteServers) {
 
-        $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $item.SiteCode }
+        $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $item.SiteCode -and $_.VmName -ne $CurrentVM.VmName}
 
         if ($existingSUP) {
             if ($item.role -ne "CAS") {
@@ -3180,6 +3203,21 @@ Function Get-SiteCodeForWSUS {
             $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
         }
     }
+
+    return $sitecodes
+
+}
+Function Get-SiteCodeForWSUS {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue,
+        [Parameter(Mandatory = $true, HelpMessage = "Config")]
+        [Object] $Config
+
+    )
+
+    $siteCodes = Get-ValidSiteCodesForWSUS
 
     $result = $null
     $Options = [ordered]@{ "X" = "StandAlone WSUS" }
@@ -3257,17 +3295,23 @@ Function Get-SiteCodeForDPMP {
     #Get-PSCallStack | out-host
     while ($valid -eq $false) {
         $siteCodes = @()
+        $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "CAS" } )
+        if ($tempSiteCodes) {
+            foreach ($tempSiteCode in $tempSiteCodes) {
+                $siteCodes += "$($tempSiteCode.SiteCode) (New CAS VM - $($tempSiteCode.vmName))"
+            }
+        }
         $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Primary" } )
         if ($tempSiteCodes) {
             foreach ($tempSiteCode in $tempSiteCodes) {
-                $siteCodes += "$($tempSiteCode.SiteCode) (New Primary Server - $($tempSiteCode.vmName))"
+                $siteCodes += "$($tempSiteCode.SiteCode) (New Primary VM - $($tempSiteCode.vmName))"
             }
         }
         $tempSiteCodes = ($ConfigToCheck.VirtualMachines | Where-Object { $_.role -eq "Secondary" })
         if ($tempSiteCodes) {
             foreach ($tempSiteCode in $tempSiteCodes) {
                 if (-not [String]::IsNullOrWhiteSpace($tempSiteCode)) {
-                    $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary Server - $($tempSiteCode.vmName))"
+                    $siteCodes += "$($tempSiteCode.SiteCode) (New Secondary VM - $($tempSiteCode.vmName))"
                 }
             }
         }
@@ -3281,9 +3325,13 @@ Function Get-SiteCodeForDPMP {
                 $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
             }
 
+            foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "CAS" | Select-Object SiteCode, Network, VmName -Unique)) {
+                $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
+            }
+
             if ($siteCodes.Length -eq 0) {
                 Write-Host
-                write-host "No valid site codes are eligible to accept this DPMP"
+                write-host "No valid site codes are eligible to accept this Site System"
                 return $null
             }
             else {
@@ -3291,7 +3339,7 @@ Function Get-SiteCodeForDPMP {
             }
             $result = $null
             while (-not $result) {
-                $result = Get-Menu -Prompt "Select sitecode to connect DPMP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false -Split
+                $result = Get-Menu -Prompt "Select sitecode to connect Site System to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false -Split
             }
             if ($result -and ($result.ToLowerInvariant() -eq "x")) {
                 return $null
@@ -3933,16 +3981,54 @@ function Get-AdditionalValidations {
                     }
                 }
 
+                $newName = Get-NewMachineName -vm $property
+                if ($($property.vmName) -ne $newName) {
+                    $rename = $true
+                    $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
+                    if (-not [String]::IsNullOrWhiteSpace($response)) {
+                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                            $rename = $false
+                        }
+                    }
+                    if ($rename -eq $true) {
+                        $property.vmName = $newName
+                    }
+                }
+
             }
             else {
                 if ($property.Role -ne "WSUS") {
                     $property.PsObject.Members.Remove("wsusContentDir")
                 }
             }
+
+            #$validSiteCodes = Get-ValidSiteCodesForWSUS -config $Global:Config -CurrentVM $property
+            #if ($property.sitecode -in $validSiteCodes) {
+#
+            #    $newName = Get-NewMachineName -vm $property
+            #    if ($($property.vmName) -ne $newName) {
+            #        $rename = $true
+            #        $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
+            #        if (-not [String]::IsNullOrWhiteSpace($response)) {
+            #            if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+            #                $rename = $false
+            #            }
+            #        }
+            #        if ($rename -eq $true) {
+            #            $property.vmName = $newName
+            #        }
+            #    }
+            #    else {
+            #        Write-log "Current site code is not a valid target for a new SUP. Only 1 sup can exist on a CAS site, and 1 must exist on a CAS site before adding one to a Primary or Secondary site"
+            #        $property.InstallSUP = $false
+            #    }
+            #}
+
+
         }
         "installMP" {
-            if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -eq "Secondary") {
-                Write-OrangePoint -ForegroundColor Orange "Can not install an MP for a secondary site"
+            if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -in "Secondary", "CAS") {
+                Write-OrangePoint -ForegroundColor Orange "Can not install an MP for a CAS or secondary site"
                 $property.installMP = $false
             }
             $newName = Get-NewMachineName -vm $property
@@ -3984,6 +4070,12 @@ function Get-AdditionalValidations {
 
         }
         "installDP" {
+
+            if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -eq "CAS") {
+                Write-OrangePoint -ForegroundColor Orange "Can not install an DP for a CAS site"
+                $property.installDP = $false
+            }
+
             if ($value -eq $false) {
                 $pullDPs = $Global:Config.virtualMachines | Where-Object { $_.pullDPSourceDP -eq $property.VmName }
                 if ($pullDPs) {
@@ -4013,34 +4105,28 @@ function Get-AdditionalValidations {
                 }
             }
         }
-        "installSUP" {
-            $newName = Get-NewMachineName -vm $property
-            if ($($property.vmName) -ne $newName) {
-                $rename = $true
-                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                if (-not [String]::IsNullOrWhiteSpace($response)) {
-                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                        $rename = $false
-                    }
-                }
-                if ($rename -eq $true) {
-                    $property.vmName = $newName
-                }
-            }
-        }
         "installRP" {
-            $newName = Get-NewMachineName -vm $property
-            if ($($property.vmName) -ne $newName) {
-                $rename = $true
-                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                if (-not [String]::IsNullOrWhiteSpace($response)) {
-                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                        $rename = $false
+
+            $validSiteCodes = Get-ValidSiteCodesForRP -config $Global:Config -CurrentVM $property
+            if ($property.sitecode -in $validSiteCodes) {
+                $newName = Get-NewMachineName -vm $property
+                if ($($property.vmName) -ne $newName) {
+                    $rename = $true
+                    $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
+                    if (-not [String]::IsNullOrWhiteSpace($response)) {
+                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                            $rename = $false
+                        }
+                    }
+                    if ($rename -eq $true) {
+                        $property.vmName = $newName
                     }
                 }
-                if ($rename -eq $true) {
-                    $property.vmName = $newName
-                }
+
+            }
+            else {
+                Write-log "Current site code is not a valid target for a new RP. Only 1 RP can exist per site"
+                $property.InstallRP = $false
             }
         }
         "siteCode" {
@@ -5402,6 +5488,11 @@ function Add-NewVMForRole {
                 }
                 else {
                     Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
+                }
+
+                if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $virtualMachine.siteCode) -eq "CAS") {
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $false -force
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $false -force
                 }
             }
             else {
