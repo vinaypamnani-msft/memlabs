@@ -124,7 +124,7 @@
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
-            <value>"DPMP"</value>
+            <value>"SiteSystem"</value>
           </rule>
            <rule>
             <property>Comment</property>

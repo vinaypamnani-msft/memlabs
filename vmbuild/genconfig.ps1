@@ -1925,7 +1925,7 @@ function Show-ExistingNetwork {
         $SiteCode = $result
     }
 
-    if ($role -eq "DPMP") {
+    if ($role -eq "SiteSystem") {
         $SiteCode = Get-SiteCodeForDPMP -Domain $domain
         #write-host "Get-SiteCodeForDPMP return $SiteCode"
     }
@@ -3860,7 +3860,7 @@ function Get-AdditionalValidations {
                 }
             }
 
-            if ($Property.Role -eq "DPMP") {
+            if ($Property.Role -eq "SiteSystem") {
                 # pullDPSourceDP
                 foreach ($pullDP in $Global:Config.virtualMachines | Where-Object { $_.pullDPSourceDP }) {
                     if ($pullDP.pullDPSourceDP -eq $CurrentValue) {
