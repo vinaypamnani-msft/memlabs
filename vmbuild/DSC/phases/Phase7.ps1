@@ -10,7 +10,7 @@ configuration Phase7
 
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc', 'UpdateServicesDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc'
 
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -48,21 +48,26 @@ configuration Phase7
             }
         }
 
-        $SqlServerInstance = $thisVM.vmName
+        $SqlServerInstance = $SqlServer.vmName
         if ($SqlServer.SqlInstanceName -and $SqlServer.SqlInstanceName -ne "MSSQLSERVER") {
             $SqlServerInstance = $SqlServerInstance + "\" + $SqlServer.SqlInstanceName
         }
-    }
-    InstallPBIRS InstallPBIRS {
-        InstallPath          = "C:\PBIRS"
-        SQLServer            = $SqlServerInstance
-        DownloadUrl          = "https://download.microsoft.com/download/7/0/A/70AD68EF-5085-4DF2-A3AB-D091244DDDBF/PowerBIReportServer.exe"
-        RSInstance           = "PBIRS"
-        PsDscRunAsCredential = $Admincreds
-    }
 
-    WriteStatus Complete {
-        Status    = "Complete!"
-        DependsOn = "[InstallPBIRS]InstallPBIRS"
+        WriteStatus InstallPBIRS {
+            Status    = "Installing PBIRS with the DB on $($SqlServerInstance)"
+        }
+
+        InstallPBIRS InstallPBIRS {
+            InstallPath          = "C:\PBIRS"
+            SQLServer            = $SqlServerInstance
+            DownloadUrl          = "https://download.microsoft.com/download/7/0/A/70AD68EF-5085-4DF2-A3AB-D091244DDDBF/PowerBIReportServer.exe"
+            RSInstance           = "PBIRS"
+            PsDscRunAsCredential = $Admincreds
+        }
+
+        WriteStatus Complete {
+            Status    = "Complete!"
+            DependsOn = "[InstallPBIRS]InstallPBIRS"
+        }
     }
 }

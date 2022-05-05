@@ -3164,7 +3164,10 @@ class InstallPBIRS {
         try {
             $service = $null
             if ($($this.RSInstance) -eq "PBIRS") {
-                $service = Get-Service PowerBIReportServer
+                try {
+                $service = Get-Service PowerBIReportServer -ErrorAction SilentlyContinue
+                }
+                catch {}
             }
 
             if ($service) {
