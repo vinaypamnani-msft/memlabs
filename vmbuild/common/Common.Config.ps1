@@ -1278,7 +1278,15 @@ function Update-VMFromHyperV {
 
         foreach ($prop in $vmNoteObject.PSObject.Properties) {
             $value = if ($prop.Value -is [string]) { $prop.Value.Trim() } else { $prop.Value }
-            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+            switch ($prop.Name) {
+                "deployedOS" {
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "OperatingSystem" -Value $value -Force
+                    $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                }
+                default {
+                    $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                }
+            }
         }
     }
     else {
@@ -1718,7 +1726,14 @@ function Convert-vmNotesToOldFormat {
     Write-Host "`nOld Notes:`n$currentNotes`n"
     $props = ($currentNotes | Convertfrom-json).psobject.members | Where-Object { $_.Name -in $propsToInclude }
     foreach ($prop in $props) {
-        $newNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+        switch ($prop.Name) {
+            "operatingSystem" {
+                $newNote | Add-Member -MemberType NoteProperty -Name "deployedOS" -Value $prop.Value -Force
+            }
+            default {
+                $newNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+            }
+        }
     }
 
     $newJson = ($newNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "

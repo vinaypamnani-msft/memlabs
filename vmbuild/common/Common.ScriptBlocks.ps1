@@ -55,24 +55,6 @@ $global:VM_Create = {
             $domainName = "WORKGROUP"
         }
 
-        # Determine which OS image file to use for the VM
-        if ($currentItem.role -notin "OSDClient") {
-            $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
-            if ($imageFile) {
-                $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
-            }
-            if (-not $vhdxPath) {
-                $linuxFile = (Get-LinuxImages).Name | Where-Object { $_ -eq $currentItem.operatingSystem }
-                if ($linuxFile) {
-                    $vhdxPath = Join-Path $Common.AzureImagePath $($linuxFile + ".vhdx")
-                }
-                if (-not $vhdxPath) {
-                    throw "Could not find $($currentItem.operatingSystem) in file list"
-                }
-            }
-        }
-
-
         # Set base VM path
         $virtualMachinePath = Join-Path $deployConfig.vmOptions.basePath $deployConfig.vmOptions.domainName
 
@@ -83,6 +65,23 @@ $global:VM_Create = {
             if ($exists) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM already exists. Exiting." -Failure -OutputStream -HostOnly
                 return
+            }
+
+            # Determine which OS image file to use for the VM
+            if ($currentItem.role -notin "OSDClient") {
+                $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
+                if ($imageFile) {
+                    $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
+                }
+                if (-not $vhdxPath) {
+                    $linuxFile = (Get-LinuxImages).Name | Where-Object { $_ -eq $currentItem.operatingSystem }
+                    if ($linuxFile) {
+                        $vhdxPath = Join-Path $Common.AzureImagePath $($linuxFile + ".vhdx")
+                    }
+                    if (-not $vhdxPath) {
+                        throw "Could not find $($currentItem.operatingSystem) in file list"
+                    }
+                }
             }
 
             # Create VM
