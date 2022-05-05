@@ -66,5 +66,3 @@ configuration Phase7
         DependsOn = "[InstallPBIRS]InstallPBIRS"
     }
 }
-
-}
