@@ -35,7 +35,7 @@ Configuration Phase8
         }
     }
 
-    Node $AllNodes.Where{ $_.Role -eq 'DPMP' }.NodeName
+    Node $AllNodes.Where{ $_.Role -eq 'SiteSystem' }.NodeName
     {
         WriteStatus Complete {
             DependsOn = $nextDepend

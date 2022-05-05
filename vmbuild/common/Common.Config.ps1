@@ -327,25 +327,16 @@ function Add-ExistingVMsToDeployConfig {
             Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
         }
     }
-    # Add Primary to list, when adding DPMP
-    $DPMPs = $config.virtualMachines | Where-Object { $_.installDP -or $_.enablePullDP }
-    foreach ($dpmp in $DPMPS) {
-        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -type VM -SmartUpdate:$false
-        if ($DPMPPrimary) {
-            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary.vmName -configToModify $config
+    # Add Primary to list, when adding SiteSystem
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+    foreach ($system in $systems) {
+        $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
+        if ($systemSite) {
+            Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
         }
 
-        if ($DPMPPrimary.pullDPSourceDP) {
-            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary.pullDPSourceDP -configToModify $config
-        }
-    }
-
-    # Add Primary to list, when adding SUP
-    $SUPs = $config.virtualMachines | Where-Object { $_.installSUP -eq $true }
-    foreach ($sup in $SUPs) {
-        $SUPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $sup.siteCode -type VM -SmartUpdate:$false
-        if ($SUPPrimary) {
-            Add-ExistingVMToDeployConfig -vmName $SUPPrimary.vmName -configToModify $config
+        if ($systemSite.pullDPSourceDP) {
+            Add-ExistingVMToDeployConfig -vmName $systemSite.pullDPSourceDP -configToModify $config
         }
     }
 
@@ -1212,6 +1203,18 @@ function Update-VMInformation {
                 }
             }
         }
+
+        # Rename WSUS role to SiteSystem, if SUP
+        if ($vmNoteObject.role -eq "WSUS" -and $vmNoteObject.installSUP -eq $true) {
+            $vmNoteObject.role = "SiteSystem"
+            Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+        }
+
+        # Remove installSUP prop if WSUS role, but not SUP
+        if ($vmNoteObject.role -eq "WSUS" -and ($null -eq $vmNoteObject.installSUP -or $vmNoteObject.installSUP -eq $false)) {
+            $vmNoteObject.PsObject.properties.Remove('installSUP')
+            Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+        }
     }
 }
 
@@ -1840,11 +1843,11 @@ Function Show-Summary {
     #$CHECKMARK = ([char]8730)
     $containsPS = $fixedConfig.role -contains "Primary"
     $containsSecondary = $fixedConfig.role -contains "Secondary"
-    # $containsDPMP = $fixedConfig.role -contains "DPMP"
+    $containsSiteSystem = $fixedConfig.role -contains "SiteSystem"
     $containsMember = $fixedConfig.role -contains "DomainMember"
     $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
-    Write-Verbose "ContainsPS: $containsPS ContainsDPMP: $containsDPMP ContainsMember: $containsMember ContainsPassive: $containsPassive"
+    Write-Verbose "ContainsPS: $containsPS ContainsSiteSystem: $containsSiteSystem ContainsMember: $containsMember ContainsPassive: $containsPassive"
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
         if ($deployConfig.cmOptions.install -eq $true -and ($containsPS -or $containsSecondary)) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."

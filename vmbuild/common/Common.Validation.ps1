@@ -159,16 +159,6 @@ function Test-ValidCmOptions {
         Add-ValidationMessage -Message "CM Options Validation: cmOptions.install has an invalid value [$($ConfigObject.cmOptions.install)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
-    # updateToLatest
-    # if ($ConfigObject.cmOptions.updateToLatest -isnot [bool]) {
-    #     Add-ValidationMessage -Message "CM Options Validation: cmOptions.updateToLatest has an invalid value [$($ConfigObject.cmOptions.updateToLatest)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
-    # }
-
-    # installDPMPRoles
-    #if ($ConfigObject.cmOptions.installDPMPRoles -isnot [bool]) {
-    #    Add-ValidationMessage -Message "CM Options Validation: cmOptions.installDPMPRoles has an invalid value [$($ConfigObject.cmOptions.installDPMPRoles)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
-    #}
-
     # pushClientToDomainMembers
     if ($ConfigObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
         Add-ValidationMessage -Message "CM Options Validation: cmOptions.pushClientToDomainMembers has an invalid value [$($ConfigObject.cmOptions.pushClientToDomainMembers)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
@@ -466,7 +456,7 @@ function Test-ValidVmServerOS {
     $vmRole = $VM.role
 
     if ($VM.operatingSystem -notlike "*Server*") {
-        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server OS for Primary/CAS/DPMP roles, or when SQL is selected." -ReturnObject $ReturnObject -Warning
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server OS for Primary/CAS/SiteSystem roles, or when SQL is selected." -ReturnObject $ReturnObject -Warning
     }
 
 }
@@ -798,7 +788,7 @@ function Test-ValidRoleFileServer {
 
 }
 
-function Test-ValidRoleDPMP {
+function Test-ValidRoleSiteSystem {
     param (
         [object] $VM,
         [object] $ReturnObject
@@ -812,7 +802,7 @@ function Test-ValidRoleDPMP {
     $vmRole = $VM.role
 
     # Server OS
-    if ($VM.installMP) {
+    if ($VM.installMP -or $VM.installSUP) {
         Test-ValidVmServerOS -VM $VM -ReturnObject $return
     }
 
@@ -1145,23 +1135,15 @@ function Test-Configuration {
             Test-ValidRoleFileServer -VM $FSVM -ReturnObject $return
         }
 
-        # DPMP Validations
-        # =================
+        # Site System Validations
+        # ========================
         if ($containsSiteSystem) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Site System" -PercentComplete 60
-            $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+            $systems = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
 
-            foreach ($VM in $DPMPVM) {
-                Test-ValidRoleDPMP -VM $VM -ReturnObject $return
+            foreach ($VM in $systems) {
+                Test-ValidRoleSiteSystem -VM $VM -ReturnObject $return
             }
-
-            #if (-not $containsPS) {
-            #    $existingPS = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "Primary" -SiteCode $DPMPVM.siteCode
-            #    if (-not $existingPS) {
-            #        Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode [$($DPMPVM.siteCode)] was not found." -ReturnObject $return -Warning
-            #    }
-            #}
-
         }
 
         # Role Conflicts

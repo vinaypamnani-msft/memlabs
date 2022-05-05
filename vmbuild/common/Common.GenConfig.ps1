@@ -860,8 +860,8 @@ function ConvertTo-DeployConfigEx {
                 $AllSiteCodes += $thisVM.siteCode
 
 
-                foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { ($_.installDP -or $_.enablePullDP) -and $_.siteCode -in $AllSiteCodes -and -not $_.hidden }) {
-                    Add-VMToAccountLists -thisVM $thisVM -VM $dpmp  -accountLists $accountLists -deployConfig $deployconfig -WaitOnDomainJoin
+                foreach ($system in $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and $_.siteCode -in $AllSiteCodes -and -not $_.hidden }) {
+                    Add-VMToAccountLists -thisVM $thisVM -VM $system  -accountLists $accountLists -deployConfig $deployconfig -WaitOnDomainJoin
                 }
 
                 $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $ThisVM.siteCode -and $_.role -eq "Secondary" -and -not $_.hidden }
