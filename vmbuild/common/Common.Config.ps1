@@ -1173,7 +1173,8 @@ function Update-VMInformation {
 
         # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
         if ($vmNoteObject.installDP -or $vmNoteObject.enablePullDP) {
-            if ($vmNoteObject.role -eq "DPMP") { # Rename Role to SiteSystem
+            if ($vmNoteObject.role -eq "DPMP") {
+                # Rename Role to SiteSystem
                 $vmNoteObject.role = "SiteSystem"
                 Set-VMNote -vmName $vmName -vmNote $vmNoteObject
             }
@@ -1889,7 +1890,7 @@ Function Show-Summary {
             Write-RedX "ConfigMgr will not be installed."
         }
 
-        $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP}
+        $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
             Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"
         }
@@ -1991,6 +1992,7 @@ Function Show-Summary {
             $roles = @()
             if ($_.InstallCA) { $roles += "CA" }
             if ($_.InstallSUP) { $roles += "SUP" }
+            if ($_.InstallRP) { $roles += "RP" }
             if ($_.InstallMP) { $roles += "MP" }
             if ($_.InstallDP) {
                 if ($_.pullDPSourceDP) { $roles += "Pull DP" }
