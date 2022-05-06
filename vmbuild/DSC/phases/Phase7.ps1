@@ -68,6 +68,7 @@ configuration Phase7
 
         WriteStatus InstallPBIRS {
             Status    = "Installing PBIRS with the DB on $($SqlServerInstance)"
+            DependsOn = "[ModuleAdd]SQLServerModule"
         }
 
         InstallPBIRS InstallPBIRS {
@@ -78,7 +79,6 @@ configuration Phase7
             DBcredentials          = $Admincreds
             IsRemoteDatabaseServer = $IsRemoteDatabaseServer
             PsDscRunAsCredential = $Admincreds
-
             DependsOn = "[ModuleAdd]SQLServerModule"
         }
 
