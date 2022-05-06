@@ -26,9 +26,13 @@ configuration Phase7
 
     Node $AllNodes.Where{ $_.Role -eq 'PBIRS' }.NodeName
     {
+
         $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
+
+        $IsRemoteDatabaseServer = $true
         if ($thisVM.SQLVersion) {
             $SqlServer = $thisVM
+            $IsRemoteDatabaseServer = $false
         }
 
         if ($thisVM.RemoteSQLVM) {
@@ -53,6 +57,15 @@ configuration Phase7
             $SqlServerInstance = $SqlServerInstance + "\" + $SqlServer.SqlInstanceName
         }
 
+        WriteStatus ImportModule {
+            Status    = "Importing SQLServer Module"
+        }
+
+        ModuleAdd SQLServerModule {
+            Key             = 'Always'
+            CheckModuleName = 'SqlServer'
+        }
+
         WriteStatus InstallPBIRS {
             Status    = "Installing PBIRS with the DB on $($SqlServerInstance)"
         }
@@ -62,7 +75,11 @@ configuration Phase7
             SQLServer            = $SqlServerInstance
             DownloadUrl          = "https://download.microsoft.com/download/7/0/A/70AD68EF-5085-4DF2-A3AB-D091244DDDBF/PowerBIReportServer.exe"
             RSInstance           = "PBIRS"
+            DBcredentials          = $Admincreds
+            IsRemoteDatabaseServer = $IsRemoteDatabaseServer
             PsDscRunAsCredential = $Admincreds
+
+            DependsOn = "[ModuleAdd]SQLServerModule"
         }
 
         WriteStatus Complete {

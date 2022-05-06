@@ -3107,8 +3107,16 @@ class InstallPBIRS {
     #Must be PBIRS
     [string]$RSInstance
 
+    [DscProperty()]
+    [PSCredential]$DBcredentials
+
+    [DscProperty()]
+    [bool]$IsRemoteDatabaseServer
+
+
     [void] Set() {
         try {
+            $_Creds = $this.DBcredentials
             write-verbose ("Configuring PBIRS for $($this.SqlServer) in $($this.ContentPath)")
 
 
@@ -3143,7 +3151,24 @@ class InstallPBIRS {
                 Write-Verbose ("$_")
             }
 
-            Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType ServiceAccount -Confirm:$false
+
+            try {
+                if ($this.IsRemoteDatabaseServer) {
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds
+                }
+                else {
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds
+                }
+            }
+            catch {
+                Write-Verbose ("$_")
+                if ($this.IsRemoteDatabaseServer) {
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase
+                }
+                else {
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase
+                }
+            }
             Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
             try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext } catch {}
             Stop-Service PowerBIReportServer
@@ -3165,7 +3190,7 @@ class InstallPBIRS {
             $service = $null
             if ($($this.RSInstance) -eq "PBIRS") {
                 try {
-                $service = Get-Service PowerBIReportServer -ErrorAction SilentlyContinue
+                    $service = Get-Service PowerBIReportServer -ErrorAction SilentlyContinue
                 }
                 catch {}
             }

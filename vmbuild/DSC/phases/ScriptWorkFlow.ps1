@@ -195,7 +195,7 @@ if ($scenario -eq "Standalone") {
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSUP.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
@@ -210,7 +210,7 @@ if ($scenario -eq "Hierarchy") {
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSUP.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
@@ -234,7 +234,7 @@ if ($scenario -eq "Hierarchy") {
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSUP.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
     }

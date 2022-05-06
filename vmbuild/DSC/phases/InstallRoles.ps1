@@ -1,4 +1,4 @@
-#InstallSUP.ps1
+#InstallRoles.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -74,6 +74,48 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 $topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
 $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
+
+#Reporting Install
+
+foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true } ) {
+
+    $thisSiteCode = $thisVM.SiteCode
+    if ($rp.SiteCode -ne $thisSiteCode) {
+        #If this is the remote SQL Server for this site code, dont continue
+        if ($rp.vmName -ne $thisVM.RemoteSQLVM) {
+            continue
+        }
+    }
+
+    $netbiosName = $deployConfig.vmOptions.DomainNetBiosName
+    $username = $netbiosName + "\cm_svc"
+    $databaseName = "CM_" + $thisSiteCode
+
+    #Get the SQL Server. Its either going to be local or remote.
+    if ($thisVM.sqlVersion) {
+        $sqlServer = $thisVM
+    }
+    else {
+        $sqlServer = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $thisVM.RemoteSQLVM }
+    }
+
+    $sqlServerName = $sqlServer.vmName + "." + $DomainFullName
+
+    #Add the SQL Instance if there is one
+    if ($sqlServer.sqlInstance -and $sqlServer.sqlInstance -ne "MSSQLSERVER") {
+        $sqlServerName += "\" + $sqlServer.SqlInstanceName
+    }
+
+    $PBIRSMachine = $rp.vmName + "." + $DomainFullName
+
+    Add-CMReportingServicePoint -SiteCode $thisSiteCode -SiteSystemServerName $PBIRSMachine -UserName $username -DatabaseServerName $sqlServerName -DatabaseName $databaseName -ReportServerInstance "PBIRS"
+}
+
+# End Reporting Install
+
+
+
+#SUP Install
 $SUPs = @()
 $ValidSiteCodes = @($SiteCode)
 if ($ThisVM.role -eq "Primary") {
@@ -107,7 +149,9 @@ foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -e
 
 # Trim nulls/blanks
 $SUPNames = $SUPs.ServerName | Where-Object { $_ -and $_.Trim() }
-Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
+if ($SUPNames) {
+    Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
+}
 
 # Check if a SUP Exists on this site
 $configureSUP = $false
