@@ -74,8 +74,7 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 $topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
 $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
-
-#Reporting Install
+# Reporting Install
 
 foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true } ) {
 
@@ -107,17 +106,13 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
     }
 
     $PBIRSMachine = $rp.vmName + "." + $DomainFullName
-
-    Write-DscStatus "Adding Reporting Services Point role for $($rp.vmName) using DB Server $sqlServerName DB Name $databaseName"
-
-    Add-CMReportingServicePoint -SiteCode $thisSiteCode -SiteSystemServerName $PBIRSMachine -UserName $username -DatabaseServerName $sqlServerName -DatabaseName $databaseName -ReportServerInstance "PBIRS"
+    Install-SRP -ServerSiteCode $thisSiteCode -ServerFQDN $PBIRSMachine -UserName $username -SqlServerName $sqlServerName -DatabaseName $databaseName
 }
 
 # End Reporting Install
 
+# SUP Install
 
-
-#SUP Install
 $SUPs = @()
 $ValidSiteCodes = @($SiteCode)
 if ($ThisVM.role -eq "Primary") {

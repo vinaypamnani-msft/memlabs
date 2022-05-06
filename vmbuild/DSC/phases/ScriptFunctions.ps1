@@ -325,6 +325,55 @@ function Install-SUP {
     } until ($installed -or $installFailure)
 }
 
+function Install-SRP {
+    param (
+        [string]
+        $ServerFQDN,
+        [string]
+        $ServerSiteCode,
+        [string]
+        $UserName,
+        [string]
+        $SqlServerName,
+        [string]
+        $DatabaseName
+    )
+
+    $i = 0
+    $installFailure = $false
+
+    do {
+
+        $i++
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+        if (-not $SystemServer) {
+            Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
+            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 15
+            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+        }
+
+        $installed = Get-CMReportingServicePoint -SiteSystemServerName $ServerFQDN
+        if (-not $installed) {
+            Write-DscStatus "Reporting Point Role not detected on $ServerFQDN. Adding Reporting Point Point role using DB Server [$SqlServerName], DB Name [$DatabaseName], UserName [$UserName]"
+            Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 60
+        }
+        else {
+            Write-DscStatus "Reporting Point Role detected on $ServerFQDN"
+            $installed = $true
+        }
+
+        if ($i -gt 10) {
+            Write-DscStatus "No Progress for Reporting Point Role after $i tries, Giving up."
+            $installFailure = $true
+        }
+
+        Start-Sleep -Seconds 10
+
+    } until ($installed -or $installFailure)
+}
+
 function Write-ScriptWorkFlowData {
     param (
         [object]
