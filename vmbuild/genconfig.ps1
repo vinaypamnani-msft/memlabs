@@ -3185,7 +3185,7 @@ Function Get-ValidSiteCodesForWSUS {
 
     foreach ($item in $topLevelSiteServers) {
 
-        $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $item.SiteCode -and $_.VmName -ne $CurrentVM.VmName}
+        $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $item.SiteCode -and $_.VmName -ne $CurrentVM.VmName }
 
         if ($existingSUP) {
             if ($item.role -ne "CAS") {
@@ -4004,7 +4004,7 @@ function Get-AdditionalValidations {
 
             #$validSiteCodes = Get-ValidSiteCodesForWSUS -config $Global:Config -CurrentVM $property
             #if ($property.sitecode -in $validSiteCodes) {
-#
+            #
             #    $newName = Get-NewMachineName -vm $property
             #    if ($($property.vmName) -ne $newName) {
             #        $rename = $true
@@ -4732,11 +4732,22 @@ function Select-Options {
                 "siteCode" {
                     if ($property.role -eq "PassiveSite") {
                         write-host
-                        write-host2 -ForegroundColor Khaki "siteCode can not be manually modified on a Passive server."
+                        Write-OrangePoint "SiteCode can not be manually modified on a Passive server. Please modify this on the Active node"
                         continue MainLoop
                     }
                     if ($property.role -in ("SiteSystem", "WSUS")) {
                         Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
+                        $SiteType = get-RoleForSitecode -siteCode $Property.SiteCode -config $Global:Config
+                        if ($SiteType -eq "CAS") {
+                            if ($property.InstallMP) {
+                                Write-OrangePoint "Can not install an MP on a CAS site. Automatically disabled"
+                                $property.InstallMP = $false
+                            }
+                            if ($property.InstallDP) {
+                                Write-OrangePoint "Can not install a DP on a CAS site. Automatically disabled"
+                                $property.InstallDP = $false
+                            }
+                        }
                         $newName = Get-NewMachineName -vm $property
                         if ($($property.vmName) -ne $newName) {
                             $rename = $true
