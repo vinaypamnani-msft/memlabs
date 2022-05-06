@@ -108,6 +108,8 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
 
     $PBIRSMachine = $rp.vmName + "." + $DomainFullName
 
+    Write-DscStatus "Adding Reporting Services Point role for $($rp.vmName) using DB Server $sqlServerName DB Name $databaseName"
+
     Add-CMReportingServicePoint -SiteCode $thisSiteCode -SiteSystemServerName $PBIRSMachine -UserName $username -DatabaseServerName $sqlServerName -DatabaseName $databaseName -ReportServerInstance "PBIRS"
 }
 
