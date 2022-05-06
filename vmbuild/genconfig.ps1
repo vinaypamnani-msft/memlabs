@@ -4761,6 +4761,7 @@ function Select-Options {
                                 $property.vmName = $newName
                             }
                         }
+                        write-host
                         continue MainLoop
                     }
                 }
