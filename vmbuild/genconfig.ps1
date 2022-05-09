@@ -1241,6 +1241,15 @@ function Get-NewMachineName {
         return $NewName
     }
 
+    if ($role -eq "DomainMember" -and $vm.SQLVersion) {
+        foreach ($existing in $configToCheck.VirtualMachines) {
+            if ($existing.RemoteSQLVM -eq $vm.vmName -and $existing.Role -in "CAS", "Primary") {
+                $RoleName = $existing.SiteCode + "SQL"
+                $SkipOne = $true
+            }
+        }
+    }
+
     if ($role -eq "WSUS") {
         if ($vm.installSUP) {
             $RoleName = $siteCode + "SUP"
@@ -1994,7 +2003,7 @@ function Format-Roles {
             "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]" }
             "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]" }
             "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]" }
-            "WSUS" { $newRoles += "$($role.PadRight($padding))`t[Standalone WSUS or SUP for a site]" }
+            "WSUS" { $newRoles += "$($role.PadRight($padding))`t[Standalone WSUS Server]" }
             default { $newRoles += $role }
         }
     }
@@ -3148,7 +3157,7 @@ Function Get-ValidSiteCodesForRP {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Config")]
         [Object] $Config,
-        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [Parameter(Mandatory = $false, HelpMessage = "Current VM")]
         [Object] $CurrentVM
     )
 
@@ -3158,7 +3167,23 @@ Function Get-ValidSiteCodesForRP {
 
     $allSiteCodes = ($list2 | where-object { $_.role -in ("CAS", "Primary") }).SiteCode
 
-    $invalidSiteCodes = ($list2 | Where-Object { $_.installRP -and $_.vmName -ne $CurrentVM.vmName }).SiteCode
+    $currentRPs = ($list2 | Where-Object { $_.installRP } )
+
+    $invalidSiteCodes = @()
+    foreach ($rp in $currentRPs) {
+        if ($rp.sitecode) {
+            $invalidSiteCodes += $rp.siteCode
+        }
+        else {
+            # No SiteCode prop means this is a remoteSQLVM for an existing or new primary/cas
+            $SiteServer = $list2 | Where-Object ($_.RemoteSQLVM -eq $rp.vmName -and $_.Role -in "CAS", "Primary")
+            if ($SiteServer) {
+                if ($SiteServer.SiteCode) {
+                    $invalidSiteCodes += $SiteServer.SiteCode
+                }
+            }
+        }
+    }
 
     foreach ($siteCode in $invalidSiteCodes) {
         $allSiteCodes = $allSiteCodes | where-object { $_ -ne $siteCode }
@@ -3487,9 +3512,21 @@ Function Set-SiteServerRemoteSQL {
         $virtualMachine.additionalDisks.PsObject.Members.Remove('F')
     }
     if ($null -ne $virtualMachine.remoteSQLVM) {
+        $oldSQLVM = $global:Config.VirtualMachines | Where-Object { $_.vmName -eq $virtualMachine.remoteSQLVM }
+        {
+            if ($oldSQLVM) {
+                $oldSQLVM.PsObject.Members.Remove('installRP')
+            }
+        }
         $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
     }
     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteSQLVM' -Value $vmName
+    $newSQLVM = $global:Config.VirtualMachines | Where-Object { $_.vmName -eq $vmName }
+    if ($newSQLVM) {
+        if (-not $newSQLVM.InstallRP) {
+            $newSQLVM | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
+        }
+    }
 }
 
 Function Get-remoteSQLVM {
@@ -3550,7 +3587,7 @@ Function Get-remoteSQLVM {
                 Set-SiteServerRemoteSQL $property $name
             }
             "r" {
-                $sqlVMName = select-RemoteSQLMenu -ConfigToModify  $global:config -currentValue $property.remoteSQLVM
+                $sqlVMName = select-RemoteSQLMenu -ConfigToModify $global:config -currentValue $property.remoteSQLVM
                 #$name = $($property.SiteCode) + "SQL"
                 #Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name -network:$property.network
                 Set-SiteServerRemoteSQL $property $sqlVMName
@@ -3727,6 +3764,41 @@ Function Get-RoleMenu {
         return $true
     }
 }
+
+function Rename-VirtualMachine {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $vm
+    )
+
+    $newName = Get-NewMachineName -vm $vm
+    if ($($vm.vmName) -ne $newName) {
+        $rename = $true
+        $response = Read-YesorNoWithTimeout -Prompt "Rename $($vm.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
+        if (-not [String]::IsNullOrWhiteSpace($response)) {
+            if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                $rename = $false
+            }
+        }
+        if ($rename -eq $true) {
+
+            foreach ($existing in $Global:Config.virtualMachines) {
+                if ($existing.RemoteSQLVM -eq $vm.vmName) {
+                    $existing.RemoteSQLVM = $newName
+                }
+                if ($existing.remoteContentLibVM -eq $vm.vmName) {
+                    $existing.remoteContentLibVM = $newName
+                }
+                if ($existing.FileServerVM -eq $vm.vmName) {
+                    $existing.FileServerVM = $newName
+                }
+            }
+            $vm.vmName = $newName
+        }
+    }
+}
+
 
 function Get-AdditionalValidations {
     [CmdletBinding()]
@@ -3981,19 +4053,8 @@ function Get-AdditionalValidations {
                     }
                 }
 
-                $newName = Get-NewMachineName -vm $property
-                if ($($property.vmName) -ne $newName) {
-                    $rename = $true
-                    $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                    if (-not [String]::IsNullOrWhiteSpace($response)) {
-                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                            $rename = $false
-                        }
-                    }
-                    if ($rename -eq $true) {
-                        $property.vmName = $newName
-                    }
-                }
+                Rename-VirtualMachine -vm $property
+
 
             }
             else {
@@ -4031,19 +4092,7 @@ function Get-AdditionalValidations {
                 Write-OrangePoint -ForegroundColor Orange "Can not install an MP for a CAS or secondary site"
                 $property.installMP = $false
             }
-            $newName = Get-NewMachineName -vm $property
-            if ($($property.vmName) -ne $newName) {
-                $rename = $true
-                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                if (-not [String]::IsNullOrWhiteSpace($response)) {
-                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                        $rename = $false
-                    }
-                }
-                if ($rename -eq $true) {
-                    $property.vmName = $newName
-                }
-            }
+            Rename-VirtualMachine -vm $property
         }
         "enablePullDP" {
             if ($value -eq $true) {
@@ -4054,20 +4103,7 @@ function Get-AdditionalValidations {
             else {
                 $property.PsObject.Members.Remove("pullDPSourceDP")
             }
-            $newName = Get-NewMachineName -vm $property
-            if ($($property.vmName) -ne $newName) {
-                $rename = $true
-                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                if (-not [String]::IsNullOrWhiteSpace($response)) {
-                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                        $rename = $false
-                    }
-                }
-                if ($rename -eq $true) {
-                    $property.vmName = $newName
-                }
-            }
-
+            Rename-VirtualMachine -vm $property
         }
         "installDP" {
 
@@ -4091,41 +4127,23 @@ function Get-AdditionalValidations {
             else {
                 $property | Add-Member -MemberType NoteProperty -Name "enablePullDP" -Value $false -Force
             }
-            $newName = Get-NewMachineName -vm $property
-            if ($($property.vmName) -ne $newName) {
-                $rename = $true
-                $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                if (-not [String]::IsNullOrWhiteSpace($response)) {
-                    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                        $rename = $false
-                    }
-                }
-                if ($rename -eq $true) {
-                    $property.vmName = $newName
-                }
-            }
+            Rename-VirtualMachine -vm $property
         }
         "installRP" {
 
             $validSiteCodes = Get-ValidSiteCodesForRP -config $Global:Config -CurrentVM $property
-            if ($property.sitecode -in $validSiteCodes) {
-                $newName = Get-NewMachineName -vm $property
-                if ($($property.vmName) -ne $newName) {
-                    $rename = $true
-                    $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                    if (-not [String]::IsNullOrWhiteSpace($response)) {
-                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                            $rename = $false
-                        }
-                    }
-                    if ($rename -eq $true) {
-                        $property.vmName = $newName
-                    }
-                }
 
+            $sitecode = $property.sitecode
+            if (-not $sitecode) {
+                $SiteVM = $global:config.virtualMachines | where-object { $_.remoteSQLVM -eq $property.vmName -and $_.role -in ("CAS", "Primary") }
+                $sitecode = $siteVM.sitecode
+            }
+
+            if ($sitecode -in $validSiteCodes) {
+                Rename-VirtualMachine -vm $property
             }
             else {
-                Write-log "Current site code is not a valid target for a new RP. Only 1 RP can exist per site"
+                Write-OrangePoint "Current site code is not a valid target for a new RP. Only 1 RP can exist per site"
                 $property.InstallRP = $false
             }
         }
@@ -4642,19 +4660,7 @@ function Select-Options {
                     Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
                     if ($property.role -eq "DomainMember") {
                         #if (-not $property.SqlVersion) {
-                        $newName = Get-NewMachineName -vm $property
-                        if ($($property.vmName) -ne $newName) {
-                            $rename = $true
-                            $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                            if (-not [String]::IsNullOrWhiteSpace($response)) {
-                                if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                                    $rename = $false
-                                }
-                            }
-                            if ($rename -eq $true) {
-                                $property.vmName = $newName
-                            }
-                        }
+                        Rename-VirtualMachine -vm $property
                         #}
                     }
                     continue MainLoop
@@ -4748,19 +4754,7 @@ function Select-Options {
                                 $property.InstallDP = $false
                             }
                         }
-                        $newName = Get-NewMachineName -vm $property
-                        if ($($property.vmName) -ne $newName) {
-                            $rename = $true
-                            $response = Read-YesorNoWithTimeout -Prompt "Rename $($property.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                            if (-not [String]::IsNullOrWhiteSpace($response)) {
-                                if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                                    $rename = $false
-                                }
-                            }
-                            if ($rename -eq $true) {
-                                $property.vmName = $newName
-                            }
-                        }
+                        Rename-VirtualMachine -vm $property
                         write-host
                         continue MainLoop
                     }
@@ -5292,26 +5286,26 @@ function Add-NewVMForRole {
     switch ($Role) {
         "WSUS" {
             $virtualMachine.Memory = "6GB"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $true
+            #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $true
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            if (-not $SiteCode) {
-                $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
-                if ($test) {
-                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
-                }
-                else {
-                    Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
-                    if (-not $virtualMachine.SiteCode) {
-                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
-                    }
-                }
-            }
-            else {
-                #write-log "Adding new DPMP for sitecode $newSiteCode"
-                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
-            }
+            #if (-not $SiteCode) {
+            #    $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
+            #    if ($test) {
+            #        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
+            #    }
+            #    else {
+            #        Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
+            #        if (-not $virtualMachine.SiteCode) {
+            #            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+            #        }
+            #    }
+            #}
+            #else {
+            #    #write-log "Adding new DPMP for sitecode $newSiteCode"
+            #    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
+            #}
 
         }
         "SqlServer" {
@@ -5349,6 +5343,7 @@ function Add-NewVMForRole {
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
@@ -5384,6 +5379,7 @@ function Add-NewVMForRole {
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false
 
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
@@ -6054,19 +6050,7 @@ function Select-VirtualMachines {
                                         }
                                     }
 
-                                    $newName = Get-NewMachineName -vm $virtualMachine
-                                    if ($($virtualMachine.vmName) -ne $newName) {
-                                        $rename = $true
-                                        $response = Read-YesorNoWithTimeout -Prompt "Rename $($virtualMachine.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                                        if (-not [String]::IsNullOrWhiteSpace($response)) {
-                                            if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                                                $rename = $false
-                                            }
-                                        }
-                                        if ($rename -eq $true) {
-                                            $virtualMachine.vmName = $newName
-                                        }
-                                    }
+                                    Rename-VirtualMachine -vm $virtualMachine
 
                                 }
                             }
@@ -6076,19 +6060,7 @@ function Select-VirtualMachines {
                                 $virtualMachine.psobject.properties.remove('sqlInstanceName')
                                 $virtualMachine.psobject.properties.remove('SqlServiceAccount')
                                 $virtualMachine.psobject.properties.remove('SqlAgentAccount')
-                                $newName = Get-NewMachineName -vm $virtualMachine
-                                if ($($virtualMachine.vmName) -ne $newName) {
-                                    $rename = $true
-                                    $response = Read-YesorNoWithTimeout -Prompt "Rename $($virtualMachine.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
-                                    if (-not [String]::IsNullOrWhiteSpace($response)) {
-                                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                                            $rename = $false
-                                        }
-                                    }
-                                    if ($rename -eq $true) {
-                                        $virtualMachine.vmName = $newName
-                                    }
-                                }
+                                Rename-VirtualMachine -vm $virtualMachine
                             }
                             if ($newValue -eq "A") {
                                 if ($null -eq $virtualMachine.additionalDisks) {
