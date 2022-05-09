@@ -80,17 +80,20 @@
             Status    = "Assigning Static IP '$DHCP_DNSAddress' and Default Gateway '$DHCP_DefaultGateway'"
         }
 
+
+        $alias =(Get-NetAdapter).Name | Select-Object -First 1
+
         IPAddress DCIPAddress {
             DependsOn      = "[WriteStatus]SetIPDG"
             IPAddress      = "$DHCP_DNSAddress/24"
-            InterfaceAlias = 'Ethernet'
+            InterfaceAlias = $alias
             AddressFamily  = 'IPV4'
         }
 
         DefaultGatewayAddress SetDefaultGateway {
             DependsOn      = "[IPAddress]DCIPAddress"
             Address        = $DHCP_DefaultGateway
-            InterfaceAlias = 'Ethernet'
+            InterfaceAlias = $alias
             AddressFamily  = 'IPv4'
         }
 

@@ -1316,6 +1316,10 @@ function Get-NewMachineName {
         else {
             $NewName = $RoleName + ($i)
         }
+
+        if ($NewName -eq $vm.vmName) {
+            break
+        }
         if ($null -eq $ConfigToCheck) {
             write-log "Config is NULL..  Machine names will not be checked. Please notify someone of this bug."
             #break
