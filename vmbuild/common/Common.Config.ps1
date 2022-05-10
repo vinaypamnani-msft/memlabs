@@ -1460,7 +1460,7 @@ function Get-List {
                     }
                 }
                 if ($found) {
-                    continue
+                    $return = $return | where-object { $_.vmName -ne $vm.vmName }
                 }
                 $newVM = $vm
                 $newVM | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
