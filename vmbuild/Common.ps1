@@ -2712,6 +2712,149 @@ function Copy-ToolToVM {
     return $true
 }
 
+function Copy-LanguagePacksToVM {
+
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
+        [string]$VmName,
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowProgress,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    $destDir = "C:\LanguagePacks"
+
+    if ($VmName) {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    }
+    else {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
+    }
+
+    foreach ($vm in $allVMs) {
+        $vmName = $vm.vmName
+        Write-Log "$vmName`: Trying to copy Language Packs to $destDir inside the VM" -Activity
+
+        $sourceDir = Join-Path $Common.ConfigPath "locales" $vm.operatingSystem
+        if (-not (Test-Path -Path "${sourceDir}\*" -Include *.cab)) {
+            Write-Log "$vmName`: Cannot find language pack(s) in $sourceDir. Skipping copy." -Warning
+            continue
+        }
+
+        # Get VM Session
+        if ($vm.State -ne "Running") {
+            Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+            continue
+        }
+
+        $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+        if (-not $ps) {
+            Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+            continue
+        }
+
+        if ($ShowProgress) {
+            Write-Progress2 "Copying language packs" -Status "Copying language packs to $VmName"
+        }
+
+        Write-Log "$vmName`: Copying '${sourceDir}\*' from HOST to VM (${destDir}\)."
+
+        try {
+            $progressPref = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+
+
+            Copy-Item -ToSession $ps -Filter "*.cab" -Path "${sourceDir}" -Destination "${destDir}" -Recurse -WhatIf:$WhatIf -ErrorAction Stop
+        } catch {
+            Write-Log "$vmName`: Failed to copy language packs. $_" -Failure
+            return $false
+        } finally {
+            $ProgressPreference = $progressPref
+        }
+    }
+
+    Write-Host2
+
+    if ($ShowProgress) {
+        Write-Progress2 "Copying language packs" -Status "Done" -Completed
+    }
+
+    return $true
+}
+
+function Copy-LocaleConfigToVM {
+
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
+        [string]$VmName,
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowProgress,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    $sourceDir = $Common.ConfigPath
+    $destDir = "C:\staging\locale"
+    $localeConfigFile = "_localeConfig.json"
+
+    if ($VmName) {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    }
+    else {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
+    }
+
+    foreach ($vm in $allVMs) {
+        $vmName = $vm.vmName
+        Write-Log "$vmName`: Trying to copy $localeConfigFile to $destDir inside the VM" -Activity
+        
+        if (-not (Test-Path -Path "${sourceDir}\*" -Include "$localeConfigFile")) {
+            Write-Log "$vmName`: Cannot find $localeConfigFile in $sourceDir. Skipping copy." -Warning
+            continue
+        }
+
+        # Get VM Session
+        if ($vm.State -ne "Running") {
+            Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+            continue
+        }
+
+        $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+        if (-not $ps) {
+            Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+            continue
+        }
+
+        if ($ShowProgress) {
+            Write-Progress2 "Copying $localeConfigFile" -Status "Copying $localeConfigFile to $VmName"
+        }
+
+        Write-Log "$vmName`: Copying '${sourceDir}\${localeConfigFile}' from HOST to VM (${destDir}\)."
+
+        try {
+            $progressPref = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+
+            # Fix me. this includes other empty folders
+            Copy-Item -ToSession $ps -Filter "$localeConfigFile" -Path "${sourceDir}" -Destination "${destDir}" -Recurse -WhatIf:$WhatIf -ErrorAction Stop
+        } catch {
+            Write-Log "$vmName`: Failed to copy ${localeConfigFile}. $_" -Failure
+            return $false
+        } finally {
+            $ProgressPreference = $progressPref
+        }
+    }
+
+    Write-Host2
+
+    if ($ShowProgress) {
+        Write-Progress2 "Copying $localeConfigFile" -Status "Done" -Completed
+    }
+
+    return $true
+}
+
 function Get-FileFromStorage {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Storage File to download.")]
