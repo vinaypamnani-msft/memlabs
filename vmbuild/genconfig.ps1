@@ -844,8 +844,11 @@ function get-VMOptionsSummary {
         $currentTimeZone = (Get-TimeZone).Id
         $options | Add-Member -MemberType NoteProperty -Name "timeZone" -Value $currentTimeZone -Force
     }
+    if ($null -eq $options.locale) {
+        $options | Add-Member -MemberType NoteProperty -Name "locale" -Value "en-US" -Force
+    }
     $domainName = "[$($options.domainName)]".PadRight(21)
-    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.adminName)] [Location $($options.basePath)] [TZ $($options.timeZone)]"
+    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.adminName)] [Location $($options.basePath)] [TZ $($options.timeZone)] [Locale $($options.locale)]"
     return $Output
 }
 
@@ -1475,6 +1478,35 @@ function select-timezone {
         $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $((Get-TimeZone -ListAvailable).Id) -CurrentValue $($ConfigToCheck.vmOptions.timezone) -test:$false
     }
     return $timezone
+}
+function Select-Locale {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
+        [Object] $ConfigToCheck = $global:config
+    )
+
+    # default locale is en-US
+    $commonLocales = @()
+    $commonLocales += "en-US"
+
+    # add selection if locale configuration file exists
+    $localeConfigPath = Join-Path $Common.ConfigPath "_localeConfig.json"
+    if (Test-Path $localeConfigPath) {
+        try {
+            $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $localeConfig.psobject.Properties | ForEach-Object {
+                $commonLocales += $_.Name
+            }
+        } catch {
+            Write-Log "Something wrong with _localeConfig.json. Only en-US is available."
+        }
+    }
+
+    $commonLanguages = $commonLanguages | Select-Object -Unique
+
+    $locale = Get-Menu -Prompt "Select Locale" -OptionArray $commonLocales -CurrentValue $($ConfigToCheck.vmOptions.locale)
+    return $locale
 }
 function select-NewDomainName {
     [CmdletBinding()]
@@ -4742,6 +4774,12 @@ function Select-Options {
                 "timeZone" {
                     $timezone = Select-TimeZone
                     $property.timeZone = $timezone
+                    Get-TestResult -SuccessOnError | out-null
+                    continue MainLoop
+                }
+                "locale" {
+                    $locale = Select-Locale
+                    $property.locale = $locale
                     Get-TestResult -SuccessOnError | out-null
                     continue MainLoop
                 }

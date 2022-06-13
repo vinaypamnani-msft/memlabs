@@ -12,6 +12,7 @@ function Write-JobProgress {
         if ($null -ne $Job.ChildJobs[0].Progress) {
             #Extracts the latest progress of the job and writes the progress
             $latestPercentComplete = 0
+            # Notes: "Preparing modules for first use" is translated when other than en-US
             $lastProgress = $Job.ChildJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
             if ($lastProgress) {
                 $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
@@ -21,7 +22,7 @@ function Write-JobProgress {
                 $latestActivity = $latestActivity.Replace("$jobName`: ", "").Trim()
             }
 
-            if ($latestActivity -and $latestStatus) {
+            if ($latestActivity -and $latestStatus.Trim().Length) {
                 #When adding multiple progress bars, a unique ID must be provided. Here I am providing the JobID as this
                 if ($latestPercentComplete -gt 0 -and $latestPercentComplete -lt 101) {
 

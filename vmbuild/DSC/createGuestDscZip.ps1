@@ -40,7 +40,8 @@ try {
         'NetworkingDsc',
         'xFailOverCluster',
         'AccessControlDsc',
-        'UpdateServicesDsc'
+        'UpdateServicesDsc',
+        'LanguageDsc'
     )
 
     foreach ($module in $modules) {
