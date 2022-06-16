@@ -1434,10 +1434,11 @@ function Get-List {
         }
         $return = $global:vm_List
 
+        foreach ($vm in $return) {
+            $vm | Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
+        }
         if ($null -ne $DeployConfigClone) {
-            foreach ($vm in $return) {
-                $vm | Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
-            }
+
             $domain = $DeployConfigClone.vmoptions.domainName
             $network = $DeployConfigClone.vmoptions.network
 

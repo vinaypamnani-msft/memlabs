@@ -225,10 +225,10 @@ function Select-ConfigMenu {
         if ($SelectedConfig) {
             Write-Verbose "SelectedConfig : $SelectedConfig"
             if (-not $SelectedConfig.VirtualMachines) {
-                Write-Host
-                Write-Redx "Config is invalid, as it does not contain any virtual machines."
-                Write-Host
 
+                Add-ErrorMessage -Warning "Config is invalid, as it does not contain any new or modified virtual machines."
+
+                return $SelectedConfig
             }
             else {
                 return $SelectedConfig
@@ -899,6 +899,27 @@ function get-VMSummary {
     return $Output
 }
 
+
+function Get-ExistingVMs {
+
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $config = $global:Config
+    )
+    $existingMachines = get-list -type vm -domain $config.vmOptions.DomainName
+
+    foreach ($vm in $config.virtualMachines) {
+        if ($vm.modified -and $vm.vmName -in $existingMachines.vmName) {
+            $existingMachines = @($existingMachines | Where-Object { $_.vmName -ne $vm.vmName })
+        }
+    }
+
+
+
+    return $existingMachines
+}
+
 function Select-MainMenu {
     while ($true) {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
@@ -908,7 +929,7 @@ function Select-MainMenu {
         if ($Global:Config.cmOptions) {
             $preOptions += [ordered]@{"C" = "Global CM Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
-        $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
+        $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions = [ordered]@{}
         #$customOptions += @{"3" = "Virtual Machines `t`t $(get-VMSummary)" }
 
@@ -926,11 +947,24 @@ function Select-MainMenu {
         #    }
         #}
 
-        if ($global:Config.virtualMachines) {
-            $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -in ("DC", "BDC") }
-            $virtualMachines += $global:config.virtualMachines | Where-Object { $_.role -notin ("DC", "BDC") } | Sort-Object { $_.vmName }
 
-            if ($virtualMachines) {
+        $existingMachines = Get-ExistingVMs
+
+
+        if ($existingMachines) {
+            foreach ($existingVM in $existingMachines) {
+                $i = $i + 1
+                $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
+                $customOptions += [ordered]@{"$i" = "$name" }
+            }
+        }
+        $customOptions += [ordered]@{"*V2" = "" }
+        $customOptions += [ordered]@{"*VV" = "---  New Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
+        if ($global:Config.virtualMachines) {
+            $virtualMachines = @($global:config.virtualMachines | Where-Object { $_.role -in "DC", "BDC" })
+            $virtualMachines += @($global:config.virtualMachines | Where-Object { $_.role -notin "DC", "BDC" } | Sort-Object { $_.vmName })
+
+            if ($virtualMachines -and $global:Config.virtualMachines) {
                 $global:Config.virtualMachines = $virtualMachines
             }
         }
@@ -1869,7 +1903,7 @@ function Show-ExistingNetwork {
         }
 
     }
-    [string]$role = Select-RolesForExisting
+    #[string]$role = Select-RolesForExisting
 
 
     if ($role -eq "H") {
@@ -1879,7 +1913,9 @@ function Show-ExistingNetwork {
         $role = "Linux"
     }
 
-    $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $domain
+    if ($role) {
+        $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $domain
+    }
     #if ($role -eq "Primary") {
     #    $ExistingCasCount = (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
     #    if ($ExistingCasCount -gt 0) {
@@ -2173,6 +2209,7 @@ function Select-Subnet {
             }
         }
         $response = [string]$network
+        write-log -verbose "Returning network $response"
         return $response
     }
     else {
@@ -2601,12 +2638,17 @@ function New-UserConfig {
         network           = $Subnet
     }
     Write-Verbose "[Get-ExistingConfig] vmOptions: $vmOptions"
+
     $configGenerated = $null
     $configGenerated = [PSCustomObject]@{
         #cmOptions       = $newCmOptions
-        vmOptions       = $vmOptions
-        virtualMachines = $()
+        vmOptions               = $vmOptions
+        virtualMachines         = $()
+        existingVirtualMachines = $()
     }
+    $existingVMs = Get-ExistingVMs -config $configGenerated
+
+    $configGenerated.existingVirtualMachines = $existingVMs
     return $configGenerated
 }
 function Get-ExistingConfig {
@@ -2616,7 +2658,7 @@ function Get-ExistingConfig {
         [String] $Domain,
         [Parameter(Mandatory = $true, HelpMessage = "Subnet Name")]
         [string] $Subnet,
-        [Parameter(Mandatory = $true, HelpMessage = "Role")]
+        [Parameter(Mandatory = $false, HelpMessage = "Role")]
         [String] $Role,
         [Parameter(Mandatory = $false, HelpMessage = "Parent Site code, if we are deploying a primary in a Hierarchy")]
         [string] $parentSiteCode = $null,
@@ -2631,8 +2673,11 @@ function Get-ExistingConfig {
 
     $configGenerated = New-UserConfig -Domain $Domain -Subnet $Subnet
 
+
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated $($configGenerated.vmOptions.domainName)"
-    Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -parentSiteCode $parentSiteCode -SiteCode $SiteCode -Quiet:$true -test:$test
+    if ($Role) {
+        Add-NewVMForRole -Role $Role -Domain $Domain -ConfigToModify $configGenerated -parentSiteCode $parentSiteCode -SiteCode $SiteCode -Quiet:$true -test:$test
+    }
     Write-Verbose "[Get-ExistingConfig] Config: $configGenerated"
     return $configGenerated
 }
@@ -3188,7 +3233,7 @@ Function Get-ValidSiteCodesForRP {
 
     $allSiteCodes = ($list2 | where-object { $_.role -in ("CAS", "Primary") }).SiteCode
 
-    $currentRPs = ($list2 | Where-Object { $_.installRP -and $_.vmName -ne $CurrentVM.vmName} )
+    $currentRPs = ($list2 | Where-Object { $_.installRP -and $_.vmName -ne $CurrentVM.vmName } )
 
     $invalidSiteCodes = @()
     foreach ($rp in $currentRPs) {
@@ -4471,7 +4516,9 @@ function Get-AdditionalInformation {
         }
 
         "vmName" {
-            $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+            if (-not $data.StartsWith($global:config.vmOptions.Prefix)) {
+                $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+            }
         }
 
         "memory" {
@@ -4518,7 +4565,8 @@ function Select-Options {
     )
 
     $property = $null
-    :MainLoop   while ($true) {
+    :MainLoop
+    while ($true) {
         if ($null -eq $property -and $null -ne $Rootproperty) {
             $property = $Rootproperty."$propertyName"
         }
@@ -4577,6 +4625,7 @@ function Select-Options {
             #$padding = 27 - ($i.ToString().Length)
             $padding = 26
             $color = $null
+            #write-log "Get-AdditionalInformation $item $value"
             $TextToDisplay = Get-AdditionalInformation -item $item -data $value
             switch ($item) {
                 "vmName" {
@@ -4754,7 +4803,7 @@ function Select-Options {
                     }
 
                     if ($network -eq $global:config.vmOptions.network) {
-                        if ($property.Network) {
+                        if ($property.Network -and $property.vmName) {
                             $property.PsObject.Members.Remove("network")
                         }
                         #write-host2 -ForegroundColor Khaki "Not changing network as this is the default network."
@@ -4964,7 +5013,12 @@ function get-VMString {
 
     )
 
-    $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(19, " ")
+    if ($virtualMachine.source -eq "HyperV") {
+        $machineName = $($virtualMachine.vmName).PadRight(19, " ")
+    }
+    else {
+        $machineName = $($($Global:Config.vmOptions.Prefix) + $($virtualMachine.vmName)).PadRight(19, " ")
+    }
     $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(17, " ")
     $mem = $($virtualMachine.memory).PadLEft(4, " ")
     $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
@@ -5048,7 +5102,8 @@ function get-VMString {
     $casCount = 0
     $priCount = 0
     $secCount = 0
-    foreach ($vm in $config.VirtualMachines) {
+    $allVMs = get-list2 -deployConfig $config
+    foreach ($vm in $allVMs) {
         switch ($vm.Role) {
             "CAS" {
                 try {
@@ -5115,13 +5170,13 @@ function get-VMString {
             "SQLAO" {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
                 if (-not $virtualMachine.Othernode) {
-                    $primaryNode = $config.VirtualMachines | Where-Object { $_.OtherNode -eq $virtualMachine.vmName }
+                    $primaryNode = $allVMs | Where-Object { $_.OtherNode -eq $virtualMachine.vmName }
                 }
                 else {
                     $primaryNode = $virtualMachine
                 }
 
-                $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName }
+                $siteVM = $allVMs | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName }
                 if ($siteVM) {
                     $color = $ColorMap[$($siteVM.SiteCode)]
                 }
@@ -5129,7 +5184,7 @@ function get-VMString {
             }
             "DomainMember" {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                $siteVM = $config.VirtualMachines | Where-Object { $_.RemoteSQLVM -eq $virtualMachine.vmName -and $_.role -in ("CAS", "Primary", "Secondary") } | Select-Object -First 1
+                $siteVM = $allVMs | Where-Object { $_.RemoteSQLVM -eq $virtualMachine.vmName -and $_.role -in ("CAS", "Primary", "Secondary") } | Select-Object -First 1
 
                 if ($siteVM -and $siteVM.SiteCode) {
                     try {
@@ -5878,419 +5933,550 @@ function Get-ListOfPossibleDPMP {
     return $FSList
 }
 
+
+function show-NewVMMenu {
+
+    $role = Select-RolesForExisting -enhance:$true
+    if (-not $role) {
+        return
+    }
+    if ($role -eq "H") {
+        $role = "PassiveSite"
+    }
+    if ($role -eq "L") {
+        $role = "Linux"
+    }
+
+    $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
+
+    if ($role -eq "Secondary") {
+        if (-not $parentSiteCode) {
+            return
+        }
+    }
+
+    if ($role -eq "PassiveSite") {
+        $existingPassive = @()
+        $existingSS = @()
+
+
+        $existingPassive += Get-List2 -deployConfig $global:config | Where-Object { $_.Role -eq "PassiveSite" }
+        $existingSS += Get-List2 -deployConfig $global:config | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+
+        $existingSS = $existingSS | Where-Object { $_ }
+        $exisitingPassive = $exisitingPassive | Where-Object { $_ }
+
+        $PossibleSS = @()
+        foreach ($item in $existingSS) {
+            if ($existingPassive.SiteCode -contains $item.Sitecode) {
+                continue
+            }
+            $PossibleSS += $item
+        }
+
+        if ($PossibleSS.Count -eq 0) {
+            Write-Host
+            Write-Host "No siteservers found that are elegible for HA"
+            return
+        }
+        $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
+        if ([string]::IsNullOrWhiteSpace($result)) {
+            return
+        }
+        $SiteCode = $result
+    }
+    #$os = Select-OSForNew -Role $role
+
+    $machineName = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config  -parentSiteCode $parentSiteCode -SiteCode $siteCode -ReturnMachineName $true
+    if ($role -eq "DC") {
+        $Global:Config.vmOptions.domainName = select-NewDomainName
+        $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
+        $netbiosName = $Global:Config.vmOptions.domainName.Split(".")[0]
+        $Global:Config.vmOptions.DomainNetBiosName = $netbiosName
+    }
+    Get-TestResult -SuccessOnError | out-null
+    if (-not $machineName) {
+        return
+    }
+    write-log -verbose "Returned machineName $machineName"
+    return $machineName
+}
+
+
+function show-ModifiedVMMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "VM to show options for")]
+        [object] $virtualMachine
+    )
+
+    $goodPropList = @("InstallCA", "InstallMP" , "InstallDP", "InstallRP", "InstallSUP", "InstallSSMS")
+
+
+    $i = 0
+
+    $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
+
+
+    $clone = $virtualMachine | ConvertTo-Json | ConvertFrom-Json
+    foreach ($prop in $clone.PSObject.Properties) {
+        if ($($prop.Name) -in $goodPropList) {
+            if ($prop.value -eq $false) {
+                $customOptions += [ordered]@{$i = $prop.Name }
+            }
+
+        }
+    }
+    $customOptions = [ordered] @{}
+    $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
+
+    Write-Output "VM Name: $($virtualMachine.vmName) Role: $($virtualMachine.Role)"
+
+
+
+}
+
 function Select-VirtualMachines {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "pre supplied response")]
         [string] $response = $null
     )
-    while ($true) {
-        #Write-Host
-        Write-Verbose "8 Select-VirtualMachines"
-        if (-not $response) {
-            $i = 0
-            #$valid = Get-TestResult -SuccessOnError
-            foreach ($virtualMachine in $global:config.virtualMachines) {
-                $i = $i + 1
-                $name = Get-VMString -virtualMachine $virtualMachine
-                write-Option "$i" "$($name)"
-            }
-            write-Option -color $Global:Common.Colors.GenConfigNewVM -Color2 $Global:Common.Colors.GenConfigNewVMNumber "N" "New Virtual Machine"
-            $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
+
+    if (-not $response) {
+        return
+    }
+
+    #Write-Host
+    Write-Verbose "8 Select-VirtualMachines"
+    if (-not $response) {
+        $i = 0
+        #$valid = Get-TestResult -SuccessOnError
+        foreach ($virtualMachine in $global:config.virtualMachines) {
+            $i = $i + 1
+            $name = Get-VMString -virtualMachine $virtualMachine
+            write-Option "$i" "$($name)"
         }
-        Write-Log -HostOnly -Verbose "response = $response"
-        if ([String]::IsNullOrWhiteSpace($response)) {
-            return
-        }
-        if (-not [String]::IsNullOrWhiteSpace($response)) {
-            if ($response.ToLowerInvariant() -eq "n") {
-                #$role = Select-RolesForNew
-                $role = Select-RolesForExisting -enhance:$true
-                if (-not $role) {
-                    return
-                }
-                if ($role -eq "H") {
-                    $role = "PassiveSite"
-                }
-                if ($role -eq "L") {
-                    $role = "Linux"
-                }
+        write-Option -color $Global:Common.Colors.GenConfigNewVM -Color2 $Global:Common.Colors.GenConfigNewVMNumber "N" "New Virtual Machine"
+        $response = get-ValidResponse "Which VM do you want to modify" $i $null "n"
+    }
+    Write-Log -HostOnly -Verbose "response = $response"
+    if ([String]::IsNullOrWhiteSpace($response)) {
+        return
+    }
+    if (-not [String]::IsNullOrWhiteSpace($response)) {
+        if ($response.ToLowerInvariant() -eq "n") {
+            $machineName = show-NewVMMenu
+            write-log  -verbose "Got MachineName $machineName from show-NewVMMenu"
 
-                $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
-
-                if ($role -eq "Secondary") {
-                    if (-not $parentSiteCode) {
-                        return
-                    }
-                }
-
-                if ($role -eq "PassiveSite") {
-                    $existingPassive = @()
-                    $existingSS = @()
-
-                    #$existingPassive += Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
-                    #$existingSS += Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
-
-                    #$exisitingPassive += $global:config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }
-                    #$existingSS += $global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
-
-
-                    $existingPassive += Get-List2 -deployConfig $global:config | Where-Object { $_.Role -eq "PassiveSite" }
-                    $existingSS += Get-List2 -deployConfig $global:config | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
-
-                    $existingSS = $existingSS | Where-Object { $_ }
-                    $exisitingPassive = $exisitingPassive | Where-Object { $_ }
-
-                    $PossibleSS = @()
-                    foreach ($item in $existingSS) {
-                        if ($existingPassive.SiteCode -contains $item.Sitecode) {
-                            continue
-                        }
-                        $PossibleSS += $item
-                    }
-
-                    if ($PossibleSS.Count -eq 0) {
-                        Write-Host
-                        Write-Host "No siteservers found that are elegible for HA"
-                        return
-                    }
-                    $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
-                    if ([string]::IsNullOrWhiteSpace($result)) {
-                        return
-                    }
-                    $SiteCode = $result
-                }
-                #$os = Select-OSForNew -Role $role
-
-                $machineName = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config  -parentSiteCode $parentSiteCode -SiteCode $siteCode -ReturnMachineName $true
-                if ($role -eq "DC") {
-                    $Global:Config.vmOptions.domainName = select-NewDomainName
-                    $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
-                    $netbiosName = $Global:Config.vmOptions.domainName.Split(".")[0]
-                    $Global:Config.vmOptions.DomainNetBiosName = $netbiosName
-                }
-                Get-TestResult -SuccessOnError | out-null
-                if (-not $machineName) {
-                    return
-                }
-            }
-            :VMLoop while ($true) {
-                $i = 0
-                foreach ($virtualMachine in $global:config.virtualMachines) {
-                    $i = $i + 1
-                    if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
-                        $newValue = "Start"
-                        while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
-                            Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                            $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%$($Global:Common.Colors.GenConfigHeader)"; "A" = "Add Additional Disk" }
-                            if ($null -eq $virtualMachine.additionalDisks) {
-                            }
-                            else {
-                                $customOptions += [ordered]@{"R" = "Remove Last Additional Disk" }
-                            }
-                            if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
-                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure SQL (Set local or remote [Standalone or Always-On] SQL)" }
-                                $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
-                                if ($PassiveNode) {
-                                    $customOptions += [ordered]@{"H" = "Remove High Availibility (HA) - Removes the Passive Site Server" }
-                                }
-                                else {
-                                    $customOptions += [ordered]@{"H" = "Enable High Availibility (HA) - Adds a Passive Site Server" }
-                                }
-                            }
-                            else {
-                                if ($virtualMachine.Role -eq "DomainMember") {
-                                    if (-not $virtualMachine.domainUser) {
-                                        $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User (This account will be made a local admin)%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Add domain user as admin on this machine" }
-                                    }
-                                    else {
-                                        $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Remove domainUser from this machine" }
-                                    }
-                                }
-                                if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
-
-
-                                    if ($virtualMachine.Role -notin ("DC", "BDC")) {
-                                        if ($null -eq $virtualMachine.sqlVersion) {
-                                            switch ($virtualMachine.Role) {
-                                                "Secondary" {
-                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
-                                                }
-                                                "WSUS" {
-                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
-                                                }
-                                                Default {
-                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
-                                                }
-                                            }
-                                        }
-                                        else {
-
-                                            switch ($virtualMachine.Role) {
-                                                "Secondary" {
-                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
-                                                }
-                                                "WSUS" {
-                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
-                                                }
-                                                Default {
-                                                    $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
-                            $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $i -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
-                            if (([string]::IsNullOrEmpty($newValue))) {
-                                return
-                            }
-                            if ($newValue -eq "REFRESH") {
-                                continue VMLoop
-                            }
-                            if ($null -ne $newValue -and $newValue -is [string]) {
-                                $newValue = [string]$newValue.Trim()
-                                #Write-Host "NewValue = '$newValue'"
-                                $newValue = [string]$newValue.ToUpper()
-                            }
-                            if (([string]::IsNullOrEmpty($newValue))) {
-                                break VMLoop
-                            }
-                            if ($newValue -eq "H") {
-                                $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
-                                if ($PassiveNode) {
-                                    $FSVM = $global:config.virtualMachines | Where-Object { $_.vmName -eq $PassiveNode.remoteContentLibVM }
-                                    if ($FSVM) {
-                                        Remove-VMFromConfig -vmName $FSVM.vmName -ConfigToModify $global:config
-                                    }
-                                    #$virtualMachine.psobject.properties.remove('remoteContentLibVM')
-                                    Remove-VMFromConfig -vmName $PassiveNode.vmName -ConfigToModify $global:config
-                                }
-                                else {
-                                    Add-NewVMForRole -Role "PassiveSite" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.vmName + "-P")  -SiteCode $virtualMachine.siteCode -OperatingSystem $virtualMachine.OperatingSystem
-                                }
-                                continue VMLoop
-
-                            }
-                            if ($newValue -eq "U") {
-                                if ($virtualMachine.domainUser) {
-                                    $virtualMachine.psobject.properties.remove('domainUser')
-                                }
-                                else {
-                                    Get-DomainUser -property $virtualMachine -name "domainUser"
-                                    #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value "bob"
-                                }
-                            }
-                            if ($newValue -eq "S") {
-                                if ($virtualMachine.Role -in ("Primary", "CAS", "WSUS")) {
-                                    Get-remoteSQLVM -property $virtualMachine
-                                    continue VMLoop
-                                }
-                                else {
-                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
-                                    if ($virtualMachine.AdditionalDisks.E) {
-                                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
-                                    }
-                                    else {
-                                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
-                                    }
-                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
-                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
-                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
-                                    $virtualMachine.virtualProcs = 4
-                                    if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
-                                        $virtualMachine.memory = "4GB"
-                                    }
-                                    if ($virtualMachine.role -eq "Secondary") {
-                                        if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
-                                            $virtualMachine.memory = "4GB"
-                                        }
-                                    }
-
-                                    Rename-VirtualMachine -vm $virtualMachine
-
-                                }
-                            }
-                            if ($newValue -eq "X") {
-                                $virtualMachine.psobject.properties.remove('sqlversion')
-                                $virtualMachine.psobject.properties.remove('sqlInstanceDir')
-                                $virtualMachine.psobject.properties.remove('sqlInstanceName')
-                                $virtualMachine.psobject.properties.remove('SqlServiceAccount')
-                                $virtualMachine.psobject.properties.remove('SqlAgentAccount')
-                                Rename-VirtualMachine -vm $virtualMachine
-                            }
-                            if ($newValue -eq "A") {
-                                if ($null -eq $virtualMachine.additionalDisks) {
-                                    $disk = [PSCustomObject]@{"E" = "120GB" }
-                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-                                }
-                                else {
-                                    $letters = 69
-                                    $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                        $letters++
-                                    }
-                                    if ($letters -lt 90) {
-                                        $letter = $([char]$letters).ToString()
-                                        $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "120GB"
-                                    }
-                                }
-                            }
-                            if ($newValue -eq "R") {
-                                $diskscount = 0
-                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                    $diskscount++
-                                }
-                                if ($virtualMachine.Role -eq "FileServer") {
-                                    if ($diskscount -le 2) {
-                                        write-host
-                                        write-redx "FileServers must have at least 2 disks"
-                                        Continue VMLoop
-                                    }
-                                }
-                                if ($virtualMachine.SqlInstanceDir) {
-                                    $neededDisks = 0
-                                    if ($virtualMachine.SqlInstanceDir.StartsWith("E:")) {
-                                        $neededDisks = 1
-                                    }
-                                    if ($virtualMachine.SqlInstanceDir.StartsWith("F:")) {
-                                        $neededDisks = 2
-                                    }
-                                    if ($virtualMachine.SqlInstanceDir.StartsWith("G:")) {
-                                        $neededDisks = 3
-                                    }
-                                    if ($diskscount -le $neededDisks) {
-                                        write-host
-                                        write-redx "SQL is configured to install to the disk we are trying to remove. Can not remove"
-                                        Continue VMLoop
-                                    }
-                                }
-
-                                if ($virtualMachine.cmInstallDir) {
-                                    $neededDisks = 0
-                                    if ($virtualMachine.cmInstallDir.StartsWith("E:")) {
-                                        $neededDisks = 1
-                                    }
-                                    if ($virtualMachine.cmInstallDir.StartsWith("F:")) {
-                                        $neededDisks = 2
-                                    }
-                                    if ($virtualMachine.cmInstallDir.StartsWith("G:")) {
-                                        $neededDisks = 3
-                                    }
-                                    if ($diskscount -le $neededDisks) {
-                                        write-host
-                                        write-redx "ConfigMgr is configured to install to the disk we are trying to remove. Can not remove"
-                                        Continue VMLoop
-                                    }
-                                }
-
-                                if ($virtualMachine.wsusContentDir) {
-                                    $neededDisks = 0
-                                    if ($virtualMachine.wsusContentDir.StartsWith("E:")) {
-                                        $neededDisks = 1
-                                    }
-                                    if ($virtualMachine.wsusContentDir.StartsWith("F:")) {
-                                        $neededDisks = 2
-                                    }
-                                    if ($virtualMachine.wsusContentDir.StartsWith("G:")) {
-                                        $neededDisks = 3
-                                    }
-                                    if ($diskscount -le $neededDisks) {
-                                        write-host
-                                        write-redx "WSUS is configured to use to the disk we are trying to remove. Can not remove"
-                                        Continue VMLoop
-                                    }
-                                }
-                                if ($diskscount -eq 1) {
-                                    $virtualMachine.psobject.properties.remove('additionalDisks')
-                                }
-                                else {
-                                    $i = 0
-                                    $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                        $i = $i + 1
-                                        if ($i -eq $diskscount) {
-                                            $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
-                                        }
-                                    }
-                                }
-                                if ($diskscount -eq 1) {
-                                    $virtualMachine.psobject.properties.remove('additionalDisks')
-                                }
-                            }
-                            if (-not ($newValue -eq "Z")) {
-                                Get-TestResult -SuccessOnError | out-null
-                            }
-                            else {
-                                break VMLoop
-                            }
-                        }
-                        break VMLoop
-                    }
-                }
-            }
-            if ($newValue -eq "Z") {
-                $i = 0
-                $removeVM = $true
-                foreach ($virtualMachine in $global:config.virtualMachines) {
-                    $i = $i + 1
-                    if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
-                        #if ($i -eq $response) {
-                        $response = Read-YesorNoWithTimeout -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (Y/n)" -HideHelp -Default "y"
-                        if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
-                        }
-                        else {
-                            if ($virtualMachine.role -eq "FileServer") {
-
-                                foreach ($testVM in $global:config.virtualMachine) {
-                                    if ($testVM.remoteContentLibVM -eq $virtualMachine.vmName) {
-                                        Write-Host
-                                        write-host2 -ForegroundColor Khaki "This VM is currently used as the RemoteContentLib for $($testVM.vmName) and can not be deleted at this time."
-                                        $removeVM = $false
-                                    }
-                                    if ($testVM.fileServerVM -eq $virtualMachine.vmName) {
-                                        Write-Host
-                                        write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($testVM.vmName) and can not be deleted at this time."
-                                        $removeVM = $false
-                                    }
-                                }
-
-                                $SQLAOVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.fileServerVM }
-                                if ($SQLAOVMs) {
-                                    foreach ($SQLAOVM in $SQLAOVMs) {
-                                        if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
-                                            Write-Host
-                                            write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
-                                            $removeVM = $false
-                                        }
-                                    }
-                                }
-                            }
-                            if ($virtualMachine.role -eq "SQLAO") {
-                                if (-not ($virtualMachine.OtherNode)) {
-                                    Write-Host
-                                    write-host2 -ForegroundColor Khaki "This VM is Secondary node in a SQLAO cluster. Please delete the Primary node to remove both VMs"
-                                    $removeVM = $false
-                                }
-                                else {
-                                    Remove-VMFromConfig -vmName $virtualMachine.OtherNode -ConfigToModify $global:config
-                                }
-                            }
-                            if ($removeVM -eq $true) {
-                                Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
-                            }
-
-                        }
-                    }
-                }
+            if (-not $machineName) {
                 return
             }
         }
-        else {
-            Get-TestResult -SuccessOnError | Out-Null
+        :VMLoop while ($true) {
+            $i = 0
+
+            foreach ($virtualMachine in Get-ExistingVMs) {
+                $i = $i + 1
+                if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
+                    $customOptions = [ordered] @{}
+                    $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
+                    if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
+
+                        if ($virtualMachine.Role -notin ("DC", "BDC")) {
+                            if ($null -eq $virtualMachine.sqlVersion) {
+                                switch ($virtualMachine.Role) {
+                                    "Secondary" {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
+                                    }
+                                    "WSUS" {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                    }
+                                    Default {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
+                                    }
+                                }
+                            }
+                            else {
+
+                                switch ($virtualMachine.Role) {
+                                    "Secondary" {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
+                                    }
+                                    "WSUS" {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                    }
+                                    Default {
+                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+
+                    $goodPropList = @("VmName", "Role", "InstallCA", "InstallMP" , "InstallDP", "InstallRP", "InstallSUP", "InstallSSMS")
+
+                    $clone = $virtualMachine | ConvertTo-Json | ConvertFrom-Json
+                    foreach ($prop in $clone.PSObject.Properties) {
+                        if ($($prop.Name) -in $goodPropList) {
+                            if ($prop.value -is [bool] -and $prop.value -eq $false) {
+                                continue
+                            }
+                            if ($prop.value -is [string]) {
+                                continue
+                            }
+                        }
+                        write-log "Removing property $($prop.Name)"
+                        $clone.PsObject.Members.Remove($($prop.Name))
+                    }
+
+
+                    $newValue = "Start"
+                    $newValue = Select-Options -propertyEnum $clone -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
+                    #$newValue = Select-Options -Property $clone -prompt "Which Existing VM property to modify" -additionalOptions $customOptions -Test:$true
+                    if (([string]::IsNullOrEmpty($newValue))) {
+                        return
+                    }
+                    if ($newValue -eq "REFRESH") {
+                        continue VMLoop
+                    }
+
+                    if ($newValue -eq "D") {
+                        $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $($virtualMachine.vmName)? (Y/n)" -HideHelp -timeout 180 -Default "y"
+
+                        if ($response2 -and ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no")) {
+                            continue VMLoop
+                        }
+                        else {
+                            Remove-VirtualMachine -VmName $virtualMachine.vmName
+                            $global:Config.existingVirtualMachines = $global:Config.existingVirtualMachines | where-object { $_.vmName -ne $virtualMachine.vmName }
+                            Get-List -type VM -SmartUpdate | Out-Null
+                            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+                            return
+                        }
+                    }
+                    return
+                }
+            }
+
+            $ii = 0
+            foreach ($virtualMachine in $global:config.virtualMachines) {
+                $i = $i + 1
+                $ii++
+                if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
+                    $newValue = "Start"
+                    while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
+                        Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
+                        $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%$($Global:Common.Colors.GenConfigHeader)"; "A" = "Add Additional Disk" }
+                        if ($null -eq $virtualMachine.additionalDisks) {
+                        }
+                        else {
+                            $customOptions += [ordered]@{"R" = "Remove Last Additional Disk" }
+                        }
+                        if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
+                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure SQL (Set local or remote [Standalone or Always-On] SQL)" }
+                            $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
+                            if ($PassiveNode) {
+                                $customOptions += [ordered]@{"H" = "Remove High Availibility (HA) - Removes the Passive Site Server" }
+                            }
+                            else {
+                                $customOptions += [ordered]@{"H" = "Enable High Availibility (HA) - Adds a Passive Site Server" }
+                            }
+                        }
+                        else {
+                            if ($virtualMachine.Role -eq "DomainMember") {
+                                if (-not $virtualMachine.domainUser) {
+                                    $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User (This account will be made a local admin)%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Add domain user as admin on this machine" }
+                                }
+                                else {
+                                    $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Remove domainUser from this machine" }
+                                }
+                            }
+                            if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
+
+
+                                if ($virtualMachine.Role -notin ("DC", "BDC")) {
+                                    if ($null -eq $virtualMachine.sqlVersion) {
+                                        switch ($virtualMachine.Role) {
+                                            "Secondary" {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
+                                            }
+                                            "WSUS" {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                            }
+                                            Default {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
+                                            }
+                                        }
+                                    }
+                                    else {
+
+                                        switch ($virtualMachine.Role) {
+                                            "Secondary" {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
+                                            }
+                                            "WSUS" {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                            }
+                                            Default {
+                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+                        $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
+                        if (([string]::IsNullOrEmpty($newValue))) {
+                            return
+                        }
+                        if ($newValue -eq "REFRESH") {
+                            continue VMLoop
+                        }
+                        if ($null -ne $newValue -and $newValue -is [string]) {
+                            $newValue = [string]$newValue.Trim()
+                            #Write-Host "NewValue = '$newValue'"
+                            $newValue = [string]$newValue.ToUpper()
+                        }
+                        if (([string]::IsNullOrEmpty($newValue))) {
+                            break VMLoop
+                        }
+                        if ($newValue -eq "H") {
+                            $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
+                            if ($PassiveNode) {
+                                $FSVM = $global:config.virtualMachines | Where-Object { $_.vmName -eq $PassiveNode.remoteContentLibVM }
+                                if ($FSVM) {
+                                    Remove-VMFromConfig -vmName $FSVM.vmName -ConfigToModify $global:config
+                                }
+                                #$virtualMachine.psobject.properties.remove('remoteContentLibVM')
+                                Remove-VMFromConfig -vmName $PassiveNode.vmName -ConfigToModify $global:config
+                            }
+                            else {
+                                Add-NewVMForRole -Role "PassiveSite" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $($virtualMachine.vmName + "-P")  -SiteCode $virtualMachine.siteCode -OperatingSystem $virtualMachine.OperatingSystem
+                            }
+                            continue VMLoop
+
+                        }
+                        if ($newValue -eq "U") {
+                            if ($virtualMachine.domainUser) {
+                                $virtualMachine.psobject.properties.remove('domainUser')
+                            }
+                            else {
+                                Get-DomainUser -property $virtualMachine -name "domainUser"
+                                #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value "bob"
+                            }
+                        }
+                        if ($newValue -eq "S") {
+                            if ($virtualMachine.Role -in ("Primary", "CAS", "WSUS")) {
+                                Get-remoteSQLVM -property $virtualMachine
+                                continue VMLoop
+                            }
+                            else {
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+                                if ($virtualMachine.AdditionalDisks.E) {
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
+                                }
+                                else {
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+                                }
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
+                                $virtualMachine.virtualProcs = 4
+                                if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
+                                    $virtualMachine.memory = "4GB"
+                                }
+                                if ($virtualMachine.role -eq "Secondary") {
+                                    if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
+                                        $virtualMachine.memory = "4GB"
+                                    }
+                                }
+
+                                Rename-VirtualMachine -vm $virtualMachine
+
+                            }
+                        }
+                        if ($newValue -eq "X") {
+                            $virtualMachine.psobject.properties.remove('sqlversion')
+                            $virtualMachine.psobject.properties.remove('sqlInstanceDir')
+                            $virtualMachine.psobject.properties.remove('sqlInstanceName')
+                            $virtualMachine.psobject.properties.remove('SqlServiceAccount')
+                            $virtualMachine.psobject.properties.remove('SqlAgentAccount')
+                            Rename-VirtualMachine -vm $virtualMachine
+                        }
+                        if ($newValue -eq "A") {
+                            if ($null -eq $virtualMachine.additionalDisks) {
+                                $disk = [PSCustomObject]@{"E" = "120GB" }
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                            }
+                            else {
+                                $letters = 69
+                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                    $letters++
+                                }
+                                if ($letters -lt 90) {
+                                    $letter = $([char]$letters).ToString()
+                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "120GB"
+                                }
+                            }
+                        }
+                        if ($newValue -eq "R") {
+                            $diskscount = 0
+                            $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                $diskscount++
+                            }
+                            if ($virtualMachine.Role -eq "FileServer") {
+                                if ($diskscount -le 2) {
+                                    write-host
+                                    write-redx "FileServers must have at least 2 disks"
+                                    Continue VMLoop
+                                }
+                            }
+                            if ($virtualMachine.SqlInstanceDir) {
+                                $neededDisks = 0
+                                if ($virtualMachine.SqlInstanceDir.StartsWith("E:")) {
+                                    $neededDisks = 1
+                                }
+                                if ($virtualMachine.SqlInstanceDir.StartsWith("F:")) {
+                                    $neededDisks = 2
+                                }
+                                if ($virtualMachine.SqlInstanceDir.StartsWith("G:")) {
+                                    $neededDisks = 3
+                                }
+                                if ($diskscount -le $neededDisks) {
+                                    write-host
+                                    write-redx "SQL is configured to install to the disk we are trying to remove. Can not remove"
+                                    Continue VMLoop
+                                }
+                            }
+
+                            if ($virtualMachine.cmInstallDir) {
+                                $neededDisks = 0
+                                if ($virtualMachine.cmInstallDir.StartsWith("E:")) {
+                                    $neededDisks = 1
+                                }
+                                if ($virtualMachine.cmInstallDir.StartsWith("F:")) {
+                                    $neededDisks = 2
+                                }
+                                if ($virtualMachine.cmInstallDir.StartsWith("G:")) {
+                                    $neededDisks = 3
+                                }
+                                if ($diskscount -le $neededDisks) {
+                                    write-host
+                                    write-redx "ConfigMgr is configured to install to the disk we are trying to remove. Can not remove"
+                                    Continue VMLoop
+                                }
+                            }
+
+                            if ($virtualMachine.wsusContentDir) {
+                                $neededDisks = 0
+                                if ($virtualMachine.wsusContentDir.StartsWith("E:")) {
+                                    $neededDisks = 1
+                                }
+                                if ($virtualMachine.wsusContentDir.StartsWith("F:")) {
+                                    $neededDisks = 2
+                                }
+                                if ($virtualMachine.wsusContentDir.StartsWith("G:")) {
+                                    $neededDisks = 3
+                                }
+                                if ($diskscount -le $neededDisks) {
+                                    write-host
+                                    write-redx "WSUS is configured to use to the disk we are trying to remove. Can not remove"
+                                    Continue VMLoop
+                                }
+                            }
+                            if ($diskscount -eq 1) {
+                                $virtualMachine.psobject.properties.remove('additionalDisks')
+                            }
+                            else {
+                                $i = 0
+                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
+                                    $i = $i + 1
+                                    if ($i -eq $diskscount) {
+                                        $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
+                                    }
+                                }
+                            }
+                            if ($diskscount -eq 1) {
+                                $virtualMachine.psobject.properties.remove('additionalDisks')
+                            }
+                        }
+                        if (-not ($newValue -eq "Z")) {
+                            Get-TestResult -SuccessOnError | out-null
+                        }
+                        else {
+                            break VMLoop
+                        }
+                    }
+                    break VMLoop
+                }
+            }
+        }
+        if ($newValue -eq "Z") {
+            $i = 0
+            $removeVM = $true
+            foreach ($virtualMachine in $global:config.virtualMachines) {
+                $i = $i + 1
+                if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
+                    #if ($i -eq $response) {
+                    $response = Read-YesorNoWithTimeout -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (Y/n)" -HideHelp -Default "y"
+                    if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
+                    }
+                    else {
+                        if ($virtualMachine.role -eq "FileServer") {
+
+                            foreach ($testVM in $global:config.virtualMachine) {
+                                if ($testVM.remoteContentLibVM -eq $virtualMachine.vmName) {
+                                    Write-Host
+                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the RemoteContentLib for $($testVM.vmName) and can not be deleted at this time."
+                                    $removeVM = $false
+                                }
+                                if ($testVM.fileServerVM -eq $virtualMachine.vmName) {
+                                    Write-Host
+                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($testVM.vmName) and can not be deleted at this time."
+                                    $removeVM = $false
+                                }
+                            }
+
+                            $SQLAOVMs = $global:config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.fileServerVM }
+                            if ($SQLAOVMs) {
+                                foreach ($SQLAOVM in $SQLAOVMs) {
+                                    if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
+                                        Write-Host
+                                        write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
+                                        $removeVM = $false
+                                    }
+                                }
+                            }
+                        }
+                        if ($virtualMachine.role -eq "SQLAO") {
+                            if (-not ($virtualMachine.OtherNode)) {
+                                Write-Host
+                                write-host2 -ForegroundColor Khaki "This VM is Secondary node in a SQLAO cluster. Please delete the Primary node to remove both VMs"
+                                $removeVM = $false
+                            }
+                            else {
+                                Remove-VMFromConfig -vmName $virtualMachine.OtherNode -ConfigToModify $global:config
+                            }
+                        }
+                        if ($removeVM -eq $true) {
+                            Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
+                        }
+
+                    }
+                }
+            }
             return
         }
     }
+    else {
+        Get-TestResult -SuccessOnError | Out-Null
+        return
+    }
+
 }
 
 function Remove-VMFromConfig {
