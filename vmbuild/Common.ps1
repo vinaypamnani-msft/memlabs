@@ -1012,6 +1012,10 @@ function Test-NoRRAS {
     if ((Get-WindowsFeature Routing).Installed) {
         Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
         Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools
+        try{
+        Remove-VMSwitch2 -NetworkName "External"
+        }
+        catch{}
         $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
         if ($response -eq "n") {
             Write-log "Please Reboot."
