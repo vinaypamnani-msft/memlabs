@@ -1003,36 +1003,65 @@ function Test-NetworkSwitch {
         return $false
     }
 
-    $text = & netsh routing ip nat show interface
-    if ($text -like "*$interfaceAlias*") {
-        Write-Log "'$interfaceAlias' interface for '$NetworkName' is already present in NAT."
-        return $true
+    $valid = Test-NetworkNat -NetworkSubnet $NetworkSubnet
+    return $valid
+}
+
+function Test-NoRRAS {
+
+    if ((Get-WindowsFeature Routing).Installed) {
+        Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
+        Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools
+        # Reboot
     }
     else {
-        Write-Log "'$interfaceAlias' interface for '$NetworkName' not found in NAT. Restarting RemoteAccess service before adding it."
-        $success = $false
-        while (-not $success) {
-            try {
-                Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
-                $success = $true
-            }
-            catch {
-                Write-Log "Retry Restarting RemoteAccess Service"
-                Start-Sleep -Seconds 10
-            }
+        # Good
+    }
+}
+
+function Test-Networks {
+
+    $invalidNetworks = @()
+    $networkList = Get-List -Type UniqueNetwork
+    foreach ($network in $networkList) {
+        $valid = Test-NetworkNat -NetworkSubnet $network
+        if (-not $valid) {
+            $invalidNetworks += $network
         }
-        & netsh routing ip nat add interface "$interfaceAlias"
     }
 
-    $text = & netsh routing ip nat show interface
-    if ($text -like "*$interfaceAlias*") {
-        Write-Log "'$interfaceAlias' interface for '$NetworkName' added to NAT." -Success
-        return $true
-    }
-    else {
-        Write-Log "Unable to add '$interfaceAlias' for '$NetworkName' to NAT." -Failure
+    if ($invalidNetworks.Count -gt 0) {
         return $false
     }
+
+    return $true
+
+}
+
+function Test-NetworkNat {
+
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Network Subnet.")]
+        [string]$NetworkSubnet
+
+    )
+
+    $exists = Get-NetNat -Name $NetworkSubnet
+    if ($exists) {
+        Write-Log "'$NetworkSubnet' is already present in NAT."
+        return $true
+    }
+
+    try {
+        Write-Log "'$NetworkSubnet' not found in NAT. Adding it."
+        New-NetNat –Name $NetworkSubnet –InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Log "New-NetNat for '$NetworkSubnet' failed with error: $_" -Failure
+        return $false
+    }
+
 }
 
 
