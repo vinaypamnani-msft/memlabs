@@ -27,6 +27,10 @@ function Start-Maintenance {
     Write-Log $text -Activity
 
     if ($vmCount -gt 0) {
+        $response = Read-YesorNoWithTimeout -Prompt "$($vmsNeedingMaintenance.Count) VM(s) need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
+        if ($response -eq "n") {
+            return
+        }
         Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
     }
     else {
