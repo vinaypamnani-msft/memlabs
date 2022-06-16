@@ -1046,7 +1046,7 @@ function Test-NetworkNat {
 
     )
 
-    $exists = Get-NetNat -Name $NetworkSubnet
+    $exists = Get-NetNat -Name $NetworkSubnet -ErrorAction SilentlyContinue
     if ($exists) {
         Write-Log "'$NetworkSubnet' is already present in NAT."
         return $true
