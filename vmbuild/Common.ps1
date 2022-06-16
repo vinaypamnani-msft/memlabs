@@ -1012,7 +1012,14 @@ function Test-NoRRAS {
     if ((Get-WindowsFeature Routing).Installed) {
         Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
         Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools
-        # Reboot
+        $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
+        if ($response -eq "n") {
+            Write-log "Please Reboot."
+            Exit
+        }
+        Write-Log "Rebooting computer. Please re-run vmbuild.cmd when it comes up."
+        Restart-Computer -Force
+        Exit
     }
     else {
         # Good

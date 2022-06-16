@@ -60,6 +60,9 @@ $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false }
 # Dot source common
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
+
+Test-NoRRAS
+
 if (-not $NoWindowResize.IsPresent) {
     try {
         Add-Type -AssemblyName System.Windows.Forms
@@ -240,7 +243,7 @@ try {
         if ($runPhase1 -eq $false -or $SkipValidation.IsPresent) {
             # Skip validation in phased run or when asked to skip
             $deployConfig = $testConfigResult.DeployConfig
-            Write-OrangePoint "Configuration validated skipped."
+            Write-OrangePoint "Configuration validation skipped."
         }
         elseif ($testConfigResult.Valid) {
             $deployConfig = $testConfigResult.DeployConfig
