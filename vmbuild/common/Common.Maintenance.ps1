@@ -298,7 +298,7 @@ function Start-VMFix {
             }
         }
     }
-
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting $VMName."
     # Start VM to apply fix
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
     if ($status.StartedVM) {
@@ -325,7 +325,10 @@ function Start-VMFix {
         $HashArguments.Add("VmDomainAccount", $vmFix.RunAsAccount)
     }
 
+    start-sleep -Milliseconds 200
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Connecting to $VMName"
     if ($vmFix.InjectFiles) {
+
         $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
         foreach ($file in $vmFix.InjectFiles) {
             $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
@@ -334,12 +337,14 @@ function Start-VMFix {
             Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
         }
     }
-
+    start-sleep -Milliseconds 200
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting ScriptBlock on $VMName"
     $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
         $return.Success = $false
-        if ($Common.VerboseEnabled) {
+        #if ($Common.VerboseEnabled) {
+        if ($false) {
             $pull_Transcript = {
                 $filePath = "C:\staging\Fix\$($using:fixName).txt"
                 if (Test-Path $filePath) {
@@ -384,7 +389,10 @@ function Start-VMIfNotRunning {
         ConnectFailed = $false
     }
 
+
     $vm = Get-VM2 -Name $VMName -ErrorAction SilentlyContinue
+
+    Write-Log -verbose "Starting $vmName if not running"
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_" -Warning
@@ -399,6 +407,7 @@ function Start-VMIfNotRunning {
         if ($started) {
             $return.StartedVM = $true
             if ($WaitForConnect.IsPresent) {
+                Write-Log -verbose "Waiting to connect to $vmName"
                 $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2 -Quiet
                 if (-not $connected) {
                     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Could not connect to the VM after waiting for 2 minutes."
@@ -414,7 +423,7 @@ function Start-VMIfNotRunning {
     else {
         if (-not $Quiet.IsPresent) { Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "VM is already running." }
     }
-
+    Write-Log -verbose "Starting $vmName Completed. $return"
     return $return
 }
 
@@ -534,8 +543,8 @@ function Get-VMFixes {
 
     $Fix_CMFullAdmin = {
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
-        $transcriptPath = "C:\staging\Fix\Fix-CMFullAdmin.txt"
-        Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
+        #$transcriptPath = "C:\staging\Fix\Fix-CMFullAdmin.txt"
+        #Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
         $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar
 
         if ($ErrVar.Count -ne 0) {
@@ -552,6 +561,9 @@ function Get-VMFixes {
         # Get CM module path
         $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
         $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+        if (-not $subKey) {
+            return $true
+        }
         $uiInstallPath = $subKey.GetValue("UI Installation Directory")
         $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
         $initParams = @{}
@@ -572,7 +584,12 @@ function Get-VMFixes {
             # Connect to the site's drive if it is not already present
             New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
 
+            $c = 0
             while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                $c++
+                if ($c -gt 5) {
+                    return $false
+                }
                 Start-Sleep -Seconds 10
                 New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
             }
@@ -591,7 +608,7 @@ function Get-VMFixes {
         }
         until ($exists -or $i -gt 5)
 
-        Stop-Transcript | out-null
+        #Stop-Transcript | out-null
 
         if ($exists) { return $true }
         else { return $false }
