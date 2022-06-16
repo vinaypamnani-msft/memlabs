@@ -60,7 +60,6 @@ $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false }
 # Dot source common
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
-
 Test-NoRRAS
 
 if (-not $NoWindowResize.IsPresent) {

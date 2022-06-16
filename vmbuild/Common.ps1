@@ -1026,7 +1026,11 @@ function Test-NoRRAS {
         Exit
     }
     else {
-        # Good
+        # RRAS not found, test NAT
+        $natValid = Test-Networks
+        if (-not $natValid) {
+            exit
+        }
     }
 }
 
