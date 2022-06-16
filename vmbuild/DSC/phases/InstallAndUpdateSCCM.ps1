@@ -16,6 +16,20 @@ $CurrentRole = $ThisVM.role
 $psvms = $deployConfig.VirtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.ParentSiteCode -eq $thisVM.SiteCode }
 $PSVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisVM.thisParams.Primary }
 
+# Read locale settings
+$locale = $deployConfig.vmOptions.locale
+$cmLanguage = "ENG"
+if ($locale -ne "en-US") {
+    $localeConfigPath = "C:\staging\locale\_localeConfig.json"
+    $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $cmLanguage = $localeConfig.$locale.CMLanguage
+
+    # Falling back to ENG if invalid language was set
+    if ($cmLanguage.Length -ne 3) {
+        $cmLanguage = "ENG"
+    }
+}
+
 # Set scenario
 $scenario = "Standalone"
 if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
@@ -106,6 +120,8 @@ PrerequisitePath=C:\%CM%\REdist
 MobileDeviceLanguage=0
 AdminConsole=1
 JoinCEIP=0
+%AddServerLanguages%
+%AddClientLanguages%
 
 [SQLConfigOptions]
 SQLServerName=%SQLMachineFQDN%
@@ -180,6 +196,16 @@ SysCenterId=
     else {
         $tinstance = $sqlInstanceName.ToUpper() + "\"
         $cmini = $cmini.Replace('%SQLInstance%', $tinstance)
+    }
+
+    # Set language
+    if ($cmLanguage -ne "ENG") {
+        $cmini = $cmini.Replace('%AddServerLanguages%', "AddServerLanguages=${cmLanguage}")
+        $cmini = $cmini.Replace('%AddClientLanguages%', "AddClientLanguages=${cmLanguage}")
+    }
+    else {
+        $cmini = $cmini.Replace('%AddServerLanguages%', '')
+        $cmini = $cmini.Replace('%AddClientLanguages%', '')
     }
 
     # Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log

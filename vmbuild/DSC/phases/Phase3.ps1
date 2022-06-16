@@ -11,15 +11,46 @@ configuration Phase3
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc'
+    Import-DscResource -ModuleName 'LanguageDsc'
 
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
     $NetBiosDomainName = $deployConfig.vmoptions.domainNetBiosName
 
+    $l = $ConfigurationData.LocaleSettings
+
     Node $AllNodes.NodeName
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+
+        # Install Language Packs
+        if ($l.LanguageTag -ne "en-US") {
+            LanguagePack InstallLanguagePack {
+                LanguagePackName = $l.LanguageTag
+                LanguagePackLocation = "C:\LanguagePacks"
+            }
+
+            Language ConfigureLanguage {
+                IsSingleInstance = "Yes"
+                LocationID = $l.LocationID
+                MUILanguage = $l.MUILanguage
+                MUIFallbackLanguage = $l.MUIFallbackLanguage
+                SystemLocale = $l.SystemLocale
+                AddInputLanguages = $l.AddInputLanguages
+                RemoveInputLanguages = $l.RemoveInputLanguages
+                UserLocale = $l.UserLocale
+                CopySystem = $true
+                CopyNewUser = $true
+                Dependson = "[LanguagePack]InstallLanguagePack"
+            }
+
+            LocalConfigurationManager {
+                RebootNodeIfNeeded = $true
+                ActionAfterReboot = "ContinueConfiguration"
+                ConfigurationMode = "ApplyAndAutoCorrect"
+            }
+        }
 
         # Install feature roles
         $featureRoles = @($ThisVM.role)
@@ -75,13 +106,18 @@ configuration Phase3
         if ($ThisVM.installSSMS -eq $true -or (($null -eq $ThisVM.installSSMS) -and $ThisVM.SQLVersion)) {
             # Check if false, for older configs that didn't have this prop
 
+            $ssmsDownloadUrl = "https://aka.ms/ssmsfullsetup"
+            if ($l.LanguageTag -ne "en-US") {
+                $ssmsDownloadUrl = $ssmsDownloadUrl + "?clcid=" + $l.LanguageID
+            }
+
             WriteStatus SSMS {
                 DependsOn = $nextDepend
                 Status    = "Downloading and installing SQL Management Studio"
             }
 
             InstallSSMS SSMS {
-                DownloadUrl = "https://aka.ms/ssmsfullsetup"
+                DownloadUrl = $ssmsDownloadUrl
                 Ensure      = "Present"
                 DependsOn   = "[WriteStatus]SSMS"
             }
