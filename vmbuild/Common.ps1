@@ -1013,7 +1013,7 @@ function Test-NoRRAS {
         Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
         Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools
         try{
-        Remove-VMSwitch2 -NetworkName "External"
+            Remove-VMSwitch2 -NetworkName "External"
         }
         catch{}
         $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
@@ -1042,6 +1042,7 @@ function Test-Networks {
     }
 
     if ($invalidNetworks.Count -gt 0) {
+        Write-Log "Failed to verify whether following networks exist in NAT: $($invalidNetworks -join ', ')" -Failure
         return $false
     }
 
