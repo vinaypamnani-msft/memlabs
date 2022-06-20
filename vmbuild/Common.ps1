@@ -3244,8 +3244,12 @@ if (-not $Common.Initialized) {
         StorageToken    = $null
     }
 
-    Write-Log "MemLabs version $($global:Common.MemLabsVersion) Initializing" -LogOnly
-    $host.ui.RawUI.WindowTitle = "MemLabs $($global:Common.MemLabsVersion)"
+    $VersionString = "MemLabs version $($global:Common.MemLabsVersion)"
+    if ($devBranch) {
+        $VersionString = $VersionString + " (DevBranch)"
+    }
+    Write-Log "$versionString Initializing" -LogOnly
+    $host.ui.RawUI.WindowTitle = $VersionString
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access
