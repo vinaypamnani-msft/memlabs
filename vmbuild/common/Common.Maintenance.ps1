@@ -27,6 +27,10 @@ function Start-Maintenance {
     Write-Log $text -Activity
 
     if ($vmCount -gt 0) {
+        $response = Read-YesorNoWithTimeout -Prompt "$($vmsNeedingMaintenance.Count) VM(s) need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
+        if ($response -eq "n") {
+            return
+        }
         Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
     }
     else {
@@ -294,7 +298,7 @@ function Start-VMFix {
             }
         }
     }
-
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting $VMName."
     # Start VM to apply fix
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
     if ($status.StartedVM) {
@@ -321,7 +325,10 @@ function Start-VMFix {
         $HashArguments.Add("VmDomainAccount", $vmFix.RunAsAccount)
     }
 
+    start-sleep -Milliseconds 200
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Connecting to $VMName"
     if ($vmFix.InjectFiles) {
+
         $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
         foreach ($file in $vmFix.InjectFiles) {
             $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
@@ -330,7 +337,8 @@ function Start-VMFix {
             Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
         }
     }
-
+    start-sleep -Milliseconds 200
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting ScriptBlock on $VMName"
     $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
@@ -380,7 +388,10 @@ function Start-VMIfNotRunning {
         ConnectFailed = $false
     }
 
+
     $vm = Get-VM2 -Name $VMName -ErrorAction SilentlyContinue
+
+    Write-Log -verbose "Starting $vmName if not running"
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_" -Warning
@@ -395,6 +406,7 @@ function Start-VMIfNotRunning {
         if ($started) {
             $return.StartedVM = $true
             if ($WaitForConnect.IsPresent) {
+                Write-Log -verbose "Waiting to connect to $vmName"
                 $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2 -Quiet
                 if (-not $connected) {
                     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Could not connect to the VM after waiting for 2 minutes."
@@ -410,7 +422,7 @@ function Start-VMIfNotRunning {
     else {
         if (-not $Quiet.IsPresent) { Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "VM is already running." }
     }
-
+    Write-Log -verbose "Starting $vmName Completed. $return"
     return $return
 }
 
@@ -599,6 +611,68 @@ function Get-VMFixes {
             Stop-Transcript | out-null
             return $false
         }
+
+        if ([string]::IsNullOrWhiteSpace($SiteCode)) {
+            # Deployment was done with cmOptions.Install=False, or site was uninstalled
+            return $true
+        }
+
+        $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
+
+        # Get CM module path
+        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+        $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+        if (-not $subKey) {
+            return $true
+        }
+        $uiInstallPath = $subKey.GetValue("UI Installation Directory")
+        $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
+        $initParams = @{}
+
+        $userName = "vmbuildadmin"
+        $userDomain = $env:USERDOMAIN
+        $domainUserName = "$userDomain\$userName"
+
+        $i = 0
+        do {
+            $i++
+
+            # Import the ConfigurationManager.psd1 module
+            if ($null -eq (Get-Module ConfigurationManager)) {
+                Import-Module $modulePath -ErrorAction SilentlyContinue | out-null
+            }
+
+            # Connect to the site's drive if it is not already present
+            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
+
+            $c = 0
+            while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                $c++
+                if ($c -gt 5) {
+                    return $false
+                }
+                Start-Sleep -Seconds 10
+                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
+            }
+
+            # Set the current location to be the site code.
+            Set-Location "$($SiteCode):\" @initParams | out-null
+
+            $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
+
+            if (-not $exists) {
+                New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+                    -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
+                Start-Sleep -Seconds 30
+                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName } -ErrorAction SilentlyContinue
+            }
+        }
+        until ($exists -or $i -gt 5)
+
+        #Stop-Transcript | out-null
+
+        if ($exists) { return $true }
+        else { return $false }
     }
 
     $fixesToPerform += [PSCustomObject]@{

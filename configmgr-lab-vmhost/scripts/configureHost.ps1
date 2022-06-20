@@ -12,16 +12,6 @@ $virtualdiskName = "VirtualDisk1"
 $repoName = "memlabs"
 $repoUrl = "https://github.com/vinaypamnani-msft/$repoName"
 
-# # Check if repository has already been cloned, if so, script has run before and there's no need to re-run
-# $vol = Get-Volume -ErrorAction SilentlyContinue -filesystemlabel $virtualdiskName
-# if ($vol) {
-#     $repoDestination = "$($vol.DriveLetter):\$repoName"
-#     if (Test-Path $repoDestination) {
-#         Write-HostLog "SKIPPED. Running at startup, but repo already cloned at $repoDestination."
-#         return
-#     }
-# }
-
 Write-HostLog "START"
 
 # Change CD-ROM Drive Letter
@@ -151,50 +141,3 @@ else {
 # else {
 #     Write-HostLog "SKIPPED executing $scriptPath since it was not found."
 # }
-
-# Create External Hyper-V Switch
-$Network = "External"
-$phsyicalNic = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "Microsoft Hyper-V Network Adapter*" }
-$phsyicalInterface = $phsyicalNic.Name
-$exists = Get-VMSwitch -SwitchType External | Where-Object { $_.Name -eq $Network }
-if (-not $exists) {
-    Write-HostLog "HyperV Network switch for '$Network' not found. Creating a new one."
-    New-VMSwitch -Name $Network  -NetAdapterName $phsyicalInterface -AllowManagementOS $true -Notes $Network | Out-Null
-    Start-Sleep -Seconds 10 # Sleep to make sure network adapter is present
-}
-else {
-    Write-HostLog "SKIPPED creating HyperV Network switch for '$Network' since it already exist."
-}
-
-# Install RRAS
-Write-HostLog "Installing RRAS"
-Install-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools
-
-# Configure NAT
-Write-HostLog "Configuring NAT"
-Install-RemoteAccess -VpnType RoutingOnly
-cmd.exe /c netsh routing ip nat install
-
-# External Hyper-V Switch NIC
-$shouldReboot = $false
-$externalInterface = "vEthernet ($Network)"
-Write-HostLog "Adding $externalInterface interface to NAT"
-$text = & netsh routing ip nat show interface
-if ($text -like "*$externalInterface*") {
-    Write-HostLog "'$externalInterface' interface is already present in NAT."
-}
-else {
-    cmd.exe /c netsh routing ip nat add interface "$externalInterface"
-    cmd.exe /c netsh routing ip nat set interface "$externalInterface" mode=full
-    $shouldReboot = $true
-}
-
-# Disable Modern Stack to allow use of RRAS GUI again
-cmd.exe /c reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\RemoteAccess\Parameters /v ModernStackEnabled /t REG_DWORD /d 0 /f
-
-Write-HostLog "FINISH"
-
-if ($shouldReboot) {
-    Write-HostLog "Restarting the machine."
-    & shutdown /r /t 30 /c "MEMLABS needs to restart the Azure Host VM. The machine will restart in less than a minute."
-}

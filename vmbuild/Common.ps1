@@ -1003,36 +1003,93 @@ function Test-NetworkSwitch {
         return $false
     }
 
-    $text = & netsh routing ip nat show interface
-    if ($text -like "*$interfaceAlias*") {
-        Write-Log "'$interfaceAlias' interface for '$NetworkName' is already present in NAT."
-        return $true
+    $valid = Test-NetworkNat -NetworkSubnet $NetworkSubnet
+    return $valid
+}
+
+function Test-NoRRAS {
+
+    if ((Get-WindowsFeature Routing).Installed) {
+        Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
+        Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools
+        try{
+            Remove-VMSwitch2 -NetworkName "External"
+        }
+        catch{}
+        $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
+        if ($response -eq "n") {
+            Write-log "Please Reboot."
+            Exit
+        }
+        Write-Log "Rebooting computer. Please re-run vmbuild.cmd when it comes up."
+        Restart-Computer -Force
+        Exit
     }
     else {
-        Write-Log "'$interfaceAlias' interface for '$NetworkName' not found in NAT. Restarting RemoteAccess service before adding it."
-        $success = $false
-        while (-not $success) {
-            try {
-                Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
-                $success = $true
-            }
-            catch {
-                Write-Log "Retry Restarting RemoteAccess Service"
-                Start-Sleep -Seconds 10
-            }
+        # RRAS not found, test NAT
+        $natValid = Test-Networks
+        if (-not $natValid) {
+            exit
         }
-        & netsh routing ip nat add interface "$interfaceAlias"
+    }
+}
+
+function Test-Networks {
+
+    $invalidNetworks = @()
+    $networkList = Get-List -Type UniqueNetwork
+    foreach ($network in $networkList) {
+        $valid = Test-NetworkNat -NetworkSubnet $network
+        if (-not $valid) {
+            $invalidNetworks += $network
+        }
     }
 
-    $text = & netsh routing ip nat show interface
-    if ($text -like "*$interfaceAlias*") {
-        Write-Log "'$interfaceAlias' interface for '$NetworkName' added to NAT." -Success
-        return $true
+    $internetSubnet = "172.31.250.0"
+    $valid = Test-NetworkNat -NetworkSubnet $internetSubnet
+    if (-not $valid) {
+        $invalidNetworks += $internetSubnet
     }
-    else {
-        Write-Log "Unable to add '$interfaceAlias' for '$NetworkName' to NAT." -Failure
+
+    $clusterNetwork = "10.250.250.0"
+    $valid = Test-NetworkNat -NetworkSubnet $clusterNetwork
+    if (-not $valid) {
+        $invalidNetworks += $clusterNetwork
+    }
+
+    if ($invalidNetworks.Count -gt 0) {
+        Write-Log "Failed to verify whether following networks exist in NAT: $($invalidNetworks -join ', ')" -Failure
         return $false
     }
+
+    return $true
+
+}
+
+function Test-NetworkNat {
+
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Network Subnet.")]
+        [string]$NetworkSubnet
+
+    )
+
+    $exists = Get-NetNat -Name $NetworkSubnet -ErrorAction SilentlyContinue
+    if ($exists) {
+        Write-Log "'$NetworkSubnet' is already present in NAT."
+        return $true
+    }
+
+    try {
+        Write-Log "'$NetworkSubnet' not found in NAT. Adding it."
+        New-NetNat –Name $NetworkSubnet –InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Log "New-NetNat for '$NetworkSubnet' failed with error: $_" -Failure
+        return $false
+    }
+
 }
 
 
@@ -3330,8 +3387,12 @@ if (-not $Common.Initialized) {
         StorageToken    = $null
     }
 
-    Write-Log "MemLabs version $($global:Common.MemLabsVersion) Initializing" -LogOnly
-    $host.ui.RawUI.WindowTitle = "MemLabs $($global:Common.MemLabsVersion)"
+    $VersionString = "MemLabs version $($global:Common.MemLabsVersion)"
+    if ($devBranch) {
+        $VersionString = $VersionString + " (DevBranch)"
+    }
+    Write-Log "$versionString Initializing" -LogOnly
+    $host.ui.RawUI.WindowTitle = $VersionString
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access
