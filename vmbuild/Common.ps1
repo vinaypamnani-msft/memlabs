@@ -1045,6 +1045,18 @@ function Test-Networks {
         }
     }
 
+    $internetSubnet = "172.31.250.0"
+    $valid = Test-NetworkNat -NetworkSubnet $internetSubnet
+    if (-not $valid) {
+        $invalidNetworks += $internetSubnet
+    }
+
+    $clusterNetwork = "10.250.250.0"
+    $valid = Test-NetworkNat -NetworkSubnet $clusterNetwork
+    if (-not $valid) {
+        $invalidNetworks += $clusterNetwork
+    }
+
     if ($invalidNetworks.Count -gt 0) {
         Write-Log "Failed to verify whether following networks exist in NAT: $($invalidNetworks -join ', ')" -Failure
         return $false
