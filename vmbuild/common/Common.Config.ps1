@@ -1110,7 +1110,7 @@ function Update-VMInformation {
 
     try {
         if ($vm.Notes) {
-            $vmNoteObject = $vm.Notes | convertFrom-Json
+            $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
         }
     }
     catch {
@@ -1266,7 +1266,7 @@ function Update-VMFromHyperV {
     if (-not $vmNoteObject) {
         try {
             if ($vm.Notes) {
-                $vmNoteObject = $vm.Notes | convertFrom-Json
+                $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
             }
         }
         catch {
