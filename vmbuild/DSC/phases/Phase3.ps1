@@ -25,7 +25,7 @@ configuration Phase3
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
 
         # Install Language Packs
-        if ($l.LanguageTag -ne "en-US") {
+        if ($l -and $l.LanguageTag -and $l.LanguageTag -ne "en-US") {
             LanguagePack InstallLanguagePack {
                 LanguagePackName = $l.LanguageTag
                 LanguagePackLocation = "C:\LanguagePacks"
