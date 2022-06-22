@@ -1109,7 +1109,9 @@ function Update-VMInformation {
     )
 
     try {
-        $vmNoteObject = $vm.Notes | convertFrom-Json
+        if ($vm.Notes) {
+            $vmNoteObject = $vm.Notes | convertFrom-Json
+        }
     }
     catch {
         Write-Log "Could not convert notes $($vm.Notes) from vm $($vm.Name)" -LogOnly -Failure
@@ -1263,7 +1265,9 @@ function Update-VMFromHyperV {
     )
     if (-not $vmNoteObject) {
         try {
-            $vmNoteObject = $vm.Notes | convertFrom-Json
+            if ($vm.Notes) {
+                $vmNoteObject = $vm.Notes | convertFrom-Json
+            }
         }
         catch {
             Write-Log -LogOnly -Failure "Could not convert Notes Object on $($vm.Name) $vmNoteObject"
