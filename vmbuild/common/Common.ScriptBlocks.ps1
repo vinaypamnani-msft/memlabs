@@ -422,7 +422,7 @@ $global:VM_Config = {
         }
 
         # copy language packs when locale is set to other than en-US
-        if (($Phase -eq 2) -and ($deployConfig.vmOptions.locale -ne "en-US")) {
+        if (($Phase -eq 2) -and ($deployConfig.vmOptions.locale -and $deployConfig.vmOptions.locale -ne "en-US")) {
             Write-Progress2 $Activity -Status "Copying language packs" -percentcomplete 15 -force
             $copied = Copy-LanguagePacksToVM -VmName $currentItem.vmName -ShowProgress
             if (-not $copied) {
@@ -431,7 +431,7 @@ $global:VM_Config = {
         }
 
         # Ad-hoc: copy _localeConfig.json
-        if (($Phase -eq 2) -and ($deployConfig.vmOptions.locale -ne "en-US")) {
+        if (($Phase -eq 2) -and ($deployConfig.vmOptions.locale -and $deployConfig.vmOptions.locale -ne "en-US")) {
             Write-Progress2 $Activity -Status "Copying language packs" -percentcomplete 18 -force
             $copied = Copy-LocaleConfigToVM -VmName $currentItem.vmName -ShowProgress
             if (-not $copied) {
