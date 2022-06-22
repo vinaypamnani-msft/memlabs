@@ -328,15 +328,22 @@ function Start-VMFix {
     start-sleep -Milliseconds 200
     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Connecting to $VMName"
     if ($vmFix.InjectFiles) {
-
-        $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
-        foreach ($file in $vmFix.InjectFiles) {
-            $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
-            $targetPathInVM = "C:\staging\$file"
-            Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM [$targetPathInVM]..."
-            Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
+        try {
+            $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
+            foreach ($file in $vmFix.InjectFiles) {
+                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+                $targetPathInVM = "C:\staging\$file"
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM [$targetPathInVM]..."
+                Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
+            }
+        }
+        catch {
+            Write-Log "$VMName`: Failed to copy files for fix '$fixName' ($fixVersion)." -Warning
+            $return.Success = $false
+            return $return
         }
     }
+
     start-sleep -Milliseconds 200
     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting ScriptBlock on $VMName"
     $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
