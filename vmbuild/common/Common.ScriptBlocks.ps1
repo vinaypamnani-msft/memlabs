@@ -844,7 +844,7 @@ $global:VM_Config = {
                 # Default is en-US and may not be used
                 $cd.LocaleSettings = @{ LanguageTag = "en-US" }
                 $locale = $deployConfig.vmOptions.locale
-                if ($locale -ne "en-US") {
+                if ($locale -and $locale -ne "en-US") {
                     $localeConfigPath = "C:\staging\locale\_localeConfig.json"
                     $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 
