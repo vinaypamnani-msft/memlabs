@@ -1532,7 +1532,8 @@ function Select-Locale {
             $localeConfig.psobject.Properties | ForEach-Object {
                 $commonLocales += $_.Name
             }
-        } catch {
+        }
+        catch {
             Write-Log "Something wrong with _localeConfig.json. Only en-US is available."
         }
     }
@@ -4651,8 +4652,8 @@ function Select-Options {
                 continue
 
             }
-            if ($isExisting -and ($item -notin $existingPropList -or $value -eq $true)) {
-                $color = $Global:Common.Colors.GenConfigFalse
+            if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true) -and $property."$($item + "-Original")" -eq $null) ) {
+                $color = $Global:Common.Colors.GenConfigHidden
 
                 Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
                 continue
@@ -4781,8 +4782,10 @@ function Select-Options {
         $i = 0
         $done = $false
         foreach ($item in (Get-SortedProperties $property)) {
-            if ($isExisting -and ($item -notin $existingPropList -or $value -eq $true)) {
+            if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true) -and -not $property."$($item + "-Original")") ) {
+
                 continue
+
             }
             if ($done) {
                 break
@@ -4799,6 +4802,11 @@ function Select-Options {
                 }
                 if (-not ($response -eq $i)) {
                     continue
+                }
+                if ($isExisting) {
+                    if ($property."$($item + "-Original")" -eq $null ) {
+                        $property |  Add-Member -MemberType NoteProperty -Name $("$item" + "-Original") -Value $property."$($item)"
+                    }
                 }
                 $value = $property."$($item)"
                 $name = $($item)

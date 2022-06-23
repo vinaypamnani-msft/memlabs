@@ -1076,7 +1076,7 @@ function Test-NetworkNat {
 
     $exists = Get-NetNat -Name $NetworkSubnet -ErrorAction SilentlyContinue
     if ($exists) {
-        Write-Log "'$NetworkSubnet' is already present in NAT."
+        Write-Log "'$NetworkSubnet' is already present in NAT." -Verbose
         return $true
     }
 
@@ -2865,7 +2865,7 @@ function Copy-LocaleConfigToVM {
     foreach ($vm in $allVMs) {
         $vmName = $vm.vmName
         Write-Log "$vmName`: Trying to copy $localeConfigFile to $destDir inside the VM" -Activity
-        
+
         if (-not (Test-Path -Path "${sourceDir}\*" -Include "$localeConfigFile")) {
             Write-Log "$vmName`: Cannot find $localeConfigFile in $sourceDir. Skipping copy." -Warning
             continue

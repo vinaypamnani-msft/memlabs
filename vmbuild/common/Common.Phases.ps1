@@ -398,7 +398,7 @@ function Get-ConfigurationData {
         "4" { $cd = Get-Phase4ConfigurationData -deployConfig $deployConfig }
         "5" { $cd = Get-Phase5ConfigurationData -deployConfig $deployConfig }
         "6" { $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig }
-        "7" { $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig}
+        "7" { $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig }
         "8" {
             $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
             if ($cd) {
@@ -430,15 +430,19 @@ function Get-ConfigurationData {
         Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VM's are running" -PercentComplete $global:preparePhasePercent
 
         $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
-        $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+        if ($nodes) {
+            $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+        }
 
         $global:preparePhasePercent++
         Start-Sleep -Milliseconds 201
         Write-Progress2 "Preparing Phase $Phase" -Status "Starting required VMs (if needed)" -PercentComplete $global:preparePhasePercent
 
-        $failures = Invoke-SmartStartVMs -CritList $critlist
-        if ($failures -ne 0) {
-            write-log "$failures VM(s) could not be started" -Failure
+        if ($critlist) {
+            $failures = Invoke-SmartStartVMs -CritList $critlist
+            if ($failures -ne 0) {
+                write-log "$failures VM(s) could not be started" -Failure
+            }
         }
 
         $dc = $cd.AllNodes | Where-Object { $_.Role -eq "DC" }
