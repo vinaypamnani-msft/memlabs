@@ -391,6 +391,13 @@ function Add-ExistingVMsToDeployConfig {
             }
         }
     }
+    # Check if any new VM's need remote SQL VM added
+    $vms = $config.virtualMachines
+    foreach ($vm in $vms) {
+        if ($vm.RemoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
+        }
+    }
 }
 
 function Add-ExistingVMToDeployConfig {
