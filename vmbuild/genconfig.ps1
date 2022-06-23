@@ -226,7 +226,7 @@ function Select-ConfigMenu {
             Write-Verbose "SelectedConfig : $SelectedConfig"
             if (-not $SelectedConfig.VirtualMachines) {
 
-                Add-ErrorMessage -Warning "Config is invalid, as it does not contain any new or modified virtual machines."
+                #Add-ErrorMessage -Warning "Config is invalid, as it does not contain any new or modified virtual machines."
 
                 return $SelectedConfig
             }
@@ -4625,7 +4625,7 @@ function Select-Options {
         if ($null -eq $property) {
             return $null
         }
-
+        $existingPropList = @("InstallCA", "InstallMP" , "InstallDP", "InstallRP", "InstallSUP", "InstallSSMS")
         $isVM = $false
         # Get the Property Names and Values.. Present as Options.
         foreach ($item in (Get-SortedProperties $property)) {
@@ -4639,14 +4639,29 @@ function Select-Options {
             if ($item -eq "role" -and $value -eq "DC") {
                 $isVM = $false
             }
+            if ($item -eq "ExistingVM") {
+                $isExisting = $true
+            }
         }
         $fakeNetwork = $null
+        $padding = 26
         foreach ($item in (Get-SortedProperties $property)) {
-            $i = $i + 1
             $value = $property."$($item)"
+            if ($isExisting -and $item -eq "ExistingVM") {
+                continue
 
+            }
+            if ($isExisting -and ($item -notin $existingPropList -or $value -eq $true)) {
+                $color = $Global:Common.Colors.GenConfigFalse
 
-            if ($isVM -and $i -eq 2) {
+                Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
+                continue
+
+            }
+
+            $i = $i + 1
+
+            if ($isVM -and $i -eq 2 -and -not $isExisting) {
 
                 $fakeNetwork = $i
                 $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
@@ -4655,7 +4670,6 @@ function Select-Options {
                 $i++
             }
             #$padding = 27 - ($i.ToString().Length)
-            $padding = 26
             $color = $null
             #write-log "Get-AdditionalInformation $item $value"
             $TextToDisplay = Get-AdditionalInformation -item $item -data $value
@@ -4767,7 +4781,9 @@ function Select-Options {
         $i = 0
         $done = $false
         foreach ($item in (Get-SortedProperties $property)) {
-
+            if ($isExisting -and ($item -notin $existingPropList -or $value -eq $true)) {
+                continue
+            }
             if ($done) {
                 break
             }
@@ -6113,10 +6129,11 @@ function Select-VirtualMachines {
         }
         :VMLoop while ($true) {
             $i = 0
-
+            $existingVM = $false
             foreach ($virtualMachine in Get-ExistingVMs) {
                 $i = $i + 1
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
+                    $existingVM = $true
                     $customOptions = [ordered] @{}
                     $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
                     if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
@@ -6156,19 +6173,20 @@ function Select-VirtualMachines {
                     $goodPropList = @("VmName", "Role", "InstallCA", "InstallMP" , "InstallDP", "InstallRP", "InstallSUP", "InstallSSMS")
 
                     $clone = $virtualMachine | ConvertTo-Json | ConvertFrom-Json
-                    foreach ($prop in $clone.PSObject.Properties) {
-                        if ($($prop.Name) -in $goodPropList) {
-                            if ($prop.value -is [bool] -and $prop.value -eq $false) {
-                                continue
-                            }
-                            if ($prop.value -is [string]) {
-                                continue
-                            }
-                        }
-                        write-log "Removing property $($prop.Name)"
-                        $clone.PsObject.Members.Remove($($prop.Name))
-                    }
-
+                    $clone | Add-Member -MemberType NoteProperty -Name "ExistingVM"  -Value $true -Force
+                    #foreach ($prop in $clone.PSObject.Properties) {
+                    #    if ($($prop.Name) -in $goodPropList) {
+                    #        if ($prop.value -is [bool] -and $prop.value -eq $false) {
+                    #            continue
+                    #        }
+                    #        if ($prop.value -is [string]) {
+                    #            continue
+                    #        }
+                    #    }
+                    #    write-log "Removing property $($prop.Name)"
+                    #    $clone.PsObject.Members.Remove($($prop.Name))
+                    #}
+                    $clone | Add-Member -MemberType NoteProperty -Name "ExistingVM"  -Value $true -Force
 
                     $newValue = "Start"
                     $newValue = Select-Options -propertyEnum $clone -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true

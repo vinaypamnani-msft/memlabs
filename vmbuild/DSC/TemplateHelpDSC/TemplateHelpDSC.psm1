@@ -3137,7 +3137,7 @@ class InstallPBIRS {
                 New-Item -Path $this.ContentPath -ItemType Directory -Force
             }
             catch {
-                write-verbose ("$_")
+                write-verbose ("InstallPBIRS $_")
             }
 
             $PBIRSargs = "/quiet /InstallFolder=$($this.InstallPath) /IAcceptLicenseTerms /Edition=Dev /Log C:\staging\PBI.log"
@@ -3148,7 +3148,7 @@ class InstallPBIRS {
                 Install-Module -Name ReportingServicesTools -Force -AllowClobber -Confirm:$false
             }
             catch {
-                Write-Verbose ("$_")
+                Write-Verbose ("InstallPBIRS $_")
             }
 
 
@@ -3161,7 +3161,7 @@ class InstallPBIRS {
                 }
             }
             catch {
-                Write-Verbose ("$_")
+                Write-Verbose ("InstallPBIRS $_")
                 if ($this.IsRemoteDatabaseServer) {
                     Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase
                 }
