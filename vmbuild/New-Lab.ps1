@@ -229,7 +229,7 @@ try {
     $runPhase1 = $false
     $existingVMs = Get-List -Type VM -SmartUpdate
     $newVMs = @()
-    $newVMs += $userConfig.virtualMachines | Where-Object { $userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName }
+    $newVMs += $userConfig.virtualMachines | Where-Object { -not $_.Hidden -and ($userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName) }
     $count = ($newVMs | Measure-Object).count
     if ($count -gt 0) {
         $runPhase1 = $true
