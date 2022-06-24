@@ -188,7 +188,7 @@ function New-DeployConfig {
 
         # add prefix to vm names
         $virtualMachines = $configObject.virtualMachines
-        foreach ($item in $virtualMachines) {
+        foreach ($item in $virtualMachines | Where-Object { -not $_.Hidden } ) {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
             if ($item.pullDPSourceDP -and -not $item.pullDPSourceDP.StartsWith($configObject.vmOptions.prefix)) {
 
@@ -201,7 +201,7 @@ function New-DeployConfig {
             }
         }
 
-        $SQLAOPriVMs = $virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
+        $SQLAOPriVMs = $virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not $_.Hidden }
         foreach ($SQLAO in $SQLAOPriVMs) {
             if ($SQLAO) {
                 if ($SQLAO.fileServerVM -and -not $SQLAO.fileServerVM.StartsWith($configObject.vmOptions.prefix)) {
@@ -219,7 +219,7 @@ function New-DeployConfig {
             }
         }
 
-        $PassiveVMs = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+        $PassiveVMs = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and -not $_.Hidden }
         if ($PassiveVMs) {
             foreach ($PassiveVM in $PassiveVMs) {
                 # Add prefix to FS
@@ -411,6 +411,7 @@ function Add-ExistingVMToDeployConfig {
         [bool] $hidden = $true
     )
 
+    Write-Log -verbose "Adding $vmName to Deploy config"
     if ($configToModify.virtualMachines.vmName -contains $vmName) {
         Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
         return
@@ -455,7 +456,12 @@ function Add-ExistingVMToDeployConfig {
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
     }
-    $configToModify.virtualMachines += $newVMObject
+    if ($null -eq $configToModify.virtualMachines) {
+        $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
+    }
+    else {
+        $configToModify.virtualMachines += $newVMObject
+    }
 }
 
 function Add-VMToAccountLists {

@@ -557,7 +557,7 @@ function Get-VMFixes {
             $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar
 
             if ($ErrVar.Count -ne 0) {
-                return $false
+                return $true
             }
 
             if ([string]::IsNullOrWhiteSpace($SiteCode)) {
@@ -569,7 +569,12 @@ function Get-VMFixes {
 
             # Get CM module path
             $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-            $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+            try {
+                $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+            }
+            catch {
+                return $true
+            }
             $uiInstallPath = $subKey.GetValue("UI Installation Directory")
             $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
             $initParams = @{}
