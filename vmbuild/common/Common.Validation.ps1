@@ -129,7 +129,7 @@ function Test-ValidVmOptions {
                 Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
             }
 
-            $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" -and (-not $_.Network) })
+            $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" -and (-not $_.Network) -and (-not $_.Hidden) })
             if ($CASorPRIorSEC) {
                 $existingCASorPRIorSEC = @()
                 $existingCASorPRIorSEC += Get-List -Type VM -SmartUpdate | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
@@ -825,7 +825,7 @@ function Test-ValidRoleSiteSystem {
         }
     }
     if (-not $allowOnCAS) {
-        $casVM = Get-List2 -DeployConfig $ConfigObject | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $VM.siteCode}
+        $casVM = Get-List2 -DeployConfig $ConfigObject | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $VM.siteCode }
         if ($casVM) {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a SiteSystem role (DP or MP) that is not allowed on CAS." -ReturnObject $ReturnObject -Warning
         }
@@ -946,13 +946,14 @@ function Test-Configuration {
             return $return
         }
 
+        $virtualMachinesNoExisting = $deployConfig.virtualMachines | Where-Object { -not $_.Hidden }
         # Contains roles
         if ($deployConfig.virtualMachines) {
-            $containsCS = $deployConfig.virtualMachines.role -contains "CAS"
-            $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
-            $containsSiteSystem = $deployConfig.virtualMachines.role -contains "SiteSystem"
-            $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
-            $containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
+            $containsCS = $virtualMachinesNoExisting -contains "CAS"
+            $containsPS = $virtualMachinesNoExisting -contains "Primary"
+            $containsSiteSystem = $virtualMachinesNoExisting -contains "SiteSystem"
+            $containsPassive = $virtualMachinesNoExisting -contains "PassiveSite"
+            $containsSecondary = $virtualMachinesNoExisting -contains "Secondary"
         }
         else {
             $containsCS = $containsPS = $containsSiteSystem = $containsPassive = $containsSecondary = $false
@@ -1221,24 +1222,30 @@ function Test-Configuration {
 
         # Names in deployment
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 80
-        $vmInDeployment = $deployConfig.virtualMachines.vmName
-        $unique1 = $vmInDeployment | Select-Object -Unique
-        $compare = Compare-Object -ReferenceObject $vmInDeployment -DifferenceObject $unique1
-        if ($compare) {
-            $duplicates = $compare.InputObject -join ","
-            Add-ValidationMessage -Message "Name Conflict: Deployment contains duplicate VM names [$duplicates]" -ReturnObject $return -Warning
+        $vmInDeployment = $virtualMachinesNoExisting.vmName
+        if ($vmInDeployment) {
+            $unique1 = $vmInDeployment | Select-Object -Unique
+            $compare = Compare-Object -ReferenceObject $vmInDeployment -DifferenceObject $unique1
+            if ($compare) {
+                $duplicates = $compare.InputObject -join ","
+                Add-ValidationMessage -Message "Name Conflict: Deployment contains duplicate VM names [$duplicates]" -ReturnObject $return -Warning
+            }
         }
 
-        # Names in domain
-        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
-        $allVMs = Get-List -Type VM -SmartUpdate | Select-Object -Expand VmName
-        $all = $allVMs + $vmInDeployment
-        $unique2 = $all | Select-Object -Unique
-        $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
-        if (-not $compare -and $compare2) {
-            $duplicates = $compare2.InputObject -join ","
-            Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
-            Get-List -type VM -SmartUpdate | Out-Null
+        if ($compare) {
+            # Names in domain
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
+            $allVMs = Get-List -Type VM -SmartUpdate | Select-Object -Expand VmName
+            $all = $allVMs + $vmInDeployment
+            $unique2 = $all | Select-Object -Unique
+            if (($null -ne $unique2) -and ($null -ne $all)) {
+                $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
+                if (-not $compare -and $compare2) {
+                    $duplicates = $compare2.InputObject -join ","
+                    Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
+                    Get-List -type VM -SmartUpdate | Out-Null
+                }
+            }
         }
 
         if (-not $fast) {

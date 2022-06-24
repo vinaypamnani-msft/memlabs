@@ -165,7 +165,7 @@ try {
     }
 
     $principal = new-object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
-    if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))){
+    if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))) {
         Write-RedX "MemLabs requires administrative rights to configure. Please run vmbuild.cmd as administrator." -ForegroundColor Red
         Write-Host
         Start-Sleep -seconds 60
@@ -235,7 +235,7 @@ try {
         $runPhase1 = $true
         Write-Log -Verbose "Phase 1 is scheduled to run"
     }
-    else{
+    else {
         Write-Log -Verbose "Phase 1 is not scheduled to run: ExistingVms = $($existingVMs.vmName -join ",") NewVMs = $($userConfig.virtualMachines.vmName -join ",")"
     }
 
@@ -468,6 +468,11 @@ catch {
 }
 finally {
 
+
+    if ($enableDebug) {
+        Write-Host 'Config Stored in $global:DebugConfig'
+        $global:DebugConfig = $deployConfig
+    }
     # Ctrl + C brings us here :)
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly

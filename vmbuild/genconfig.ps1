@@ -1006,7 +1006,7 @@ function Select-MainMenu {
             "d" {
                 foreach ($virtualMachine in $global:existingMachines) {
                     if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
-                        Add-ExistingVMToDeployConfig -vmName $virtualMachine.vmName -configToModify $global:config -hidden:$true
+                        Add-ModifiedExistingVMToDeployConfig -vm $virtualMachine -configToModify $global:config -hidden:$true
                     }
                 }
                 return $true
@@ -1015,7 +1015,7 @@ function Select-MainMenu {
             "r" {
                 foreach ($virtualMachine in $global:existingMachines) {
                     if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
-                        Add-ExistingVMToDeployConfig -vmName $virtualMachine.vmName -configToModify $global:config -hidden:$true
+                        Add-ModifiedExistingVMToDeployConfig -vm $virtualMachine -configToModify $global:config -hidden:$true
                     }
                 }
                 $c = Test-Configuration -InputObject $Global:Config

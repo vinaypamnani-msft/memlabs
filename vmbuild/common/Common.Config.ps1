@@ -400,6 +400,78 @@ function Add-ExistingVMsToDeployConfig {
     }
 }
 
+function Add-ModifiedExistingVMToDeployConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Existing VM Name")]
+        [object] $vm,
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $configToModify,
+        [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
+        [bool] $hidden = $true
+    )
+
+    $vmName = $vm.vmName
+
+    Write-Log -verbose "Adding Modified $($vmName) to Deploy config"
+    if ($configToModify.virtualMachines.vmName -contains $vmName) {
+        Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
+        return
+    }
+    $existingVM = (get-list -Type VM | where-object { $_.vmName -eq $vmName })
+    if (-not $existingVM) {
+        Write-Log "Not adding $vmName as it does not exist as an existing VM" -LogOnly
+        return
+    }
+
+    Write-Log -Verbose "Adding $vmName as a modified existing VM"
+    if ($existingVM.state -ne "Running") {
+        Start-VM2 -Name $existingVM.vmName
+    }
+
+    $newVMObject = [PSCustomObject]@{
+        hidden = $hidden
+    }
+
+    $vmNote = $vm
+    $propsToExclude = @(
+        "LastKnownIP",
+        "inProgress",
+        "success",
+        "deployedOS",
+        "domain",
+        "network",
+        "prefix",
+        "memLabsDeployVersion",
+        "memLabsVersion",
+        "adminName",
+        "lastUpdate",
+        "source",
+        "vmID",
+        "switch"
+    )
+    foreach ($prop in $vmNote.PSObject.Properties) {
+        if ($prop.Name -in $propsToExclude) {
+            continue
+        }
+
+        if ($prop.Name.EndsWith("-Original")) {
+            continue
+        }
+        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+    }
+
+    if (-not $newVMObject.vmName) {
+        throw "Could not add hidden VM, because it does not have a vmName property"
+    }
+    if ($null -eq $configToModify.virtualMachines) {
+        $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
+    }
+    else {
+        $configToModify.virtualMachines += $newVMObject
+    }
+}
+
 function Add-ExistingVMToDeployConfig {
     [CmdletBinding()]
     param (
