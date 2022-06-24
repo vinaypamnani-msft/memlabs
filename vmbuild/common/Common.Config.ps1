@@ -1321,6 +1321,21 @@ function Update-VMFromHyperV {
         $vmObject.Role = "SiteSystem"
     }
 
+    if ($vmObject.Role -eq "SiteSystem") {
+        if ($null -eq $vmObject.InstallRP) {
+            $vmObject | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+        }
+        if ($null -eq $vmObject.InstallSUP) {
+            $vmObject | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $false -Force
+        }
+        if ($null -eq $vmObject.InstallMP) {
+            $vmObject | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $false -Force
+        }
+        if ($null -eq $vmObject.InstallDP) {
+            $vmObject | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
+        }
+    }
+
 }
 
 $global:vm_List = $null

@@ -924,6 +924,7 @@ function Get-ExistingVMs {
 }
 
 function Select-MainMenu {
+    $global:existingMachines = Get-ExistingVMs
     while ($true) {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
@@ -951,11 +952,11 @@ function Select-MainMenu {
         #}
 
 
-        $existingMachines = Get-ExistingVMs
+        #$existingMachines = Get-ExistingVMs
 
 
-        if ($existingMachines) {
-            foreach ($existingVM in $existingMachines) {
+        if ($global:existingMachines) {
+            foreach ($existingVM in $global:existingMachines) {
                 $i = $i + 1
                 $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
                 $customOptions += [ordered]@{"$i" = "$name" }
@@ -3874,6 +3875,9 @@ function Rename-VirtualMachine {
         [string] $newName
     )
 
+    if ($vm.ExistingVM) {
+        return
+    }
     $rename = $true
     if (-not $newName) {
         $rename = $false
@@ -4143,8 +4147,12 @@ function Get-AdditionalValidations {
                     $property.installSUP = $false
                 }
 
-                if ($property.ParentSiteCode) {
-                    $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $property.ParentSiteCode -type VM -SmartUpdate:$false
+                if ($property.ParentSiteCode -or $property.SiteCode) {
+                    $sitecode = $property.ParentSiteCode
+                    if (-not $sitecode) {
+                        $sitecode = $property.SiteCode
+                    }
+                    $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
 
                     if ($Parent.ParentSiteCode) {
                         $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $Parent.ParentSiteCode -type VM -SmartUpdate:$false
@@ -4652,7 +4660,7 @@ function Select-Options {
                 continue
 
             }
-            if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true) -and $property."$($item + "-Original")" -eq $null) ) {
+            if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
                 $color = $Global:Common.Colors.GenConfigHidden
 
                 Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
@@ -4782,11 +4790,13 @@ function Select-Options {
         $i = 0
         $done = $false
         foreach ($item in (Get-SortedProperties $property)) {
-            if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true) -and -not $property."$($item + "-Original")") ) {
+            $value = $property."$($item)"
+            if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
 
                 continue
 
             }
+
             if ($done) {
                 break
             }
@@ -6138,7 +6148,7 @@ function Select-VirtualMachines {
         :VMLoop while ($true) {
             $i = 0
             $existingVM = $false
-            foreach ($virtualMachine in Get-ExistingVMs) {
+            foreach ($virtualMachine in $global:existingMachines) {
                 $i = $i + 1
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                     $existingVM = $true
@@ -6180,7 +6190,7 @@ function Select-VirtualMachines {
 
                     $goodPropList = @("VmName", "Role", "InstallCA", "InstallMP" , "InstallDP", "InstallRP", "InstallSUP", "InstallSSMS")
 
-                    $clone = $virtualMachine | ConvertTo-Json | ConvertFrom-Json
+                    $clone = $virtualMachine # | ConvertTo-Json | ConvertFrom-Json
                     $clone | Add-Member -MemberType NoteProperty -Name "ExistingVM"  -Value $true -Force
                     #foreach ($prop in $clone.PSObject.Properties) {
                     #    if ($($prop.Name) -in $goodPropList) {
@@ -6194,7 +6204,7 @@ function Select-VirtualMachines {
                     #    write-log "Removing property $($prop.Name)"
                     #    $clone.PsObject.Members.Remove($($prop.Name))
                     #}
-                    $clone | Add-Member -MemberType NoteProperty -Name "ExistingVM"  -Value $true -Force
+
 
                     $newValue = "Start"
                     $newValue = Select-Options -propertyEnum $clone -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
