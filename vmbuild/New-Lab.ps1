@@ -457,18 +457,26 @@ try {
     }
     else {
         Start-Maintenance -DeployConfig $deployConfig
-        # Update Existing VMs
 
+        $updateExistingRequired = $false
         foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
-            Write-Host "Updating VM Notes on $($vm.VmName)"
-            foreach ($updatableEntry in $Global:Common.Supported.PropsToUpdate) {
-                if ($null -ne $vm."$updatableEntry") {
-                    Write-Host "Updating $($vm.vmName) $updatableEntry to $($vm."$updatableEntry")"
-                    Update-VMNoteProperty -vmName $vm.VmName -PropertyName $updatableEntry -PropertyValue $vm."$updatableEntry"
+            $updateExistingRequired = $true
+        }
+
+        # Update Existing VMs
+        if ($updateExistingRequired) {
+            Write-Log "Update Existing Virtual Machine Properties" -Activity -HostOnly
+            foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
+                Write-Host "Updating VM Notes on $($vm.VmName)"
+                foreach ($updatableEntry in $Global:Common.Supported.PropsToUpdate) {
+                    if ($null -ne $vm."$updatableEntry") {
+                        Write-Host "Updating $($vm.vmName) $updatableEntry to $($vm."$updatableEntry")"
+                        Update-VMNoteProperty -vmName $vm.VmName -PropertyName $updatableEntry -PropertyValue $vm."$updatableEntry"
+                    }
                 }
             }
-
         }
+
         Write-Host
         Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
     }
