@@ -457,6 +457,18 @@ try {
     }
     else {
         Start-Maintenance -DeployConfig $deployConfig
+        # Update Existing VMs
+
+        foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
+            Write-Host "Updating VM Notes on $($vm.VmName)"
+            foreach ($updatableEntry in $Global:Common.Supported.UpdateablePropList) {
+                if ($null -ne $vm."$updatableEntry") {
+                    Write-Host "Updating $($vm.vmName) $updateableEntry to $($vm."$updatableEntry")"
+                    Update-VMNoteProperty -vmName $vm.VmName -PropertyName $updatableEntry -PropertyValue $vm."$updatableEntry"
+                }
+            }
+
+        }
         Write-Host
         Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
     }

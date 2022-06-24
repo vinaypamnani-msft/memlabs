@@ -2691,11 +2691,8 @@ function New-UserConfig {
         #cmOptions       = $newCmOptions
         vmOptions               = $vmOptions
         virtualMachines         = $()
-        existingVirtualMachines = $()
-    }
-    $existingVMs = Get-ExistingVMs -config $configGenerated
 
-    $configGenerated.existingVirtualMachines = $existingVMs
+    }
     return $configGenerated
 }
 function Get-ExistingConfig {
@@ -4647,7 +4644,7 @@ function Select-Options {
         if ($null -eq $property) {
             return $null
         }
-        $existingPropList = @("InstallCA", "InstallMP" , "InstallDP", "InstallRP", "InstallSUP", "InstallSSMS")
+        $existingPropList =$Global:Common.Supported.UpdateablePropList
         $isVM = $false
         # Get the Property Names and Values.. Present as Options.
         foreach ($item in (Get-SortedProperties $property)) {
@@ -6124,7 +6121,7 @@ function show-ModifiedVMMenu {
         [object] $virtualMachine
     )
 
-    $goodPropList = @("InstallCA", "InstallMP" , "InstallDP", "InstallRP", "InstallSUP", "InstallSSMS")
+    $goodPropList = $Global:Common.Supported.UpdateablePropList
 
 
     $i = 0
@@ -6229,27 +6226,9 @@ function Select-VirtualMachines {
                         }
                     }
 
-
-                    $goodPropList = @("VmName", "Role", "InstallCA", "InstallMP" , "InstallDP", "InstallRP", "InstallSUP", "InstallSSMS")
-
-                    $clone = $virtualMachine # | ConvertTo-Json | ConvertFrom-Json
-                    $clone | Add-Member -MemberType NoteProperty -Name "ExistingVM"  -Value $true -Force
-                    #foreach ($prop in $clone.PSObject.Properties) {
-                    #    if ($($prop.Name) -in $goodPropList) {
-                    #        if ($prop.value -is [bool] -and $prop.value -eq $false) {
-                    #            continue
-                    #        }
-                    #        if ($prop.value -is [string]) {
-                    #            continue
-                    #        }
-                    #    }
-                    #    write-log "Removing property $($prop.Name)"
-                    #    $clone.PsObject.Members.Remove($($prop.Name))
-                    #}
-
-
                     $newValue = "Start"
-                    $newValue = Select-Options -propertyEnum $clone -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
+                    $virtualMachine  | Add-Member -MemberType NoteProperty -Name "ExistingVM" -Value $true -Force
+                    $newValue = Select-Options -propertyEnum $virtualMachine -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
                     #$newValue = Select-Options -Property $clone -prompt "Which Existing VM property to modify" -additionalOptions $customOptions -Test:$true
                     if (([string]::IsNullOrEmpty($newValue))) {
                         return

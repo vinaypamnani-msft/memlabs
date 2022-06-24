@@ -1012,10 +1012,10 @@ function Test-NoRRAS {
     if ((Get-WindowsFeature Routing).Installed) {
         Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
         Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools
-        try{
+        try {
             Remove-VMSwitch2 -NetworkName "External"
         }
-        catch{}
+        catch {}
         $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
         if ($response -eq "n") {
             Write-log "Please Reboot."
@@ -2823,10 +2823,12 @@ function Copy-LanguagePacksToVM {
 
 
             Copy-Item -ToSession $ps -Filter "*.cab" -Path "${sourceDir}" -Destination "${destDir}" -Recurse -WhatIf:$WhatIf -ErrorAction Stop
-        } catch {
+        }
+        catch {
             Write-Log "$vmName`: Failed to copy language packs. $_" -Failure
             return $false
-        } finally {
+        }
+        finally {
             $ProgressPreference = $progressPref
         }
     }
@@ -2895,10 +2897,12 @@ function Copy-LocaleConfigToVM {
 
             # Fix me. this includes other empty folders
             Copy-Item -ToSession $ps -Filter "$localeConfigFile" -Path "${sourceDir}" -Destination "${destDir}" -Recurse -WhatIf:$WhatIf -ErrorAction Stop
-        } catch {
+        }
+        catch {
             Write-Log "$vmName`: Failed to copy ${localeConfigFile}. $_" -Failure
             return $false
-        } finally {
+        }
+        finally {
             $ProgressPreference = $progressPref
         }
     }
@@ -3181,6 +3185,9 @@ function Set-SupportedOptions {
         "WSUS"
     )
 
+
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSMSS")
+
     $cmVersions += Get-CMVersions
 
     $operatingSystems = $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" } | Sort-Object
@@ -3188,12 +3195,13 @@ function Set-SupportedOptions {
     $sqlVersions = $Common.AzureFileList.ISO.id | Select-Object -Unique | Sort-Object
 
     $supported = [PSCustomObject]@{
-        Roles            = $roles
-        RolesForExisting = $rolesForExisting
-        AllRoles         = ($roles + $rolesForExisting | Select-Object -Unique)
-        OperatingSystems = $operatingSystems
-        SqlVersions      = $sqlVersions
-        CMVersions       = $cmVersions
+        Roles              = $roles
+        RolesForExisting   = $rolesForExisting
+        AllRoles           = ($roles + $rolesForExisting | Select-Object -Unique)
+        OperatingSystems   = $operatingSystems
+        SqlVersions        = $sqlVersions
+        CMVersions         = $cmVersions
+        UpdateablePropList = $updatablePropList
     }
 
     $Common.Supported = $supported
@@ -3350,7 +3358,7 @@ if (-not $Common.Initialized) {
     $colors = Get-Colors
 
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "220505"
+        MemLabsVersion        = "220706"
         LatestHotfixVersion   = $latestHotfixVersion
         PS7                   = $PS7
         Initialized           = $true

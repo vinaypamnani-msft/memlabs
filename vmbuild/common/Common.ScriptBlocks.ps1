@@ -850,18 +850,18 @@ $global:VM_Config = {
 
                     # Picking up current locale
                     $l = @{
-                        LanguageTag = $locale
+                        LanguageTag          = $locale
 
                         # These are used for LanguageDsc
-                        LocationID = $localeConfig.$locale.LocationID
-                        MUILanguage = $localeConfig.$locale.MUILanguage
-                        MUIFallbackLanguage = $localeConfig.$locale.MUIFallbackLanguage
-                        SystemLocale = $localeConfig.$locale.SystemLocale
-                        AddInputLanguages = $localeConfig.$locale.AddInputLanguages
+                        LocationID           = $localeConfig.$locale.LocationID
+                        MUILanguage          = $localeConfig.$locale.MUILanguage
+                        MUIFallbackLanguage  = $localeConfig.$locale.MUIFallbackLanguage
+                        SystemLocale         = $localeConfig.$locale.SystemLocale
+                        AddInputLanguages    = $localeConfig.$locale.AddInputLanguages
                         RemoveInputLanguages = $localeConfig.$locale.RemoveInputLanguages
-                        UserLocale = $localeConfig.$locale.UserLocale
+                        UserLocale           = $localeConfig.$locale.UserLocale
                         # This is used for SSMS (TBD)
-                        LanguageID = $localeConfig.$locale.LanguageID
+                        LanguageID           = $localeConfig.$locale.LanguageID
                     }
                     $cd.LocaleSettings = $l
                 }
@@ -1359,7 +1359,7 @@ $global:VM_Config = {
         if ($using:Phase -gt 1 -and -not $currentItem.hidden) {
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete
         }
-
+       
         if (-not $complete) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -OutputStream -Failure
         }
