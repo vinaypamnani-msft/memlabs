@@ -3187,6 +3187,8 @@ function Set-SupportedOptions {
 
 
     $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSMSS")
+    $propsToUpdate = $updatablePropList
+    $propsToUpdate += "wsusContentDir"
 
     $cmVersions += Get-CMVersions
 
@@ -3202,6 +3204,7 @@ function Set-SupportedOptions {
         SqlVersions        = $sqlVersions
         CMVersions         = $cmVersions
         UpdateablePropList = $updatablePropList
+        PropsToUpdate      = $propsToUpdate
     }
 
     $Common.Supported = $supported

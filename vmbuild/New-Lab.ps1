@@ -461,7 +461,7 @@ try {
 
         foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
             Write-Host "Updating VM Notes on $($vm.VmName)"
-            foreach ($updatableEntry in $Global:Common.Supported.UpdateablePropList) {
+            foreach ($updatableEntry in $Global:Common.Supported.PropsToUpdate) {
                 if ($null -ne $vm."$updatableEntry") {
                     Write-Host "Updating $($vm.vmName) $updatableEntry to $($vm."$updatableEntry")"
                     Update-VMNoteProperty -vmName $vm.VmName -PropertyName $updatableEntry -PropertyValue $vm."$updatableEntry"
