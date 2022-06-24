@@ -463,7 +463,7 @@ try {
             Write-Host "Updating VM Notes on $($vm.VmName)"
             foreach ($updatableEntry in $Global:Common.Supported.UpdateablePropList) {
                 if ($null -ne $vm."$updatableEntry") {
-                    Write-Host "Updating $($vm.vmName) $updateableEntry to $($vm."$updatableEntry")"
+                    Write-Host "Updating $($vm.vmName) $updatableEntry to $($vm."$updatableEntry")"
                     Update-VMNoteProperty -vmName $vm.VmName -PropertyName $updatableEntry -PropertyValue $vm."$updatableEntry"
                 }
             }
