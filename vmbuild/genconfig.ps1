@@ -910,7 +910,7 @@ function Get-ExistingVMs {
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [object] $config = $global:Config
     )
-    $existingMachines = get-list -type vm -domain $config.vmOptions.DomainName
+    $existingMachines = get-list -type vm -domain $config.vmOptions.DomainName | Where-Object {$_.vmName}
 
     foreach ($vm in $config.virtualMachines) {
         if ($vm.modified -and $vm.vmName -in $existingMachines.vmName) {
@@ -5117,6 +5117,8 @@ function get-VMString {
         [switch] $colors
 
     )
+
+
 
     $modified = get-IsExistingVMModified -virtualMachine $virtualMachine
 
