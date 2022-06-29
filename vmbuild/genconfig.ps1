@@ -910,7 +910,7 @@ function Get-ExistingVMs {
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [object] $config = $global:Config
     )
-    $existingMachines = get-list -type vm -domain $config.vmOptions.DomainName | Where-Object {$_.vmName}
+    $existingMachines = get-list -type vm -domain $config.vmOptions.DomainName | Where-Object { $_.vmName }
 
     foreach ($vm in $config.virtualMachines) {
         if ($vm.modified -and $vm.vmName -in $existingMachines.vmName) {
@@ -972,7 +972,7 @@ function Select-MainMenu {
                 $global:Config.virtualMachines = $virtualMachines
             }
         }
-        foreach ($virtualMachine in $global:config.virtualMachines | Where-Object {-not $_.Hidden }) {
+        foreach ($virtualMachine in $global:config.virtualMachines | Where-Object { -not $_.Hidden }) {
             if ($null -eq $virtualMachine) {
                 $global:config.virtualMachines | convertTo-Json -Depth 5 | out-host
                 continue
@@ -2689,8 +2689,8 @@ function New-UserConfig {
     $configGenerated = $null
     $configGenerated = [PSCustomObject]@{
         #cmOptions       = $newCmOptions
-        vmOptions               = $vmOptions
-        virtualMachines         = $()
+        vmOptions       = $vmOptions
+        virtualMachines = $()
 
     }
     return $configGenerated
@@ -4644,7 +4644,7 @@ function Select-Options {
         if ($null -eq $property) {
             return $null
         }
-        $existingPropList =$Global:Common.Supported.UpdateablePropList
+        $existingPropList = $Global:Common.Supported.UpdateablePropList
         $isVM = $false
         # Get the Property Names and Values.. Present as Options.
         foreach ($item in (Get-SortedProperties $property)) {
@@ -5131,8 +5131,13 @@ function get-VMString {
     }
 
     $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(17, " ")
-    $mem = $($virtualMachine.memory).PadLeft(4, " ")
-    $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
+    if ($virtualMachine.memory) {
+        $mem = $($virtualMachine.memory).PadLeft(4, " ")
+    }
+    else { $mem = "n/a" }
+    if ($virtualMachine.virtualProcs) {
+        $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
+    }
     $Network = $config.vmOptions.Network
     if ($virtualMachine.Network) {
         $Network = $virtualMachine.Network
@@ -6165,7 +6170,7 @@ function Select-VirtualMachines {
     if (-not $response) {
         $i = 0
         #$valid = Get-TestResult -SuccessOnError
-        foreach ($virtualMachine in $global:config.virtualMachines | Where-Object {-not $_.Hidden }) {
+        foreach ($virtualMachine in $global:config.virtualMachines | Where-Object { -not $_.Hidden }) {
             $i = $i + 1
             $name = Get-VMString -virtualMachine $virtualMachine
             write-Option "$i" "$($name)"
@@ -6258,7 +6263,7 @@ function Select-VirtualMachines {
             }
 
             $ii = 0
-            foreach ($virtualMachine in $global:config.virtualMachines | Where-Object {-not $_.Hidden }) {
+            foreach ($virtualMachine in $global:config.virtualMachines | Where-Object { -not $_.Hidden }) {
                 $i = $i + 1
                 $ii++
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
