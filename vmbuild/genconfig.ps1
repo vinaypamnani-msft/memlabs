@@ -5131,7 +5131,7 @@ function get-VMString {
     }
 
     $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(17, " ")
-    $mem = $($virtualMachine.memory).PadLEft(4, " ")
+    $mem = $($virtualMachine.memory).PadLeft(4, " ")
     $procs = $($virtualMachine.virtualProcs).ToString().PadLeft(2, " ")
     $Network = $config.vmOptions.Network
     if ($virtualMachine.Network) {
