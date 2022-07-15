@@ -5030,6 +5030,9 @@ function Select-Options {
                         $valid = Get-TestResult -SuccessOnError
                     }
                 }
+                if ($name -eq "VmName") {
+                    return "REFRESH"
+                }
             }
         }
     }
@@ -6336,6 +6339,9 @@ function Select-VirtualMachines {
                             return
                         }
                         if ($newValue -eq "REFRESH") {
+                            if ($machineName) {
+                                return
+                            }
                             continue VMLoop
                         }
                         if ($null -ne $newValue -and $newValue -is [string]) {
