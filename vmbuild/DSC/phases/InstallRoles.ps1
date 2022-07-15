@@ -211,17 +211,17 @@ if ($configureSUP) {
                 else {
                     $syncStateString = "Unknown"
                     switch ($($syncState.LastSyncState)) {
-                        6700: { $syncStateString = "WSUS Sync Manager Error" }
-                        6701: { $syncStateString = "WSUS Synchronization Started" }
-                        6702: { $syncStateString = "WSUS Synchronization Done" }
-                        6703: { $syncStateString = "WSUS Synchronization Failed" }
-                        6704: { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
-                        6705: { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
-                        6706: { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
-                        6707: { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
-                        6709: { $syncStateString = "SMS Legacy Update Synchronization started" }
-                        6710: { $syncStateString = "SMS Legacy Update Synchronization done" }
-                        6711: { $syncStateString = "SMS Legacy Update Synchronization failed" }
+                        "6700" { $syncStateString = "WSUS Sync Manager Error" }
+                        "6701" { $syncStateString = "WSUS Synchronization Started" }
+                        "6702" { $syncStateString = "WSUS Synchronization Done" }
+                        "6703" { $syncStateString = "WSUS Synchronization Failed" }
+                        "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
+                        "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
+                        "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
+                        "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
+                        "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
+                        "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
+                        "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
                     }
 
                     Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState) $syncStateString"
