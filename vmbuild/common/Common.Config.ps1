@@ -593,7 +593,7 @@ function Get-SQLAOConfig {
         [Parameter(Mandatory = $true, HelpMessage = "SQLAONAME")]
         [object] $vmName
     )
-
+    Write-Log -verbose "Running Get-SQLAOConfig"
     $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
 
     if (-not $PrimaryAO) {
@@ -621,13 +621,19 @@ function Get-SQLAOConfig {
     #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     if (-not ($PrimaryAO.ClusterIPAddress)) {
-        $vm = Get-List2 -deployConfig $deployConfig -SmartUpdate | where-object { $_.vmName -eq $PrimaryAO.vmName }
+        $vm = Get-List -SmartUpdate -Type VM | where-object { $_.vmName -eq $PrimaryAO.vmName }
         if ($vm.ClusterIPAddress) {
+            write-log "Setting Cluster IP from vmNotes" -verbose
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $vm.ClusterIPAddress -Force
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $vm.AGIPAddress -Force
+        }else {
+            write-log "Cluster IP not found in VMNotes" -verbose
+
         }
     }
     if (-not ($PrimaryAO.ClusterIPAddress)) {
+        write-log "Cluster IP is not yet set. Skipping SQLAO Config"
+        return
         #throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
     }
 
@@ -661,6 +667,7 @@ function Get-SQLAOConfig {
         SQLAOPort                  = 1500
     }
 
+    Write-Log "SQLAO Config Generated"
     return $config
 }
 
@@ -1352,6 +1359,7 @@ function Update-VMFromHyperV {
         try {
             if ($vm.Notes) {
                 $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
+                #write-log -verbose $vmNoteObject
             }
         }
         catch {
