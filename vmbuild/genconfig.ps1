@@ -6583,8 +6583,12 @@ function Select-VirtualMachines {
             }
         }
         if ($newValue -eq "Z") {
+            write-log -verbose "Removing machine $response or $machineName"
             $i = 0
             $removeVM = $true
+            foreach ($virtualMachine in $global:existingMachines) {
+                $i = $i + 1
+            }
             foreach ($virtualMachine in $global:config.virtualMachines) {
                 $i = $i + 1
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
