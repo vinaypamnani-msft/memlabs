@@ -30,6 +30,7 @@ function Write-ValidationMessages {
     }
 }
 
+
 function Test-ValidVmOptions {
     param (
         [object] $ConfigObject,
@@ -523,7 +524,7 @@ function Test-ValidRoleDC {
     if ($containsDC) {
 
         if ($existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported. (Use the BDC role instead)" -ReturnObject $ReturnObject -Warning
         }
 
         # $MyInvocation.BoundParameters.ConfigObject.VirtualMachines | Out-Host
@@ -1015,6 +1016,9 @@ function Test-Configuration {
                     Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Warning
                 }
 
+                if (-not $vm.sqlport) {
+                    Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlport." -ReturnObject $return -Warning
+                }
                 # Minimum SQL Memory
                 if ($VM.memory / 1 -lt 4GB) {
                     Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using SQL." -ReturnObject $return -Failure

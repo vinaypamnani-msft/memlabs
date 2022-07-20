@@ -1227,9 +1227,9 @@ class ChangeSqlInstancePort {
         $_SQLInstanceName = $this.SQLInstanceName
         $_SQLInstancePort = $this.SQLInstancePort
 
-        if ($_SQLInstanceName -eq "MSSQLSERVER") {
-            return
-        }
+        #if ($_SQLInstanceName -eq "MSSQLSERVER") {
+        #    return
+        #}
 
         Try {
             # Load the assemblies
@@ -1240,11 +1240,14 @@ class ChangeSqlInstancePort {
             $mc = new-object Microsoft.SqlServer.Management.Smo.Wmi.ManagedComputer $env:COMPUTERNAME
             $i = $mc.ServerInstances[$_SQLInstanceName]
             $p = $i.ServerProtocols['Tcp']
-            $ip = $p.IPAddresses['IPAll']
-            $ip.IPAddressProperties['TcpDynamicPorts'].Value = ''
-            $ipa = $ip.IPAddressProperties['TcpPort']
-            $ipa.Value = [string]$_SQLInstancePort
+            foreach ($ip in $p.IPAddresses) {
+                #$ip = $p.IPAddresses['IPAll']
+                $ip.IPAddressProperties['TcpDynamicPorts'].Value = ''
+                $ipa = $ip.IPAddressProperties['TcpPort']
+                $ipa.Value = [string]$_SQLInstancePort
+            }
             $p.Alter()
+
 
             New-NetFirewallRule -DisplayName 'SQL over TCP Inbound (Named Instance)' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort $_SQLInstancePort -Group "For SQL Server"
 
@@ -1259,9 +1262,9 @@ class ChangeSqlInstancePort {
         $_SQLInstanceName = $this.SQLInstanceName
         $_SQLInstancePort = $this.SQLInstancePort
 
-        if ($_SQLInstanceName -eq "MSSQLSERVER") {
-            return $true
-        }
+        #if ($_SQLInstanceName -eq "MSSQLSERVER") {
+        #    return $true
+        #}
 
         try {
             # Load the assemblies

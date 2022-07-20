@@ -23,7 +23,7 @@ if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
     $sqlInstanceName = $SQLVM.sqlInstanceName
-    $sqlPort = $SQLVM.thisParams.sqlPort
+    $sqlPort = $SQLVM.sqlPort
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
         $sqlServerName = $SQLVM.AlwaysOnListenerName
@@ -34,7 +34,7 @@ if ($ThisVM.remoteSQLVM) {
 else {
     $sqlServerName = $env:COMPUTERNAME
     $sqlInstanceName = $ThisVM.sqlInstanceName
-    $sqlPort = $ThisVM.thisParams.sqlPort
+    $sqlPort = $ThisVM.sqlPort
 }
 
 # Set Site Code

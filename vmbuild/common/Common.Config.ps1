@@ -47,6 +47,16 @@ function Get-UserConfiguration {
 
         foreach ($vm in $config.VirtualMachines) {
 
+            if ($null -ne $vm.SQLInstanceName) {
+                if ($null -eq $vm.sqlPort) {
+                    if ($vm.SQLInstanceName -eq "MSSQLSERVER") {
+                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "1433"
+                    }
+                    else {
+                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "2433"
+                    }
+                }
+            }
             if ($null -ne $vm.AlwaysOnName ) {
                 if ($null -eq ($vm.AlwaysOnGroupName)) {
                     $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $vm.AlwaysOnName
@@ -626,7 +636,8 @@ function Get-SQLAOConfig {
             write-log "Setting Cluster IP from vmNotes" -verbose
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $vm.ClusterIPAddress -Force
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $vm.AGIPAddress -Force
-        }else {
+        }
+        else {
             write-log "Cluster IP not found in VMNotes" -verbose
 
         }

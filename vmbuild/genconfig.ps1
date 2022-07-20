@@ -1573,7 +1573,22 @@ function select-NewDomainName {
             while (-not $domain) {
                 $domain = Get-Menu -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions -CurrentValue ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1) -Test:$false
                 if ($domain -and ($domain.ToLowerInvariant() -eq "c")) {
-                    $domain = Read-Host2 -Prompt "Enter Custom Domain Name:"
+                    $domain = Read-Host2 -Prompt "Enter Custom Domain Name (eg test.com):"
+                    if (-not $domain.Contains(".")) {
+                        Write-Host
+                        Write-RedX -ForegroundColor FireBrick "domainName value [$($domain)] is invalid. You must specify the Full Domain name. For example: contoso.com"
+                        $domain = $null
+                        continue
+                    }
+
+                    # valid domain name
+                    $pattern = "^((?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,6}$"
+                    if (-not ($domain -match $pattern)) {
+                        Write-Host
+                        Write-RedX -ForegroundColor FireBrick "domainName value [$($domain)] contains invalid characters, is too long, or too short. You must specify a valid Domain name. For example: contoso.com."
+                        $domain = $null
+                        continue
+                    }
                 }
                 if ($domain.Length -lt 3) {
                     $domain = $null
@@ -1582,7 +1597,7 @@ function select-NewDomainName {
             if ($domain) {
                 if ((get-list -Type UniqueDomain) -contains $domain.ToLowerInvariant()) {
                     Write-Host
-                    Write-Host2 -ForegroundColor FireBrick "Domain is already in use. Please use the Expand option to expand the domain"
+                    Write-RedX -ForegroundColor FireBrick "Domain is already in use. Please use the Expand option to expand the domain"
                     continue
                 }
             }
@@ -3566,6 +3581,7 @@ Function Set-SiteServerLocalSql {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
     }
     if ($virtualMachine.Role -eq "WSUS") {
         $virtualMachine.virtualProcs = 4
@@ -3616,6 +3632,7 @@ Function Set-SiteServerRemoteSQL {
         $virtualMachine.PsObject.Members.Remove('sqlVersion')
         $virtualMachine.PsObject.Members.Remove('sqlInstanceName')
         $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
+        $virtualMachine.PsObject.Members.Remove('sqlPort')
     }
     $virtualMachine.memory = "4GB"
     $virtualMachine.virtualProcs = 4
@@ -3712,6 +3729,7 @@ Function Get-remoteSQLVM {
             "w" {
                 $virtualMachine.PsObject.Members.Remove('sqlVersion')
                 $virtualMachine.PsObject.Members.Remove('sqlInstanceName')
+                $virtualMachine.PsObject.Members.Remove('sqlPort')
                 $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
                 $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
 
@@ -4077,6 +4095,33 @@ function Get-AdditionalValidations {
             }
         }
         "sqlInstanceName" {
+            if ($CurrentValue -eq "MSSQLSERVER") {
+                if ($Value -ne "MSSQLSERVER") {
+                    $property.sqlPort = "2433"
+                }
+            }
+            else {
+                if ($Value -eq "MSSQLSERVER") {
+                    $property.sqlPort = "1433"
+                }
+            }
+
+            if ($property.Role -eq "SQLAO") {
+                $SQLAO = @($property)
+                if ($property.OtherNode) {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
+                }
+                else {
+                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
+                }
+                foreach ($sql in $SQLAO) {
+                    $sql.$name = $value
+                    $sql.sqlPort = $property.sqlPort
+                }
+            }
+
+        }
+        "sqlPort" {
             if ($property.Role -eq "SQLAO") {
                 $SQLAO = @($property)
                 if ($property.OtherNode) {
@@ -4450,6 +4495,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "sqlInstanceDir") {
         $sorted += "sqlInstanceDir"
     }
+    if ($members.Name -contains "sqlPort") {
+        $sorted += "sqlPort"
+    }
     if ($members.Name -contains "remoteSQLVM") {
         $sorted += "remoteSQLVM"
     }
@@ -4506,6 +4554,7 @@ function Get-SortedProperties {
         "sqlVersion" { }
         "sqlInstanceName" {  }
         "sqlInstanceDir" { }
+        "sqlPort" { }
         "additionalDisks" { }
         "cmInstallDir" { }
         "domainName" { }
@@ -5231,16 +5280,19 @@ function get-VMString {
                     $ColorMap.Add($vm.SiteCode, $CASColors[$casCount])
                 }
                 catch {
-                    $ColorMap.Add($vm.SiteCode, "HotPink")
+                    break
+                    #$ColorMap.Add($vm.SiteCode, "HotPink")
                 }
                 $casCount++
             }
             "Primary" {
+                #write-log "Adding color $($PRIColors[$priCount]) for $($vm.VmName)"
                 try {
                     $ColorMap.Add($vm.SiteCode, $PRIColors[$priCount])
                 }
                 catch {
-                    $ColorMap.Add($vm.SiteCode, "HotPink")
+                    break
+                    #$ColorMap.Add($vm.SiteCode, "HotPink")
                 }
                 $priCount++
             }
@@ -5249,7 +5301,8 @@ function get-VMString {
                     $ColorMap.Add($vm.SiteCode, $SECColors[$secCount])
                 }
                 catch {
-                    $ColorMap.Add($vm.SiteCode, "HotPink")
+                    #$ColorMap.Add($vm.SiteCode, "HotPink")
+                    break
                 }
                 $secCount++
             }
@@ -5547,6 +5600,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $disk = [PSCustomObject]@{"E" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.Memory = "7GB"
@@ -5560,6 +5614,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $disk = [PSCustomObject]@{"E" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.Memory = "7GB"
@@ -5572,6 +5627,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
             $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
@@ -5608,6 +5664,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
             $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
@@ -6393,6 +6450,7 @@ function Select-VirtualMachines {
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
                                 $virtualMachine.virtualProcs = 4
                                 if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
                                     $virtualMachine.memory = "4GB"
@@ -6411,6 +6469,7 @@ function Select-VirtualMachines {
                             $virtualMachine.psobject.properties.remove('sqlversion')
                             $virtualMachine.psobject.properties.remove('sqlInstanceDir')
                             $virtualMachine.psobject.properties.remove('sqlInstanceName')
+                            $virtualMachine.psobject.properties.remove('sqlPort')
                             $virtualMachine.psobject.properties.remove('SqlServiceAccount')
                             $virtualMachine.psobject.properties.remove('SqlAgentAccount')
                             Rename-VirtualMachine -vm $virtualMachine

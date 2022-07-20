@@ -953,12 +953,12 @@ function ConvertTo-DeployConfigEx {
             $backupSolutionURL = "https://ola.hallengren.com/scripts/MaintenanceSolution.sql"
             $thisParams | Add-Member -MemberType NoteProperty -Name "backupSolutionURL" -Value $backupSolutionURL -Force
 
-            if ($thisvm.sqlInstanceName -eq "MSSQLSERVER" ) {
-                $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 1433 -Force
-            }
-            else {
-                $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 2433 -Force
-            }
+            #if ($thisvm.sqlInstanceName -eq "MSSQLSERVER" ) {
+            #    $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 1433 -Force
+            #}
+            #else {
+            #    $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 2433 -Force
+            #}
 
             $DomainAdminName = $deployConfig.vmOptions.adminName
             $DomainName = $deployConfig.vmOptions.domainName
