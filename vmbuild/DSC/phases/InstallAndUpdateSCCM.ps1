@@ -272,6 +272,7 @@ SysCenterId=
     $Configuration.InstallSCCM.Status = 'Completed'
     $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    start-sleep -seconds 60
 
 }
 else {

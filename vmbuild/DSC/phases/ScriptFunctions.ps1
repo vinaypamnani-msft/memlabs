@@ -106,28 +106,35 @@ function Get-SMSProvider {
         NamespacePath = $null
     }
 
-    # try local provider first
-    $localTest = Get-WmiObject -Namespace "root\SMS\Site_$SiteCode" -Class "SMS_Site" -ErrorVariable WmiErr
-    if ($localTest -and $WmiErr.Count -eq 0) {
-        $return.FQDN = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
-        $return.NamespacePath = "root\SMS\Site_$SiteCode"
-        return $return
-    }
+    $retry = 0
 
-    # loop through providers
-    $providers = Get-WmiObject -class "SMS_ProviderLocation" -Namespace "root\SMS"
-    foreach ($provider in $providers) {
-
-        # Test provider
-        Get-WmiObject -Namespace $provider.NamespacePath -Class SMS_Site -ErrorVariable WmiErr | Out-Null
-        if ($WmiErr.Count -gt 0) {
-            continue
-        }
-        else {
-            $return.FQDN = $provider.Machine
+    while ($retry -lt 4) {
+        # try local provider first
+        $localTest = Get-WmiObject -Namespace "root\SMS\Site_$SiteCode" -Class "SMS_Site" -ErrorVariable WmiErr
+        if ($localTest -and $WmiErr.Count -eq 0) {
+            $return.FQDN = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
             $return.NamespacePath = "root\SMS\Site_$SiteCode"
             return $return
         }
+
+        # loop through providers
+        $providers = Get-WmiObject -class "SMS_ProviderLocation" -Namespace "root\SMS"
+        foreach ($provider in $providers) {
+
+            # Test provider
+            Get-WmiObject -Namespace $provider.NamespacePath -Class SMS_Site -ErrorVariable WmiErr | Out-Null
+            if ($WmiErr.Count -gt 0) {
+                continue
+            }
+            else {
+                $return.FQDN = $provider.Machine
+                $return.NamespacePath = "root\SMS\Site_$SiteCode"
+                return $return
+            }
+        }
+        $retry++
+        $seconds = $retry * 45
+        start-sleep -seconds $seconds
     }
 
     return $return
@@ -307,7 +314,7 @@ function Install-SUP {
         $installed = Get-CMSoftwareUpdatePoint -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
             Write-DscStatus "SUP Role not detected on $ServerFQDN. Adding Software Update Point role."
-            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531| Out-File $global:StatusLog -Append
+            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 60
         }
         else {
@@ -409,7 +416,7 @@ function Get-UpdatePack {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
     $CMPSSuppressFastNotUsedCheck = $true
 
-    $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion"} # filter hotfixes
+    $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" } # filter hotfixes
     $getupdateretrycount = 0
     while ($updatepacklist.Count -eq 0) {
 
@@ -423,7 +430,7 @@ function Get-UpdatePack {
         Invoke-CMSiteUpdateCheck -ErrorAction Ignore
         Start-Sleep 120
 
-        $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion"} # filter hotfixes
+        $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" } # filter hotfixes
     }
 
     $updatepack = ""
