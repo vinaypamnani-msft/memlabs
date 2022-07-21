@@ -2402,7 +2402,17 @@ function Get-VmSession {
 
 function Get-StorageConfig {
 
-    $configPath = Join-Path $Common.ConfigPath "_storageConfig.json"
+
+    $storageConfigName = "_storageConfig2022.json"
+
+    $configPath = Join-Path $Common.ConfigPath $storageConfigName
+
+    if (-not (Test-Path $configPath)) {
+        $configPath = Join-Path $Common.ConfigPath "_storageConfig.json"
+        $GetNewStorageConfig = $true
+    }
+
+
 
     if (-not (Test-Path $configPath)) {
         $Common.FatalError = "Storage Config not found. Refer internal documentation."
@@ -2432,12 +2442,35 @@ function Get-StorageConfig {
             $fileListName = "_fileList_develop.json"
         }
         $fileListPath = Join-Path $Common.AzureFilesPath $fileListName
+        $storageConfigPath = Join-Path $Common.ConfigPath $storageConfigName
         $fileListLocation = "$($StorageConfig.StorageLocation)/$fileListName"
 
         # See if image list needs to be updated
         if (Test-Path $fileListPath) {
             $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             $updateList = $Common.AzureFileList.UpdateFromStorage
+        }
+
+        # Update StorageConfig
+
+        if ($GetNewStorageConfig -and -not $InJob.IsPresent){
+            $storageConfigLocation = "$($StorageConfig.StorageLocation)/$storageConfigName"
+            Write-Log "Updating $($storageConfigNam) from azure storage" -LogOnly
+            $storageConfigURL = $storageConfigLocation + "?$($StorageConfig.StorageToken)"
+            try {
+                $response = Invoke-WebRequest -Uri $storageConfigURL -UseBasicParsing -ErrorAction Stop
+            }
+            catch {
+                start-sleep -second 5
+                $response = Invoke-WebRequest -Uri $storageConfigURL -sUseBasicParsing -ErrorAction Stop
+            }
+            if (-not $response) {
+                Write-Log "Failed to download updated storage config"
+            }
+            else {
+                $response.Content.Trim() | Out-File -FilePath $storageConfigPath -Force -ErrorAction SilentlyContinue
+            }
+
         }
 
         # Update file list
