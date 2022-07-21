@@ -12,6 +12,7 @@ param (
             if ($WordToComplete) { $ConfigPaths = $ConfigPaths | Where-Object { $_.Name.ToLowerInvariant().StartsWith($WordToComplete) } }
             $ConfigNames = ForEach ($Path in $ConfigPaths) {
                 if ($Path.Name -eq "_storageConfig.json") { continue }
+                if ($Path.Name -eq "_storageConfig2022.json") { continue }
                 If (Test-Path $Path) {
                     (Get-ChildItem $Path).BaseName
                 }
