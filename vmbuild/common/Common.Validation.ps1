@@ -1016,8 +1016,10 @@ function Test-Configuration {
                     Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Warning
                 }
 
-                if (-not $vm.sqlport) {
-                    Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlport." -ReturnObject $return -Warning
+                if ($vm.Role -ne "Secondary") {
+                    if (-not $vm.sqlport) {
+                        Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlport." -ReturnObject $return -Warning
+                    }
                 }
                 # Minimum SQL Memory
                 if ($VM.memory / 1 -lt 4GB) {

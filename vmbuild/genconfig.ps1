@@ -6450,7 +6450,9 @@ function Select-VirtualMachines {
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
+                                if ($virtualMachine.Role -ne "Secondary") {
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
+                                }
                                 $virtualMachine.virtualProcs = 4
                                 if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
                                     $virtualMachine.memory = "4GB"

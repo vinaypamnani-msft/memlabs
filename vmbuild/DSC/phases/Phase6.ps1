@@ -38,8 +38,13 @@ configuration Phase6
                 $sqlServer = $thisVM.vmName
             }
 
-            if ($thisVM.sqlInstanceName -and $thisVM.sqlInstanceName -ne "MSSQLSERVER") {
-                $sqlServer = $sqlServer + "\" + $thisVM.sqlInstanceName
+            $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $sqlServer }
+            #
+            if ($sqlServerVM.sqlInstanceName) {
+                $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
+            }
+            if ($sqlServerVM.sqlPort -ne "1433") {
+                $sqlServer = $sqlServer + "," + $sqlServerVM.sqlPort
             }
         }
         else {

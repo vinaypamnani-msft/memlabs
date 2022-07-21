@@ -53,9 +53,17 @@ configuration Phase7
         }
 
         $SqlServerInstance = $SqlServer.vmName
-        if ($SqlServer.SqlInstanceName -and $SqlServer.SqlInstanceName -ne "MSSQLSERVER") {
-            $SqlServerInstance = $SqlServerInstance + "\" + $SqlServer.SqlInstanceName
+
+
+        $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $SqlServerInstance }
+        #
+        if ($sqlServerVM.sqlInstanceName) {
+            $SqlServerInstance = $SqlServerInstance + "\" + $sqlServerVM.sqlInstanceName
         }
+        if ($sqlServerVM.sqlPort -ne "1433") {
+            $SqlServerInstance = $SqlServerInstance + "," + $sqlServerVM.sqlPort
+        }
+
 
         WriteStatus ImportModule {
             Status    = "Importing SQLServer Module"
