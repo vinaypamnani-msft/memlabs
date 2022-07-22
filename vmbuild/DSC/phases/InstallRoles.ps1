@@ -101,11 +101,27 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
     $sqlServerName = $sqlServer.vmName + "." + $DomainFullName
 
     #Add the SQL Instance if there is one
-    if ($sqlServer.sqlInstance -and $sqlServer.sqlInstance -ne "MSSQLSERVER") {
-        $sqlServerName += "\" + $sqlServer.SqlInstanceName
+    #if ($sqlServer.sqlInstance -and $sqlServer.sqlInstance -ne "MSSQLSERVER") {
+    #    $sqlServerName += "\" + $sqlServer.SqlInstanceName
+    #}
+
+    #Add the SQL Instance, and port
+    if ($sqlServer.sqlInstanceName) {
+        $sqlServerName = $sqlServerName + "\" + $sqlServer.sqlInstanceName
+    }
+    if ($sqlServer.sqlPort -ne "1433") {
+        $sqlServerName = $sqlServerName + "," + $sqlServer.sqlPort
     }
 
     $PBIRSMachine = $rp.vmName + "." + $DomainFullName
+
+    $cm_svc_file = "$LogPath\cm_svc.txt"
+    if (Test-Path $cm_svc_file) {
+        # Add cm_svc user as a CM Account
+        $unencrypted = Get-Content $cm_svc_file
+    }
+
+    Add-ReportingUser -SiteCode $thisSiteCode -UserName $username -Unencrypted $unencrypted
     Install-SRP -ServerSiteCode $thisSiteCode -ServerFQDN $PBIRSMachine -UserName $username -SqlServerName $sqlServerName -DatabaseName $databaseName
 }
 

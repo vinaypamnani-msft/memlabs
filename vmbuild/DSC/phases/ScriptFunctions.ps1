@@ -332,6 +332,42 @@ function Install-SUP {
     } until ($installed -or $installFailure)
 }
 
+
+function Add-ReportingUser {
+    [CmdletBinding()]
+    Param(
+        [string]
+        $SiteCode,
+        [string]
+        $UserName,
+        [Parameter(Mandatory = $true)]
+        [String]$unencrypted
+    )
+
+    # Encrypt the Password
+    $SMSSite = "SMS_Site"
+    $class_PWD = [wmiclass]""
+    $class_PWD.psbase.Path = "ROOT\SMS\site_$($SiteCode):$($SMSSite)"
+    $Parameters = $class_PWD.GetMethodParameters("EncryptDataEx")
+    $Parameters.Data = $unencrypted
+    $Parameters.SiteCode = $SiteCode
+    $encryptedPassword = $class_PWD.InvokeMethod("EncryptDataEx", $Parameters, $null)
+
+    # Create the user in the site
+    $SMSSCIReserved = "SMS_SCI_Reserved"
+    $class_User = [wmiclass]""
+    $class_User.psbase.Path = "ROOT\SMS\Site_$($SiteCode):$($SMSSCIReserved)"
+    $user = $class_User.createInstance()
+    $user.ItemName = "$($UserName)|0"
+    $user.ItemType = "User"
+    $user.UserName = $UserName
+    $user.Availability = "0"
+    $user.FileType = "2"
+    $user.SiteCode = $SiteCode
+    $user.Reserved2 = $encryptedPassword.EncryptedData.ToString()
+    $user.Put() | Out-Null
+}
+
 function Install-SRP {
     param (
         [string]
@@ -355,7 +391,7 @@ function Install-SRP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode 2>&1 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         }
@@ -363,7 +399,7 @@ function Install-SRP {
         $installed = Get-CMReportingServicePoint -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
             Write-DscStatus "Reporting Point Role not detected on $ServerFQDN. Adding Reporting Point Point role using DB Server [$SqlServerName], DB Name [$DatabaseName], UserName [$UserName]"
-            Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" | Out-File $global:StatusLog -Append
+            Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" 2>&1 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 60
         }
         else {
