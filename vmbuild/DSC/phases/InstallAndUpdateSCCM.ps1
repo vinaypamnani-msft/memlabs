@@ -108,7 +108,7 @@ Action=%InstallAction%
 Preview=0
 
 [Options]
-ProductID=EVAL
+ProductID=%ProductID%
 SiteCode=%SiteCode%
 SiteName=%SiteName%
 SMSInstallDir=%InstallDir%
@@ -151,6 +151,11 @@ SysCenterId=
 
     # Set ini values
     $installAction = if ($CurrentRole -eq "CAS") { "InstallCAS" } else { "InstallPrimarySite" }
+    $productID = "EVAL"
+    if ($($deployConfig.parameters.ProductID)){
+        $productID = $($deployConfig.parameters.ProductID)
+    }
+    $cmini = $cmini.Replace('%ProductID%', $productID)
     $cmini = $cmini.Replace('%InstallAction%', $installAction)
     $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
     $cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")

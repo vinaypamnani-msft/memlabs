@@ -2445,6 +2445,14 @@ function Get-StorageConfig {
         $storageConfigPath = Join-Path $Common.ConfigPath $storageConfigName
         $fileListLocation = "$($StorageConfig.StorageLocation)/$fileListName"
 
+
+        $productIDName = "productID.txt"
+        $productID = "productID"
+        $productIdPath = "E:\$productIDName"
+        $procuctIdLocation = "$($StorageConfig.StorageLocation)/$productIDName"
+
+
+
         # See if image list needs to be updated
         if (Test-Path $fileListPath) {
             $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -2453,48 +2461,74 @@ function Get-StorageConfig {
 
         # Update StorageConfig
 
-        if ($GetNewStorageConfig -and -not $InJob.IsPresent){
-            $storageConfigLocation = "$($StorageConfig.StorageLocation)/$storageConfigName"
-            Write-Log "Updating $($storageConfigNam) from azure storage" -LogOnly
-            $storageConfigURL = $storageConfigLocation + "?$($StorageConfig.StorageToken)"
-            try {
-                $response = Invoke-WebRequest -Uri $storageConfigURL -UseBasicParsing -ErrorAction Stop
-            }
-            catch {
-                start-sleep -second 5
-                $response = Invoke-WebRequest -Uri $storageConfigURL -sUseBasicParsing -ErrorAction Stop
-            }
-            if (-not $response) {
-                Write-Log "Failed to download updated storage config"
-            }
-            else {
-                $response.Content.Trim() | Out-File -FilePath $storageConfigPath -Force -ErrorAction SilentlyContinue
+        if (-not $InJob.IsPresent) {
+
+            if ($GetNewStorageConfig) {
+                $storageConfigLocation = "$($StorageConfig.StorageLocation)/$storageConfigName"
+                Write-Log "Updating $($storageConfigNam) from azure storage" -LogOnly
+                $storageConfigURL = $storageConfigLocation + "?$($StorageConfig.StorageToken)"
+                try {
+                    $response = Invoke-WebRequest -Uri $storageConfigURL -UseBasicParsing -ErrorAction Stop
+                }
+                catch {
+                    start-sleep -second 5
+                    $response = Invoke-WebRequest -Uri $storageConfigURL -sUseBasicParsing -ErrorAction Stop
+                }
+                if (-not $response) {
+                    Write-Log "Failed to download updated storage config"
+                }
+                else {
+                    $response.Content.Trim() | Out-File -FilePath $storageConfigPath -Force -ErrorAction SilentlyContinue
+                }
+
             }
 
-        }
+            # Update file list
+            if (($updateList) -or -not (Test-Path $fileListPath)) {
 
-        # Update file list
-        if (($updateList -and -not $InJob.IsPresent) -or -not (Test-Path $fileListPath)) {
+                Write-Log "Updating fileList from azure storage" -LogOnly
 
-            Write-Log "Updating fileList from azure storage" -LogOnly
+                # Get file list
+                #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
+                $fileListUrl = $fileListLocation + "?$($StorageConfig.StorageToken)"
+                try {
+                    $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+                }
+                catch {
+                    start-sleep -second 5
+                    $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+                }
+                if (-not $response) {
+                    $Common.FatalError = "Failed to download file list."
+                }
+                else {
+                    $response.Content.Trim() | Out-File -FilePath $fileListPath -Force -ErrorAction SilentlyContinue
+                    $Common.AzureFileList = $response.Content.Trim() | ConvertFrom-Json -ErrorAction Stop
+                }
 
-            # Get file list
-            #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
-            $fileListUrl = $fileListLocation + "?$($StorageConfig.StorageToken)"
-            try {
-                $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
             }
-            catch {
-                start-sleep -second 5
-                $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+
+            # Get ProductID
+
+            if (-not (Test-Path $productIdPath)) {
+
+                Write-Log "Updating $($productIDName) from azure storage" -LogOnly
+                $productIDURL = $procuctIdLocation + "?$($StorageConfig.StorageToken)"
+                try {
+                    $response = Invoke-WebRequest -Uri $productIDURL -UseBasicParsing -ErrorAction Stop
+                }
+                catch {
+                    start-sleep -second 5
+                    $response = Invoke-WebRequest -Uri $productIDURL -sUseBasicParsing -ErrorAction Stop
+                }
+                if (-not $response) {
+                    Write-Log "Failed to download updated Product ID"
+                }
+                else {
+                    $response.Content.Trim() | Out-File -FilePath $productIdPath -Force -ErrorAction SilentlyContinue
+                }
             }
-            if (-not $response) {
-                $Common.FatalError = "Failed to download file list."
-            }
-            else {
-                $response.Content.Trim() | Out-File -FilePath $fileListPath -Force -ErrorAction SilentlyContinue
-                $Common.AzureFileList = $response.Content.Trim() | ConvertFrom-Json -ErrorAction Stop
-            }
+
 
         }
 

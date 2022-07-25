@@ -263,6 +263,15 @@ function New-DeployConfig {
             }
         }
 
+        $productID = "productID"
+        $productIdPath = "E:\$productID.txt"
+        if (Test-Path $productIdPath) {
+            $prodid = Get-Content $productIdPath -ErrorAction SilentlyContinue
+            if ($prodid) {
+                $params | Add-Member -MemberType NoteProperty -Name $productID -Value $prodid.Trim() -Force
+            }
+        }
+
         $deploy = [PSCustomObject]@{
             cmOptions       = $configObject.cmOptions
             vmOptions       = $configObject.vmOptions
@@ -1418,18 +1427,31 @@ function Update-VMFromHyperV {
         $vmObject.Role = "SiteSystem"
     }
 
-    if ($vmObject.Role -eq "SiteSystem") {
+    #add missing Properties
+    if ($vmObject.Role -in "SiteSystem", "CAS", "Primary") {
         if ($null -eq $vmObject.InstallRP) {
             $vmObject | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
         }
         if ($null -eq $vmObject.InstallSUP) {
             $vmObject | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $false -Force
         }
-        if ($null -eq $vmObject.InstallMP) {
-            $vmObject | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $false -Force
+        if ($vmObject.Role -eq "SiteSystem") {
+            if ($null -eq $vmObject.InstallMP) {
+                $vmObject | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $false -Force
+            }
+            if ($null -eq $vmObject.InstallDP) {
+                $vmObject | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
+            }
         }
-        if ($null -eq $vmObject.InstallDP) {
-            $vmObject | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
+    }
+
+    if ($vmObject.SqlVersion) {
+        foreach ($listVM in $global:vm_List) {
+            if ($listVM.RemoteSQLVM -eq $vmObject.VmName) {
+                if ($null -eq $vmObject.InstallRP) {
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                }
+            }
         }
     }
 
@@ -1456,7 +1478,7 @@ function Get-List {
     )
 
     $doSmartUpdate = $SmartUpdate.IsPresent
-
+    $inMutex = $false
     #Get-PSCallStack | out-host
     if ($global:DisableSmartUpdate -eq $true) {
         $doSmartUpdate = $false
@@ -1466,6 +1488,7 @@ function Get-List {
         $mtx = New-Object System.Threading.Mutex($false, $mutexName)
         #write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly -Verbose
         [void]$mtx.WaitOne()
+        $inMutex = $true
         #write-log "acquired '$mutexName' Mutex" -LogOnly -Verbose
     }
     try {
@@ -1532,7 +1555,7 @@ function Get-List {
             }
         }
 
-        if (-not $global:vm_List) {
+        if (-not $global:vm_List -and $inMutex) {
 
             try {
                 #This may have been populated while waiting for mutex

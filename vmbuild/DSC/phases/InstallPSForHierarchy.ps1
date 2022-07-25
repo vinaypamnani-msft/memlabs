@@ -109,7 +109,7 @@ Action=InstallPrimarySite
 CDLatest=1
 
 [Options]
-ProductID=EVAL
+ProductID=%ProductID%
 SiteCode=%SiteCode%
 SiteName=%SiteName%
 SMSInstallDir=%InstallDir%
@@ -155,6 +155,12 @@ CCARSiteServer=%CASMachineFQDN%
 
     # Set ini values
     $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
+    $productID = "EVAL"
+    if ($($deployConfig.parameters.ProductID)){
+        $productID = $($deployConfig.parameters.ProductID)
+    }
+    $cmini = $cmini.Replace('%ProductID%', $productID)
+
     $cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")
     $cmini = $cmini.Replace('%SQLMachineFQDN%', "$sqlServerName.$DomainFullName")
     $cmini = $cmini.Replace('%SiteCode%', $SiteCode)
