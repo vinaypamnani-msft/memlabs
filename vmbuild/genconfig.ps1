@@ -317,7 +317,7 @@ function Select-DomainMenu {
 
     $domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false -return
     if ([string]::isnullorwhitespace($domain)) {
-        return $null
+        return
     }
 
     Write-Verbose "2 Select-DomainMenu"
@@ -6312,7 +6312,9 @@ function Select-VirtualMachines {
                         }
                         else {
                             Remove-VirtualMachine -VmName $virtualMachine.vmName
-                            $global:Config.existingVirtualMachines = $global:Config.existingVirtualMachines | where-object { $_.vmName -ne $virtualMachine.vmName }
+                            if ($global:Config.existingVirtualMachines) {
+                                $global:Config.existingVirtualMachines = $global:Config.existingVirtualMachines | where-object { $_.vmName -ne $virtualMachine.vmName }
+                            }
                             Get-List -type VM -SmartUpdate | Out-Null
                             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
                             return
