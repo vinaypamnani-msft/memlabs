@@ -19,7 +19,7 @@ $PSVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisVM.thi
 # Read locale settings
 $locale = $deployConfig.vmOptions.locale
 $cmLanguage = "ENG"
-if ($locale -ne "en-US") {
+if ($locale -and $locale -ne "en-US") {
     $localeConfigPath = "C:\staging\locale\_localeConfig.json"
     $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     $cmLanguage = $localeConfig.$locale.CMLanguage
