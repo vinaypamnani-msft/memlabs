@@ -142,6 +142,9 @@ SysCenterId=
 [HierarchyExpansionOption]
 CCARSiteServer=%CASMachineFQDN%
 
+[SABranchOptions]
+SAActive=1
+CurrentBranch=1
 '@
 
     # Get SQL instance info

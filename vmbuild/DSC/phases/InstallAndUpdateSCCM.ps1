@@ -142,6 +142,10 @@ ProxyPort=
 SysCenterId=
 
 [HierarchyExpansionOption]
+
+[SABranchOptions]
+SAActive=1
+CurrentBranch=1
 '@
 
     # Get SQL instance info
