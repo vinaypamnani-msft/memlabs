@@ -918,6 +918,42 @@ function Get-ExistingVMs {
         }
     }
 
+    foreach ($evm in $existingMachines) {
+        if ($null -ne $evm.deployedOS) {
+            $evm.PsObject.Members.Remove("deployedOS")
+        }
+        if ($null -ne $evm.switch) {
+            $evm.PsObject.Members.Remove("switch")
+        }
+        if ($null -ne $evm.vmBuild) {
+            $evm.PsObject.Members.Remove("vmBuild")
+        }
+        if ($null -ne $evm.success) {
+            $evm.PsObject.Members.Remove("success")
+        }
+        if ($null -ne $evm.source) {
+            $evm.PsObject.Members.Remove("source")
+        }
+        if ($null -ne $evm.memoryGB) {
+            $evm.PsObject.Members.Remove("memoryGB")
+        }
+        if ($null -ne $evm.memoryStartupGB) {
+            $evm.PsObject.Members.Remove("memoryStartupGB")
+        }
+        if ($null -ne $evm.memLabsDeployVersion) {
+            $evm.PsObject.Members.Remove("memLabsDeployVersion")
+        }
+        if ($null -ne $evm.inProgress) {
+            $evm.PsObject.Members.Remove("inProgress")
+        }
+        if ($null -ne $evm.lastUpdate) {
+            $evm.PsObject.Members.Remove("lastUpdate")
+        }
+        if ($null -ne $evm.DiskUsedGB) {
+            $evm.PsObject.Members.Remove("DiskUsedGB")
+        }
+    }
+
 
 
     return $existingMachines
@@ -5175,7 +5211,7 @@ function get-VMString {
     $modified = get-IsExistingVMModified -virtualMachine $virtualMachine
 
 
-    if ($virtualMachine.source -eq "HyperV") {
+    if ($virtualMachine.source -eq "hyperv" -or $virtualMachine.vmId) {
         $machineName = $($virtualMachine.vmName).PadRight(19, " ")
     }
     else {

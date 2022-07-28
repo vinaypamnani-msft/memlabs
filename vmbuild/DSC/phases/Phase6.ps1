@@ -43,7 +43,7 @@ configuration Phase6
             if ($sqlServerVM.sqlInstanceName) {
                 $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
             }
-            if ($sqlServerVM.sqlPort -ne "1433") {
+            if ($sqlServerVM.sqlPort) {
                 $sqlServer = $sqlServer + "," + $sqlServerVM.sqlPort
             }
         }

@@ -71,6 +71,34 @@ function Get-UserConfiguration {
             if ($vm.role -eq "DPMP") {
                 $vm.role = "SiteSystem"
             }
+
+            #add missing Properties
+            if ($vm.Role -in "SiteSystem", "CAS", "Primary") {
+                if ($null -eq $vm.InstallRP) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                }
+                if ($null -eq $vm.InstallSUP) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $false -Force
+                }
+                if ($vm.Role -eq "SiteSystem") {
+                    if ($null -eq $vm.InstallMP) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $false -Force
+                    }
+                    if ($null -eq $vm.InstallDP) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
+                    }
+                }
+            }
+
+            if ($vm.SqlVersion) {
+                foreach ($listVM in $config.VirtualMachines) {
+                    if ($listVM.RemoteSQLVM -eq $vm.VmName) {
+                        if ($null -eq $vm.InstallRP) {
+                            $vm | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                        }
+                    }
+                }
+            }
         }
 
         if ($null -ne $config.cmOptions.updateToLatest ) {
@@ -94,6 +122,9 @@ function Get-UserConfiguration {
                 }
             }
         }
+
+
+
 
         $return.Loaded = $true
         $return.Config = $config

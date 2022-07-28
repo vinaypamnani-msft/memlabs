@@ -1020,6 +1020,12 @@ function Test-Configuration {
                     if (-not $vm.sqlport) {
                         Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlport." -ReturnObject $return -Warning
                     }
+                    if ($vm.sqlport -lt 1 -or $vm.sqlPort -gt 65535) {
+                        Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] sqlport Out of range" -ReturnObject $return -Warning
+                    }
+                    if ($vm.sqlport -in 21,80,135,139,443,445,860,1434,2382,2383,2393,2394,2725,3260,3389,4022,5022,7022) {
+                        Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] sqlPort can not use OS reserved port #" -ReturnObject $return -Warning
+                    }
                 }
                 # Minimum SQL Memory
                 if ($VM.memory / 1 -lt 4GB) {
