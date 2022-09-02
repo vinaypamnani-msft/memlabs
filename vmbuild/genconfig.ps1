@@ -3326,7 +3326,7 @@ Function Get-ValidSiteCodesForRP {
 
     $list2 = Get-List2 -deployConfig $Config
 
-    $allSiteCodes = ($list2 | where-object { $_.role -in ("CAS", "Primary") }).SiteCode
+    $allSiteCodes = ($list2 | where-object { $_.role -in ("CAS", "Primary", "SiteSystem") }).SiteCode
 
     $currentRPs = ($list2 | Where-Object { $_.installRP -and $_.vmName -ne $CurrentVM.vmName } )
 
@@ -5020,6 +5020,8 @@ function Select-Options {
                             if ($property.InstallDP) {
                                 Add-ErrorMessage -property $name "Can not install a DP on a CAS site. Automatically disabled"
                                 $property.InstallDP = $false
+                                $property.PsObject.Members.Remove("enablePullDP")
+                                $property.PsObject.Members.Remove("pullDPSourceDP")
                             }
                         }
                         Rename-VirtualMachine -vm $property
@@ -5252,6 +5254,9 @@ function get-VMString {
         if ($virtualMachine.installSUP) {
             $name += " [SUP]"
         }
+        if ($virtualMachine.installRP) {
+            $name += " [RP]"
+        }
         $name = $name.PadRight(39, " ")
     }
 
@@ -5277,6 +5282,9 @@ function get-VMString {
         if ($virtualMachine.installSUP) {
             $temp += " [SUP]"
         }
+        if ($virtualMachine.installRP) {
+            $temp += " [RP]"
+        }
         $name += $temp.PadRight(39, " ")
     }
 
@@ -5295,6 +5303,14 @@ function get-VMString {
         $name += "$($virtualMachine.sqlInstanceName) ($($virtualMachine.sqlInstanceDir))]"
     }
 
+    if ($virtualMachine.sqlVersion) {
+        if ($virtualMachine.installSUP) {
+            $name += " [SUP]"
+        }
+        if ($virtualMachine.installRP) {
+            $name += " [RP]"
+        }
+    }
     write-log "Name is $name" -verbose
 
     $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen", "%MediumSeaGreen", "%SpringGreen", "%Lime", "%LimeGreen")

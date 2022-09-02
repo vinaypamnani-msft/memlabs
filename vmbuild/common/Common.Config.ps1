@@ -355,6 +355,46 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
+    # Add Primary to list, when adding SiteSystem
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+    foreach ($system in $systems) {
+        $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
+        if ($systemSite) {
+            Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
+        }
+
+        if ($systemSite.pullDPSourceDP) {
+            Add-ExistingVMToDeployConfig -vmName $systemSite.pullDPSourceDP -configToModify $config
+        }
+    }
+
+    # Add Primary to list, when adding Secondary
+    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+    foreach ($Secondary in $Secondaries) {
+        $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM -SmartUpdate:$false
+        if ($primary) {
+            Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
+            if ($primary.RemoteSQLVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
+            }
+        }
+    }
+
+    # Add Primary to list, when adding Passive
+    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+    foreach ($PassiveVM in $PassiveVMs) {
+        $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
+        if ($ActiveNode) {
+            $ActiveNodeVM = Get-VMFromList2 -deployConfig $config -vmName $ActiveNode -SmartUpdate:$false
+            if ($ActiveNodeVM) {
+                if ($ActiveNodeVM.remoteSQLVM) {
+                    Add-RemoteSQLVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
+                }
+                Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $config
+            }
+        }
+    }
+
     # Add CAS to list, when adding primary
     $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
     foreach ($PriVM in $PriVMS) {
@@ -377,18 +417,7 @@ function Add-ExistingVMsToDeployConfig {
             Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
         }
     }
-    # Add Primary to list, when adding SiteSystem
-    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
-    foreach ($system in $systems) {
-        $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
-        if ($systemSite) {
-            Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
-        }
 
-        if ($systemSite.pullDPSourceDP) {
-            Add-ExistingVMToDeployConfig -vmName $systemSite.pullDPSourceDP -configToModify $config
-        }
-    }
 
     # Add FS to list, when adding SQLAO
     $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
@@ -402,32 +431,9 @@ function Add-ExistingVMsToDeployConfig {
     }
 
 
-    # Add Primary to list, when adding Passive
-    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-    foreach ($PassiveVM in $PassiveVMs) {
-        $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
-        if ($ActiveNode) {
-            $ActiveNodeVM = Get-VMFromList2 -deployConfig $config -vmName $ActiveNode -SmartUpdate:$false
-            if ($ActiveNodeVM) {
-                if ($ActiveNodeVM.remoteSQLVM) {
-                    Add-RemoteSQLVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
-                }
-                Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $config
-            }
-        }
-    }
 
-    # Add Primary to list, when adding Secondary
-    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
-    foreach ($Secondary in $Secondaries) {
-        $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM -SmartUpdate:$false
-        if ($primary) {
-            Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
-            if ($primary.RemoteSQLVM) {
-                Add-RemoteSQLVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
-            }
-        }
-    }
+
+
 
     $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" }
     foreach ($sup in $wsus) {
