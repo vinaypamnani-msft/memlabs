@@ -1107,7 +1107,7 @@ $global:VM_Config = {
                                         Start-VM2 -Name $currentItem.vmName
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 60 seconds to check status."
 
-                                        Start-Sleep -Seconds 60
+                                        Start-Sleep -Seconds 300
                                         $state = Get-VM2 -Name $currentItem.vmName
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Current State: $($state.state)"
                                     }
@@ -1359,7 +1359,7 @@ $global:VM_Config = {
         if ($using:Phase -gt 1 -and -not $currentItem.hidden) {
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete
         }
-       
+
         if (-not $complete) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Configuration did not finish successfully for $($currentItem.role). Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -OutputStream -Failure
         }
