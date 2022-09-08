@@ -1450,6 +1450,16 @@ function Update-VMFromHyperV {
                     $vmObject | Add-Member -MemberType NoteProperty -Name "OperatingSystem" -Value $value -Force
                     $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                 }
+                "sqlInstanceName" {
+                    if (-not $vmObject.sqlPort) {
+                        if ($vmObject.sqlInstanceName -eq "MSSQLSERVER") {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 1433 -Force
+                        }
+                        else{
+                            $vmObject | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 2433 -Force
+                        }
+                    }
+                }
                 default {
                     $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                 }
