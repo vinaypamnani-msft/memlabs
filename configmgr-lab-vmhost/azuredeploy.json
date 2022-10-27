@@ -71,7 +71,6 @@
     "dataDiskSize": 128,
     "dataDiskType": "StandardSSD_LRS",
     "location": "[resourceGroup().location]",
-    "aadLoginExtensionName": "AADLoginForWindows",
     "windowsAdminCenterPort": "6516",
     "hostScript": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/scripts/configureHostTask.ps1')]",
     "hostScriptParam": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/scripts/configureHost.ps1')]"
@@ -312,24 +311,6 @@
       }
     },
     {
-      "name": "[concat(parameters('virtualMachineName'),'/', variables('aadLoginExtensionName'))]",
-      "type": "Microsoft.Compute/virtualMachines/extensions",
-      "apiVersion": "2018-10-01",
-      "location": "[variables('location')]",
-      "properties": {
-        "publisher": "Microsoft.Azure.ActiveDirectory",
-        "type": "[variables('aadLoginExtensionName')]",
-        "typeHandlerVersion": "1.0",
-        "autoUpgradeMinorVersion": true,
-        "settings": {
-          "mdmId": ""
-        }
-      },
-      "dependsOn": [
-        "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
-      ]
-    },
-    {
       "type": "Microsoft.Compute/virtualMachines/extensions",
       "name": "[concat(parameters('virtualMachineName'), '/AzurePolicyforWindows')]",
       "apiVersion": "2019-07-01",
@@ -385,8 +366,7 @@
       "location": "[variables('location')]",
       "dependsOn": [
           "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AdminCenter' )]",
-          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AzurePolicyforWindows' )]",
-          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AADLoginForWindows' )]"
+          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AzurePolicyforWindows' )]"
       ],
       "properties": {
           "publisher": "Microsoft.Compute",
