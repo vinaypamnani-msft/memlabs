@@ -216,11 +216,11 @@ function Stop-VM2 {
     }
     catch {
         if ($Passthru) {
-            Write-Log "$Name`: Exception stopping VM $_" -error
+            Write-Log "$Name`: Exception stopping VM $_" -Failure
             return $false
         }
         else {
-            Write-Log "$Name`: Exception stopping VM $_" -error -LogOnly
+            Write-Log "$Name`: Exception stopping VM $_" -Failure -LogOnly
         }
     }
 }

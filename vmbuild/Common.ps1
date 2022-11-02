@@ -2473,7 +2473,7 @@ function Get-StorageConfig {
                 }
                 catch {
                     start-sleep -second 5
-                    $response = Invoke-WebRequest -Uri $storageConfigURL -sUseBasicParsing -ErrorAction Stop
+                    $response = Invoke-WebRequest -Uri $storageConfigURL -UseBasicParsing -ErrorAction Stop
                 }
                 if (-not $response) {
                     Write-Log "Failed to download updated storage config"
@@ -2520,7 +2520,7 @@ function Get-StorageConfig {
                 }
                 catch {
                     start-sleep -second 5
-                    $response = Invoke-WebRequest -Uri $productIDURL -sUseBasicParsing -ErrorAction Stop
+                    $response = Invoke-WebRequest -Uri $productIDURL -UseBasicParsing -ErrorAction Stop
                 }
                 if (-not $response) {
                     Write-Log "Failed to download updated Product ID"
