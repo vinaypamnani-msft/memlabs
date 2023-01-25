@@ -117,7 +117,13 @@ Function Read-SingleKeyWithTimeout {
         $timeoutLeft = [Math]::Round(($timeout) - $secs / 40, 0)
         if ([Console]::KeyAvailable) {
             if ($UseReadHost) {
-                return read-host
+                $read = Read-Host
+                #write-host "read = $read"
+                if ($read -eq [string]::empty)
+                {
+                    return $null
+                }
+                return $read
             }
             $key = $host.UI.RawUI.ReadKey()
             $host.ui.RawUI.FlushInputBuffer()

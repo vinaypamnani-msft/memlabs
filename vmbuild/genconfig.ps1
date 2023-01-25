@@ -136,7 +136,7 @@ Function Select-ToolsMenu {
 }
 
 function Select-ConfigMenu {
-    $Global:EnterKey = $false
+    $Global:EnterKey = $true
     while ($true) {
         $customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
@@ -4436,9 +4436,13 @@ function Get-AdditionalValidations {
             }
             Write-Verbose "New Name: $newName"
             if ($property.role -eq "CAS") {
-                $PRIVM = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
-                if ($PRIVM) {
-                    $PRIVM.parentSiteCode = $value
+                $PRIVMs = $Global:Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }
+                if ($PRIVMs) {
+                    foreach ($PRIVM in $PRIVMs) {
+                        if ($PRIVM.ParentSiteCode -eq $CurrentValue ) {
+                            $PRIVM.ParentSiteCode = $value
+                        }
+                    }
                 }
                 $VMs = @()
                 $VMs += $Global:Config.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" }

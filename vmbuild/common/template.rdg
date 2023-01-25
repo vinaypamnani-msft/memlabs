@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<RDCMan programVersion="2.83" schemaVersion="3">
+<RDCMan programVersion="2.90" schemaVersion="3">
   <file>
     <credentialsProfiles />
     <properties>
@@ -15,7 +15,7 @@
       <properties>
         <expanded>True</expanded>
         <name>VMASTEMPLATE</name>
-		<comment>MemLabs Auto Generated</comment>
+        <comment>MemLabs Auto Generated</comment>
       </properties>
       <logonCredentials inherit="None">
         <profileName scope="Local">Custom</profileName>
@@ -25,43 +25,7 @@
       </logonCredentials>
       <smartGroup>
         <properties>
-          <expanded>True</expanded>
-          <name>Servers</name>
-        </properties>
-        <ruleGroup operator="Any">
-          <rule>
-            <property>Comment</property>
-            <operator>Matches</operator>
-            <value>"PlainMemberServer"</value>
-          </rule>
-        </ruleGroup>
-      </smartGroup>
-      <smartGroup>
-        <properties>
-          <expanded>True</expanded>
-          <name>DomainServers</name>
-        </properties>
-        <ruleGroup operator="Any">
-          <rule>
-            <property>Comment</property>
-            <operator>Matches</operator>
-            <value>"DC"</value>
-          </rule>
-          <rule>
-            <property>Comment</property>
-            <operator>Matches</operator>
-            <value>"BDC"</value>
-          </rule>
-          <rule>
-            <property>Comment</property>
-            <operator>Matches</operator>
-            <value>"FileServer"</value>
-          </rule>
-        </ruleGroup>
-      </smartGroup>
-      <smartGroup>
-        <properties>
-          <expanded>True</expanded>
+          <expanded>False</expanded>
           <name>Clients</name>
         </properties>
         <ruleGroup operator="Any">
@@ -84,7 +48,30 @@
       </smartGroup>
       <smartGroup>
         <properties>
-          <expanded>True</expanded>
+          <expanded>False</expanded>
+          <name>DomainServers</name>
+        </properties>
+        <ruleGroup operator="Any">
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"DC"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"BDC"</value>
+          </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"FileServer"</value>
+          </rule>
+        </ruleGroup>
+      </smartGroup>
+      <smartGroup>
+        <properties>
+          <expanded>False</expanded>
           <name>MECMServers</name>
         </properties>
         <ruleGroup operator="Any">
@@ -108,7 +95,7 @@
             <operator>Matches</operator>
             <value>"SiteSystem"</value>
           </rule>
-           <rule>
+          <rule>
             <property>Comment</property>
             <operator>Matches</operator>
             <value>"PassiveSite"</value>
@@ -125,6 +112,19 @@
           </rule>
         </ruleGroup>
       </smartGroup>
+      <smartGroup>
+        <properties>
+          <expanded>False</expanded>
+          <name>Servers</name>
+        </properties>
+        <ruleGroup operator="Any">
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"PlainMemberServer"</value>
+          </rule>
+        </ruleGroup>
+      </smartGroup>
       <group>
         <properties>
           <expanded>False</expanded>
@@ -133,8 +133,7 @@
         <server>
           <properties>
             <name>TESTSERVER</name>
-            <displayName>TESTSERVER</displayName>
-	          <comment>TESTCOMMENT</comment>
+            <comment>TESTCOMMENT</comment>
           </properties>
         </server>
       </group>
