@@ -2804,6 +2804,7 @@ function Read-Host2 {
     }
     Write-Host " : " -NoNewline
     $response = Read-Host
+    Write-Host "------------------------------------------"
     return $response
 }
 
@@ -2840,6 +2841,10 @@ function Read-Single {
     }
 
     $response = Read-SingleKeyWithTimeout -timeout $timeout -Prompt ": " -useReadHost:$useReadHost
+    if ($response) {
+        Write-Host
+    }
+    Write-Host "------------------------------------------"
     return $response
 }
 

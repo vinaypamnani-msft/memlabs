@@ -270,7 +270,11 @@ function Read-YesorNoWithTimeout {
             $valid = $true
         }
     }
-    Write-Host
+
+    if ($YNresponse) {
+        Write-Host
+    }
+    Write-Host "------------------------------------------"
     if ([String]::IsNullOrWhiteSpace($YNresponse)) {
         if ($Default) {
             return $Default
