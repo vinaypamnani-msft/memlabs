@@ -3574,13 +3574,18 @@ Function Get-SiteCodeMenu {
         $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -Force
         #$property."$name" = $result
     }
-    if (Get-TestResult -SuccessOnWarning) {
-        return
-    }
-    else {
-        if ($property."$name" -eq $CurrentValue) {
+    try {
+        if (Get-TestResult -SuccessOnWarning) {
             return
         }
+        else {
+            if ($property."$name" -eq $CurrentValue) {
+                return
+            }
+        }
+    }
+    catch {
+        return
     }
 }
 

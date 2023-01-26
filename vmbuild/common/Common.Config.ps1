@@ -229,7 +229,7 @@ function New-DeployConfig {
 
         # add prefix to vm names
         $virtualMachines = $configObject.virtualMachines
-        foreach ($item in $virtualMachines | Where-Object { -not $_.Hidden } ) {
+        foreach ($item in $virtualMachines | Where-Object { -not $_.Hidden -and $_.vmName } ) {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
             if ($item.pullDPSourceDP -and -not $item.pullDPSourceDP.StartsWith($configObject.vmOptions.prefix)) {
 
