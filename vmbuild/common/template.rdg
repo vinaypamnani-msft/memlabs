@@ -133,6 +133,7 @@
         <server>
           <properties>
             <name>TESTSERVER</name>
+            <displayName>TESTCOMMENT</displayName>
             <comment>TESTCOMMENT</comment>
           </properties>
         </server>
