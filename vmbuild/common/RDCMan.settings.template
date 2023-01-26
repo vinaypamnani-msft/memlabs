@@ -60,7 +60,7 @@
         <domain />
       </gatewaySettings>
       <remoteDesktop>
-        <sameSizeAsClientArea>False</sameSizeAsClientArea>
+        <sameSizeAsClientArea>True</sameSizeAsClientArea>
         <fullScreen>True</fullScreen>
         <colorDepth>24</colorDepth>
       </remoteDesktop>

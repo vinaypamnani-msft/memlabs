@@ -30,6 +30,7 @@ function Write-ValidationMessages {
     }
 }
 
+
 function Test-ValidVmOptions {
     param (
         [object] $ConfigObject,
@@ -129,7 +130,7 @@ function Test-ValidVmOptions {
                 Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
             }
 
-            $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" -and (-not $_.Network) })
+            $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" -and (-not $_.Network) -and (-not $_.Hidden) })
             if ($CASorPRIorSEC) {
                 $existingCASorPRIorSEC = @()
                 $existingCASorPRIorSEC += Get-List -Type VM -SmartUpdate | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
@@ -158,16 +159,6 @@ function Test-ValidCmOptions {
     if ($ConfigObject.cmOptions.install -isnot [bool]) {
         Add-ValidationMessage -Message "CM Options Validation: cmOptions.install has an invalid value [$($ConfigObject.cmOptions.install)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
-
-    # updateToLatest
-    # if ($ConfigObject.cmOptions.updateToLatest -isnot [bool]) {
-    #     Add-ValidationMessage -Message "CM Options Validation: cmOptions.updateToLatest has an invalid value [$($ConfigObject.cmOptions.updateToLatest)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
-    # }
-
-    # installDPMPRoles
-    #if ($ConfigObject.cmOptions.installDPMPRoles -isnot [bool]) {
-    #    Add-ValidationMessage -Message "CM Options Validation: cmOptions.installDPMPRoles has an invalid value [$($ConfigObject.cmOptions.installDPMPRoles)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
-    #}
 
     # pushClientToDomainMembers
     if ($ConfigObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
@@ -466,7 +457,7 @@ function Test-ValidVmServerOS {
     $vmRole = $VM.role
 
     if ($VM.operatingSystem -notlike "*Server*") {
-        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server OS for Primary/CAS/DPMP roles, or when SQL is selected." -ReturnObject $ReturnObject -Warning
+        Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid OS [$($VM.operatingSystem)]. OS must be a Server OS for Primary/CAS/SiteSystem roles, or when SQL is selected." -ReturnObject $ReturnObject -Warning
     }
 
 }
@@ -533,7 +524,7 @@ function Test-ValidRoleDC {
     if ($containsDC) {
 
         if ($existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported. (Use the BDC role instead)" -ReturnObject $ReturnObject -Warning
         }
 
         # $MyInvocation.BoundParameters.ConfigObject.VirtualMachines | Out-Host
@@ -798,7 +789,7 @@ function Test-ValidRoleFileServer {
 
 }
 
-function Test-ValidRoleDPMP {
+function Test-ValidRoleSiteSystem {
     param (
         [object] $VM,
         [object] $ReturnObject
@@ -812,20 +803,32 @@ function Test-ValidRoleDPMP {
     $vmRole = $VM.role
 
     # Server OS
-    if ($VM.installMP) {
+    if ($VM.installMP -or $VM.installSUP) {
         Test-ValidVmServerOS -VM $VM -ReturnObject $return
+    }
+
+    # Role allowed on CAS?
+    $allowOnCAS = $true
+    if ($VM.installMP -or $VM.installDP) {
+        $allowOnCAS = $false
     }
 
     if (-not $VM.siteCode) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain siteCode; When deploying $vmRole Role, you must specify the siteCode of a Primary Site Server." -ReturnObject $ReturnObject -Warning
     }
     else {
-        $psInConfig = $ConfigObject.virtualMachines | Where-Object { $_.sitecode -eq $VM.siteCode -and ($_.role -in "Primary", "Secondary") }
-        if (-not $psInConfig) {
-            $psVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
-            if (($psVM | Measure-Object).Count -eq 0) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Primary Site Server or Secondary Site Server." -ReturnObject $ReturnObject -Warning
+        $ssInConfig = $ConfigObject.virtualMachines | Where-Object { $_.sitecode -eq $VM.siteCode -and ($_.role -in "Primary", "Secondary", "CAS") }
+        if (-not $ssInConfig) {
+            $ssVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
+            if (($ssVM | Measure-Object).Count -eq 0) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Site Server." -ReturnObject $ReturnObject -Warning
             }
+        }
+    }
+    if (-not $allowOnCAS) {
+        $casVM = Get-List2 -DeployConfig $ConfigObject | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $VM.siteCode }
+        if ($casVM) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a SiteSystem role (DP or MP) that is not allowed on CAS." -ReturnObject $ReturnObject -Warning
         }
     }
 
@@ -944,19 +947,20 @@ function Test-Configuration {
             return $return
         }
 
+        $virtualMachinesNoExisting = $deployConfig.virtualMachines | Where-Object { -not $_.Hidden }
         # Contains roles
         if ($deployConfig.virtualMachines) {
-            $containsCS = $deployConfig.virtualMachines.role -contains "CAS"
-            $containsPS = $deployConfig.virtualMachines.role -contains "Primary"
-            $containsDPMP = $deployConfig.virtualMachines.role -contains "DPMP"
-            $containsPassive = $deployConfig.virtualMachines.role -contains "PassiveSite"
-            $containsSecondary = $deployConfig.virtualMachines.role -contains "Secondary"
+            $containsCS = $virtualMachinesNoExisting -contains "CAS"
+            $containsPS = $virtualMachinesNoExisting -contains "Primary"
+            $containsSiteSystem = $virtualMachinesNoExisting -contains "SiteSystem"
+            $containsPassive = $virtualMachinesNoExisting -contains "PassiveSite"
+            $containsSecondary = $virtualMachinesNoExisting -contains "Secondary"
         }
         else {
-            $containsCS = $containsPS = $containsDPMP = $containsPassive = $containsSecondary = $false
+            $containsCS = $containsPS = $containsSiteSystem = $containsPassive = $containsSecondary = $false
         }
 
-        $needCMOptions = $containsCS -or $containsPS -or $containsDPMP -or $containsPassive -or $containsSecondary
+        $needCMOptions = $containsCS -or $containsPS -or $containsSiteSystem -or $containsPassive -or $containsSecondary
 
         # VM Options
         # ===========
@@ -1012,6 +1016,17 @@ function Test-Configuration {
                     Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Warning
                 }
 
+                if ($vm.Role -ne "Secondary") {
+                    if (-not $vm.sqlport) {
+                        Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlport." -ReturnObject $return -Warning
+                    }
+                    if ($vm.sqlport -lt 1 -or $vm.sqlPort -gt 65535) {
+                        Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] sqlport Out of range" -ReturnObject $return -Warning
+                    }
+                    if ($vm.sqlport -in 21,80,135,139,443,445,860,1434,2382,2383,2393,2394,2725,3260,3389,4022,5022,7022) {
+                        Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] sqlPort can not use OS reserved port #" -ReturnObject $return -Warning
+                    }
+                }
                 # Minimum SQL Memory
                 if ($VM.memory / 1 -lt 4GB) {
                     Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using SQL." -ReturnObject $return -Failure
@@ -1145,23 +1160,15 @@ function Test-Configuration {
             Test-ValidRoleFileServer -VM $FSVM -ReturnObject $return
         }
 
-        # DPMP Validations
-        # =================
-        if ($containsDPMP) {
-            Write-Progress2 -Activity "Validating Configuration" -Status "Testing DPMP" -PercentComplete 60
-            $DPMPVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" }
+        # Site System Validations
+        # ========================
+        if ($containsSiteSystem) {
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Site System" -PercentComplete 60
+            $systems = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
 
-            foreach ($VM in $DPMPVM) {
-                Test-ValidRoleDPMP -VM $VM -ReturnObject $return
+            foreach ($VM in $systems) {
+                Test-ValidRoleSiteSystem -VM $VM -ReturnObject $return
             }
-
-            #if (-not $containsPS) {
-            #    $existingPS = Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role "Primary" -SiteCode $DPMPVM.siteCode
-            #    if (-not $existingPS) {
-            #        Add-ValidationMessage -Message "Role Conflict: DPMP Role specified without Primary site and an existing Primary with same siteCode [$($DPMPVM.siteCode)] was not found." -ReturnObject $return -Warning
-            #    }
-            #}
-
         }
 
         # Role Conflicts
@@ -1217,7 +1224,7 @@ function Test-Configuration {
 
             if ($totalMemory -gt $availableMemory) {
                 if (-not $enableDebug) {
-                    Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB]." -ReturnObject $return -Warning
+                    Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB] [8GB buffer]." -ReturnObject $return -Warning
                 }
             }
         }
@@ -1227,24 +1234,30 @@ function Test-Configuration {
 
         # Names in deployment
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 80
-        $vmInDeployment = $deployConfig.virtualMachines.vmName
-        $unique1 = $vmInDeployment | Select-Object -Unique
-        $compare = Compare-Object -ReferenceObject $vmInDeployment -DifferenceObject $unique1
-        if ($compare) {
-            $duplicates = $compare.InputObject -join ","
-            Add-ValidationMessage -Message "Name Conflict: Deployment contains duplicate VM names [$duplicates]" -ReturnObject $return -Warning
+        $vmInDeployment = $virtualMachinesNoExisting.vmName
+        if ($vmInDeployment) {
+            $unique1 = $vmInDeployment | Select-Object -Unique
+            $compare = Compare-Object -ReferenceObject $vmInDeployment -DifferenceObject $unique1
+            if ($compare) {
+                $duplicates = $compare.InputObject -join ","
+                Add-ValidationMessage -Message "Name Conflict: Deployment contains duplicate VM names [$duplicates]" -ReturnObject $return -Warning
+            }
         }
 
-        # Names in domain
-        Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
-        $allVMs = Get-List -Type VM -SmartUpdate | Select-Object -Expand VmName
-        $all = $allVMs + $vmInDeployment
-        $unique2 = $all | Select-Object -Unique
-        $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
-        if (-not $compare -and $compare2) {
-            $duplicates = $compare2.InputObject -join ","
-            Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
-            Get-List -type VM -SmartUpdate | Out-Null
+        if ($compare) {
+            # Names in domain
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
+            $allVMs = Get-List -Type VM -SmartUpdate | Select-Object -Expand VmName
+            $all = $allVMs + $vmInDeployment
+            $unique2 = $all | Select-Object -Unique
+            if (($null -ne $unique2) -and ($null -ne $all)) {
+                $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
+                if (-not $compare -and $compare2) {
+                    $duplicates = $compare2.InputObject -join ","
+                    Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
+                    Get-List -type VM -SmartUpdate | Out-Null
+                }
+            }
         }
 
         if (-not $fast) {

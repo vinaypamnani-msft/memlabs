@@ -38,8 +38,13 @@ configuration Phase6
                 $sqlServer = $thisVM.vmName
             }
 
-            if ($thisVM.sqlInstanceName -and $thisVM.sqlInstanceName -ne "MSSQLSERVER") {
-                $sqlServer = $sqlServer + "\" + $thisVM.sqlInstanceName
+            $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $sqlServer }
+            #
+            if ($sqlServerVM.sqlInstanceName) {
+                $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
+            }
+            if ($sqlServerVM.sqlPort) {
+                $sqlServer = $sqlServer + "," + $sqlServerVM.sqlPort
             }
         }
         else {
@@ -58,15 +63,23 @@ configuration Phase6
             DependsOn            = "[WriteStatus]UpdateServices"
         }
 
+        $contentDir = $thisVM.wsusContentDir
+        if (-not $contentDir) {
+            $contentDir = "C:\WSUS"
+            if ($thisVM.AdditionalDisks.E) {
+                $contentDir = "E:\WSUS"
+            }
+        }
+
         WriteStatus ConfigureWSUS {
-            Status = "Configuring WSUS to use ContentDir [$($thisVM.wsusContentDir)] and DB [$sqlServer]"
+            Status = "Configuring WSUS to use ContentDir [$($contentDir)] and DB [$sqlServer]"
         }
 
         if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
             ConfigureWSUS UpdateServices
             {
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
-                ContentPath = $thisVM.wsusContentDir
+                ContentPath = $contentDir
                 SqlServer  = $sqlServer
                 PsDscRunAsCredential = $Admincreds
             }
@@ -75,7 +88,7 @@ configuration Phase6
             ConfigureWSUS UpdateServices
             {
                 DependsOn  = @('[WindowsFeatureSet]UpdateServices')
-                ContentPath = $thisVM.wsusContentDir
+                ContentPath = $contentDir
             }
         }
 

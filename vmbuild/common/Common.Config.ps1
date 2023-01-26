@@ -47,6 +47,16 @@ function Get-UserConfiguration {
 
         foreach ($vm in $config.VirtualMachines) {
 
+            if ($null -ne $vm.SQLInstanceName) {
+                if ($null -eq $vm.sqlPort) {
+                    if ($vm.SQLInstanceName -eq "MSSQLSERVER") {
+                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "1433"
+                    }
+                    else {
+                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "2433"
+                    }
+                }
+            }
             if ($null -ne $vm.AlwaysOnName ) {
                 if ($null -eq ($vm.AlwaysOnGroupName)) {
                     $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $vm.AlwaysOnName
@@ -56,6 +66,38 @@ function Get-UserConfiguration {
                 }
                 $vm.PsObject.properties.Remove('AlwaysOnName')
 
+            }
+
+            if ($vm.role -eq "DPMP") {
+                $vm.role = "SiteSystem"
+            }
+
+            #add missing Properties
+            if ($vm.Role -in "SiteSystem", "CAS", "Primary") {
+                if ($null -eq $vm.InstallRP) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                }
+                if ($null -eq $vm.InstallSUP) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $false -Force
+                }
+                if ($vm.Role -eq "SiteSystem") {
+                    if ($null -eq $vm.InstallMP) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $false -Force
+                    }
+                    if ($null -eq $vm.InstallDP) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
+                    }
+                }
+            }
+
+            if ($vm.SqlVersion) {
+                foreach ($listVM in $config.VirtualMachines) {
+                    if ($listVM.RemoteSQLVM -eq $vm.VmName) {
+                        if ($null -eq $vm.InstallRP) {
+                            $vm | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                        }
+                    }
+                }
             }
         }
 
@@ -74,12 +116,15 @@ function Get-UserConfiguration {
         if ($null -ne $config.cmOptions.installDPMPRoles) {
             $config.cmOptions.PsObject.properties.Remove('installDPMPRoles')
             foreach ($vm in $config.virtualMachines) {
-                if ($vm.Role -eq "DPMP") {
+                if ($vm.Role -eq "SiteSystem") {
                     $vm | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
                     $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
                 }
             }
         }
+
+
+
 
         $return.Loaded = $true
         $return.Config = $config
@@ -184,7 +229,7 @@ function New-DeployConfig {
 
         # add prefix to vm names
         $virtualMachines = $configObject.virtualMachines
-        foreach ($item in $virtualMachines) {
+        foreach ($item in $virtualMachines | Where-Object { -not $_.Hidden -and $_.vmName } ) {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
             if ($item.pullDPSourceDP -and -not $item.pullDPSourceDP.StartsWith($configObject.vmOptions.prefix)) {
 
@@ -197,7 +242,7 @@ function New-DeployConfig {
             }
         }
 
-        $SQLAOPriVMs = $virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
+        $SQLAOPriVMs = $virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not $_.Hidden }
         foreach ($SQLAO in $SQLAOPriVMs) {
             if ($SQLAO) {
                 if ($SQLAO.fileServerVM -and -not $SQLAO.fileServerVM.StartsWith($configObject.vmOptions.prefix)) {
@@ -215,7 +260,7 @@ function New-DeployConfig {
             }
         }
 
-        $PassiveVMs = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+        $PassiveVMs = $virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and -not $_.Hidden }
         if ($PassiveVMs) {
             foreach ($PassiveVM in $PassiveVMs) {
                 # Add prefix to FS
@@ -246,6 +291,15 @@ function New-DeployConfig {
             $id = Get-Content $sysCenterIdPath -ErrorAction SilentlyContinue
             if ($id) {
                 $params | Add-Member -MemberType NoteProperty -Name $sysCenterId -Value $id.Trim() -Force
+            }
+        }
+
+        $productID = "productID"
+        $productIdPath = "E:\$productID.txt"
+        if (Test-Path $productIdPath) {
+            $prodid = Get-Content $productIdPath -ErrorAction SilentlyContinue
+            if ($prodid) {
+                $params | Add-Member -MemberType NoteProperty -Name $productID -Value $prodid.Trim() -Force
             }
         }
 
@@ -301,6 +355,46 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
+    # Add Primary to list, when adding SiteSystem
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+    foreach ($system in $systems) {
+        $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
+        if ($systemSite) {
+            Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
+        }
+
+        if ($systemSite.pullDPSourceDP) {
+            Add-ExistingVMToDeployConfig -vmName $systemSite.pullDPSourceDP -configToModify $config
+        }
+    }
+
+    # Add Primary to list, when adding Secondary
+    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+    foreach ($Secondary in $Secondaries) {
+        $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM -SmartUpdate:$false
+        if ($primary) {
+            Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
+            if ($primary.RemoteSQLVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
+            }
+        }
+    }
+
+    # Add Primary to list, when adding Passive
+    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+    foreach ($PassiveVM in $PassiveVMs) {
+        $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
+        if ($ActiveNode) {
+            $ActiveNodeVM = Get-VMFromList2 -deployConfig $config -vmName $ActiveNode -SmartUpdate:$false
+            if ($ActiveNodeVM) {
+                if ($ActiveNodeVM.remoteSQLVM) {
+                    Add-RemoteSQLVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
+                }
+                Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $config
+            }
+        }
+    }
+
     # Add CAS to list, when adding primary
     $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
     foreach ($PriVM in $PriVMS) {
@@ -323,27 +417,7 @@ function Add-ExistingVMsToDeployConfig {
             Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
         }
     }
-    # Add Primary to list, when adding DPMP
-    $DPMPs = $config.virtualMachines | Where-Object { $_.role -eq "DPMP" }
-    foreach ($dpmp in $DPMPS) {
-        $DPMPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $dpmp.siteCode -type VM -SmartUpdate:$false
-        if ($DPMPPrimary) {
-            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary.vmName -configToModify $config
-        }
 
-        if ($DPMPPrimary.pullDPSourceDP) {
-            Add-ExistingVMToDeployConfig -vmName $DPMPPrimary.pullDPSourceDP -configToModify $config
-        }
-    }
-
-    # Add Primary to list, when adding SUP
-    $SUPs = $config.virtualMachines | Where-Object { $_.installSUP -eq $true }
-    foreach ($sup in $SUPs) {
-        $SUPPrimary = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $sup.siteCode -type VM -SmartUpdate:$false
-        if ($SUPPrimary) {
-            Add-ExistingVMToDeployConfig -vmName $SUPPrimary.vmName -configToModify $config
-        }
-    }
 
     # Add FS to list, when adding SQLAO
     $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
@@ -357,32 +431,9 @@ function Add-ExistingVMsToDeployConfig {
     }
 
 
-    # Add Primary to list, when adding Passive
-    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
-    foreach ($PassiveVM in $PassiveVMs) {
-        $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
-        if ($ActiveNode) {
-            $ActiveNodeVM = Get-VMFromList2 -deployConfig $config -vmName $ActiveNode -SmartUpdate:$false
-            if ($ActiveNodeVM) {
-                if ($ActiveNodeVM.remoteSQLVM) {
-                    Add-RemoteSQLVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
-                }
-                Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $config
-            }
-        }
-    }
 
-    # Add Primary to list, when adding Secondary
-    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
-    foreach ($Secondary in $Secondaries) {
-        $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM -SmartUpdate:$false
-        if ($primary) {
-            Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
-            if ($primary.RemoteSQLVM) {
-                Add-RemoteSQLVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
-            }
-        }
-    }
+
+
 
     $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" }
     foreach ($sup in $wsus) {
@@ -395,6 +446,85 @@ function Add-ExistingVMsToDeployConfig {
                 }
             }
         }
+    }
+    # Check if any new VM's need remote SQL VM added
+    $vms = $config.virtualMachines
+    foreach ($vm in $vms) {
+        if ($vm.RemoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
+        }
+    }
+}
+
+function Add-ModifiedExistingVMToDeployConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Existing VM Name")]
+        [object] $vm,
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $configToModify,
+        [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
+        [bool] $hidden = $true
+    )
+
+    $vmName = $vm.vmName
+
+    Write-Log -verbose "Adding Modified $($vmName) to Deploy config"
+    if ($configToModify.virtualMachines.vmName -contains $vmName) {
+        Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
+        return
+    }
+    $existingVM = (get-list -Type VM | where-object { $_.vmName -eq $vmName })
+    if (-not $existingVM) {
+        Write-Log "Not adding $vmName as it does not exist as an existing VM" -LogOnly
+        return
+    }
+
+    Write-Log -Verbose "Adding $vmName as a modified existing VM"
+    if ($existingVM.state -ne "Running") {
+        Start-VM2 -Name $existingVM.vmName
+    }
+
+    $newVMObject = [PSCustomObject]@{
+        hidden = $hidden
+    }
+
+    $vmNote = $vm
+    $propsToExclude = @(
+        "LastKnownIP",
+        "inProgress",
+        "success",
+        "deployedOS",
+        "domain",
+        "network",
+        "prefix",
+        "memLabsDeployVersion",
+        "memLabsVersion",
+        "adminName",
+        "lastUpdate",
+        "source",
+        "vmID",
+        "switch"
+    )
+    foreach ($prop in $vmNote.PSObject.Properties) {
+        if ($prop.Name -in $propsToExclude) {
+            continue
+        }
+
+        if ($prop.Name.EndsWith("-Original")) {
+            continue
+        }
+        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+    }
+
+    if (-not $newVMObject.vmName) {
+        throw "Could not add hidden VM, because it does not have a vmName property"
+    }
+    if ($null -eq $configToModify.virtualMachines) {
+        $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
+    }
+    else {
+        $configToModify.virtualMachines += $newVMObject
     }
 }
 
@@ -409,6 +539,7 @@ function Add-ExistingVMToDeployConfig {
         [bool] $hidden = $true
     )
 
+    Write-Log -verbose "Adding $vmName to Deploy config"
     if ($configToModify.virtualMachines.vmName -contains $vmName) {
         Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
         return
@@ -453,7 +584,12 @@ function Add-ExistingVMToDeployConfig {
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
     }
-    $configToModify.virtualMachines += $newVMObject
+    if ($null -eq $configToModify.virtualMachines) {
+        $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
+    }
+    else {
+        $configToModify.virtualMachines += $newVMObject
+    }
 }
 
 function Add-VMToAccountLists {
@@ -513,7 +649,7 @@ function Get-SQLAOConfig {
         [Parameter(Mandatory = $true, HelpMessage = "SQLAONAME")]
         [object] $vmName
     )
-
+    Write-Log -verbose "Running Get-SQLAOConfig"
     $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
 
     if (-not $PrimaryAO) {
@@ -541,13 +677,20 @@ function Get-SQLAOConfig {
     #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     if (-not ($PrimaryAO.ClusterIPAddress)) {
-        $vm = Get-List2 -deployConfig $deployConfig -SmartUpdate | where-object { $_.vmName -eq $PrimaryAO.vmName }
+        $vm = Get-List -SmartUpdate -Type VM | where-object { $_.vmName -eq $PrimaryAO.vmName }
         if ($vm.ClusterIPAddress) {
+            write-log "Setting Cluster IP from vmNotes" -verbose
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $vm.ClusterIPAddress -Force
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $vm.AGIPAddress -Force
         }
+        else {
+            write-log "Cluster IP not found in VMNotes" -verbose
+
+        }
     }
     if (-not ($PrimaryAO.ClusterIPAddress)) {
+        write-log "Cluster IP is not yet set. Skipping SQLAO Config"
+        return
         #throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
     }
 
@@ -581,6 +724,7 @@ function Get-SQLAOConfig {
         SQLAOPort                  = 1500
     }
 
+    Write-Log "SQLAO Config Generated"
     return $config
 }
 
@@ -634,7 +778,7 @@ function Get-ExistingForDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
-        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember", "Secondary")]
+        [ValidateSet("DC", "CAS", "Primary", "SiteSystem", "DomainMember", "Secondary")]
         [string]$Role
     )
 
@@ -733,7 +877,7 @@ function Get-ExistingForNetwork {
         [Parameter(Mandatory = $true, HelpMessage = "Network")]
         [string]$Network,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
-        [ValidateSet("DC", "CAS", "Primary", "DPMP", "DomainMember", "Secondary")]
+        [ValidateSet("DC", "CAS", "Primary", "SiteSystem", "DomainMember", "Secondary")]
         [string]$Role,
         [Parameter(Mandatory = $false, HelpMessage = "VMName to exclude")]
         [string] $exclude = $null,
@@ -1026,7 +1170,9 @@ function Get-VMSizeCached {
 
     if ($vmCacheEntry) {
         if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
-            return $vmCacheEntry
+            if ($vmCacheEntry.diskSize -and $vmCacheEntry.diskSize -gt 0) {
+                return $vmCacheEntry
+            }
         }
     }
 
@@ -1112,7 +1258,9 @@ function Update-VMInformation {
     )
 
     try {
-        $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
+        if ($vm.Notes) {
+            $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
+        }
     }
     catch {
         Write-Log "Could not convert notes $($vm.Notes) from vm $($vm.Name)" -LogOnly -Failure
@@ -1175,7 +1323,13 @@ function Update-VMInformation {
         }
 
         # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
-        if ($vmNoteObject.role -eq "DPMP") {
+        if ($vmNoteObject.installDP -or $vmNoteObject.enablePullDP) {
+            if ($vmNoteObject.role -eq "DPMP") {
+                # Rename Role to SiteSystem
+                $vmNoteObject.role = "SiteSystem"
+                Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+            }
+
             if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
                 if ($vmState -eq "Running" -and (-not $inProgress)) {
                     try {
@@ -1200,6 +1354,18 @@ function Update-VMInformation {
                     Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                 }
             }
+        }
+
+        # Rename WSUS role to SiteSystem, if SUP
+        if ($vmNoteObject.role -eq "WSUS" -and $vmNoteObject.installSUP -eq $true) {
+            $vmNoteObject.role = "SiteSystem"
+            Set-VMNote -vmName $vmName -vmNote $vmNoteObject
+        }
+
+        # Remove installSUP prop if WSUS role, but not SUP
+        if ($vmNoteObject.role -eq "WSUS" -and ($null -eq $vmNoteObject.installSUP -or $vmNoteObject.installSUP -eq $false)) {
+            $vmNoteObject.PsObject.properties.Remove('installSUP')
+            Set-VMNote -vmName $vmName -vmNote $vmNoteObject
         }
     }
 }
@@ -1248,7 +1414,10 @@ function Update-VMFromHyperV {
     )
     if (-not $vmNoteObject) {
         try {
-            $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
+            if ($vm.Notes) {
+                $vmNoteObject = $vm.Notes | convertFrom-Json -ErrorAction Stop
+                #write-log -verbose $vmNoteObject
+            }
         }
         catch {
             Write-Log -LogOnly -Failure "Could not convert Notes Object on $($vm.Name) $vmNoteObject"
@@ -1281,6 +1450,16 @@ function Update-VMFromHyperV {
                     $vmObject | Add-Member -MemberType NoteProperty -Name "OperatingSystem" -Value $value -Force
                     $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                 }
+                "sqlInstanceName" {
+                    if (-not $vmObject.sqlPort) {
+                        if ($vmObject.sqlInstanceName -eq "MSSQLSERVER") {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 1433 -Force
+                        }
+                        else{
+                            $vmObject | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 2433 -Force
+                        }
+                    }
+                }
                 default {
                     $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                 }
@@ -1289,6 +1468,38 @@ function Update-VMFromHyperV {
     }
     else {
         $vmObject | Add-Member -MemberType NoteProperty -Name "vmBuild" -Value $false -Force
+    }
+
+    if ($vmObject.Role -eq "DPMP") {
+        $vmObject.Role = "SiteSystem"
+    }
+
+    #add missing Properties
+    if ($vmObject.Role -in "SiteSystem", "CAS", "Primary") {
+        if ($null -eq $vmObject.InstallRP) {
+            $vmObject | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+        }
+        if ($null -eq $vmObject.InstallSUP) {
+            $vmObject | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $false -Force
+        }
+        if ($vmObject.Role -eq "SiteSystem") {
+            if ($null -eq $vmObject.InstallMP) {
+                $vmObject | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $false -Force
+            }
+            if ($null -eq $vmObject.InstallDP) {
+                $vmObject | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
+            }
+        }
+    }
+
+    if ($vmObject.SqlVersion) {
+        foreach ($listVM in $global:vm_List) {
+            if ($listVM.RemoteSQLVM -eq $vmObject.VmName) {
+                if ($null -eq $vmObject.InstallRP) {
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                }
+            }
+        }
     }
 
 }
@@ -1314,7 +1525,7 @@ function Get-List {
     )
 
     $doSmartUpdate = $SmartUpdate.IsPresent
-
+    $inMutex = $false
     #Get-PSCallStack | out-host
     if ($global:DisableSmartUpdate -eq $true) {
         $doSmartUpdate = $false
@@ -1324,6 +1535,7 @@ function Get-List {
         $mtx = New-Object System.Threading.Mutex($false, $mutexName)
         #write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly -Verbose
         [void]$mtx.WaitOne()
+        $inMutex = $true
         #write-log "acquired '$mutexName' Mutex" -LogOnly -Verbose
     }
     try {
@@ -1390,7 +1602,7 @@ function Get-List {
             }
         }
 
-        if (-not $global:vm_List) {
+        if (-not $global:vm_List -and $inMutex) {
 
             try {
                 #This may have been populated while waiting for mutex
@@ -1415,10 +1627,11 @@ function Get-List {
         }
         $return = $global:vm_List
 
+        foreach ($vm in $return) {
+            $vm | Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
+        }
         if ($null -ne $DeployConfigClone) {
-            foreach ($vm in $return) {
-                $vm | Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
-            }
+
             $domain = $DeployConfigClone.vmoptions.domainName
             $network = $DeployConfigClone.vmoptions.network
 
@@ -1441,7 +1654,7 @@ function Get-List {
                     }
                 }
                 if ($found) {
-                    continue
+                    $return = $return | where-object { $_.vmName -ne $vm.vmName }
                 }
                 $newVM = $vm
                 $newVM | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
@@ -1825,13 +2038,14 @@ Function Show-Summary {
     #$CHECKMARK = ([char]8730)
     $containsPS = $fixedConfig.role -contains "Primary"
     $containsSecondary = $fixedConfig.role -contains "Secondary"
-    $containsDPMP = $fixedConfig.role -contains "DPMP"
+    $containsSiteSystem = $fixedConfig.role -contains "SiteSystem"
     $containsMember = $fixedConfig.role -contains "DomainMember"
     $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
-    Write-Verbose "ContainsPS: $containsPS ContainsDPMP: $containsDPMP ContainsMember: $containsMember ContainsPassive: $containsPassive"
+    Write-Verbose "ContainsPS: $containsPS ContainsSiteSystem: $containsSiteSystem ContainsMember: $containsMember ContainsPassive: $containsPassive"
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
-        if ($deployConfig.cmOptions.install -eq $true -and ($containsPS -or $containsSecondary)) {
+
+        if ($containsPS -or $containsSecondary) {
             Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
 
             $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
@@ -1870,50 +2084,26 @@ Function Show-Summary {
             Write-RedX "ConfigMgr will not be installed."
         }
 
-
-        if ($deployConfig.cmOptions.install -eq $true) {
-            $foundDP = $false
-            $foundMP = $false
-
-            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and $_.InstallMP }
-            if ($DPMP) {
-                Write-GreenCheck "DP and MP roles will be installed on $($DPMP.vmName -Join ",")"
-                $foundDP = $true
-                $foundMP = $true
-            }
-
-            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallDP -and -not $_.InstallMP }
-            if ($DPMP) {
-                Write-GreenCheck "DP role will be installed on $($DPMP.vmName -Join ",")"
-                $foundDP = $true
-            }
-            $DPMP = $fixedConfig | Where-Object { $_.Role -eq "DPMP" -and $_.InstallMP -and -not $_.InstallDP }
-            if ($DPMP) {
-                Write-GreenCheck "MP role will be installed on $($DPMP.vmName -Join ",")"
-                $foundMP = $true
-            }
-
-            if (-not $foundDP -or -not $foundMP) {
-                $PSVM = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-                if ($PSVM) {
-                    if (-not $foundDP -and -not $foundMP) {
-                        Write-GreenCheck "DP and MP roles will be installed on Primary Site Server $($PSVM.vmName)"
-                    }
-                    else {
-                        if (-not $foundDP) {
-                            Write-GreenCheck "DP role will be installed on Primary Site Server $($PSVM.vmName)"
-                        }
-                        if (-not $foundMP) {
-                            Write-GreenCheck "MP role will be installed on Primary Site Server $($PSVM.vmName)"
-                        }
-                    }
-                }
-            }
-
+        $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
+        if ($testSystem) {
+            Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"
         }
-        else {
-            Write-RedX "DPMP roles will not be installed"
+
+        $testSystem = $fixedConfig | Where-Object { $_.InstallMP }
+        if ($testSystem) {
+            Write-GreenCheck "MP role will be installed on $($testSystem.vmName -Join ",")"
         }
+
+        $testSystem = $fixedConfig | Where-Object { $_.installSUP }
+        if ($testSystem) {
+            Write-GreenCheck "SUP role will be installed on $($testSystem.vmName -Join ",")"
+        }
+
+        $testSystem = $fixedConfig | Where-Object { $_.installRP }
+        if ($testSystem) {
+            Write-GreenCheck "Reporting Point role will be installed on $($testSystem.vmName -Join ",")"
+        }
+
 
         if ($containsMember) {
             if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
@@ -1965,7 +2155,7 @@ Function Show-Summary {
         $totalMemory = $fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
         $totalMemory = $totalMemory.Sum / 1GB
         $availableMemory = Get-AvailableMemoryGB
-        Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine"
+        Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine [8GB Buffer]"
     }
 
     if (-not $Common.DevBranch) {
@@ -1996,6 +2186,7 @@ Function Show-Summary {
             $roles = @()
             if ($_.InstallCA) { $roles += "CA" }
             if ($_.InstallSUP) { $roles += "SUP" }
+            if ($_.InstallRP) { $roles += "RP" }
             if ($_.InstallMP) { $roles += "MP" }
             if ($_.InstallDP) {
                 if ($_.pullDPSourceDP) { $roles += "Pull DP" }

@@ -12,6 +12,7 @@ function Write-JobProgress {
         if ($null -ne $Job.ChildJobs[0].Progress) {
             #Extracts the latest progress of the job and writes the progress
             $latestPercentComplete = 0
+            # Notes: "Preparing modules for first use" is translated when other than en-US
             $lastProgress = $Job.ChildJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
             if ($lastProgress) {
                 $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
@@ -21,7 +22,7 @@ function Write-JobProgress {
                 $latestActivity = $latestActivity.Replace("$jobName`: ", "").Trim()
             }
 
-            if ($latestActivity -and $latestStatus) {
+            if ($latestActivity -and $latestStatus.Trim().Length) {
                 #When adding multiple progress bars, a unique ID must be provided. Here I am providing the JobID as this
                 if ($latestPercentComplete -gt 0 -and $latestPercentComplete -lt 101) {
 
@@ -397,8 +398,9 @@ function Get-ConfigurationData {
         "4" { $cd = Get-Phase4ConfigurationData -deployConfig $deployConfig }
         "5" { $cd = Get-Phase5ConfigurationData -deployConfig $deployConfig }
         "6" { $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig }
-        "7" {
-            $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig
+        "7" { $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig }
+        "8" {
+            $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
             if ($cd) {
                 $autoSnapshotName = "MemLabs AutoSnapshot"
                 $snapshot = $null
@@ -428,15 +430,19 @@ function Get-ConfigurationData {
         Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VM's are running" -PercentComplete $global:preparePhasePercent
 
         $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
-        $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+        if ($nodes) {
+            $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+        }
 
         $global:preparePhasePercent++
         Start-Sleep -Milliseconds 201
         Write-Progress2 "Preparing Phase $Phase" -Status "Starting required VMs (if needed)" -PercentComplete $global:preparePhasePercent
 
-        $failures = Invoke-SmartStartVMs -CritList $critlist
-        if ($failures -ne 0) {
-            write-log "$failures VM(s) could not be started" -Failure
+        if ($critlist) {
+            $failures = Invoke-SmartStartVMs -CritList $critlist
+            if ($failures -ne 0) {
+                write-log "$failures VM(s) could not be started" -Failure
+            }
         }
 
         $dc = $cd.AllNodes | Where-Object { $_.Role -eq "DC" }
@@ -712,6 +718,55 @@ function Get-Phase7ConfigurationData {
     param (
         [object]$deployConfig
     )
+    $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+
+    # Configuration Data
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName = $dc.vmName
+                Role     = 'DC'
+            }
+        )
+    }
+
+    $NumberOfNodesAdded = 0
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true }) {
+
+        $global:preparePhasePercent++
+
+        # Filter out workgroup machines
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux") {
+            continue
+        }
+
+        $newItem = @{
+            NodeName = $vm.vmName
+            Role     = "PBIRS"
+        }
+        $cd.AllNodes += $newItem
+        if ($vm.Role -ne "DC") {
+            $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+        }
+    }
+
+    $all = @{
+        NodeName                    = "*"
+        PSDscAllowDomainUser        = $true
+        PSDscAllowPlainTextPassword = $true
+    }
+    $cd.AllNodes += $all
+
+    if ($NumberOfNodesAdded -eq 0) {
+        return
+    }
+
+    return $cd
+}
+function Get-Phase8ConfigurationData {
+    param (
+        [object]$deployConfig
+    )
 
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
     $NumberOfNodesAdded = 0
@@ -728,7 +783,7 @@ function Get-Phase7ConfigurationData {
     if ($deployConfig.cmOptions.Install -ne $false) {
 
         $fsVMsAdded = @()
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "DPMP", "WSUS") }) {
+        foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "SiteSystem", "WSUS") }) {
 
             $global:preparePhasePercent++
 

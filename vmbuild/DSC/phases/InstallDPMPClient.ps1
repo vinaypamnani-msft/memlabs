@@ -1,7 +1,3 @@
-# InstallDPMPClient.ps1
-
-
-
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -82,32 +78,32 @@ $ValidSiteCodes = @($SiteCode)
 $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
 $ValidSiteCodes += $ReportingSiteCodes
 
-foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" } ) {
-    if ($dpmp.siteCode -in $ValidSiteCodes) {
-        if ($dpmp.installDP) {
-            if ($dpmp.enablePullDP) {
+foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" } ) {
+    if ($vm.siteCode -in $ValidSiteCodes) {
+        if ($vm.installDP) {
+            if ($vm.enablePullDP) {
                 $PullDPs += [PSCustomObject]@{
-                    ServerName     = $dpmp.vmName
-                    ServerSiteCode = $dpmp.siteCode
-                    SourceDP       = $dpmp.pullDPSourceDP
+                    ServerName     = $vm.vmName
+                    ServerSiteCode = $vm.siteCode
+                    SourceDP       = $vm.pullDPSourceDP
                 }
             }
             else {
                 $DPs += [PSCustomObject]@{
-                    ServerName     = $dpmp.vmName
-                    ServerSiteCode = $dpmp.siteCode
+                    ServerName     = $vm.vmName
+                    ServerSiteCode = $vm.siteCode
                 }
             }
         }
-        if ($dpmp.installMP) {
-            if ($dpmp.siteCode -notin $ReportingSiteCodes) {
+        if ($vm.installMP) {
+            if ($vm.siteCode -notin $ReportingSiteCodes) {
                 $MPs += [PSCustomObject]@{
-                    ServerName     = $dpmp.vmName
-                    ServerSiteCode = $dpmp.siteCode
+                    ServerName     = $vm.vmName
+                    ServerSiteCode = $vm.siteCode
                 }
             }
             else {
-                Write-DscStatus "Skip MP role for $($dpmp.vmName) since it's a remote site system in Secondary site"
+                Write-DscStatus "Skip MP role for $($vm.vmName) since it's a remote site system in Secondary site"
             }
         }
     }
@@ -184,19 +180,20 @@ Write-DscStatus "Create $bgsCount Boundary Groups"
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     $siteStatus = Get-CMSite -SiteCode $bgsitecode
     if ($siteStatus.Status -eq 1) {
-        $dpmplist = @()
-        $dpmplist += (Get-CMDistributionPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $dpmplist += (Get-CMManagementPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $dpmplist = $dpmplist | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+        $sitesystems = @()
+        $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
         try {
             $exists = Get-CMBoundaryGroup -Name $bgsitecode
             if ($exists) {
-                Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($dpmplist -join ',')"
-                Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $dpmplist
+                Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',')"
+                Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $sitesystems
             }
             else {
-                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($dpmplist -join ',')"
-                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $dpmplist
+                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',')"
+                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $sitesystems
             }
         }
         catch {

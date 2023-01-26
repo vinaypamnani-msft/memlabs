@@ -1,4 +1,4 @@
-#InstallSUP.ps1
+#InstallRoles.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -74,6 +74,61 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 $topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
 $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
+# Reporting Install
+
+foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true } ) {
+
+    $thisSiteCode = $thisVM.SiteCode
+    if ($rp.SiteCode -ne $thisSiteCode) {
+        #If this is the remote SQL Server for this site code, dont continue
+        if ($rp.vmName -ne $thisVM.RemoteSQLVM) {
+            continue
+        }
+    }
+
+    $netbiosName = $deployConfig.vmOptions.DomainNetBiosName
+    $username = $netbiosName + "\cm_svc"
+    $databaseName = "CM_" + $thisSiteCode
+
+    #Get the SQL Server. Its either going to be local or remote.
+    if ($thisVM.sqlVersion) {
+        $sqlServer = $thisVM
+    }
+    else {
+        $sqlServer = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $thisVM.RemoteSQLVM }
+    }
+
+    $sqlServerName = $sqlServer.vmName + "." + $DomainFullName
+
+    #Add the SQL Instance if there is one
+    #if ($sqlServer.sqlInstance -and $sqlServer.sqlInstance -ne "MSSQLSERVER") {
+    #    $sqlServerName += "\" + $sqlServer.SqlInstanceName
+    #}
+
+    #Add the SQL Instance, and port
+    if ($sqlServer.sqlInstanceName) {
+        $sqlServerName = $sqlServerName + "\" + $sqlServer.sqlInstanceName
+    }
+    if ($sqlServer.sqlPort -ne "1433") {
+        $sqlServerName = $sqlServerName + "," + $sqlServer.sqlPort
+    }
+
+    $PBIRSMachine = $rp.vmName + "." + $DomainFullName
+
+    $cm_svc_file = "$LogPath\cm_svc.txt"
+    if (Test-Path $cm_svc_file) {
+        # Add cm_svc user as a CM Account
+        $unencrypted = Get-Content $cm_svc_file
+    }
+
+    Add-ReportingUser -SiteCode $thisSiteCode -UserName $username -Unencrypted $unencrypted
+    Install-SRP -ServerSiteCode $thisSiteCode -ServerFQDN $PBIRSMachine -UserName $username -SqlServerName $sqlServerName -DatabaseName $databaseName
+}
+
+# End Reporting Install
+
+# SUP Install
+
 $SUPs = @()
 $ValidSiteCodes = @($SiteCode)
 if ($ThisVM.role -eq "Primary") {
@@ -107,7 +162,9 @@ foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -e
 
 # Trim nulls/blanks
 $SUPNames = $SUPs.ServerName | Where-Object { $_ -and $_.Trim() }
-Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
+if ($SUPNames) {
+    Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
+}
 
 # Check if a SUP Exists on this site
 $configureSUP = $false
@@ -150,7 +207,7 @@ if ($configureSUP) {
         catch {
             # Run sync to refresh categories, wait for sync, then try again?
             if (-not $syncTimeout) {
-                Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products. Attempt #$attempts"
+                Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products. Attempt #$attempts $_"
                 Sync-CMSoftwareUpdate
                 Start-Sleep -Seconds 120 # Sync waits for 2 mins anyway, so sleep before even checking status
             }
@@ -162,14 +219,28 @@ if ($configureSUP) {
             do {
                 $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode }
 
-                if ($syncState.LastSyncState -eq "" -or $null -eq $syncState.LastSyncState) {
+                if (-not $syncState.LastSyncState ) {
                     Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
                     Sync-CMSoftwareUpdate
                     Start-Sleep -Seconds 120
                 }
+                else {
+                    $syncStateString = "Unknown"
+                    switch ($($syncState.LastSyncState)) {
+                        "6700" { $syncStateString = "WSUS Sync Manager Error" }
+                        "6701" { $syncStateString = "WSUS Synchronization Started" }
+                        "6702" { $syncStateString = "WSUS Synchronization Done" }
+                        "6703" { $syncStateString = "WSUS Synchronization Failed" }
+                        "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
+                        "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
+                        "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
+                        "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
+                        "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
+                        "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
+                        "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
+                    }
 
-                if ($syncState.LastSyncState -ne "") {
-                    Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState)"
+                    Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState) $syncStateString"
                     if ($syncState.LastSyncState -eq 6702) {
                         $syncFinished = $true
                         Write-DscStatus "SUM Sync finished."

@@ -47,6 +47,7 @@ DscResourcesToExport = @(
     'ClusterSetOwnerNodes',
     'ADServicePrincipalName2',
     'ConfigureWSUS'
+    'InstallPBIRS'
 
 )
 

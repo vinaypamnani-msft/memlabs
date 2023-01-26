@@ -23,7 +23,7 @@ if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
     $sqlInstanceName = $SQLVM.sqlInstanceName
-    $sqlPort = $SQLVM.thisParams.sqlPort
+    $sqlPort = $SQLVM.sqlPort
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
         $sqlServerName = $SQLVM.AlwaysOnListenerName
@@ -34,7 +34,7 @@ if ($ThisVM.remoteSQLVM) {
 else {
     $sqlServerName = $env:COMPUTERNAME
     $sqlInstanceName = $ThisVM.sqlInstanceName
-    $sqlPort = $ThisVM.thisParams.sqlPort
+    $sqlPort = $ThisVM.sqlPort
 }
 
 # Set Site Code
@@ -109,7 +109,7 @@ Action=InstallPrimarySite
 CDLatest=1
 
 [Options]
-ProductID=EVAL
+ProductID=%ProductID%
 SiteCode=%SiteCode%
 SiteName=%SiteName%
 SMSInstallDir=%InstallDir%
@@ -142,6 +142,9 @@ SysCenterId=
 [HierarchyExpansionOption]
 CCARSiteServer=%CASMachineFQDN%
 
+[SABranchOptions]
+SAActive=1
+CurrentBranch=1
 '@
 
     # Get SQL instance info
@@ -155,6 +158,12 @@ CCARSiteServer=%CASMachineFQDN%
 
     # Set ini values
     $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
+    $productID = "EVAL"
+    if ($($deployConfig.parameters.ProductID)){
+        $productID = $($deployConfig.parameters.ProductID)
+    }
+    $cmini = $cmini.Replace('%ProductID%', $productID)
+
     $cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")
     $cmini = $cmini.Replace('%SQLMachineFQDN%', "$sqlServerName.$DomainFullName")
     $cmini = $cmini.Replace('%SiteCode%', $SiteCode)

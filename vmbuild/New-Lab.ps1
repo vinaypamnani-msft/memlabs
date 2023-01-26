@@ -12,6 +12,7 @@ param (
             if ($WordToComplete) { $ConfigPaths = $ConfigPaths | Where-Object { $_.Name.ToLowerInvariant().StartsWith($WordToComplete) } }
             $ConfigNames = ForEach ($Path in $ConfigPaths) {
                 if ($Path.Name -eq "_storageConfig.json") { continue }
+                if ($Path.Name -eq "_storageConfig2022.json") { continue }
                 If (Test-Path $Path) {
                     (Get-ChildItem $Path).BaseName
                 }
@@ -34,10 +35,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 7)]
+    [ValidateRange(2, 8)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 7)]
+    [ValidateRange(2, 8)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
@@ -140,6 +141,10 @@ function Write-Phase {
         }
 
         7 {
+            Write-Log "Phase $Phase - Setup Reporting Services" -Activity
+        }
+
+        8 {
             Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
         }
     }
@@ -161,7 +166,7 @@ try {
     }
 
     $principal = new-object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
-    if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))){
+    if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))) {
         Write-RedX "MemLabs requires administrative rights to configure. Please run vmbuild.cmd as administrator." -ForegroundColor Red
         Write-Host
         Start-Sleep -seconds 60
@@ -225,13 +230,13 @@ try {
     $runPhase1 = $false
     $existingVMs = Get-List -Type VM -SmartUpdate
     $newVMs = @()
-    $newVMs += $userConfig.virtualMachines | Where-Object { $userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName }
+    $newVMs += $userConfig.virtualMachines | Where-Object { -not $_.Hidden -and ($userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName) }
     $count = ($newVMs | Measure-Object).count
     if ($count -gt 0) {
         $runPhase1 = $true
         Write-Log -Verbose "Phase 1 is scheduled to run"
     }
-    else{
+    else {
         Write-Log -Verbose "Phase 1 is not scheduled to run: ExistingVms = $($existingVMs.vmName -join ",") NewVMs = $($userConfig.virtualMachines.vmName -join ",")"
     }
 
@@ -394,7 +399,7 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 7
+    $maxPhase = 8
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -453,6 +458,26 @@ try {
     }
     else {
         Start-Maintenance -DeployConfig $deployConfig
+
+        $updateExistingRequired = $false
+        foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
+            $updateExistingRequired = $true
+        }
+
+        # Update Existing VMs
+        if ($updateExistingRequired) {
+            Write-Log "Update Existing Virtual Machine Properties" -Activity -HostOnly
+            foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
+                Write-Host "Updating VM Notes on $($vm.VmName)"
+                foreach ($updatableEntry in $Global:Common.Supported.PropsToUpdate) {
+                    if ($null -ne $vm."$updatableEntry") {
+                        Write-Host "Updating $($vm.vmName) $updatableEntry to $($vm."$updatableEntry")"
+                        Update-VMNoteProperty -vmName $vm.VmName -PropertyName $updatableEntry -PropertyValue $vm."$updatableEntry"
+                    }
+                }
+            }
+        }
+
         Write-Host
         Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
     }
@@ -464,6 +489,11 @@ catch {
 }
 finally {
 
+
+    if ($enableDebug) {
+        Write-Host 'Config Stored in $global:DebugConfig'
+        $global:DebugConfig = $deployConfig
+    }
     # Ctrl + C brings us here :)
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly

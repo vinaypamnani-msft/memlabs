@@ -16,7 +16,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "Secondary" { return $ServerList }
         "FileServer" { return $ServerList }
         "SQLAO" { return $ServerList }
-        "DPMP" { return $ServerList }
+        "SiteSystem" { return $ServerList }
         "DomainMember" { return $AllList }
         "DomainMember (Server)" { return $ServerList }
         "DomainMember (Client)" { return $ClientList }
@@ -117,7 +117,13 @@ Function Read-SingleKeyWithTimeout {
         $timeoutLeft = [Math]::Round(($timeout) - $secs / 40, 0)
         if ([Console]::KeyAvailable) {
             if ($UseReadHost) {
-                return read-host
+                $read = Read-Host
+                #write-host "read = $read"
+                if ($read -eq [string]::empty)
+                {
+                    return $null
+                }
+                return $read
             }
             $key = $host.UI.RawUI.ReadKey()
             $host.ui.RawUI.FlushInputBuffer()
@@ -270,7 +276,11 @@ function Read-YesorNoWithTimeout {
             $valid = $true
         }
     }
-    Write-Host
+
+    if ($YNresponse) {
+        Write-Host
+    }
+    Write-Host "------------------------------------------"
     if ([String]::IsNullOrWhiteSpace($YNresponse)) {
         if ($Default) {
             return $Default
@@ -741,6 +751,8 @@ function ConvertTo-DeployConfigEx {
                         $DomainAccountsUPN += @($vm.SqlAgentAccount)
                     }
                 }
+                $DomainAccountsUPN += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
+                $DomainAccountsUPN = $DomainAccountsUPN | Where-Object { $_ } | Select-Object -Unique
 
                 if ($DomainAccountsUPN.Count -gt 0) {
                     $DomainAccountsUPN = $DomainAccountsUPN | Select-Object -Unique
@@ -751,10 +763,10 @@ function ConvertTo-DeployConfigEx {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
                 }
 
-                $accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
+                #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentAccount } | Select-Object -ExpandProperty SQLAgentAccount -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SqlServiceAccount } | Select-Object -ExpandProperty SqlServiceAccount -Unique
-                $accountLists.DomainAccounts = $accountLists.DomainAccounts | Select-Object -Unique
+                #$accountLists.DomainAccounts = $accountLists.DomainAccounts | Select-Object -Unique
 
                 $ServersToWaitOn = @()
                 $thisPSName = $null
@@ -858,8 +870,8 @@ function ConvertTo-DeployConfigEx {
                 $AllSiteCodes += $thisVM.siteCode
 
 
-                foreach ($dpmp in $deployConfig.virtualMachines | Where-Object { $_.role -eq "DPMP" -and $_.siteCode -in $AllSiteCodes -and -not $_.hidden }) {
-                    Add-VMToAccountLists -thisVM $thisVM -VM $dpmp  -accountLists $accountLists -deployConfig $deployconfig -WaitOnDomainJoin
+                foreach ($system in $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and $_.siteCode -in $AllSiteCodes -and -not $_.hidden }) {
+                    Add-VMToAccountLists -thisVM $thisVM -VM $system  -accountLists $accountLists -deployConfig $deployconfig -WaitOnDomainJoin
                 }
 
                 $SecondaryVM = $deployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $ThisVM.siteCode -and $_.role -eq "Secondary" -and -not $_.hidden }
@@ -951,12 +963,12 @@ function ConvertTo-DeployConfigEx {
             $backupSolutionURL = "https://ola.hallengren.com/scripts/MaintenanceSolution.sql"
             $thisParams | Add-Member -MemberType NoteProperty -Name "backupSolutionURL" -Value $backupSolutionURL -Force
 
-            if ($thisvm.sqlInstanceName -eq "MSSQLSERVER" ) {
-                $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 1433 -Force
-            }
-            else {
-                $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 2433 -Force
-            }
+            #if ($thisvm.sqlInstanceName -eq "MSSQLSERVER" ) {
+            #    $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 1433 -Force
+            #}
+            #else {
+            #    $thisParams | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 2433 -Force
+            #}
 
             $DomainAdminName = $deployConfig.vmOptions.adminName
             $DomainName = $deployConfig.vmOptions.domainName

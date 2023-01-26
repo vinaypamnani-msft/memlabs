@@ -421,6 +421,24 @@ $global:VM_Config = {
             }
         }
 
+        # copy language packs when locale is set to other than en-US
+        if (($Phase -eq 2) -and ($deployConfig.vmOptions.locale -and $deployConfig.vmOptions.locale -ne "en-US")) {
+            Write-Progress2 $Activity -Status "Copying language packs" -percentcomplete 15 -force
+            $copied = Copy-LanguagePacksToVM -VmName $currentItem.vmName -ShowProgress
+            if (-not $copied) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not copy language packs to the VM." -Warning
+            }
+        }
+
+        # Ad-hoc: copy _localeConfig.json
+        if (($Phase -eq 2) -and ($deployConfig.vmOptions.locale -and $deployConfig.vmOptions.locale -ne "en-US")) {
+            Write-Progress2 $Activity -Status "Copying language packs" -percentcomplete 18 -force
+            $copied = Copy-LocaleConfigToVM -VmName $currentItem.vmName -ShowProgress
+            if (-not $copied) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not copy _localeConfig.json to the VM." -Warning
+            }
+        }
+
         $Stop_RunningDSC = {
             # Stop any existing DSC runs
             try {
@@ -822,6 +840,32 @@ $global:VM_Config = {
                     $cd.AllNodes += $node
                 }
 
+                # Add locale settings to Configuration Data
+                # Default is en-US and may not be used
+                $cd.LocaleSettings = @{ LanguageTag = "en-US" }
+                $locale = $deployConfig.vmOptions.locale
+                if ($locale -and $locale -ne "en-US") {
+                    $localeConfigPath = "C:\staging\locale\_localeConfig.json"
+                    $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+
+                    # Picking up current locale
+                    $l = @{
+                        LanguageTag          = $locale
+
+                        # These are used for LanguageDsc
+                        LocationID           = $localeConfig.$locale.LocationID
+                        MUILanguage          = $localeConfig.$locale.MUILanguage
+                        MUIFallbackLanguage  = $localeConfig.$locale.MUIFallbackLanguage
+                        SystemLocale         = $localeConfig.$locale.SystemLocale
+                        AddInputLanguages    = $localeConfig.$locale.AddInputLanguages
+                        RemoveInputLanguages = $localeConfig.$locale.RemoveInputLanguages
+                        UserLocale           = $localeConfig.$locale.UserLocale
+                        # This is used for SSMS (TBD)
+                        LanguageID           = $localeConfig.$locale.LanguageID
+                    }
+                    $cd.LocaleSettings = $l
+                }
+
                 # Dump $cd, in case we need to review
                 $cd | ConvertTo-Json -Depth 5 | Out-File "C:\staging\DSC\Phase$($Phase)_CD.json" -Force -Confirm:$false
 
@@ -1063,7 +1107,7 @@ $global:VM_Config = {
                                         Start-VM2 -Name $currentItem.vmName
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 60 seconds to check status."
 
-                                        Start-Sleep -Seconds 60
+                                        Start-Sleep -Seconds 300
                                         $state = Get-VM2 -Name $currentItem.vmName
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Current State: $($state.state)"
                                     }

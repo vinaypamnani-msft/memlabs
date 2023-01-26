@@ -1009,14 +1009,15 @@ function Test-NetworkSwitch {
 
 function Test-NoRRAS {
 
-    if ((Get-WindowsFeature Routing).Installed) {
+    $router = (get-itemproperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters).IpEnableRouter
+    if ((Get-WindowsFeature Routing).Installed -or $router -eq 0) {
         Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
         Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools
-        try{
+        try {
             Remove-VMSwitch2 -NetworkName "External"
         }
-        catch{}
-        $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
+        catch {}
+        $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal and IpEnableRouter TCP Value. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
         if ($response -eq "n") {
             Write-log "Please Reboot."
             Exit
@@ -1076,7 +1077,7 @@ function Test-NetworkNat {
 
     $exists = Get-NetNat -Name $NetworkSubnet -ErrorAction SilentlyContinue
     if ($exists) {
-        Write-Log "'$NetworkSubnet' is already present in NAT."
+        Write-Log "'$NetworkSubnet' is already present in NAT." -Verbose
         return $true
     }
 
@@ -1822,7 +1823,7 @@ function New-VirtualMachine {
                 #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
                 if ($currentItem.OtherNode) {
                     $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75 -WarningAction SilentlyContinue) | Select-Object -Last 2
-                    Write-Log "$VmName`: SQLAO: Could not find $($PrimaryAO.vmName) in Get-List Setting New ClusterIPAddress and AG IPAddress" -LogOnly
+                    Write-Log "$VmName`: SQLAO: Setting New ClusterIPAddress and AG IPAddress" -LogOnly
                     $clusterIP = $IPs[0]
                     $AGIP = $IPs[1]
 
@@ -1833,10 +1834,11 @@ function New-VirtualMachine {
                         return $false
                     }
 
-                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
-                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue | out-null
                     $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
                     $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
+
+                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
+                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue | out-null
                 }
             }
             catch {
@@ -1872,7 +1874,7 @@ function New-VirtualMachine {
 
 function Get-AvailableMemoryGB {
     $availableMemory = Get-CimInstance win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-    $availableMemory = ($availableMemory - ("5GB" / 1kB)) * 1KB / 1GB
+    $availableMemory = ($availableMemory - ("8GB" / 1kB)) * 1KB / 1GB
     $availableMemory = [Math]::Round($availableMemory, 2)
     if ($availableMemory -lt 0) {
         $availableMemory = 0
@@ -2401,7 +2403,17 @@ function Get-VmSession {
 
 function Get-StorageConfig {
 
-    $configPath = Join-Path $Common.ConfigPath "_storageConfig.json"
+
+    $storageConfigName = "_storageConfig2022.json"
+
+    $configPath = Join-Path $Common.ConfigPath $storageConfigName
+
+    if (-not (Test-Path $configPath)) {
+        $configPath = Join-Path $Common.ConfigPath "_storageConfig.json"
+        $GetNewStorageConfig = $true
+    }
+
+
 
     if (-not (Test-Path $configPath)) {
         $Common.FatalError = "Storage Config not found. Refer internal documentation."
@@ -2431,7 +2443,16 @@ function Get-StorageConfig {
             $fileListName = "_fileList_develop.json"
         }
         $fileListPath = Join-Path $Common.AzureFilesPath $fileListName
+        $storageConfigPath = Join-Path $Common.ConfigPath $storageConfigName
         $fileListLocation = "$($StorageConfig.StorageLocation)/$fileListName"
+
+
+        $productIDName = "productID.txt"
+        $productID = "productID"
+        $productIdPath = "E:\$productIDName"
+        $procuctIdLocation = "$($StorageConfig.StorageLocation)/$productIDName"
+
+
 
         # See if image list needs to be updated
         if (Test-Path $fileListPath) {
@@ -2439,28 +2460,76 @@ function Get-StorageConfig {
             $updateList = $Common.AzureFileList.UpdateFromStorage
         }
 
-        # Update file list
-        if (($updateList -and -not $InJob.IsPresent) -or -not (Test-Path $fileListPath)) {
+        # Update StorageConfig
 
-            Write-Log "Updating fileList from azure storage" -LogOnly
+        if (-not $InJob.IsPresent) {
 
-            # Get file list
-            #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
-            $fileListUrl = $fileListLocation + "?$($StorageConfig.StorageToken)"
-            try {
-                $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+            if ($GetNewStorageConfig) {
+                $storageConfigLocation = "$($StorageConfig.StorageLocation)/$storageConfigName"
+                Write-Log "Updating $($storageConfigNam) from azure storage" -LogOnly
+                $storageConfigURL = $storageConfigLocation + "?$($StorageConfig.StorageToken)"
+                try {
+                    $response = Invoke-WebRequest -Uri $storageConfigURL -UseBasicParsing -ErrorAction Stop
+                }
+                catch {
+                    start-sleep -second 5
+                    $response = Invoke-WebRequest -Uri $storageConfigURL -UseBasicParsing -ErrorAction Stop
+                }
+                if (-not $response) {
+                    Write-Log "Failed to download updated storage config"
+                }
+                else {
+                    $response.Content.Trim() | Out-File -FilePath $storageConfigPath -Force -ErrorAction SilentlyContinue
+                }
+
             }
-            catch {
-                start-sleep -second 5
-                $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+
+            # Update file list
+            if (($updateList) -or -not (Test-Path $fileListPath)) {
+
+                Write-Log "Updating fileList from azure storage" -LogOnly
+
+                # Get file list
+                #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
+                $fileListUrl = $fileListLocation + "?$($StorageConfig.StorageToken)"
+                try {
+                    $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+                }
+                catch {
+                    start-sleep -second 5
+                    $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+                }
+                if (-not $response) {
+                    $Common.FatalError = "Failed to download file list."
+                }
+                else {
+                    $response.Content.Trim() | Out-File -FilePath $fileListPath -Force -ErrorAction SilentlyContinue
+                    $Common.AzureFileList = $response.Content.Trim() | ConvertFrom-Json -ErrorAction Stop
+                }
+
             }
-            if (-not $response) {
-                $Common.FatalError = "Failed to download file list."
+
+            # Get ProductID
+
+            if (-not (Test-Path $productIdPath)) {
+
+                Write-Log "Updating $($productIDName) from azure storage" -LogOnly
+                $productIDURL = $procuctIdLocation + "?$($StorageConfig.StorageToken)"
+                try {
+                    $response = Invoke-WebRequest -Uri $productIDURL -UseBasicParsing -ErrorAction Stop
+                }
+                catch {
+                    start-sleep -second 5
+                    $response = Invoke-WebRequest -Uri $productIDURL -UseBasicParsing -ErrorAction Stop
+                }
+                if (-not $response) {
+                    Write-Log "Failed to download updated Product ID"
+                }
+                else {
+                    $response.Content.Trim() | Out-File -FilePath $productIdPath -Force -ErrorAction SilentlyContinue
+                }
             }
-            else {
-                $response.Content.Trim() | Out-File -FilePath $fileListPath -Force -ErrorAction SilentlyContinue
-                $Common.AzureFileList = $response.Content.Trim() | ConvertFrom-Json -ErrorAction Stop
-            }
+
 
         }
 
@@ -2769,6 +2838,153 @@ function Copy-ToolToVM {
     return $true
 }
 
+function Copy-LanguagePacksToVM {
+
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
+        [string]$VmName,
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowProgress,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    $destDir = "C:\LanguagePacks"
+
+    if ($VmName) {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    }
+    else {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
+    }
+
+    foreach ($vm in $allVMs) {
+        $vmName = $vm.vmName
+        Write-Log "$vmName`: Trying to copy Language Packs to $destDir inside the VM" -Activity
+
+        $sourceDir = Join-Path $Common.ConfigPath "locales" $vm.operatingSystem
+        if (-not (Test-Path -Path "${sourceDir}\*" -Include *.cab)) {
+            Write-Log "$vmName`: Cannot find language pack(s) in $sourceDir. Skipping copy." -Warning
+            continue
+        }
+
+        # Get VM Session
+        if ($vm.State -ne "Running") {
+            Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+            continue
+        }
+
+        $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+        if (-not $ps) {
+            Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+            continue
+        }
+
+        if ($ShowProgress) {
+            Write-Progress2 "Copying language packs" -Status "Copying language packs to $VmName"
+        }
+
+        Write-Log "$vmName`: Copying '${sourceDir}\*' from HOST to VM (${destDir}\)."
+
+        try {
+            $progressPref = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+
+
+            Copy-Item -ToSession $ps -Filter "*.cab" -Path "${sourceDir}" -Destination "${destDir}" -Recurse -WhatIf:$WhatIf -ErrorAction Stop
+        }
+        catch {
+            Write-Log "$vmName`: Failed to copy language packs. $_" -Failure
+            return $false
+        }
+        finally {
+            $ProgressPreference = $progressPref
+        }
+    }
+
+    Write-Host2
+
+    if ($ShowProgress) {
+        Write-Progress2 "Copying language packs" -Status "Done" -Completed
+    }
+
+    return $true
+}
+
+function Copy-LocaleConfigToVM {
+
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
+        [string]$VmName,
+        [Parameter(Mandatory = $false)]
+        [switch]$ShowProgress,
+        [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
+        [switch]$WhatIf
+    )
+
+    $sourceDir = $Common.ConfigPath
+    $destDir = "C:\staging\locale"
+    $localeConfigFile = "_localeConfig.json"
+
+    if ($VmName) {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    }
+    else {
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
+    }
+
+    foreach ($vm in $allVMs) {
+        $vmName = $vm.vmName
+        Write-Log "$vmName`: Trying to copy $localeConfigFile to $destDir inside the VM" -Activity
+
+        if (-not (Test-Path -Path "${sourceDir}\*" -Include "$localeConfigFile")) {
+            Write-Log "$vmName`: Cannot find $localeConfigFile in $sourceDir. Skipping copy." -Warning
+            continue
+        }
+
+        # Get VM Session
+        if ($vm.State -ne "Running") {
+            Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+            continue
+        }
+
+        $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+        if (-not $ps) {
+            Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+            continue
+        }
+
+        if ($ShowProgress) {
+            Write-Progress2 "Copying $localeConfigFile" -Status "Copying $localeConfigFile to $VmName"
+        }
+
+        Write-Log "$vmName`: Copying '${sourceDir}\${localeConfigFile}' from HOST to VM (${destDir}\)."
+
+        try {
+            $progressPref = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+
+            # Fix me. this includes other empty folders
+            Copy-Item -ToSession $ps -Filter "$localeConfigFile" -Path "${sourceDir}" -Destination "${destDir}" -Recurse -WhatIf:$WhatIf -ErrorAction Stop
+        }
+        catch {
+            Write-Log "$vmName`: Failed to copy ${localeConfigFile}. $_" -Failure
+            return $false
+        }
+        finally {
+            $ProgressPreference = $progressPref
+        }
+    }
+
+    Write-Host2
+
+    if ($ShowProgress) {
+        Write-Progress2 "Copying $localeConfigFile" -Status "Done" -Completed
+    }
+
+    return $true
+}
+
 function Get-FileFromStorage {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Storage File to download.")]
@@ -3008,9 +3224,9 @@ function Set-SupportedOptions {
         "CAS",
         "Primary",
         "Secondary",
+        "SiteSystem",
         "PassiveSite",
         "FileServer",
-        "DPMP",
         "SQLAO",
         "DomainMember",
         "WorkgroupMember",
@@ -3026,9 +3242,9 @@ function Set-SupportedOptions {
         "BDC",
         "Primary",
         "Secondary",
+        "SiteSystem",
         "PassiveSite",
         "FileServer",
-        "DPMP",
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
@@ -3038,6 +3254,11 @@ function Set-SupportedOptions {
         "WSUS"
     )
 
+
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSMSS")
+    $propsToUpdate = $updatablePropList
+    $propsToUpdate += "wsusContentDir"
+
     $cmVersions += Get-CMVersions
 
     $operatingSystems = $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" } | Sort-Object
@@ -3045,12 +3266,14 @@ function Set-SupportedOptions {
     $sqlVersions = $Common.AzureFileList.ISO.id | Select-Object -Unique | Sort-Object
 
     $supported = [PSCustomObject]@{
-        Roles            = $roles
-        RolesForExisting = $rolesForExisting
-        AllRoles         = ($roles + $rolesForExisting | Select-Object -Unique)
-        OperatingSystems = $operatingSystems
-        SqlVersions      = $sqlVersions
-        CMVersions       = $cmVersions
+        Roles              = $roles
+        RolesForExisting   = $rolesForExisting
+        AllRoles           = ($roles + $rolesForExisting | Select-Object -Unique)
+        OperatingSystems   = $operatingSystems
+        SqlVersions        = $sqlVersions
+        CMVersions         = $cmVersions
+        UpdateablePropList = $updatablePropList
+        PropsToUpdate      = $propsToUpdate
     }
 
     $Common.Supported = $supported
@@ -3207,7 +3430,7 @@ if (-not $Common.Initialized) {
     $colors = Get-Colors
 
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "220505"
+        MemLabsVersion        = "230126"
         LatestHotfixVersion   = $latestHotfixVersion
         PS7                   = $PS7
         Initialized           = $true

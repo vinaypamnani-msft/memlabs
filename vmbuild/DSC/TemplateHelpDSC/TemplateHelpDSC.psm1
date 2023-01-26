@@ -1227,9 +1227,9 @@ class ChangeSqlInstancePort {
         $_SQLInstanceName = $this.SQLInstanceName
         $_SQLInstancePort = $this.SQLInstancePort
 
-        if ($_SQLInstanceName -eq "MSSQLSERVER") {
-            return
-        }
+        #if ($_SQLInstanceName -eq "MSSQLSERVER") {
+        #    return
+        #}
 
         Try {
             # Load the assemblies
@@ -1240,11 +1240,14 @@ class ChangeSqlInstancePort {
             $mc = new-object Microsoft.SqlServer.Management.Smo.Wmi.ManagedComputer $env:COMPUTERNAME
             $i = $mc.ServerInstances[$_SQLInstanceName]
             $p = $i.ServerProtocols['Tcp']
-            $ip = $p.IPAddresses['IPAll']
-            $ip.IPAddressProperties['TcpDynamicPorts'].Value = ''
-            $ipa = $ip.IPAddressProperties['TcpPort']
-            $ipa.Value = [string]$_SQLInstancePort
+            foreach ($ip in $p.IPAddresses) {
+                #$ip = $p.IPAddresses['IPAll']
+                $ip.IPAddressProperties['TcpDynamicPorts'].Value = ''
+                $ipa = $ip.IPAddressProperties['TcpPort']
+                $ipa.Value = [string]$_SQLInstancePort
+            }
             $p.Alter()
+
 
             New-NetFirewallRule -DisplayName 'SQL over TCP Inbound (Named Instance)' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort $_SQLInstancePort -Group "For SQL Server"
 
@@ -1259,9 +1262,9 @@ class ChangeSqlInstancePort {
         $_SQLInstanceName = $this.SQLInstanceName
         $_SQLInstancePort = $this.SQLInstancePort
 
-        if ($_SQLInstanceName -eq "MSSQLSERVER") {
-            return $true
-        }
+        #if ($_SQLInstanceName -eq "MSSQLSERVER") {
+        #    return $true
+        #}
 
         try {
             # Load the assemblies
@@ -1688,6 +1691,7 @@ class OpenFirewallPortForSCCM {
 
         New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
         New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+        New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For RdcMan"
 
         if ($_Role -contains "DC") {
             #HTTP(S) Requests
@@ -1936,7 +1940,6 @@ class OpenFirewallPortForSCCM {
             }
 
             if ($_Role -contains "WorkgroupMember") {
-                New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For WorkgroupMember"
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
 
@@ -3086,6 +3089,129 @@ class ConfigureWSUS {
     }
 
     [ConfigureWSUS] Get() {
+        return $this
+    }
+
+}
+
+#InstallPBIRS
+[DscResource()]
+class InstallPBIRS {
+    [DscProperty(Key)]
+    [string] $InstallPath
+
+    [DscProperty()]
+    [string]$SqlServer
+
+    [DscProperty()]
+    [string]$DownloadUrl
+
+    [DscProperty()]
+    #Must be PBIRS
+    [string]$RSInstance
+
+    [DscProperty()]
+    [PSCredential]$DBcredentials
+
+    [DscProperty()]
+    [bool]$IsRemoteDatabaseServer
+
+
+    [void] Set() {
+        try {
+            $_Creds = $this.DBcredentials
+            write-verbose ("Configuring PBIRS for $($this.SqlServer) in $($this.ContentPath)")
+
+
+            $pbirsSetup = "C:\temp\PowerBIReportServer.exe"
+            if (!(Test-Path $pbirsSetup)) {
+                Write-Verbose "Downloading PBIRS from $($this.DownloadUrl)..."
+                try {
+                    Start-BitsTransfer -Source $this.DownloadUrl -Destination $pbirsSetup -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    ipconfig /flushdns
+                    start-sleep -seconds 60
+                    Start-BitsTransfer -Source $this.DownloadUrl -Destination $pbirsSetup -Priority Foreground -ErrorAction Stop
+                }
+            }
+
+            try {
+                New-Item -Path $this.ContentPath -ItemType Directory -Force
+            }
+            catch {
+                write-verbose ("InstallPBIRS $_")
+            }
+
+            $PBIRSargs = "/quiet /InstallFolder=$($this.InstallPath) /IAcceptLicenseTerms /Edition=Dev /Log C:\staging\PBI.log"
+            Start-Process $pbirsSetup $PBIRSargs -Wait
+
+            try {
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+                Install-Module -Name ReportingServicesTools -Force -AllowClobber -Confirm:$false
+            }
+            catch {
+                Write-Verbose ("InstallPBIRS $_")
+            }
+
+
+            try {
+                if ($this.IsRemoteDatabaseServer) {
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds
+                }
+                else {
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds
+                }
+            }
+            catch {
+                Write-Verbose ("InstallPBIRS $_")
+                if ($this.IsRemoteDatabaseServer) {
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase
+                }
+                else {
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase
+                }
+            }
+            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+            try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext } catch {}
+            Stop-Service PowerBIReportServer
+            Start-Service PowerBIReportServer
+            try {
+                Get-Service | Where-Object { $_.Name -eq "SQLSERVERAGENT" -or $_.Name -like "SqlAgent*" } | Start-Service
+            }
+            catch {}
+        }
+        catch {
+            Write-Verbose "Failed to Configure PBIRS"
+            Write-Verbose "$_"
+        }
+    }
+
+    [bool] Test() {
+
+        try {
+            $service = $null
+            if ($($this.RSInstance) -eq "PBIRS") {
+                try {
+                    $service = Get-Service PowerBIReportServer -ErrorAction SilentlyContinue
+                }
+                catch {}
+            }
+
+            if ($service) {
+                return $true
+            }
+
+            return $false
+        }
+        catch {
+            Write-Verbose "Failed to Find PBIRS Server"
+            Write-Verbose "$_"
+            return $false
+        }
+    }
+
+    [InstallPBIRS] Get() {
         return $this
     }
 

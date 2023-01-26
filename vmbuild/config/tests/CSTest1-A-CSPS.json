@@ -2,7 +2,6 @@
   "cmOptions": {
     "version": "current-branch",
     "install": true,
-    "updateToLatest": false,
     "pushClientToDomainMembers": true
   },
   "vmOptions": {
@@ -11,7 +10,9 @@
     "domainName": "cstest1.com",
     "adminName": "admin",
     "network": "192.168.10.0",
-    "timeZone": "Eastern Standard Time"
+    "timeZone": "Eastern Standard Time",
+    "domainNetBiosName": "cstest1",
+    "locale": "en-US"
   },
   "virtualMachines": [
     {
@@ -34,12 +35,13 @@
         "E": "250GB"
       },
       "memory": "12GB",
-      "virtualProcs": 8
+      "virtualProcs": 8,
+      "sqlPort": "1433"
     },
     {
       "vmName": "DPMP1",
       "operatingSystem": "Server 2022",
-      "role": "DPMP",
+      "role": "SiteSystem",
       "additionalDisks": {
         "E": "250GB"
       },
@@ -64,7 +66,8 @@
         "E": "250GB"
       },
       "memory": "12GB",
-      "virtualProcs": 8
+      "virtualProcs": 8,
+      "sqlPort": "1433"
     },
     {
       "vmName": "W10Client1",
