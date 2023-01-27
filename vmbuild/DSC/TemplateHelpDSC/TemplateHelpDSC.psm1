@@ -194,22 +194,21 @@ class InstallSSMS {
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
 
-        if ((Test-Path -path $smssinstallpath) -or (Test-Path -path $smssinstallpath2)) {
-
-            if (Test-Path -path $smssinstallpath) {
+            if (Test-Path $smssinstallpath) {
                 If ((Get-Item $smssinstallpath).length -gt 0kb) {
+                    Write-Verbose "Test - Installing SSMS... $smssinstallpath exists"
                     return $true
                 }
             }
 
-            if (Test-Path -path $smssinstallpath2) {
+            if (Test-Path $smssinstallpath2) {
                 If ((Get-Item $smssinstallpath2).length -gt 0kb) {
+                    Write-Verbose "Test - Installing SSMS... $smssinstallpath2 exists"
                     return $true
                 }
             }
 
-        }
-
+            Write-Verbose "Test - Installing SSMS... $smssinstallpath2 does not exist"
         return $false
     }
 
