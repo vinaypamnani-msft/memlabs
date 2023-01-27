@@ -158,8 +158,16 @@ class InstallSSMS {
         }
 
         # Install SSMS
-        $adkinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
-        while (!(Test-Path $adkinstallpath)) {
+        $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
+        $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
+
+
+        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2)) {
+            Write-Verbose "SSMS Installed Successfully! (Tested Out)"
+            return
+        }
+        else {
+
             $cmd = $ssmsSetup
             $arg1 = "/install"
             $arg2 = "/quiet"
@@ -178,23 +186,31 @@ class InstallSSMS {
                 $ErrorMessage = $_.Exception.Message
                 throw "Failed to install SSMS with below error: $ErrorMessage"
             }
-
             Start-Sleep -Seconds 10
         }
-
     }
 
     [bool] Test() {
-        $adkinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
-        if (!(Test-Path $adkinstallpath)) {
-            return $false
+        $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
+        $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
+
+        if ((Test-Path -path $smssinstallpath) -or (Test-Path -path $smssinstallpath2)) {
+
+            if (Test-Path -path $smssinstallpath) {
+                If ((Get-Item $smssinstallpath).length -gt 0kb) {
+                    return $true
+                }
+            }
+
+            if (Test-Path -path $smssinstallpath2) {
+                If ((Get-Item $smssinstallpath2).length -gt 0kb) {
+                    return $true
+                }
+            }
+
         }
 
-        If (!(Get-Item $adkinstallpath).length -gt 0kb) {
-            return $false
-        }
-
-        return $true
+        return $false
     }
 
     [InstallSSMS] Get() {
