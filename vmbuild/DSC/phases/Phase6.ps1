@@ -43,9 +43,17 @@ configuration Phase6
             if ($sqlServerVM.sqlInstanceName) {
                 $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
             }
+
             if ($sqlServerVM.sqlPort) {
+                $sqlPort = $sqlServerVM.sqlPort
+            }
+            else {
+                $sqlPort = 1433
+            }
+            if ($sqlPort -ne 1433) {
                 $sqlServer = $sqlServer + "," + $sqlServerVM.sqlPort
             }
+
         }
         else {
             $wsusFeatures += "UpdateServices-WidDB"
@@ -76,18 +84,16 @@ configuration Phase6
         }
 
         if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
-            ConfigureWSUS UpdateServices
-            {
-                DependsOn  = @('[WindowsFeatureSet]UpdateServices')
-                ContentPath = $contentDir
-                SqlServer  = $sqlServer
+            ConfigureWSUS UpdateServices {
+                DependsOn            = @('[WindowsFeatureSet]UpdateServices')
+                ContentPath          = $contentDir
+                SqlServer            = $sqlServer
                 PsDscRunAsCredential = $Admincreds
             }
         }
         else {
-            ConfigureWSUS UpdateServices
-            {
-                DependsOn  = @('[WindowsFeatureSet]UpdateServices')
+            ConfigureWSUS UpdateServices {
+                DependsOn   = @('[WindowsFeatureSet]UpdateServices')
                 ContentPath = $contentDir
             }
         }

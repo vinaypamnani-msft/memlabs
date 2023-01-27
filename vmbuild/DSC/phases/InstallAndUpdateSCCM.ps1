@@ -46,7 +46,12 @@ if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
     $sqlInstanceName = $SQLVM.sqlInstanceName
-    $sqlPort = $SQLVM.sqlPort
+    if ($SQLVM.sqlPort) {
+        $sqlPort = $SQLVM.sqlPort
+    }
+    else {
+        $sqlPort = 1433
+    }
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
         $sqlServerName = $SQLVM.AlwaysOnListenerName
@@ -57,7 +62,12 @@ if ($ThisVM.remoteSQLVM) {
 else {
     $sqlServerName = $env:COMPUTERNAME
     $sqlInstanceName = $ThisVM.sqlInstanceName
-    $sqlPort = $ThisVM.sqlPort
+    if ($ThisVM.sqlPort) {
+        $sqlPort = $ThisVM.sqlPort
+    }
+    else {
+        $sqlPort = 1433
+    }
 }
 
 # Set Site Code
@@ -156,7 +166,7 @@ CurrentBranch=1
     # Set ini values
     $installAction = if ($CurrentRole -eq "CAS") { "InstallCAS" } else { "InstallPrimarySite" }
     $productID = "EVAL"
-    if ($($deployConfig.parameters.ProductID)){
+    if ($($deployConfig.parameters.ProductID)) {
         $productID = $($deployConfig.parameters.ProductID)
     }
     $cmini = $cmini.Replace('%ProductID%', $productID)
