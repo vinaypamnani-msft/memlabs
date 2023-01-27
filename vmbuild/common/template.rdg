@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<RDCMan programVersion="2.90" schemaVersion="3">
+<RDCMan programVersion="2.92" schemaVersion="3">
   <file>
     <credentialsProfiles />
     <properties>
@@ -132,8 +132,8 @@
         </properties>
         <server>
           <properties>
-            <name>TESTSERVER</name>
             <displayName>TESTCOMMENT</displayName>
+            <name>TESTSERVER</name>
             <comment>TESTCOMMENT</comment>
           </properties>
         </server>
