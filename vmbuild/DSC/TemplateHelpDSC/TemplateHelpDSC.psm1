@@ -158,11 +158,11 @@ class InstallSSMS {
         }
 
         # Install SSMS
-        $adkinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
-        $adkinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
+        $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
+        $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
 
 
-        if ((Test-Path $adkinstallpath) -or (Test-Path $adkinstallpath2)) {
+        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2)) {
             return
         }
         else {
@@ -190,12 +190,12 @@ class InstallSSMS {
     }
 
     [bool] Test() {
-        $adkinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
-        $adkinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
+        $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
+        $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
 
-        if ((Test-Path $adkinstallpath) -or (Test-Path $adkinstallpath2)) {
-                If (!(Get-Item $adkinstallpath).length -gt 0kb) {
-                    If (!(Get-Item $adkinstallpath2).length -gt 0kb) {
+        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2)) {
+                If (!(Get-Item $smssinstallpath).length -gt 0kb) {
+                    If (!(Get-Item $smssinstallpath2).length -gt 0kb) {
                         return $false
                     }
                 }
