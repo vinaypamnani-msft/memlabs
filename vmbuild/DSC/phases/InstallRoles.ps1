@@ -109,8 +109,14 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
     if ($sqlServer.sqlInstanceName) {
         $sqlServerName = $sqlServerName + "\" + $sqlServer.sqlInstanceName
     }
-    if ($sqlServer.sqlPort -ne "1433") {
-        $sqlServerName = $sqlServerName + "," + $sqlServer.sqlPort
+    if ($sqlServer.sqlPort) {
+        $sqlPort = $sqlServer.sqlPort
+    }
+    else {
+        $sqlPort = 1433
+    }
+    if ($sqlPort -ne "1433") {
+        $sqlServerName = $sqlServerName + "," + $sqlPort
     }
 
     $PBIRSMachine = $rp.vmName + "." + $DomainFullName

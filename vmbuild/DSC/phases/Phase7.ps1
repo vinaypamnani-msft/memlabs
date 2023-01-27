@@ -60,8 +60,14 @@ configuration Phase7
         if ($sqlServerVM.sqlInstanceName) {
             $SqlServerInstance = $SqlServerInstance + "\" + $sqlServerVM.sqlInstanceName
         }
-        if ($sqlServerVM.sqlPort -ne "1433") {
-            $SqlServerInstance = $SqlServerInstance + "," + $sqlServerVM.sqlPort
+        if ($sqlServerVM.sqlPort) {
+            $sqlPort = $sqlServerVM.sqlPort
+        }
+        else {
+            $sqlPort = 1433
+        }
+        if ($sqlPort-ne "1433") {
+            $SqlServerInstance = $SqlServerInstance + "," + $sqlPort
         }
 
 
