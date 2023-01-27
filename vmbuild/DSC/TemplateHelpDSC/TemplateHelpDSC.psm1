@@ -160,7 +160,7 @@ class InstallSSMS {
         # Install SSMS
         $adkinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
         $adkinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
-        while (!(Test-Path $adkinstallpath) -and !(Test-Path $adkinstallpath2)) {
+        while (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
             $cmd = $ssmsSetup
             $arg1 = "/install"
             $arg2 = "/quiet"
@@ -188,7 +188,7 @@ class InstallSSMS {
     [bool] Test() {
         $adkinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
         $adkinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
-        if (!(Test-Path $adkinstallpath) -and !(Test-Path $adkinstallpath2)) {
+        if (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
             return $false
         }
 
