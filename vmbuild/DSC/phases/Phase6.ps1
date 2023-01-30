@@ -41,7 +41,9 @@ configuration Phase6
             $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $sqlServer }
             #
             if ($sqlServerVM.sqlInstanceName) {
-                $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
+                if ($sqlServerVM.sqlInstanceName -ne "MSSQLSERVER") {
+                    $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
+                }
             }
 
             if ($sqlServerVM.sqlPort) {
