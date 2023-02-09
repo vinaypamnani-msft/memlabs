@@ -1620,9 +1620,23 @@ function New-VirtualMachine {
         # Make sure Existing VM Path is gone!
         $VmSubPath = Join-Path $VmPath $VmName
         if (Test-Path -Path $VmSubPath) {
-            Write-Log "$VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
+            Write-Log "$VmName`: Found existing directory for $VmName. Purging $VmSubPath folder..."
             Remove-Item -Path $VmSubPath -Force -Recurse | out-null
-            Write-Log "$VmName`: Purge complete." -Verbose
+            Write-Log "$VmName`: Purge complete."
+        }
+
+        # Retry if its not gone.
+        if (Test-Path -Path $VmSubPath) {
+            Start-Sleep -Seconds 30
+            Write-Log "$VmName`: (Retry) Found existing directory for $VmName. Purging $VmSubPath folder..."
+            Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+            Write-Log "$VmName`: Purge complete."
+        }
+
+        #Fail if its not gone.
+        if (Test-Path -Path $VmSubPath) {
+            Write-Log "$VmName`: Could not delete $VmSubPath folder... Exit."
+            return $false
         }
 
         Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
