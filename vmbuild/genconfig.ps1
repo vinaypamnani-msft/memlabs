@@ -5667,7 +5667,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
-            $disk = [PSCustomObject]@{"E" = "120GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.Memory = "7GB"
             $virtualMachine.virtualProcs = 8
@@ -5681,7 +5681,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
-            $disk = [PSCustomObject]@{"E" = "120GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.Memory = "7GB"
             $virtualMachine.virtualProcs = 8
@@ -5695,7 +5695,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -5732,7 +5732,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -6546,7 +6546,7 @@ function Select-VirtualMachines {
                         }
                         if ($newValue -eq "A") {
                             if ($null -eq $virtualMachine.additionalDisks) {
-                                $disk = [PSCustomObject]@{"E" = "120GB" }
+                                $disk = [PSCustomObject]@{"E" = "250GB" }
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
                             }
                             else {
@@ -6556,7 +6556,7 @@ function Select-VirtualMachines {
                                 }
                                 if ($letters -lt 90) {
                                     $letter = $([char]$letters).ToString()
-                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "120GB"
+                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "250GB"
                                 }
                             }
                         }
