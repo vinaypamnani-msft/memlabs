@@ -76,11 +76,16 @@ configuration Phase4
                 Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
             }
 
+            $features = 'SQLENGINE'
+            if ($($ThisVm.sqlVersion -match "SQL Server 201")) {
+                $features = 'SQLENGINE,CONN,BC'
+            }
+
             SqlSetup InstallSQL {
                 InstanceName        = $SQLInstanceName
                 InstanceDir         = $SQLInstanceDir
                 SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
-                Features            = 'SQLENGINE,CONN,BC'
+                Features            = $features
                 SourcePath          = 'C:\temp\SQL'
                 UpdateEnabled       = $sqlUpdateEnabled
                 UpdateSource        = "C:\temp\SQL_CU"
@@ -140,7 +145,7 @@ configuration Phase4
         else {
             $SQLport = 1433
         }
-       
+
 
         ChangeSqlInstancePort SqlInstancePort {
             SQLInstanceName = $SQLInstanceName

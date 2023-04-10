@@ -495,7 +495,7 @@ function Get-Phase2ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -notin "WorkgroupMember", "AADClient", "InternetClient", "OSDClient", "Linux") {
+        if ($vm.role -notin  "AADClient", "InternetClient", "OSDClient", "Linux") {
             if (-not $vm.Hidden) {
                 return $cd
             }

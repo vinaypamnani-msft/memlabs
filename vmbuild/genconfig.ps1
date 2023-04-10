@@ -1910,43 +1910,47 @@ Function Get-DomainStatsLine {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName
     )
+
     $stats = ""
-    $ListCache = Get-List -Type VM -Domain $DomainName
-    $ExistingCasCount = ($ListCache | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-    $ExistingPriCount = ($ListCache | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
-    $ExistingSecCount = ($ListCache | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
-    $ExistingDPMPCount = ($ListCache | Where-Object { $_.installDP -or $_.enablePullDP } | Measure-Object).Count
-    $ExistingSQLCount = ($ListCache | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
-    $ExistingSubnetCount = ($ListCache | Select-Object -Property Network -unique | measure-object).Count
-    $TotalVMs = ($ListCache | Measure-Object).Count
-    $TotalRunningVMs = ($ListCache | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
-    $TotalMem = ($ListCache | Measure-Object -Sum MemoryGB).Sum
-    $TotalMaxMem = ($ListCache | Measure-Object -Sum MemoryStartupGB).Sum
-    $TotalDiskUsed = ($ListCache | Measure-Object -Sum DiskUsedGB).Sum
-    $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
-    if ($ExistingCasCount -gt 0) {
-        $stats += "[CAS VMs: $ExistingCasCount] "
-    }
-    if ($ExistingPriCount -gt 0) {
-        $stats += "[Primary VMs: $ExistingPriCount] "
-    }
-    if ($ExistingSecCount -gt 0) {
-        $stats += "[Secondary VMs: $ExistingSecCount] "
-    }
-    if ($ExistingSQLCount -gt 0) {
-        $stats += "[SQL VMs: $ExistingSQLCount] "
-    }
-    if ($ExistingDPMPCount -gt 0) {
-        $stats += "[DPMP Vms: $ExistingDPMPCount] "
-    }
+    try {
+        $ListCache = Get-List -Type VM -Domain $DomainName
+        $ExistingCasCount = ($ListCache | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
+        $ExistingPriCount = ($ListCache | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
+        $ExistingSecCount = ($ListCache | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
+        $ExistingDPMPCount = ($ListCache | Where-Object { $_.installDP -or $_.enablePullDP } | Measure-Object).Count
+        $ExistingSQLCount = ($ListCache | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
+        $ExistingSubnetCount = ($ListCache | Select-Object -Property Network -unique | measure-object).Count
+        $TotalVMs = ($ListCache | Measure-Object).Count
+        $TotalRunningVMs = ($ListCache | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
+        $TotalMem = ($ListCache | Measure-Object -Sum MemoryGB).Sum
+        $TotalMaxMem = ($ListCache | Measure-Object -Sum MemoryStartupGB).Sum
+        $TotalDiskUsed = ($ListCache | Measure-Object -Sum DiskUsedGB).Sum
+        $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
+        if ($ExistingCasCount -gt 0) {
+            $stats += "[CAS VMs: $ExistingCasCount] "
+        }
+        if ($ExistingPriCount -gt 0) {
+            $stats += "[Primary VMs: $ExistingPriCount] "
+        }
+        if ($ExistingSecCount -gt 0) {
+            $stats += "[Secondary VMs: $ExistingSecCount] "
+        }
+        if ($ExistingSQLCount -gt 0) {
+            $stats += "[SQL VMs: $ExistingSQLCount] "
+        }
+        if ($ExistingDPMPCount -gt 0) {
+            $stats += "[DPMP Vms: $ExistingDPMPCount] "
+        }
 
-    if ([string]::IsNullOrWhiteSpace($stats)) {
-        $stats = "[No ConfigMgr Roles installed] "
-    }
+        if ([string]::IsNullOrWhiteSpace($stats)) {
+            $stats = "[No ConfigMgr Roles installed] "
+        }
 
-    if ($ExistingSubnetCount -gt 0) {
-        $stats += "[Number of Networks: $ExistingSubnetCount] "
+        if ($ExistingSubnetCount -gt 0) {
+            $stats += "[Number of Networks: $ExistingSubnetCount] "
+        }
     }
+    catch {}
     return $stats
 }
 
