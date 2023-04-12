@@ -99,11 +99,11 @@ Function Select-ToolsMenu {
             else {
                 if ($tool -eq "A") {
                     #all Tools
-                    Get-Tools -vmName $vmName
+                    Get-Tools -Inject -vmName $vmName
                 }
                 else {
                     #Specific Tool
-                    Get-Tools -vmName $vmName -ToolName $tool
+                    Get-Tools -Inject -vmName $vmName -ToolName $tool
                 }
             }
 
@@ -122,12 +122,12 @@ Function Select-ToolsMenu {
             }
             if ($vmName -eq "A") {
                 foreach ($vmName in $runningVMs) {
-                    Get-Tools -ToolName $tool -vmName $vmName
+                    Get-Tools -Inject -ToolName $tool -vmName $vmName
 
                 }
             }
             else {
-                Get-Tools -ToolName $tool -vmName $vmName
+                Get-Tools -Inject -ToolName $tool -vmName $vmName
             }
 
         }
