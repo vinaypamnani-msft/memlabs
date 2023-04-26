@@ -14,7 +14,7 @@ Configuration Phase5
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
     #$netbiosName = $DomainName.Split(".")[0]
-    $netbiosName = $deployConfig.parameters.domainNetBiosName 
+    $netbiosName = $deployConfig.parameters.domainNetBiosName
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Log share
