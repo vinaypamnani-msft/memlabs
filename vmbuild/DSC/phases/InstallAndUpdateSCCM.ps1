@@ -231,7 +231,14 @@ CurrentBranch=1
     Write-DscStatusSetup
 
     #Setup Downloader
-    $CMSetupDL = "c:\$CM\SMSSETUP\BIN\X64\Setupdl.exe"
+
+    $CMDir = "c:\$CM"
+    $CMDirnew = Join-Path $CMDir "cd.retail"
+    if (Test-Path $CMDirnew -PathType Container) {
+        $CMDir = $CMDirnew
+    }
+
+    $CMSetupDL = "$CMDir\SMSSETUP\BIN\X64\Setupdl.exe"
     $CMRedist = "C:\$CM\REdist"
     $CMLog = "C:\ConfigMgrSetup.log"
     $success = 0
@@ -275,7 +282,7 @@ CurrentBranch=1
     $cmini > $CMINIPath
 
     # Install CM
-    $CMInstallationFile = "c:\$CM\SMSSETUP\BIN\X64\Setup.exe"
+    $CMInstallationFile = "$CMDir\SMSSETUP\BIN\X64\Setup.exe"
     $CMFileVersion = Get-Item -Path $CMInstallationFile -ErrorAction SilentlyContinue
 
     Write-DscStatus "Starting Install of CM from $CMInstallationFile [$($CMFileVersion.VersionInfo.FileVersion)]"
