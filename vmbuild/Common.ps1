@@ -693,7 +693,10 @@ function Get-File {
         if (Test-Path $Destination) {
             return $true
         }
-
+        else {
+            Write-Log "Destinataion $Destination does not exist" -Failure
+        }
+        Write-Log "Returning failure from Get-File"
         return $false
     }
     catch {
@@ -1620,9 +1623,23 @@ function New-VirtualMachine {
         # Make sure Existing VM Path is gone!
         $VmSubPath = Join-Path $VmPath $VmName
         if (Test-Path -Path $VmSubPath) {
-            Write-Log "$VmName`: Found existing directory for $vmName. Purging $VmSubPath folder..."
+            Write-Log "$VmName`: Found existing directory for $VmName. Purging $VmSubPath folder..."
             Remove-Item -Path $VmSubPath -Force -Recurse | out-null
-            Write-Log "$VmName`: Purge complete." -Verbose
+            Write-Log "$VmName`: Purge complete."
+        }
+
+        # Retry if its not gone.
+        if (Test-Path -Path $VmSubPath) {
+            Start-Sleep -Seconds 30
+            Write-Log "$VmName`: (Retry) Found existing directory for $VmName. Purging $VmSubPath folder..."
+            Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+            Write-Log "$VmName`: Purge complete."
+        }
+
+        #Fail if its not gone.
+        if (Test-Path -Path $VmSubPath) {
+            Write-Log "$VmName`: Could not delete $VmSubPath folder... Exit."
+            return $false
         }
 
         Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
@@ -2633,14 +2650,17 @@ function Get-Tools {
         }
 
         if (-not $tool.md5) {
-            Write-Log "Downloading/Verifying '$name'" -SubActivity
+            Write-Log "Downloading/Verifying '$name' without hash" -SubActivity
             $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
         else {
-            $worked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN -WhatIf:$WhatIf
+            Write-Log "Downloading/Verifying '$name' with hash" -SubActivity
+            $tempworked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN -WhatIf:$WhatIf
+            $worked = $tempworked.success
         }
 
-        if (-not $worked.success) {
+        if (-not $worked) {
+            Write-Log "Failed to Download or Verify '$name'"
             $allSuccess = $false
         }
 
@@ -2678,6 +2698,7 @@ function Get-Tools {
 
     $injected = $allSuccess
     if ($Inject.IsPresent -and $allSuccess) {
+        Write-Log "Injecting $ToolName to $VmName..." -Activity
         $HashArguments = @{
             WhatIf          = $WhatIf
             IncludeOptional = $IncludeOptional
@@ -2685,7 +2706,7 @@ function Get-Tools {
 
         if ($VmName) { $HashArguments.Add("VmName", $VmName) }
         if ($ToolName) { $HashArguments.Add("ToolName", $ToolName) }
-
+        $HashArguments.Add("ShowProgress", $true)
         $injected = Install-Tools @HashArguments
 
     }
@@ -2712,6 +2733,7 @@ function Install-Tools {
         [switch]$WhatIf
     )
 
+    Write-Log "Install-Tools called. ${$VmName}"
     if ($VmName) {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
     }
@@ -2746,7 +2768,7 @@ function Install-Tools {
 
             if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-            if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { continue }
+            if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { continue }
 
             if ($ShowProgress) {
                 Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"

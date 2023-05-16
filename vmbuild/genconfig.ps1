@@ -99,11 +99,11 @@ Function Select-ToolsMenu {
             else {
                 if ($tool -eq "A") {
                     #all Tools
-                    Get-Tools -vmName $vmName
+                    Get-Tools -Inject -vmName $vmName
                 }
                 else {
                     #Specific Tool
-                    Get-Tools -vmName $vmName -ToolName $tool
+                    Get-Tools -Inject -vmName $vmName -ToolName $tool
                 }
             }
 
@@ -122,12 +122,12 @@ Function Select-ToolsMenu {
             }
             if ($vmName -eq "A") {
                 foreach ($vmName in $runningVMs) {
-                    Get-Tools -ToolName $tool -vmName $vmName
+                    Get-Tools -Inject -ToolName $tool -vmName $vmName
 
                 }
             }
             else {
-                Get-Tools -ToolName $tool -vmName $vmName
+                Get-Tools -Inject -ToolName $tool -vmName $vmName
             }
 
         }
@@ -1910,43 +1910,47 @@ Function Get-DomainStatsLine {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName
     )
+
     $stats = ""
-    $ListCache = Get-List -Type VM -Domain $DomainName
-    $ExistingCasCount = ($ListCache | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-    $ExistingPriCount = ($ListCache | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
-    $ExistingSecCount = ($ListCache | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
-    $ExistingDPMPCount = ($ListCache | Where-Object { $_.installDP -or $_.enablePullDP } | Measure-Object).Count
-    $ExistingSQLCount = ($ListCache | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
-    $ExistingSubnetCount = ($ListCache | Select-Object -Property Network -unique | measure-object).Count
-    $TotalVMs = ($ListCache | Measure-Object).Count
-    $TotalRunningVMs = ($ListCache | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
-    $TotalMem = ($ListCache | Measure-Object -Sum MemoryGB).Sum
-    $TotalMaxMem = ($ListCache | Measure-Object -Sum MemoryStartupGB).Sum
-    $TotalDiskUsed = ($ListCache | Measure-Object -Sum DiskUsedGB).Sum
-    $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
-    if ($ExistingCasCount -gt 0) {
-        $stats += "[CAS VMs: $ExistingCasCount] "
-    }
-    if ($ExistingPriCount -gt 0) {
-        $stats += "[Primary VMs: $ExistingPriCount] "
-    }
-    if ($ExistingSecCount -gt 0) {
-        $stats += "[Secondary VMs: $ExistingSecCount] "
-    }
-    if ($ExistingSQLCount -gt 0) {
-        $stats += "[SQL VMs: $ExistingSQLCount] "
-    }
-    if ($ExistingDPMPCount -gt 0) {
-        $stats += "[DPMP Vms: $ExistingDPMPCount] "
-    }
+    try {
+        $ListCache = Get-List -Type VM -Domain $DomainName
+        $ExistingCasCount = ($ListCache | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
+        $ExistingPriCount = ($ListCache | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
+        $ExistingSecCount = ($ListCache | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
+        $ExistingDPMPCount = ($ListCache | Where-Object { $_.installDP -or $_.enablePullDP } | Measure-Object).Count
+        $ExistingSQLCount = ($ListCache | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion } | Measure-Object).Count
+        $ExistingSubnetCount = ($ListCache | Select-Object -Property Network -unique | measure-object).Count
+        $TotalVMs = ($ListCache | Measure-Object).Count
+        $TotalRunningVMs = ($ListCache | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
+        $TotalMem = ($ListCache | Measure-Object -Sum MemoryGB).Sum
+        $TotalMaxMem = ($ListCache | Measure-Object -Sum MemoryStartupGB).Sum
+        $TotalDiskUsed = ($ListCache | Measure-Object -Sum DiskUsedGB).Sum
+        $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
+        if ($ExistingCasCount -gt 0) {
+            $stats += "[CAS VMs: $ExistingCasCount] "
+        }
+        if ($ExistingPriCount -gt 0) {
+            $stats += "[Primary VMs: $ExistingPriCount] "
+        }
+        if ($ExistingSecCount -gt 0) {
+            $stats += "[Secondary VMs: $ExistingSecCount] "
+        }
+        if ($ExistingSQLCount -gt 0) {
+            $stats += "[SQL VMs: $ExistingSQLCount] "
+        }
+        if ($ExistingDPMPCount -gt 0) {
+            $stats += "[DPMP Vms: $ExistingDPMPCount] "
+        }
 
-    if ([string]::IsNullOrWhiteSpace($stats)) {
-        $stats = "[No ConfigMgr Roles installed] "
-    }
+        if ([string]::IsNullOrWhiteSpace($stats)) {
+            $stats = "[No ConfigMgr Roles installed] "
+        }
 
-    if ($ExistingSubnetCount -gt 0) {
-        $stats += "[Number of Networks: $ExistingSubnetCount] "
+        if ($ExistingSubnetCount -gt 0) {
+            $stats += "[Number of Networks: $ExistingSubnetCount] "
+        }
     }
+    catch {}
     return $stats
 }
 
@@ -5667,7 +5671,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
-            $disk = [PSCustomObject]@{"E" = "120GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.Memory = "7GB"
             $virtualMachine.virtualProcs = 8
@@ -5681,7 +5685,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
-            $disk = [PSCustomObject]@{"E" = "120GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.Memory = "7GB"
             $virtualMachine.virtualProcs = 8
@@ -5695,7 +5699,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -5732,7 +5736,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "120GB" }
+            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -6546,7 +6550,7 @@ function Select-VirtualMachines {
                         }
                         if ($newValue -eq "A") {
                             if ($null -eq $virtualMachine.additionalDisks) {
-                                $disk = [PSCustomObject]@{"E" = "120GB" }
+                                $disk = [PSCustomObject]@{"E" = "250GB" }
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
                             }
                             else {
@@ -6556,7 +6560,7 @@ function Select-VirtualMachines {
                                 }
                                 if ($letters -lt 90) {
                                     $letter = $([char]$letters).ToString()
-                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "120GB"
+                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "250GB"
                                 }
                             }
                         }

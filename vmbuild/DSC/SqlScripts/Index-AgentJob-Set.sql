@@ -75,4 +75,17 @@ QuitWithRollback:
 EndSave:
 GO
 
+use master
+go
+exec sp_configure 'Show advanced options',1
+Go
+reconfigure with override
+go
+
+use master
+go
+exec sp_configure 'Agent XPs',1
+Go
+reconfigure with override
+go
 
