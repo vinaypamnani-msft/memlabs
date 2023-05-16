@@ -194,21 +194,21 @@ class InstallSSMS {
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
 
-            if (Test-Path $smssinstallpath) {
-                If ((Get-Item $smssinstallpath).length -gt 0kb) {
-                    Write-Verbose "Test - Installing SSMS... $smssinstallpath exists"
-                    return $true
-                }
+        if (Test-Path $smssinstallpath) {
+            If ((Get-Item $smssinstallpath).length -gt 0kb) {
+                Write-Verbose "Test - Installing SSMS... $smssinstallpath exists"
+                return $true
             }
+        }
 
-            if (Test-Path $smssinstallpath2) {
-                If ((Get-Item $smssinstallpath2).length -gt 0kb) {
-                    Write-Verbose "Test - Installing SSMS... $smssinstallpath2 exists"
-                    return $true
-                }
+        if (Test-Path $smssinstallpath2) {
+            If ((Get-Item $smssinstallpath2).length -gt 0kb) {
+                Write-Verbose "Test - Installing SSMS... $smssinstallpath2 exists"
+                return $true
             }
+        }
 
-            Write-Verbose "Test - Installing SSMS... $smssinstallpath2 does not exist"
+        Write-Verbose "Test - Installing SSMS... $smssinstallpath2 does not exist"
         return $false
     }
 
@@ -709,7 +709,7 @@ class DownloadSCCM {
         $_CMURL = $this.CMDownloadUrl
         $cmpath = "c:\temp\$_CM.exe"
         $cmsourcepath = "c:\$_CM"
-        Write-Verbose "Downloading $_CM installation source..."
+        Write-Verbose "Downloading [$_CMURL] $_CM installation source... to $cmpath"
 
         Start-BitsTransfer -Source $_CMURL -Destination $cmpath -Priority Foreground -ErrorAction Stop
         if (Test-Path $cmsourcepath) {
@@ -717,7 +717,13 @@ class DownloadSCCM {
         }
 
         if (!(Test-Path $cmsourcepath)) {
-            Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -Wait
+
+            if (($_CMURL -like "*MCM_*") -or ($_CMURL -like "*go.microsoft.com*")) {
+                Start-Process -Filepath ($cmpath) -ArgumentList ('/extract:"' + $cmsourcepath + '" /quiet') -Wait
+            }
+            else {
+                Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -Wait
+            }
         }
     }
 
