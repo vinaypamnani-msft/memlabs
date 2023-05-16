@@ -554,14 +554,14 @@ $global:VM_Config = {
                 foreach ($folder in $modules) {
                     try {
                         Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction Stop
-                        Import-Module $folder.Name -Force;
+                        Import-Module $folder.Name -Force
                     }
                     catch {
                         "Failed to copy $($folder.Name) to WindowsPowerShell\Modules. Retrying once after killing WMIPRvSe.exe hosting DSC modules." | Out-File $log -Append
                         Get-Process wmiprvse* -ErrorAction SilentlyContinue | Where-Object { $_.modules.ModuleName -like "*DSC*" } | Stop-Process -Force -ErrorAction SilentlyContinue
                         Start-Sleep -Seconds 60
                         Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction SilentlyContinue
-                        Import-Module $folder.Name -Force;
+                        Import-Module $folder.Name -Force
                     }
                 }
             }
@@ -571,6 +571,7 @@ $global:VM_Config = {
                 Write-Error $error_message
                 return $error_message
             }
+            "Modules Installed" | Out-File $log -Append
         }
 
         $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
