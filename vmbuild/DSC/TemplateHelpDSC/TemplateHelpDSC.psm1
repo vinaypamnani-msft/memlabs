@@ -526,9 +526,11 @@ class WaitForExtendSchemaFile {
             Write-Verbose "Testing $extadschpath and $extadschpath"
             Write-Verbose "Wait for extadsch.exe exist on $($this.MachineName), will try 10 seconds later..."
             Start-Sleep -Seconds 10
+            $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
+            $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
         }
 
-        Write-Verbose "Extended the Active Directory schema..."
+        Write-Verbose "Extending the Active Directory schema..."
 
         # Force AD Replication
         $domainControllers = Get-ADDomainController -Filter *
@@ -539,9 +541,11 @@ class WaitForExtendSchemaFile {
         }
 
         if (Test-Path $extadschpath) {
-        & $extadschpath | out-null
+            Write-Verbose "Running $extadschpath"
+            & $extadschpath | out-null
         }
         if (Test-Path $extadschpath2) {
+            Write-Verbose "Running $extadschpath"
             & $extadschpath2 | out-null
         }
 
