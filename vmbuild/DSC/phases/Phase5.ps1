@@ -651,6 +651,7 @@ Configuration Phase5
             DisableVariables = $true
             DependsOn        = $nextDepend
             Variable     = @('FilePath=C:\temp\')
+            Credential =  $Admincreds
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 
@@ -1001,6 +1002,7 @@ Configuration Phase5
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
             DependsOn        = $nextDepend
+            Credential =  $Admincreds
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 
