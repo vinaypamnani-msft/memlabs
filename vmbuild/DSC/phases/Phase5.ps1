@@ -1004,6 +1004,7 @@ Configuration Phase5
             DisableVariables = $true
             DependsOn        = $nextDepend
             PsDscRunAsCredential =  $Admincreds
+            Variable     = @('FilePath=C:\temp\')
             Encrypt = "Optional"
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
