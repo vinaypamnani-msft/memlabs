@@ -408,9 +408,20 @@ Configuration Phase5
             InstanceName = $thisVM.sqlInstanceName
             Name         = 'NT SERVICE\ClusSvc'
             Permission   = @(
-                ServerPermission {
-                    State    = 'Grant'
+                ServerPermission
+                {
+                    State      = 'Grant'
                     Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
+                }
+                ServerPermission
+                {
+                    State      = 'GrantWithGrant'
+                    Permission = @()
+                }
+                ServerPermission
+                {
+                    State      = 'Deny'
+                    Permission = @()
                 }
             )
             Credential = $Admincreds
@@ -831,9 +842,20 @@ Configuration Phase5
             InstanceName         = $node1vm.sqlInstanceName
             Name            = 'NT SERVICE\ClusSvc'
             Permission   = @(
-                ServerPermission {
-                    State    = 'Grant'
+                ServerPermission
+                {
+                    State      = 'Grant'
                     Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
+                }
+                ServerPermission
+                {
+                    State      = 'GrantWithGrant'
+                    Permission = @()
+                }
+                ServerPermission
+                {
+                    State      = 'Deny'
+                    Permission = @()
                 }
             )
             Credential = $Admincreds
