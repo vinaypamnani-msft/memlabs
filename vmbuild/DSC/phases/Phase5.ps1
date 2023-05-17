@@ -404,12 +404,27 @@ Configuration Phase5
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions' {
             DependsOn    = '[SqlLogin]AddNTServiceClusSvc'
-            Ensure       = 'Present'
             ServerName   = $Node.NodeName
             InstanceName = $thisVM.sqlInstanceName
-            Principal    = 'NT SERVICE\ClusSvc'
-            Permission   = 'AlterAnyAvailabilityGroup', 'ViewServerState'
-            #PsDscRunAsCredential = $Admincreds
+            Name         = 'NT SERVICE\ClusSvc'
+            Permission   = @(
+                ServerPermission
+                {
+                    State      = 'Grant'
+                    Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
+                }
+                ServerPermission
+                {
+                    State      = 'GrantWithGrant'
+                    Permission = @()
+                }
+                ServerPermission
+                {
+                    State      = 'Deny'
+                    Permission = @()
+                }
+            )
+            Credential = $Admincreds
         }
         $nextDepend = '[SqlPermission]AddNTServiceClusSvcPermissions'
 
@@ -635,6 +650,9 @@ Configuration Phase5
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
             DependsOn        = $nextDepend
+            Variable     = @('FilePath=C:\temp\')
+            PsDscRunAsCredential =  $Admincreds
+            Encrypt = "Optional"
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 
@@ -820,16 +838,30 @@ Configuration Phase5
             DependsOn            = $nextDepend
         }
 
-
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions' {
             DependsOn            = $nextDepend
-            Ensure               = 'Present'
             ServerName           = $Node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            Principal            = 'NT SERVICE\ClusSvc'
-            Permission           = 'AlterAnyAvailabilityGroup', 'ViewServerState'
-            PsDscRunAsCredential = $Admincreds
+            Name            = 'NT SERVICE\ClusSvc'
+            Permission   = @(
+                ServerPermission
+                {
+                    State      = 'Grant'
+                    Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
+                }
+                ServerPermission
+                {
+                    State      = 'GrantWithGrant'
+                    Permission = @()
+                }
+                ServerPermission
+                {
+                    State      = 'Deny'
+                    Permission = @()
+                }
+            )
+            Credential = $Admincreds
         }
         $nextDepend = '[SqlRole]Add_ServerRole', '[SqlPermission]AddNTServiceClusSvcPermissions'
 
@@ -971,6 +1003,9 @@ Configuration Phase5
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
             DependsOn        = $nextDepend
+            PsDscRunAsCredential =  $Admincreds
+            Variable     = @('FilePath=C:\temp\')
+            Encrypt = "Optional"
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 
