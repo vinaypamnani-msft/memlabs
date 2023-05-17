@@ -413,7 +413,7 @@ Configuration Phase5
                     Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
                 }
             )
-            #PsDscRunAsCredential = $Admincreds
+            Credential = $Admincreds
         }
         $nextDepend = '[SqlPermission]AddNTServiceClusSvcPermissions'
 
@@ -836,7 +836,7 @@ Configuration Phase5
                     Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
                 }
             )
-            PsDscRunAsCredential = $Admincreds
+            Credential = $Admincreds
         }
         $nextDepend = '[SqlRole]Add_ServerRole', '[SqlPermission]AddNTServiceClusSvcPermissions'
 
