@@ -289,6 +289,7 @@ configuration Phase4
             GetFilePath      = $sqlBackupGet
             DisableVariables = $true
             DependsOn        = '[DownloadFile]DownloadBackupSolution'
+            Variable     = @('FilePath=C:\temp\')
         }
 
         $nextDepend = '[SqlScript]InstallBackupSolution'
@@ -313,6 +314,7 @@ configuration Phase4
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
             DependsOn        = $nextDepend
+            Variable     = @('FilePath=C:\temp\')
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 

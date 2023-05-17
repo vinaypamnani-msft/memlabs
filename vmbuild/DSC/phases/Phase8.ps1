@@ -71,6 +71,7 @@ Configuration Phase8
             TestFilePath     = $AgentJobTest
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
+            Variable     = @('FilePath=C:\temp\')
         }
         $nextDepend = '[SqlScript]DisableAgentJob'
 
@@ -119,6 +120,7 @@ Configuration Phase8
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
             DependsOn        = $nextDepend
+            Variable     = @('FilePath=C:\temp\')
         }
         $nextDepend = '[SqlScript]EnableAgentJob'
 

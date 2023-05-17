@@ -650,6 +650,7 @@ Configuration Phase5
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
             DependsOn        = $nextDepend
+            Variable     = @('FilePath=C:\temp\')
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 
