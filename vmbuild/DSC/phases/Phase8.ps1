@@ -72,7 +72,7 @@ Configuration Phase8
             GetFilePath      = $AgentJobGet
             DisableVariables = $true
             Variable     = @('FilePath=C:\temp\')
-            Credential =  $Admincreds
+            PsDscRunAsCredential =  $Admincreds
         }
         $nextDepend = '[SqlScript]DisableAgentJob'
 
@@ -122,7 +122,7 @@ Configuration Phase8
             DisableVariables = $true
             DependsOn        = $nextDepend
             Variable     = @('FilePath=C:\temp\')
-            Credential =  $Admincreds
+            PsDscRunAsCredential =  $Admincreds
         }
         $nextDepend = '[SqlScript]EnableAgentJob'
 

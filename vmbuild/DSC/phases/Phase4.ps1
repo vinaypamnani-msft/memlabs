@@ -290,7 +290,7 @@ configuration Phase4
             DisableVariables = $true
             DependsOn        = '[DownloadFile]DownloadBackupSolution'
             Variable     = @('FilePath=C:\temp\')
-            Credential =  $Admincreds
+            PsDscRunAsCredential =  $Admincreds
         }
 
         $nextDepend = '[SqlScript]InstallBackupSolution'
@@ -316,6 +316,7 @@ configuration Phase4
             DisableVariables = $true
             DependsOn        = $nextDepend
             Variable     = @('FilePath=C:\temp\')
+            PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 
