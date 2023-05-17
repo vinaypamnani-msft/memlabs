@@ -404,11 +404,15 @@ Configuration Phase5
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions' {
             DependsOn    = '[SqlLogin]AddNTServiceClusSvc'
-            Ensure       = 'Present'
             ServerName   = $Node.NodeName
             InstanceName = $thisVM.sqlInstanceName
-            Principal    = 'NT SERVICE\ClusSvc'
-            Permission   = 'AlterAnyAvailabilityGroup', 'ViewServerState'
+            Name         = 'NT SERVICE\ClusSvc'
+            Permission   = @(
+                ServerPermission {
+                    State    = 'Grant'
+                    Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
+                }
+            )
             #PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[SqlPermission]AddNTServiceClusSvcPermissions'
@@ -820,15 +824,18 @@ Configuration Phase5
             DependsOn            = $nextDepend
         }
 
-
         # Add the required permissions to the cluster service login
         SqlPermission 'AddNTServiceClusSvcPermissions' {
             DependsOn            = $nextDepend
-            Ensure               = 'Present'
             ServerName           = $Node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            Principal            = 'NT SERVICE\ClusSvc'
-            Permission           = 'AlterAnyAvailabilityGroup', 'ViewServerState'
+            Name            = 'NT SERVICE\ClusSvc'
+            Permission   = @(
+                ServerPermission {
+                    State    = 'Grant'
+                    Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
+                }
+            )
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[SqlRole]Add_ServerRole', '[SqlPermission]AddNTServiceClusSvcPermissions'
