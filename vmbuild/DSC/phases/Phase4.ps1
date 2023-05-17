@@ -291,6 +291,7 @@ configuration Phase4
             DependsOn        = '[DownloadFile]DownloadBackupSolution'
             Variable     = @('FilePath=C:\temp\')
             PsDscRunAsCredential =  $Admincreds
+            Encrypt = "Optional"
         }
 
         $nextDepend = '[SqlScript]InstallBackupSolution'
@@ -317,6 +318,7 @@ configuration Phase4
             DependsOn        = $nextDepend
             Variable     = @('FilePath=C:\temp\')
             PsDscRunAsCredential = $Admincreds
+            Encrypt = "Optional"
         }
         $nextDepend = '[SqlScript]InstallAgentJob'
 

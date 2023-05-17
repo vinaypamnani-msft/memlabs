@@ -73,6 +73,7 @@ Configuration Phase8
             DisableVariables = $true
             Variable     = @('FilePath=C:\temp\')
             PsDscRunAsCredential =  $Admincreds
+            Encrypt = "Optional"
         }
         $nextDepend = '[SqlScript]DisableAgentJob'
 
@@ -123,6 +124,7 @@ Configuration Phase8
             DependsOn        = $nextDepend
             Variable     = @('FilePath=C:\temp\')
             PsDscRunAsCredential =  $Admincreds
+            Encrypt = "Optional"
         }
         $nextDepend = '[SqlScript]EnableAgentJob'
 
