@@ -63,6 +63,11 @@ $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false }
 
 Test-NoRRAS
 
+
+if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
+    Set-VMhost -EnableEnhancedSessionMode $True
+}
+
 if (-not $NoWindowResize.IsPresent) {
     try {
         Add-Type -AssemblyName System.Windows.Forms
