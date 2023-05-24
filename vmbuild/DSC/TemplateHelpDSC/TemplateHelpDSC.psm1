@@ -1689,6 +1689,7 @@ class JoinDomain {
     }
 
     [bool] Test() {
+
         $_DomainName = $this.DomainName
         $CurrentDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
 

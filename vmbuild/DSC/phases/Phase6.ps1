@@ -53,6 +53,11 @@ configuration Phase6
                 $sqlPort = 1433
             }
             if ($sqlPort -ne 1433) {
+                if ($sqlServerVM.sqlInstanceName) {
+                    if ($sqlServerVM.sqlInstanceName -eq "MSSQLSERVER") {
+                        $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
+                    }
+                }
                 $sqlServer = $sqlServer + "," + $sqlServerVM.sqlPort
             }
 
