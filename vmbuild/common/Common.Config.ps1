@@ -1384,6 +1384,19 @@ function Get-VMFromHyperV {
     $memoryStartupGB = $sizeCache.MemoryStartup / 1GB
     $diskSizeGB = $sizeCache.diskSize / 1GB
 
+    if (-not $memoryStartupGB) {
+        $memoryStartupGB = 0
+    }
+
+    if (-not $diskSizeGB) {
+        $diskSizeGB = 0
+    }
+
+    $memoryGB = $vm.MemoryAssigned / 1GB
+
+    if (-not $memoryGB) {
+        $memoryGB = 0
+    }
     $vmNet = Get-VMNetworkCached -vm $vm
 
     #VmState is now updated  in Update-VMFromHyperV
@@ -1393,7 +1406,7 @@ function Get-VMFromHyperV {
         vmName          = $vm.Name
         vmId            = $vm.Id
         switch          = $vmNet.SwitchName
-        memoryGB        = $vm.MemoryAssigned / 1GB
+        memoryGB        = $memoryGB
         memoryStartupGB = $memoryStartupGB
         diskUsedGB      = [math]::Round($diskSizeGB, 2)
     }
@@ -1455,7 +1468,7 @@ function Update-VMFromHyperV {
                         if ($vmObject.sqlInstanceName -eq "MSSQLSERVER") {
                             $vmObject | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 1433 -Force
                         }
-                        else{
+                        else {
                             $vmObject | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value 2433 -Force
                         }
                     }
@@ -1526,6 +1539,7 @@ function Get-List {
 
     $doSmartUpdate = $SmartUpdate.IsPresent
     $inMutex = $false
+    $return = $null
     #Get-PSCallStack | out-host
     if ($global:DisableSmartUpdate -eq $true) {
         $doSmartUpdate = $false
@@ -1668,7 +1682,7 @@ function Get-List {
             $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
         }
 
-        $return = $return | Sort-Object -Property * -Unique
+        $return = $return | Sort-Object -Property * #-Unique
 
         if ($Type -eq "VM") {
             return $return

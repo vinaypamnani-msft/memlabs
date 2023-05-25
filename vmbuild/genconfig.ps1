@@ -1008,15 +1008,17 @@ function Select-MainMenu {
                 $global:Config.virtualMachines = $virtualMachines
             }
         }
-        foreach ($virtualMachine in $global:config.virtualMachines | Where-Object { -not $_.Hidden }) {
-            if ($null -eq $virtualMachine) {
-                $global:config.virtualMachines | convertTo-Json -Depth 5 | out-host
-                continue
+        if ($global:config.virtualMachines) {
+            foreach ($virtualMachine in $global:config.virtualMachines | Where-Object { -not $_.Hidden }) {
+                if ($null -eq $virtualMachine) {
+                    #$global:config.virtualMachines | convertTo-Json -Depth 5 | out-host
+                    continue
+                }
+                $i = $i + 1
+                $name = Get-VMString -config $global:config -virtualMachine $virtualMachine -colors
+                $customOptions += [ordered]@{"$i" = "$name" }
+                #write-Option "$i" "$($name)"
             }
-            $i = $i + 1
-            $name = Get-VMString -config $global:config -virtualMachine $virtualMachine -colors
-            $customOptions += [ordered]@{"$i" = "$name" }
-            #write-Option "$i" "$($name)"
         }
 
         $customOptions += [ordered]@{ "N" = "New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)" }
@@ -1061,6 +1063,7 @@ function Select-MainMenu {
             }
             "!" {
                 $global:StartOver = $true
+                Get-List -FlushCache
                 return $false
             }
             "z" {
@@ -1925,6 +1928,7 @@ Function Get-DomainStatsLine {
         $TotalMem = ($ListCache | Measure-Object -Sum MemoryGB).Sum
         $TotalMaxMem = ($ListCache | Measure-Object -Sum MemoryStartupGB).Sum
         $TotalDiskUsed = ($ListCache | Measure-Object -Sum DiskUsedGB).Sum
+
         $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
         if ($ExistingCasCount -gt 0) {
             $stats += "[CAS VMs: $ExistingCasCount] "
@@ -6870,6 +6874,7 @@ do {
         if ($global:StartOver -eq $true) {
             Write-Host2 -ForegroundColor MediumAquamarine "Saving Configuration... use ""!"" to return."
             $Global:SavedConfig = $global:config
+            $DeployConfig = $null
             Write-Host
             break
         }
