@@ -237,6 +237,12 @@ CurrentBranch=1
     if (Test-Path $CMDirnew -PathType Container) {
         $CMDir = $CMDirnew
     }
+    else{
+        $CMDirnew = Join-Path $CMDir "cd.retail.LN"
+        if (Test-Path $CMDirnew -PathType Container) {
+            $CMDir = $CMDirnew
+        }
+    }
 
     $CMSetupDL = "$CMDir\SMSSETUP\BIN\X64\Setupdl.exe"
     $CMRedist = "C:\$CM\REdist"
