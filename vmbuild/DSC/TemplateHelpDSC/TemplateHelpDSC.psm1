@@ -737,7 +737,7 @@ class DownloadSCCM {
             if (($_CMURL -like "*MCM_*") -or ($_CMURL -like "*go.microsoft.com*")) {
                 $size = (Get-Item $cmpath).length / 1GB
                 if ($size -gt 1) {
-                    Start-Process -Filepath ($cmpath) -ArgumentList ('-d' + $cmsourcepath + '" -s2') -Wait
+                    Start-Process -Filepath ($cmpath) -ArgumentList ('-d' + $cmsourcepath + ' -s2') -Wait
                 }
                 else {
                     Start-Process -Filepath ($cmpath) -ArgumentList ('/extract:"' + $cmsourcepath + '" /quiet') -Wait
