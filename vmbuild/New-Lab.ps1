@@ -182,7 +182,9 @@ try {
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
     ### Run maintenance
-    Start-Maintenance
+    if (!$Configuration) {
+        Start-Maintenance
+    }
 
     # Get config
     if (-not $Configuration) {
