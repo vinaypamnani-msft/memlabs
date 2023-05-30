@@ -424,7 +424,7 @@ Configuration Phase5
                     Permission = @()
                 }
             )
-            Credential = $Admincreds
+            #Credential = $Admincreds
         }
         $nextDepend = '[SqlPermission]AddNTServiceClusSvcPermissions'
 
@@ -861,7 +861,7 @@ Configuration Phase5
                     Permission = @()
                 }
             )
-            Credential = $Admincreds
+            #Credential = $Admincreds
         }
         $nextDepend = '[SqlRole]Add_ServerRole', '[SqlPermission]AddNTServiceClusSvcPermissions'
 

@@ -522,12 +522,14 @@ class WaitForExtendSchemaFile {
         $_FilePath = "\\$($this.MachineName)\$($this.ExtFolder)"
         $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
         $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
-        while (!(Test-Path $extadschpath) -and !(Test-Path $extadschpath2)) {
-            Write-Verbose "Testing $extadschpath and $extadschpath"
+        $extadschpath3 = Join-Path -Path $_FilePath -ChildPath "cd.retai.LN\SMSSETUP\BIN\X64\extadsch.exe"
+        while (!(Test-Path $extadschpath) -and !(Test-Path $extadschpath2) -and !(Test-Path $extadschpath3)) {
+            Write-Verbose "Testing $extadschpath and $extadschpath2 and $extadschpath3"
             Write-Verbose "Wait for extadsch.exe exist on $($this.MachineName), will try 10 seconds later..."
             Start-Sleep -Seconds 10
             $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
             $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
+            $extadschpath3 = Join-Path -Path $_FilePath -ChildPath "cd.retai.LN\SMSSETUP\BIN\X64\extadsch.exe"
         }
 
         Write-Verbose "Extending the Active Directory schema..."
@@ -545,10 +547,14 @@ class WaitForExtendSchemaFile {
             & $extadschpath | out-null
         }
         if (Test-Path $extadschpath2) {
-            Write-Verbose "Running $extadschpath"
+            Write-Verbose "Running $extadschpath2"
             & $extadschpath2 | out-null
         }
 
+        if (Test-Path $extadschpath3) {
+            Write-Verbose "Running $extadschpath3"
+            & $extadschpath3 | out-null
+        }
         Write-Verbose "Done."
     }
 
@@ -727,8 +733,15 @@ class DownloadSCCM {
 
         if (!(Test-Path $cmsourcepath)) {
 
+
             if (($_CMURL -like "*MCM_*") -or ($_CMURL -like "*go.microsoft.com*")) {
-                Start-Process -Filepath ($cmpath) -ArgumentList ('/extract:"' + $cmsourcepath + '" /quiet') -Wait
+                $size = (Get-Item $cmpath).length / 1GB
+                if ($size -gt 1) {
+                    Start-Process -Filepath ($cmpath) -ArgumentList ('-d' + $cmsourcepath + ' -s2') -Wait
+                }
+                else {
+                    Start-Process -Filepath ($cmpath) -ArgumentList ('/extract:"' + $cmsourcepath + '" /quiet') -Wait
+                }
             }
             else {
                 Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -Wait
