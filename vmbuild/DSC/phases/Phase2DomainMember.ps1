@@ -72,7 +72,7 @@
 
         WriteStatus WaitDomain {
             DependsOn = "[SetCustomPagingFile]PagingSettings"
-            Status    = "Waiting for domain to be ready"
+            Status    = "Waiting for domain to be ready (Trying to ping the DC)"
         }
 
         WaitForDomainReady WaitForDomain {

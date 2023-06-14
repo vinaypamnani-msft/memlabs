@@ -517,8 +517,27 @@ $global:VM_Config = {
         Copy-Item -ToSession $ps -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
         $Expand_Archive = {
+
+            $global:ScriptBlockName = "Expand_Archive"
+            # Create init log
+            $log = "C:\staging\DSC\DSC_Init.txt"
+            $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
+
             $zipPath = "C:\staging\DSC\DSC.zip"
             $extractPath = "C:\staging\DSC\modules"
+
+            if (test-path -PathType Container $extractPath) {
+                "$time : Expand_Archive is attempting to remove the existing folder $($extractPath)" | Out-File $log -Append
+
+                try {
+                    Remove-Item -Force -Recurse $extractPath -ErrorAction Continue
+                }
+                catch {
+                    "$time : Failed to Remove $($extractPath)" | Out-File $log -Append
+                }
+            }
+
+            "$time : Expand_Archive is attempting to expand $($zipPath) to $($extractPath)" | Out-File $log -Append
             try {
                 Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
             }
@@ -552,8 +571,29 @@ $global:VM_Config = {
                 "Installing modules" | Out-File $log -Append
                 $modules = Get-ChildItem -Path "C:\staging\DSC\modules" -Directory
                 foreach ($folder in $modules) {
+
+
+
                     try {
+                        $targetFolder = Join-Path "C:\Program Files\WindowsPowerShell\Modules" $folder.Name
+                        "Removing $($targetFolder) in WindowsPowerShell\Modules." | Out-File $log -Append
+                        Remove-Item -Recurse -Force $targetFolder -ErrorAction SilentlyContinue
+                    }
+                    catch {
+                        "Failed to delete $($targetFolder) in WindowsPowerShell\Modules. Continuing" | Out-File $log -Append
+                    }
+
+                }
+
+                Start-Sleep 10
+
+                foreach ($folder in $modules) {
+                    try {
+
+                        "Copying $($folder.FullName) to WindowsPowerShell\Modules." | Out-File $log -Append
+
                         Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction Stop
+                        "Import-Module $($folder.Name)" | Out-File $log -Append
                         Import-Module $folder.Name -Force
                     }
                     catch {
