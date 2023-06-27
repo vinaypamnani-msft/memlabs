@@ -105,6 +105,7 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
 
         if (!(Test-Path $cmsourcepath)) {
+            #BUG, FIXME, TIMHE: This does not work in 2303. Fix Me
             Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
         }
     }
@@ -328,7 +329,8 @@ if (-not $smsProvider.FQDN) {
 # Set CMSite Provider
 $worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($smsProvider.FQDN)
 if (-not $worked) {
-    return
+    Write-DscStatus "Failed to load the ConfigMgr Powershell Components for site $SiteCode, and provider $($smsProvider.FQDN). Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return $false
 }
 
 # Set the current location to be the site code.
