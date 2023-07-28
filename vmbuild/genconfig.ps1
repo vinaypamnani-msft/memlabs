@@ -2993,7 +2993,7 @@ function Get-Menu {
 
 
     Show-GenConfigErrorMessages
-
+    #Write-Verbose "Calling Get-ValidResponse with -return:true"
     $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout -HideHelp:$HideHelp -return:$return
 
     if (-not [String]::IsNullOrWhiteSpace($response)) {
@@ -4891,7 +4891,7 @@ function Select-Options {
 
         Show-GenConfigErrorMessages
 
-        $response = get-ValidResponse $prompt $i $null $additionalOptions
+        $response = get-ValidResponse $prompt $i $null $additionalOptions -return:$true
 
         if ([String]::IsNullOrWhiteSpace($response)) {
             return
