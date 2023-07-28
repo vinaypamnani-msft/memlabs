@@ -1370,20 +1370,24 @@ class RegisterTaskScheduler {
         if (!(Test-Path $ProvisionToolPath)) {
             New-Item $ProvisionToolPath -ItemType directory | Out-Null
         }
-
+        Write-Verbose "Checking for existing task: $_TaskName"
         $exists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
         if ($exists) {
+            Write-Verbose "Task $_TaskName already exists. Removing"
             if ($exists.state -eq "Running") {
                 stop-Process -Name setup -Force -ErrorAction SilentlyContinue
                 stop-Process -Name setupwpf -Force -ErrorAction SilentlyContinue
                 $exists | Stop-ScheduledTask -ErrorAction SilentlyContinue
             }
             Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
+            Write-Verbose "Task $_TaskName Removed"
+            Start-Sleep -Seconds 10
         }
 
         $sourceDirctory = "$_ScriptPath\*"
         $destDirctory = "$ProvisionToolPath\"
 
+        Write-Verbose "Copying $sourceDirctory to  $destDirctory"
         Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
 
         $TaskDescription = "vmbuild task"
@@ -1394,12 +1398,15 @@ class RegisterTaskScheduler {
 
         $TaskArg = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $TaskScript $_ScriptArgument"
 
-        Write-Verbose "command is : $TaskArg"
-
         $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
+        Write-Verbose "New-ScheduledTaskAction : $TaskCommand $TaskArg"
 
-        $TaskStartTime = [datetime]::Now.AddMinutes(1)
+        # Seconds to wait to start task
+        $waitTime = 15
+        $TaskStartTime = [datetime]::Now.AddSeconds($waitTime)
+        $RegisterTime = [datetime]::Now
         $Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
+        Write-Verbose "Time is now: $RegisterTime Task Scheduled to run at $TaskStartTime"
 
         $Principal = New-ScheduledTaskPrincipal -UserId $_AdminCreds.UserName -RunLevel Highest
         $Password = $_AdminCreds.GetNetworkCredential().Password
@@ -1408,7 +1415,60 @@ class RegisterTaskScheduler {
 
         $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
 
-        $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force
+        $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force | out-Null
+
+        start-sleep -Seconds $waitTime
+
+        $lastRunTime = $this.GetLastRunTime()
+        $failCount = 0
+        while ($lastRunTime -lt $RegisterTime) {
+            Write-Verbose "Checking to see if task has started Attempt $failCount"
+
+            if ($failCount -gt 2) {
+                Write-Verbose "Manually starting the task"
+                Start-ScheduledTask -TaskName $_TaskName
+                start-sleep $waitTime
+                $lastRunTime = $this.GetLastRunTime()
+            }
+
+            if ($failCount -eq 5) {
+                Write-Verbose "Task has not ran yet after 5 Cyles. Re-Registering Task"
+                #Unregister existing task
+                Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
+                Start-Sleep -Seconds 10
+
+                # Start a new Task, but wait longer this time
+                $waitTime = 90
+                $TaskStartTime = [datetime]::Now.AddSeconds($waitTime)
+                $Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
+                Write-Verbose "Time is now: $([datetime]::Now) Task Scheduled to run at $TaskStartTime"
+
+                $Principal = New-ScheduledTaskPrincipal -UserId $_AdminCreds.UserName -RunLevel Highest
+                $Password = $_AdminCreds.GetNetworkCredential().Password
+                $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
+                $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force
+
+            }
+
+            if ($failCount -eq 8) {
+                Write-Verbose "Task failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
+                throw "Task failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
+            }
+
+            if ($lastRunTime -gt $RegisterTime) {
+                Write-Verbose "Task was successfully started at $lastRunTime"
+                break
+            }
+            else {
+                Write-Verbose "Task has not ran yet. Last run time was: $lastRunTime"
+                $failCount++
+            }
+            start-sleep -Seconds $waitTime
+            $lastRunTime = $this.GetLastRunTime()
+        }
+        Write-Verbose "Task was successfully started at $lastRunTime"
+
+
 
         # $TaskStartTime = [datetime]::Now.AddMinutes(2)
         # $service = new-object -ComObject("Schedule.Service")
@@ -1459,6 +1519,30 @@ class RegisterTaskScheduler {
 
     [RegisterTaskScheduler] Get() {
         return $this
+    }
+
+
+    [datetime] GetLastRunTime() {
+
+        $filterXML = @'
+        <QueryList>
+         <Query Id="0" Path="Microsoft-Windows-TaskScheduler/Operational">
+          <Select Path="Microsoft-Windows-TaskScheduler/Operational">
+           *[EventData/Data[@Name='TaskName']='\TEMPLATE']
+          </Select>
+         </Query>
+        </QueryList>
+'@
+
+        $filterXML = $filterXML -replace ("TEMPLATE", $this.TaskName)
+        $Lastevent = (Get-WinEvent  -FilterXml $filterXML -ErrorAction Stop) | Where-Object {$_.ID -eq 100} | Select-Object -First 1
+
+        if ($Lastevent) {
+            return $Lastevent.TimeCreated
+        }
+
+        return [datetime]::Min
+
     }
 }
 

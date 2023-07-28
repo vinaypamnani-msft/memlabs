@@ -178,7 +178,15 @@ CurrentBranch=1
     $cmini = $cmini.Replace('%MachineFQDN%', "$env:computername.$DomainFullName")
     $cmini = $cmini.Replace('%SQLMachineFQDN%', "$sqlServerName.$DomainFullName")
     $cmini = $cmini.Replace('%SiteCode%', $SiteCode)
-    $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+
+
+    if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+        $cmini = $cmini.Replace('%SiteName%', $ThisVM.siteName)
+    }
+    else {
+        $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+    }
+
     $cmini = $cmini.Replace('%SqlPort%', $sqlPort)
     # $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
     # $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)

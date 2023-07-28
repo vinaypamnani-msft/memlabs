@@ -203,10 +203,20 @@ CurrentBranch=1
     else {
         $cmini = $cmini.Replace('Preview=0', "")
         if ($installAction -eq "InstallCAS") {
-            $cmini = $cmini.Replace('%SiteName%', "ConfigMgr CAS")
+            if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+                $cmini = $cmini.Replace('%SiteName%', $ThisVM.siteName)
+            }
+            else {
+                $cmini = $cmini.Replace('%SiteName%', "ConfigMgr CAS")
+            }
         }
         else {
-            $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+            if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+                $cmini = $cmini.Replace('%SiteName%', $ThisVM.siteName)
+            }
+            else {
+                $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+            }
         }
     }
 
@@ -238,7 +248,7 @@ CurrentBranch=1
     if (Test-Path $CMDirnew -PathType Container) {
         $CMDir = $CMDirnew
     }
-    else{
+    else {
         $CMDirnew = Join-Path $CMDir "cd.retail.LN"
         if (Test-Path $CMDirnew -PathType Container) {
             $CMDir = $CMDirnew

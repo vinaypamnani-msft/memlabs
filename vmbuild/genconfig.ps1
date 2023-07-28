@@ -4569,6 +4569,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "siteCode") {
         $sorted += "siteCode"
     }
+    if ($members.Name -contains "siteName") {
+        $sorted += "siteName"
+    }
     if ($members.Name -contains "remoteContentLibVM") {
         $sorted += "remoteContentLibVM"
     }
@@ -4609,6 +4612,7 @@ function Get-SortedProperties {
         "virtualProcs" { }
         "operatingSystem" {  }
         "siteCode" { }
+        "siteName" { }
         "parentSiteCode" { }
         "sqlVersion" { }
         "sqlInstanceName" {  }
@@ -4822,6 +4826,9 @@ function Select-Options {
                     $color = $Global:Common.Colors.GenConfigVMRemoteServer
                 }
                 "SiteCode" {
+                    $color = $Global:Common.Colors.GenConfigSiteCode
+                }
+                "siteName" {
                     $color = $Global:Common.Colors.GenConfigSiteCode
                 }
                 "ParentSiteCode" {
@@ -5714,6 +5721,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr CAS"
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
@@ -5751,6 +5759,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr Primary Site"
 
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
@@ -5772,6 +5781,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr Secondary Site"
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             if (-not $test -and (-not $network)) {

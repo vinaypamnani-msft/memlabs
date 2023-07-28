@@ -135,6 +135,7 @@
             Status    = "Creating user accounts and groups"
         }
 
+        
         $nextDepend = "[WriteStatus]CreateAccounts"
         $adObjectDependency = @($nextDepend)
         $i = 0
