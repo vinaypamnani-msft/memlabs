@@ -1366,59 +1366,12 @@ class RegisterTaskScheduler {
         $_ScriptArgument = $this.ScriptArgument
         $_AdminCreds = $this.AdminCreds
 
-        $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
-        if (!(Test-Path $ProvisionToolPath)) {
-            New-Item $ProvisionToolPath -ItemType directory | Out-Null
-        }
-        Write-Verbose "Checking for existing task: $_TaskName"
-        $exists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
-        if ($exists) {
-            Write-Verbose "Task $_TaskName already exists. Removing"
-            if ($exists.state -eq "Running") {
-                stop-Process -Name setup -Force -ErrorAction SilentlyContinue
-                stop-Process -Name setupwpf -Force -ErrorAction SilentlyContinue
-                $exists | Stop-ScheduledTask -ErrorAction SilentlyContinue
-            }
-            Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
-            Write-Verbose "Task $_TaskName Removed"
-            Start-Sleep -Seconds 10
-        }
 
-        $sourceDirctory = "$_ScriptPath\*"
-        $destDirctory = "$ProvisionToolPath\"
 
-        Write-Verbose "Copying $sourceDirctory to  $destDirctory"
-        Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
-
-        $TaskDescription = "vmbuild task"
-        $TaskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-        $TaskScript = "$ProvisionToolPath\$_ScriptName"
-
-        Write-Verbose "Task script full path is : $TaskScript "
-
-        $TaskArg = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $TaskScript $_ScriptArgument"
-
-        $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
-        Write-Verbose "New-ScheduledTaskAction : $TaskCommand $TaskArg"
-
-        # Seconds to wait to start task
+        $RegisterTime = [datetime]::now()
         $waitTime = 15
-        $TaskStartTime = [datetime]::Now.AddSeconds($waitTime)
-        $RegisterTime = [datetime]::Now
-        $Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
-        Write-Verbose "Time is now: $RegisterTime Task Scheduled to run at $TaskStartTime"
 
-        $Principal = New-ScheduledTaskPrincipal -UserId $_AdminCreds.UserName -RunLevel Highest
-        $Password = $_AdminCreds.GetNetworkCredential().Password
-
-
-
-        $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
-
-        $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force | out-Null
-
-        start-sleep -Seconds $waitTime
-
+        $success = $this.RegisterTask()
         $lastRunTime = $this.GetLastRunTime()
         $failCount = 0
         while ($lastRunTime -lt $RegisterTime) {
@@ -1434,19 +1387,7 @@ class RegisterTaskScheduler {
             if ($failCount -eq 5) {
                 Write-Verbose "Task has not ran yet after 5 Cyles. Re-Registering Task"
                 #Unregister existing task
-                Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
-                Start-Sleep -Seconds 10
-
-                # Start a new Task, but wait longer this time
-                $waitTime = 90
-                $TaskStartTime = [datetime]::Now.AddSeconds($waitTime)
-                $Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
-                Write-Verbose "Time is now: $([datetime]::Now) Task Scheduled to run at $TaskStartTime"
-
-                $Principal = New-ScheduledTaskPrincipal -UserId $_AdminCreds.UserName -RunLevel Highest
-                $Password = $_AdminCreds.GetNetworkCredential().Password
-                $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
-                $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force
+                $success = $this.RegisterTask()
 
             }
 
@@ -1493,34 +1434,81 @@ class RegisterTaskScheduler {
 
     [bool] Test() {
 
+        $exists = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+        if ($exists) {
+            if ($exists.state -eq "Running") {
+                return $true
+            }
+        }
         return $false
-        try {
-            $ConfigurationFile = Join-Path -Path "C:\Staging\DSC" -ChildPath "ScriptWorkflow.json"
-            if (-not (Test-Path $ConfigurationFile)) {
-                return $false
-            }
-
-            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-            if (-not ($Configuration.ScriptWorkflow)) {
-                return $false
-            }
-            if ($Configuration.ScriptWorkflow.Status -eq 'NotStart') {
-                $Configuration.ScriptWorkflow.Status = 'Scheduled'
-                $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-                return $false
-            }
-
-            return $true
-        }
-        catch {
-            return $false
-        }
     }
 
     [RegisterTaskScheduler] Get() {
         return $this
     }
 
+
+    [bool] RegisterTask() {
+        $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
+        if (!(Test-Path $ProvisionToolPath)) {
+            New-Item $ProvisionToolPath -ItemType directory | Out-Null
+        }
+        Write-Verbose "Checking for existing task: $($this.TaskName)"
+        $exists = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+        if ($exists) {
+            Write-Verbose "Task $($this.TaskName) already exists. Removing"
+            if ($exists.state -eq "Running") {
+                stop-Process -Name setup -Force -ErrorAction SilentlyContinue
+                stop-Process -Name setupwpf -Force -ErrorAction SilentlyContinue
+                $exists | Stop-ScheduledTask -ErrorAction SilentlyContinue
+            }
+            Unregister-ScheduledTask -TaskName $($this.TaskName) -Confirm:$false
+            Write-Verbose "Task $($this.TaskName) Removed"
+            Start-Sleep -Seconds 10
+        }
+
+        $sourceDirctory = "$($this.ScriptPath)\*"
+        $destDirctory = "$ProvisionToolPath\"
+
+        Write-Verbose "Copying $sourceDirctory to  $destDirctory"
+        Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
+
+        $TaskDescription = "vmbuild task"
+        $TaskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $TaskScript = "$ProvisionToolPath\$($this.ScriptName)"
+
+        Write-Verbose "Task script full path is : $TaskScript "
+
+        $TaskArg = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $TaskScript $($this.ScriptArgument)"
+
+        $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
+        Write-Verbose "New-ScheduledTaskAction : $TaskCommand $TaskArg"
+
+        # Seconds to wait to start task
+        $waitTime = 15
+        $TaskStartTime = [datetime]::Now.AddSeconds($waitTime)
+        $RegisterTime = [datetime]::Now
+        #$Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
+        #Write-Verbose "Time is now: $RegisterTime Task Scheduled to run at $TaskStartTime"
+
+        $Principal = New-ScheduledTaskPrincipal -UserId $($this.AdminCreds.UserName) -RunLevel Highest
+        $Password = $($this.AdminCreds).GetNetworkCredential().Password
+
+
+
+        $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
+
+        $Task | Register-ScheduledTask -TaskName $($this.TaskName) -User $($this.AdminCreds.UserName) -Password $Password -Force | out-Null
+
+        start-sleep -Seconds $waitTime
+
+        Write-Verbose "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) is starting"
+        Start-ScheduledTask -TaskName $($this.TaskName)
+        Write-Verbose "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) has Started."
+
+        return $true
+
+    }
 
     [datetime] GetLastRunTime() {
 
@@ -1538,9 +1526,10 @@ class RegisterTaskScheduler {
         $Lastevent = (Get-WinEvent  -FilterXml $filterXML -ErrorAction Stop) | Where-Object {$_.ID -eq 100} | Select-Object -First 1
 
         if ($Lastevent) {
+            Write-Verbose "Last Run Time is $($Lastevent.TimeCreated)"
             return $Lastevent.TimeCreated
         }
-
+        Write-Verbose "No Last Run Time found returning $([datetime]::Min)"
         return [datetime]::Min
 
     }
