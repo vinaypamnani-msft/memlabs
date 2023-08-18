@@ -1368,7 +1368,7 @@ class RegisterTaskScheduler {
 
 
 
-        $RegisterTime = [datetime]::now()
+        $RegisterTime = [datetime]::Now
         $waitTime = 15
 
         $success = $this.RegisterTask()
