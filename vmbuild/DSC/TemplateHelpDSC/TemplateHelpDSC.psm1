@@ -1374,8 +1374,11 @@ class RegisterTaskScheduler {
         $success = $this.RegisterTask()
         $lastRunTime = $this.GetLastRunTime()
         $failCount = 0
+
+        Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
         while ($lastRunTime -lt $RegisterTime) {
             Write-Verbose "Checking to see if task has started Attempt $failCount"
+            Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
 
             if ($failCount -gt 2) {
                 Write-Verbose "Manually starting the task"

@@ -1792,6 +1792,12 @@ function Select-Config {
         write-log "No files found in $configPath"
         return
     }
+
+    if ($ConfigPath.EndsWith("tests")) {
+        write-host "TestMode- Sorting By Name"
+        $testMode = $true
+    }
+
     $files = @()
     $files += Get-ChildItem $ConfigPath\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
     $files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
@@ -1799,7 +1805,8 @@ function Select-Config {
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property LastWriteTime
     write-host $ConfigPath
-    if ($ConfigPath.ToLowerInvariant().("tests")) {
+
+    if ($testMode) {
         $files = $files | sort-Object -Property Name
     }
     $responseValid = $false
