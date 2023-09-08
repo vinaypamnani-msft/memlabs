@@ -2819,7 +2819,7 @@ function Copy-ToolToVM {
     $toolFileName = Split-Path $tool.url -Leaf
     $fileTargetRelative = Join-Path $tool.Target $toolFileName
 
-    Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative"
+    Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative" -LogOnly
 
     if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
         Write-Log "$vmName`: File is marked to extract '$($tool.Name) since ExtractFolderIfZip is true" -Verbose
