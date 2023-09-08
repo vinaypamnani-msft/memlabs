@@ -2819,7 +2819,10 @@ function Copy-ToolToVM {
     $toolFileName = Split-Path $tool.url -Leaf
     $fileTargetRelative = Join-Path $tool.Target $toolFileName
 
+    Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative"
+
     if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+        Write-Log "$vmName`: File is marked to extract '$($tool.Name) since ExtractFolderIfZip is true" -Verbose
         $fileTargetRelative = $tool.Target
     }
 
@@ -3103,25 +3106,27 @@ function Get-FileWithHash {
             #$localFileHash | Out-File -FilePath $localImageHashPath -Force
             $return.download = $true
         }
-
-        if ($localFileHash -eq $ExpectedHash) {
-            Write-Log "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
-            if ($ForceDownload.IsPresent) {
-                Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
-                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-                $return.download = $true
+        # For dynamically updated packages, its impossible to know the hash ahead of time, so we just re-download these every run
+        if ($ExpectedHash -ne "NONE") {
+            if ($localFileHash -eq $ExpectedHash) {
+                Write-Log "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
+                if ($ForceDownload.IsPresent) {
+                    Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
+                    Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                    $return.download = $true
+                }
+                else {
+                    # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
+                    $return.download = $false
+                    $return.success = $true
+                }
             }
             else {
-                # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
-                $return.download = $false
-                $return.success = $true
+                Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
+                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
+                $return.download = $true
             }
-        }
-        else {
-            Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
-            Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-            Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
-            $return.download = $true
         }
     }
     else {
@@ -3129,28 +3134,33 @@ function Get-FileWithHash {
     }
 
     if ($return.download) {
-        $worked = Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Downloading '$FileName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
+        $worked = Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Downloading '$FileName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf -ForceDownload
         if (-not $worked) {
             $return.success = $false
         }
         else {
-            # Calculate file hash, save to local hash file
-            Write-Log "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
-            $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
-            $localFileHash = $hashFileResult.Hash
-            if ($localFileHash -eq $ExpectedHash) {
-                $localFileHash | Out-File -FilePath $localImageHashPath -Force
-                Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
-                $return.success = $true
-            }
-            else {
-                if ($IgnoreHashFailure) {
+            if ($ExpectedHash -ne "NONE") {
+                # Calculate file hash, save to local hash file
+                Write-Log "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
+                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+                $localFileHash = $hashFileResult.Hash
+                if ($localFileHash -eq $ExpectedHash) {
+                    $localFileHash | Out-File -FilePath $localImageHashPath -Force
+                    Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
                     $return.success = $true
                 }
                 else {
-                    Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
-                    $return.success = $false
+                    if ($IgnoreHashFailure) {
+                        $return.success = $true
+                    }
+                    else {
+                        Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
+                        $return.success = $false
+                    }
                 }
+            }
+            else {
+                $return.success = $true
             }
         }
     }

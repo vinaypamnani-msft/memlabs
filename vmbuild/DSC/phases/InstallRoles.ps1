@@ -192,8 +192,10 @@ foreach ($SUP in $SUPs) {
 }
 
 # Configure SUP
-$productsToAdd = @("Windows 10, version 1903 and later", "Microsoft Server operating system-21H2")
-$classificationsToAdd = @("Critical Updates", "Security Updates", "Updates")
+#$productsToAdd = @("Windows 10, version 1903 and later", "Microsoft Server operating system-21H2")
+$productsToAdd = @("PowerShell - x64")
+#$classificationsToAdd = @("Critical Updates", "Security Updates", "Updates")
+$classificationsToAdd = @("Tools")
 if ($configureSUP) {
     Write-DscStatus "Configuring SUP, and adding Products [$($productsToAdd -join ',')] and Classifications [$($classificationsToAdd -join ',')]"
     $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2022/1/1 00:00:00"
