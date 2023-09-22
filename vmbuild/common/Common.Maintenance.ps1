@@ -759,6 +759,50 @@ function Get-VMFixes {
         InjectFiles       = @("Disable-IEESC.ps1") # must exist in filesToInject\staging dir
     }
 
+
+    $Fix_AccountExpiry = {
+
+        $RegistryPath = 'HKLM:\\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'
+        $Name = 'DisablePasswordChange'
+        $Value = '1'
+        New-ItemProperty -Path $RegistryPath -Name $Name -Value $Value -PropertyType DWORD -Force | Out-Null
+        return $true
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-AccountExpiry"
+        FixVersion        = "230922"
+        AppliesToThisVM   = $false
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("DC", "OSDClient", "Linux", "AADClient")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_AccountExpiry
+
+    }
+
+    $Fix_LocalAdminAccount = {
+        param ($password)
+        $p = ConvertTo-SecureString $password -AsPlainText -Force
+        Set-LocalUser -Password $p "Administrator"
+        Enable-LocalUser "Administrator"
+        return $true
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix_LocalAdminAccount"
+        FixVersion        = "230927"
+        AppliesToThisVM   = $false
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("DC", "OSDClient", "Linux", "AADClient")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_LocalAdminAccount
+        ArgumentList      = @($Common.LocalAdmin.GetNetworkCredential().Password)
+    }
+
     # ========================
     # Determine applicability
     # ========================
