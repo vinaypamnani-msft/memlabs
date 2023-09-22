@@ -3453,17 +3453,16 @@ if (-not $Common.Initialized) {
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
     # Get latest hotfix version
-    Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 7
-    $latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
 
-    Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 10
+
+    Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 7
     # Common global props
 
     $colors = Get-Colors
 
     $global:Common = [PSCustomObject]@{
         MemLabsVersion        = "230614"
-        LatestHotfixVersion   = $latestHotfixVersion
+        LatestHotfixVersion   = "230614"
         PS7                   = $PS7
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
@@ -3508,8 +3507,12 @@ if (-not $Common.Initialized) {
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access
-    Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 12
+    Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
     Get-StorageConfig
+
+
+    Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
+    $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
 
     ### Set supported options
     Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13

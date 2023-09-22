@@ -451,7 +451,6 @@ function Get-VMFixes {
     }
 
     $fixesToPerform = @()
-
     ### Domain account password expiration
 
     $Fix_DomainAccount = {
