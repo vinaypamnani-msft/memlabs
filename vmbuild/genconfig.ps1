@@ -5633,6 +5633,9 @@ function Add-NewVMForRole {
         $vprocs = 4
         $installSSMS = $true
     }
+    if ($OperatingSystem.Contains("Windows 11") -and ($role -notin ("DC", "BDC"))) {
+        $memory = "4GB"
+    }
 
     if ($role -eq "Linux") {
         $virtualMachine = [PSCustomObject]@{

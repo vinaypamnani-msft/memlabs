@@ -1398,6 +1398,12 @@ $global:VM_Config = {
             }
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_StickyKeys -DisplayName "Disable StickyKeys"
+
+            $disable_AutomaticUpdates = {
+                Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Type DWord -Value 1
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
         }
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
