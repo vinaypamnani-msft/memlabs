@@ -5865,6 +5865,10 @@ function Add-NewVMForRole {
             }
 
             $virtualMachine.Memory = "2GB"
+            if ($virtualMachine.operatingSystem.Contains("Windows 11") ) {
+                $virtualMachine.Memory = "4GB"
+            }
+
         }
         "OSDClient" {
             $virtualMachine.memory = "2GB"
