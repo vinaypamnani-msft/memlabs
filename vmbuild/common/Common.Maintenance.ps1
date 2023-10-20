@@ -31,7 +31,15 @@ function Start-Maintenance {
         if ($response -eq "n") {
             return
         }
-        Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
+
+        $response = Read-YesorNoWithTimeout -Prompt "Start VM's that are stopped for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
+        if ($response -eq "y") {
+            Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
+        }
+        else {
+            Write-Log "$vmCount VM's need maintenance. VM's will NOT be started (if stopped)."
+            $maintenanceDoNotStart = $true
+        }
     }
     else {
         Write-Log "No maintenance required." -Success
@@ -69,6 +77,13 @@ function Start-Maintenance {
     # Perform maintenance on other VM's
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
         $i++
+        if ($maintenanceDoNotStart) {
+            if ($vm.State -ne "Running") {
+                $countSkipped++
+                continue
+            }
+        }
+
         Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         if ($vm.domain -in $criticalDomains) {
             Write-Log "$($vm.vmName)`: Maintenance skipped, DC maintenance failed." -Highlight
