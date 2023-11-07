@@ -287,7 +287,87 @@ class InstallDotNet4 {
     }
 }
 
+[DscResource()]
+class InstallODBCDriver {
+    [DscProperty(Key)]
+    [string] $ODBCPath
 
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $_odbcpath = $this.ODBCPath
+        if (!(Test-Path $_odbcpath)) {
+            $odbcurl = "https://go.microsoft.com/fwlink/?linkid=2220989"
+
+            Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server from $($this.odbcurl)..."
+                        
+            try {
+                Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+                Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
+            }
+            catch {
+                ipconfig /flushdns
+                start-sleep -seconds 60
+                Start-BitsTransfer -Source $this.odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+                Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
+            }            
+        }
+
+        # Install ODBC Driver
+        $cmd = "msiexec"
+        $arg1 = "/i"
+        $arg2 = $_odbcpath
+        $arg3 = "IACCEPTMSODBCSQLLICENSETERMS=YES"
+        $arg4 = "/qn"
+        #$arg5 = "/lv c:\temp\odbcinstallation.log"
+
+        try {                
+            Write-Verbose "Installing Microsoft ODBC Driver 18 for SQL Server..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
+            & $cmd $arg1 $arg2 $arg3 $arg4 #$arg5
+            Write-Verbose "Microsoft ODBC Driver 18 for SQL Server was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            throw "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 10
+    }
+
+    [bool] Test() {
+
+        $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
+        
+        if (Test-Path -Path $ODBCRegistryPath) {
+            try {
+                # Get the InstalledVersion only if the path exists
+                $ODBCVersion = Get-ItemProperty -Path $ODBCRegistryPath -Name "InstalledVersion"                
+            }
+            catch {
+                Write-Exception -ExceptionInfo $_
+                return $false
+            }
+        }
+        else {
+            return $false
+        }
+
+        If ($ODBCVersion.InstalledVersion -ge "18.1.2.1") {
+            Write-Host "Microsoft ODBC Driver for SQL Server 18.1.2.1 ir greater $($ODBCVersion.InstalledVersion) is installed"
+            return $true
+        }
+
+        return $false
+    }
+
+    [InstallODBCDriver] Get() {
+        return $this
+    }
+}
 [DscResource()]
 class InstallAndConfigWSUS {
     [DscProperty(Key)]
@@ -1526,7 +1606,7 @@ class RegisterTaskScheduler {
 '@
 
         $filterXML = $filterXML -replace ("TEMPLATE", $this.TaskName)
-        $Lastevent = (Get-WinEvent  -FilterXml $filterXML -ErrorAction Stop) | Where-Object {$_.ID -eq 100} | Select-Object -First 1
+        $Lastevent = (Get-WinEvent  -FilterXml $filterXML -ErrorAction Stop) | Where-Object { $_.ID -eq 100 } | Select-Object -First 1
 
         if ($Lastevent) {
             Write-Verbose "Last Run Time is $($Lastevent.TimeCreated)"

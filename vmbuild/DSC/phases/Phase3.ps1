@@ -172,6 +172,22 @@ configuration Phase3
             }
         }
 
+        #add depend stuff
+        if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "Secondary") {
+            WriteStatus ODBCDriverInstall {
+                DependsOn = $nextDepend
+                Status = "Downloading and installing ODBC driver"
+            }
+    
+            InstallODBCDriver ODBCDriverInstall {
+                DependsOn = "[WriteStatus]ODBCDriverInstall"
+                ODBCPath = "C:\temp\msodbcsql.msi"
+                Ensure   = "Present"
+            }
+
+            $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
+        }
+
         WriteStatus Complete {
             DependsOn = $nextDepend
             Status    = "Complete!"
