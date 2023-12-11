@@ -39,7 +39,9 @@
       },
       "installDP": true,
       "installMP": true,
-      "siteCode": "PS1"
+      "siteCode": "PS1",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "PS1SITE",
@@ -57,7 +59,9 @@
         "F": "120GB"
       },
       "siteCode": "PS1",
-      "sqlPort": "1433"
+      "sqlPort": "1433",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "PS1SITE-P",
@@ -90,7 +94,7 @@
     }
   ],
   "cmOptions": {
-    "version": "current-branch",
+    "version": "2309",
     "install": true,
     "pushClientToDomainMembers": true
   }

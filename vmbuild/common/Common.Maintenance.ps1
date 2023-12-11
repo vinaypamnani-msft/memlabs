@@ -109,7 +109,9 @@ function Start-Maintenance {
     Write-Host
     Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -SubActivity
     Write-Progress2 -Id $progressId -Activity $text -Completed
-    Write-Progress2 -Activity $global:MaintenanceActivity -Completed
+    if ($global:MaintenanceActivity) {
+        Write-Progress2 -Activity $global:MaintenanceActivity -Completed
+    }
 }
 
 function Show-FailedDomains {
