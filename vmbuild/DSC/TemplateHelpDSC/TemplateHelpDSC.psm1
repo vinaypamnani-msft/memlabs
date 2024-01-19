@@ -720,13 +720,15 @@ class WaitForExtendSchemaFile {
         $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
         $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
         $extadschpath3 = Join-Path -Path $_FilePath -ChildPath "cd.retail.LN\SMSSETUP\BIN\X64\extadsch.exe"
-        while (!(Test-Path $extadschpath) -and !(Test-Path $extadschpath2) -and !(Test-Path $extadschpath3)) {
+        $extadschpath4 = Join-Path -Path $_FilePath -ChildPath "cd.preview\SMSSETUP\BIN\X64\extadsch.exe"
+        while (!(Test-Path $extadschpath) -and !(Test-Path $extadschpath2) -and !(Test-Path $extadschpath3) -and !(Test-Path $extadschpath4)) {
             Write-Verbose "Testing $extadschpath and $extadschpath2 and $extadschpath3"
             Write-Verbose "Wait for extadsch.exe exist on $($this.MachineName), will try 10 seconds later..."
             Start-Sleep -Seconds 10
             $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
             $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
             $extadschpath3 = Join-Path -Path $_FilePath -ChildPath "cd.retail.LN\SMSSETUP\BIN\X64\extadsch.exe"
+            $extadschpath4 = Join-Path -Path $_FilePath -ChildPath "cd.preview\SMSSETUP\BIN\X64\extadsch.exe"
         }
 
         Write-Verbose "Extending the Active Directory schema..."
@@ -751,6 +753,11 @@ class WaitForExtendSchemaFile {
         if (Test-Path $extadschpath3) {
             Write-Verbose "Running $extadschpath3"
             & $extadschpath3 | out-null
+        }
+
+        if (Test-Path $extadschpath4) {
+            Write-Verbose "Running $extadschpath4"
+            & $extadschpath4 | out-null
         }
         Write-Verbose "Done."
     }

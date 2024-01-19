@@ -167,8 +167,11 @@ CurrentBranch=1
     # Set ini values
     $installAction = if ($CurrentRole -eq "CAS") { "InstallCAS" } else { "InstallPrimarySite" }
     $productID = "EVAL"
-    if ($($deployConfig.parameters.ProductID)) {
-        $productID = $($deployConfig.parameters.ProductID)
+
+    if ($CM -ne "CMTP") {
+        if ($($deployConfig.parameters.ProductID)) {
+            $productID = $($deployConfig.parameters.ProductID)
+        }
     }
     $cmini = $cmini.Replace('%ProductID%', $productID)
     $cmini = $cmini.Replace('%InstallAction%', $installAction)
@@ -252,6 +255,12 @@ CurrentBranch=1
         $CMDirnew = Join-Path $CMDir "cd.retail.LN"
         if (Test-Path $CMDirnew -PathType Container) {
             $CMDir = $CMDirnew
+        }
+        else {
+            $CMDirnew = Join-Path $CMDir "cd.preview"
+            if (Test-Path $CMDirnew -PathType Container) {
+                $CMDir = $CMDirnew
+            }
         }
     }
 

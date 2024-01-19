@@ -9,7 +9,7 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $DomainFullName = $deployConfig.parameters.domainName
 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CSName = $ThisVM.thisParams.ParentSiteServer
 
 # Set Install Dir
@@ -39,8 +39,8 @@ if ($ThisVM.remoteSQLVM) {
 else {
     $sqlServerName = $env:COMPUTERNAME
     $sqlInstanceName = $ThisVM.sqlInstanceName
-    if ($ThisVM.sqlPort){
-    $sqlPort = $ThisVM.sqlPort
+    if ($ThisVM.sqlPort) {
+        $sqlPort = $ThisVM.sqlPort
     }
     else {
         $sqlPort = 1433
@@ -170,8 +170,10 @@ CurrentBranch=1
     # Set ini values
     $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
     $productID = "EVAL"
-    if ($($deployConfig.parameters.ProductID)){
-        $productID = $($deployConfig.parameters.ProductID)
+    if ($CM -ne "CMTP") {
+        if ($($deployConfig.parameters.ProductID)) {
+            $productID = $($deployConfig.parameters.ProductID)
+        }
     }
     $cmini = $cmini.Replace('%ProductID%', $productID)
 
@@ -236,8 +238,8 @@ CurrentBranch=1
     $i = 0
     while ($CSConfiguration.$propName.Status -ne "Completed") {
         if ($i -eq 0) {
-        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 600
-        $i++
+            Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 600
+            $i++
         }
         else {
             $i++
