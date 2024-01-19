@@ -303,18 +303,32 @@ class InstallODBCDriver {
         if (!(Test-Path $_odbcpath)) {
             $odbcurl = "https://go.microsoft.com/fwlink/?linkid=2220989"
 
-            Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server from $($this.odbcurl)..."
-                        
+            Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server from $($odbcurl)..."
+
             try {
-                Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
                 Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
+                Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
             }
             catch {
+                $ErrorMessage = $_.Exception.Message
+                Write-Verbose "Failed to Download Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
                 ipconfig /flushdns
                 start-sleep -seconds 60
-                Start-BitsTransfer -Source $this.odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
                 Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
-            }            
+                try{
+                    Invoke-WebRequest -Uri $odbcurl -OutFile $_odbcpath -ErrorAction Stop
+                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    # Force reboot
+                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    #$global:DSCMachineStatus = 1
+                    throw "Retry (Attempting Reboot) Failed to Download Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
+                    return
+                }
+
+            }
         }
 
         # Install ODBC Driver
@@ -325,7 +339,7 @@ class InstallODBCDriver {
         $arg4 = "/qn"
         #$arg5 = "/lv c:\temp\odbcinstallation.log"
 
-        try {                
+        try {
             Write-Verbose "Installing Microsoft ODBC Driver 18 for SQL Server..."
             Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
             & $cmd $arg1 $arg2 $arg3 $arg4 #$arg5
@@ -341,14 +355,16 @@ class InstallODBCDriver {
     [bool] Test() {
 
         $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
-        
+
         if (Test-Path -Path $ODBCRegistryPath) {
             try {
                 # Get the InstalledVersion only if the path exists
-                $ODBCVersion = Get-ItemProperty -Path $ODBCRegistryPath -Name "InstalledVersion"                
+                $ODBCVersion = Get-ItemProperty -Path $ODBCRegistryPath -Name "InstalledVersion"
             }
             catch {
-                Write-Exception -ExceptionInfo $_
+                $ErrorMessage = $_.Exception.Message
+                Write-Verbose "Microsoft ODBC Driver 18 for SQL Server Error $($ErrorMessage)!"
+
                 return $false
             }
         }
@@ -368,6 +384,107 @@ class InstallODBCDriver {
         return $this
     }
 }
+
+[DscResource()]
+class InstallVCRedist {
+    [DscProperty(Key)]
+    [string] $Path
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $_path = $this.Path
+        if (!(Test-Path $_path)) {
+            $url = "https://aka.ms/vs/15/release/vc_redist.x64.exe"
+
+            Write-Verbose "Downloading VC Redist from $($url)..."
+
+            try {
+                Write-Verbose "Downloading VC Redist"
+                Start-BitsTransfer -Source $url -Destination $_path -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                $ErrorMessage = $_.Exception.Message
+                Write-Verbose "Failed to Download VC Redist with error: $ErrorMessage"
+                ipconfig /flushdns
+                start-sleep -seconds 60
+                Write-Verbose "Downloading VC Redist"
+                try{
+                    Invoke-WebRequest -Uri $url -OutFile $_path -ErrorAction Stop
+                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    # Force reboot
+                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    #$global:DSCMachineStatus = 1
+                    throw "Retry (Attempting Reboot) Failed to Download VC Redist with error: $ErrorMessage"
+                    return
+                }
+
+            }
+        }
+
+        # Install
+        #VC_redist.x64.exe /install /passive /quiet
+        $cmd = $_path
+        $arg1 = "/install"
+        $arg2 = "/passive"
+        $arg3 = "/quiet"
+        #$arg4 = "/qn"
+        #$arg5 = "/lv c:\temp\odbcinstallation.log"
+
+        try {
+            Write-Verbose "Installing VC Redist..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3")
+            & $cmd $arg1 $arg2 $arg3 #$arg5
+            Write-Verbose "VC Redist was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            throw "Failed to install VC Redist with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 20
+    }
+
+    [bool] Test() {
+
+        #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
+        $RegistryPath = "HKLM:\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes"
+
+        if (Test-Path -Path $RegistryPath) {
+            try {
+                # Get the InstalledVersion only if the path exists
+                $Version = Get-ItemProperty -Path $RegistryPath -Name "X64"
+            }
+            catch {
+                $ErrorMessage = $_.Exception.Message
+                Write-Verbose "VC Redist Error $($ErrorMessage)!"
+
+                return $false
+            }
+        }
+        else {
+            return $false
+        }
+
+        If ($Version.Major -ge "14") {
+            Write-Host "VC Redist 14 or greater $($Version.InstalledVersion) is installed"
+            return $true
+        }
+
+        return $false
+    }
+
+    [InstallVCRedist] Get() {
+        return $this
+    }
+}
+
 [DscResource()]
 class InstallAndConfigWSUS {
     [DscProperty(Key)]

@@ -24,26 +24,29 @@ function Start-Maintenance {
     $countNotNeeded = $allVMs.Count - $vmCount
 
     $text = "Performing maintenance"
+    $maintenanceDoNotStart = $false
     Write-Log $text -Activity
 
-    if ($vmCount -gt 0) {
-        $response = Read-YesorNoWithTimeout -Prompt "$($vmsNeedingMaintenance.Count) VM(s) [$($vmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
-        if ($response -eq "n") {
-            return
-        }
+    if ($applyNewOnly -eq $false) {
+        if ($vmCount -gt 0) {
+            $response = Read-YesorNoWithTimeout -Prompt "$($vmsNeedingMaintenance.Count) VM(s) [$($vmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
+            if ($response -eq "n") {
+                return
+            }
 
-        $response = Read-YesorNoWithTimeout -Prompt "Start VM's that are stopped for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
-        if ($response -eq "y") {
-            Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
+            $response = Read-YesorNoWithTimeout -Prompt "Start VM's that are stopped for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
+            if ($response -eq "y") {
+                Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
+            }
+            else {
+                Write-Log "$vmCount VM's need maintenance. VM's will NOT be started (if stopped)."
+                $maintenanceDoNotStart = $true
+            }
         }
         else {
-            Write-Log "$vmCount VM's need maintenance. VM's will NOT be started (if stopped)."
-            $maintenanceDoNotStart = $true
+            Write-Log "No maintenance required." -Success
+            return
         }
-    }
-    else {
-        Write-Log "No maintenance required." -Success
-        return
     }
 
     $progressId = Get-Random

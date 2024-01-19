@@ -5850,7 +5850,7 @@ function Add-NewVMForRole {
 
             $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
             [int]$i = 1
-            $userPrefix = "user"
+            $userPrefix = $oldConfig.vmOptions.prefix.toLower() + "user"
             while ($true) {
                 $preferredUserName = $userPrefix + $i
                 if ($users -contains $preferredUserName) {

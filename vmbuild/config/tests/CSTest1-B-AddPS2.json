@@ -21,7 +21,9 @@
       },
       "installDP": true,
       "installMP": true,
-      "siteCode": "PS2"
+      "siteCode": "PS2",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "PS2SITE",
@@ -39,7 +41,9 @@
         "F": "120GB"
       },
       "siteCode": "PS2",
-      "sqlPort": "1433"
+      "sqlPort": "1433",
+      "InstallRP": false,
+      "InstallSUP": false
     }
   ],
   "cmOptions": {

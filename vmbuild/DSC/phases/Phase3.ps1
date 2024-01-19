@@ -174,8 +174,19 @@ configuration Phase3
 
         #add depend stuff
      #   if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "Secondary") {
-            WriteStatus ODBCDriverInstall {
+            WriteStatus VCInstall {
                 DependsOn = $nextDepend
+                Status = "Downloading and installing VC redist"
+            }
+
+            InstallVCRedist VCInstall {
+                DependsOn = "[WriteStatus]VCInstall"
+                Path = "C:\temp\vc_redist.x64.exe"
+                Ensure   = "Present"
+            }
+
+            WriteStatus ODBCDriverInstall {
+                DependsOn = "[InstallVCRedist]VCInstall"
                 Status = "Downloading and installing ODBC driver"
             }
 
