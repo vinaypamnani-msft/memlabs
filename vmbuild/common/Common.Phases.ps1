@@ -402,7 +402,7 @@ function Get-ConfigurationData {
         "8" {
             $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
             if ($cd) {
-                $autoSnapshotName = "MemLabs AutoSnapshot"
+                $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $Configuration
                 $snapshot = $null
                 $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
                 if ($dc) {
