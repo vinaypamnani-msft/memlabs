@@ -332,6 +332,7 @@ function Write-Log {
 
     If ($Activity.IsPresent) {
         $info = $false
+        Set-TitleBar $Text
         Write-Host
         if ($NoNewLine.IsPresent) {
             $Text = "=== $Text"
@@ -339,6 +340,7 @@ function Write-Log {
         else {
             $Text = "=== $Text`r`n"
         }
+
         $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
     }
 
@@ -1913,7 +1915,7 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false, ParameterSetName = "VmTestPath")]
         [string]$PathToVerify,
         [Parameter(Mandatory = $false)]
-        [int]$TimeoutMinutes = 20,
+        [int]$TimeoutMinutes = 30,
         [Parameter(Mandatory = $false)]
         [int]$WaitSeconds = 10,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
@@ -3388,6 +3390,27 @@ Function Set-PS7ProgressWidth {
     }
 }
 
+Function Set-TitleBar {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $Text
+    )
+
+    $VersionString = "MemLabs version $($global:Common.MemLabsVersion)"
+    if ($devBranch) {
+        $VersionString = $VersionString + " (DevBranch)"
+    }
+
+    if ($Global:ConfigFile) {
+        $config = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile))
+        $VersionString = $config + " - " + $VersionString
+    }
+    # Set Title bar
+    $host.ui.RawUI.WindowTitle = $VersionString + " - " + $Text
+}
+
 ####################
 ### DOT SOURCING ###
 ####################
@@ -3497,13 +3520,9 @@ if (-not $Common.Initialized) {
         StorageLocation = $null
         StorageToken    = $null
     }
+    Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
 
-    $VersionString = "MemLabs version $($global:Common.MemLabsVersion)"
-    if ($devBranch) {
-        $VersionString = $VersionString + " (DevBranch)"
-    }
-    Write-Log "$versionString Initializing" -LogOnly
-    $host.ui.RawUI.WindowTitle = $VersionString
+    Set-TitleBar "Init Phase"
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access

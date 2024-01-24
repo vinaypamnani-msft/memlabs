@@ -436,7 +436,7 @@ try {
                 Write-OrangePoint "Skipped Phase $i because -StopPhase is $StopPhase." -ForegroundColor Yellow -WriteLog
                 continue
             }
-
+            $currentPhase = $i
             $configured = Start-Phase -Phase $i -deployConfig $deployConfig -WhatIf:$WhatIf
             if (-not $configured) {
                 break
@@ -461,6 +461,9 @@ try {
     if (-not $prepared -or -not $configured) {
         Write-Host
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
+        Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
+        Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase" -Failure -NoIndent
+        Write-Log "If this failed on phase 8, please restore the phase 8 auto snapshot before retrying (in the domain menu)" -Failure -NoIndent
         Write-Host
     }
     else {

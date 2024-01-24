@@ -413,6 +413,8 @@ function Get-ConfigurationData {
                     $response = Read-YesorNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
                     if (-not ($response -eq "n")) {
                         Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
+                        write-log -HostOnly ""
+                        write-log "Auto Snapshot $autoSnapshotName completed."
                     }
                 }
             }

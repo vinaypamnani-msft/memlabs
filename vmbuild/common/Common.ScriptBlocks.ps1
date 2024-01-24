@@ -139,9 +139,9 @@ $global:VM_Create = {
             Write-Progress2 "Waiting for OOBE" -Status "Starting" -percentcomplete 0 -force
             start-sleep -seconds 3
             # Wait for VM to finish OOBE
-            $oobeTimeout = 15
-            if ($deployConfig.virtualMachines.Count -gt 5) {
-                $oobeTimeout = $deployConfig.virtualMachines.Count + 10
+            $oobeTimeout = 25
+            if ($deployConfig.virtualMachines.Count -gt 3) {
+                $oobeTimeout = $deployConfig.virtualMachines.Count + $oobeTimeout
             }
 
             $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
@@ -1008,11 +1008,12 @@ $global:VM_Config = {
                     $nodeList.Add($node) | Out-Null
                 }
                 $attempts = 0
+                $maxAttempts = 150
                 do {
                     $attempts++
                     $allNodesReady = $true
                     $nonReadyNodes = $nodeList.Clone()
-                    $percent = [Math]::Min($attempts, 100)
+                    $percent = [Math]::Min($attempts, $maxAttempts)
                     Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
                     foreach ($node in $nonReadyNodes) {
                         if (-not $node) {
@@ -1026,17 +1027,27 @@ $global:VM_Config = {
                         else {
                             $nodeList.Remove($node) | Out-Null
                             if ($nodeList.Count -eq 0) {
-                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -status "All nodes are ready" -PercentComplete 100
+                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -status "All nodes are ready" -PercentComplete 100
                                 $allNodesReady = $true
                             }
                             else {
-                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent
+                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent
                             }
                         }
                     }
 
+                    if ($attempts -eq 80) {
+                        foreach ($node in $nodeList) {
+                            Write-Progress2 "Restarting $node" -PercentComplete $percent
+                            Stop-Vm2 -Name $node -force:$true
+                            Start-Sleep -seconds 20
+                            Start-VM2 -Name $node
+                            Start-Sleep -seconds 60
+                        }
+                    }
+
                     Start-Sleep -Seconds 6
-                } until ($allNodesReady -or $attempts -ge 100)
+                } until ($allNodesReady -or $attempts -ge $maxAttempts)
 
                 if (-not $allNodesReady) {
                     Write-Progress2 "Failed waiting on VMs [$($nodeList -join ',')].  Please cancel and retry this phase."
