@@ -1002,7 +1002,7 @@ function Test-Configuration {
 
                 # Supported SQL
                 if ($Common.Supported.SqlVersions -notcontains $vm.sqlVersion) {
-                    Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]." -ReturnObject $return -Failure
+                    Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]." -ReturnObject $return -Failure
                 }
 
                 # Server OS
@@ -1013,26 +1013,32 @@ function Test-Configuration {
 
                 # sqlInstanceName
                 if (-not $vm.sqlInstanceName) {
-                    Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Warning
+                    Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] does not contain sqlInstanceName." -ReturnObject $return -Warning
                 }
 
                 if ($vm.Role -ne "Secondary") {
                     if (-not $vm.sqlport) {
-                        Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] does not contain sqlport." -ReturnObject $return -Warning
+                        Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] does not contain sqlport." -ReturnObject $return -Warning
                     }
 
                     # Put number first to force numeric comparisons
                     if ((1 -gt $vm.sqlport) -or (65535 -lt $vm.sqlport)) {
-                        Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] sqlport: $($vm.sqlport) Out of range" -ReturnObject $return -Warning
+                        Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlport: $($vm.sqlport) Out of range" -ReturnObject $return -Warning
                     }
 
                     if ($vm.sqlport -in 21,80,135,139,443,445,860,1434,2382,2383,2393,2394,2725,3260,3389,4022,5022,7022) {
-                        Add-ValidationMessage -Message "VM Validation: [$($vm.vmName)] sqlPort can not use OS reserved port #" -ReturnObject $return -Warning
+                        Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlPort can not use OS reserved port #" -ReturnObject $return -Warning
                     }
                 }
                 # Minimum SQL Memory
                 if ($VM.memory / 1 -lt 4GB) {
-                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of 4GB memory when using SQL." -ReturnObject $return -Failure
+                    Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] must contain a minimum of 4GB memory when using SQL." -ReturnObject $return -Failure
+                }
+
+                if ($vm.Role -eq "SQLAO") {
+                    if ($vm.sqlport -ne 1433) {
+                        Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQL Port must be 1433 on SQLAO due to issue SqlServerDSC #329" -ReturnObject $return -Failure
+                    }
                 }
             }
 

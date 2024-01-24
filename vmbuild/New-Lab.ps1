@@ -219,6 +219,8 @@ try {
         if ($configResult.Loaded) {
             Write-GreenCheck "Loaded Configuration: $Configuration"
             $userConfig = $configResult.Config
+            $Global:configfile = $configResult.ConfigPath
+            Write-Log -LogOnly "Config file: $($configResult.ConfigPath)"
         }
         else {
             Write-Log $configResult.Message -Failure
@@ -460,10 +462,13 @@ try {
 
     if (-not $prepared -or -not $configured) {
         Write-Host
+        Set-TitleBar "SCRIPT FINISHED WITH FAILURES"
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
-        Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
-        Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase" -Failure -NoIndent
-        Write-Log "If this failed on phase 8, please restore the phase 8 auto snapshot before retrying (in the domain menu)" -Failure -NoIndent
+        if ($currentPhase -ge 2) {
+            Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
+            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase" -Failure -NoIndent
+            Write-Log "If this failed on phase 8, please restore the phase 8 auto snapshot before retrying (in the domain menu)" -Failure -NoIndent
+        }
         Write-Host
     }
     else {
@@ -507,10 +512,13 @@ finally {
     # Ctrl + C brings us here :)
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
+        Set-TitleBar "Script Cancelled"
         Write-Log "### $Configuration Terminated" -HostOnly
-        Write-Log "To Retry from the current phase, run the following command from the current powershell window: " -Failure -NoIndent
-        Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase" -Failure -NoIndent
-        Write-Log "If this was cancelled on phase 8, please restore the phase 8 auto snapshot before retrying (in the domain menu)" -Failure -NoIndent
+        if ($currentPhase -ge 2) {
+            Write-Log "To Retry from the current phase, run the following command from the current powershell window: " -Failure -NoIndent
+            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase" -Failure -NoIndent
+            Write-Log "If this was cancelled on phase 8, please restore the phase 8 auto snapshot before retrying (in the domain menu)" -Failure -NoIndent
+        }
         Write-Host
     }
 

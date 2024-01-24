@@ -376,7 +376,7 @@ class InstallODBCDriver {
             }
 
             If ($ODBCVersion.InstalledVersion -ge "18.1.2.1") {
-                Write-Host "Microsoft ODBC Driver for SQL Server 18.1.2.1 ir greater $($ODBCVersion.InstalledVersion) is installed"
+                Write-Host "Microsoft ODBC Driver for SQL Server 18.1.2.1 or greater $($ODBCVersion.InstalledVersion) is installed"
                 return $true
             }
 
@@ -462,12 +462,12 @@ class InstallSqlClient {
 
         try {
             #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
-            $RegistryPath = "HKLM:\SOFTWARE\Microsoft"
+            $RegistryPath = "HKLM:\SOFTWARE\Microsoft\SQLNCLI11"
 
             if (Test-Path -Path $RegistryPath) {
                 try {
                     # Get the InstalledVersion only if the path exists
-                    $Version = Get-ItemProperty -Path $RegistryPath -Name "SQLNCLI11" -ErrorAction SilentlyContinue
+                    $Version = Get-ItemProperty -Path $RegistryPath -ErrorAction SilentlyContinue
                 }
                 catch {
                     $ErrorMessage = $_.Exception.Message
@@ -480,7 +480,7 @@ class InstallSqlClient {
                 return $false
             }
 
-            If ($Version.InstalledVersion -ge "14.4.7001.0") {
+            If ([System.Version]$($Version.InstalledVersion) -ge [System.Version]"11.4.7001.0") {
                 Write-Host "Sql Client 11.4.7001.0 or greater $($Version.InstalledVersion) is installed"
                 return $true
             }
@@ -567,12 +567,12 @@ class InstallVCRedist {
 
         try {
             #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
-            $RegistryPath = "HKLM:\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes"
+            $RegistryPath = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
 
             if (Test-Path -Path $RegistryPath) {
                 try {
                     # Get the InstalledVersion only if the path exists
-                    $Version = Get-ItemProperty -Path $RegistryPath -Name "X64" -ErrorAction SilentlyContinue
+                    $Version = Get-ItemProperty -Path $RegistryPath -ErrorAction SilentlyContinue
                 }
                 catch {
                     $ErrorMessage = $_.Exception.Message

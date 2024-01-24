@@ -892,8 +892,8 @@ Configuration Phase5
 
         SqlWaitForAG 'SQLConfigureAG-WaitAG' {
             Name                 = $node1VM.thisParams.SQLAO.AlwaysOnGroupName
-            RetryIntervalSec     = 5
-            RetryCount           = 450
+            RetryIntervalSec     = 10
+            RetryCount           = 300
             ServerName           = $node1
             InstanceName         = $node1vm.sqlInstanceName
             Dependson            = '[SqlAlwaysOnService]EnableHADR'

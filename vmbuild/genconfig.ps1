@@ -4169,6 +4169,7 @@ function Get-AdditionalValidations {
             }
 
             if ($property.Role -eq "SQLAO") {
+                $property.sqlPort = "1433"
                 $SQLAO = @($property)
                 if ($property.OtherNode) {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
@@ -4185,6 +4186,7 @@ function Get-AdditionalValidations {
         }
         "sqlPort" {
             if ($property.Role -eq "SQLAO") {
+                Add-ErrorMessage -property $name  "Sorry. When using SQLAO, port must remain 1433 due to a bug in SqlServerDSC issue #329."
                 $SQLAO = @($property)
                 if ($property.OtherNode) {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
@@ -4193,7 +4195,7 @@ function Get-AdditionalValidations {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
                 }
                 foreach ($sql in $SQLAO) {
-                    $sql.$name = $value
+                    $sql.$name = 1433
                 }
             }
 
