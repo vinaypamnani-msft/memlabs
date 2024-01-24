@@ -185,8 +185,19 @@ configuration Phase3
                 Ensure   = "Present"
             }
 
-            WriteStatus ODBCDriverInstall {
+            WriteStatus SQLClientInstall {
                 DependsOn = "[InstallVCRedist]VCInstall"
+                Status = "Downloading and installing SQL Client"
+            }
+
+            InstallSQLClient SQLClientInstall {
+                DependsOn = "[WriteStatus]SQLClientInstall"
+                Path = "C:\temp\sqlncli.msi"
+                Ensure   = "Present"
+            }
+
+            WriteStatus ODBCDriverInstall {
+                DependsOn = "[InstallSQLClient]SQLClientInstall"
                 Status = "Downloading and installing ODBC driver"
             }
 

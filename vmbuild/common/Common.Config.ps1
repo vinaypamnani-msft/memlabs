@@ -161,6 +161,7 @@ function Get-FilesForConfiguration {
         $result = Get-UserConfiguration -Configuration $Configuration
         if ($result.Loaded) {
             $config = $result.Config
+            $Global:ConfigFile = $ConfigPath
         }
     }
 

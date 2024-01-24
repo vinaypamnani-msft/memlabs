@@ -287,6 +287,8 @@ class InstallDotNet4 {
     }
 }
 
+
+
 [DscResource()]
 class InstallODBCDriver {
     [DscProperty(Key)]
@@ -315,7 +317,7 @@ class InstallODBCDriver {
                 ipconfig /flushdns
                 start-sleep -seconds 60
                 Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
-                try{
+                try {
                     Invoke-WebRequest -Uri $odbcurl -OutFile $_odbcpath -ErrorAction Stop
                     #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
                 }
@@ -354,33 +356,143 @@ class InstallODBCDriver {
 
     [bool] Test() {
 
-        $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
+        try {
+            $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
 
-        if (Test-Path -Path $ODBCRegistryPath) {
-            try {
-                # Get the InstalledVersion only if the path exists
-                $ODBCVersion = Get-ItemProperty -Path $ODBCRegistryPath -Name "InstalledVersion"
+            if (Test-Path -Path $ODBCRegistryPath) {
+                try {
+                    # Get the InstalledVersion only if the path exists
+                    $ODBCVersion = Get-ItemProperty -Path $ODBCRegistryPath -Name "InstalledVersion" -ErrorAction SilentlyContinue
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Verbose "Microsoft ODBC Driver 18 for SQL Server Error $($ErrorMessage)!"
+
+                    return $false
+                }
             }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Verbose "Microsoft ODBC Driver 18 for SQL Server Error $($ErrorMessage)!"
-
+            else {
                 return $false
             }
-        }
-        else {
+
+            If ($ODBCVersion.InstalledVersion -ge "18.1.2.1") {
+                Write-Host "Microsoft ODBC Driver for SQL Server 18.1.2.1 ir greater $($ODBCVersion.InstalledVersion) is installed"
+                return $true
+            }
+
             return $false
         }
-
-        If ($ODBCVersion.InstalledVersion -ge "18.1.2.1") {
-            Write-Host "Microsoft ODBC Driver for SQL Server 18.1.2.1 ir greater $($ODBCVersion.InstalledVersion) is installed"
-            return $true
+        catch {
+            return $false
         }
-
-        return $false
     }
 
     [InstallODBCDriver] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
+class InstallSqlClient {
+    [DscProperty(Key)]
+    [string] $Path
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $_path = $this.Path
+        if (!(Test-Path $_path)) {
+            $url = "https://go.microsoft.com/fwlink/?linkid=2115684"
+
+            Write-Verbose "Downloading Sql Client from $($url)..."
+
+            try {
+                Write-Verbose "Downloading  Sql Client"
+                Start-BitsTransfer -Source $url -Destination $_path -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                $ErrorMessage = $_.Exception.Message
+                Write-Verbose "Failed to Download Sql Client with error: $ErrorMessage"
+                ipconfig /flushdns
+                start-sleep -seconds 60
+                Write-Verbose "Downloading Sql Client"
+                try {
+                    Invoke-WebRequest -Uri $url -OutFile $_path -ErrorAction Stop
+                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    # Force reboot
+                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    #$global:DSCMachineStatus = 1
+                    throw "Retry (Attempting Reboot) Failed to Download Sql Client with error: $ErrorMessage"
+                    return
+                }
+
+            }
+        }
+
+        # Install
+        #VC_redist.x64.exe /install /passive /quiet
+        $cmd = "msiexec"
+        $arg1 = "/i"
+        $arg2 = $_path
+        $arg3 = "IACCEPTSQLNCLILICENSETERMS=YES"
+        $arg4 = "/qn"
+        #$arg5 = "/lv c:\temp\odbcinstallation.log"
+
+        try {
+            Write-Verbose "Installing Sql Client..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
+            & $cmd $arg1 $arg2 $arg3 #$arg5
+            Write-Verbose "VC Redist was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            throw "Failed to install Sql Client with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 20
+    }
+
+    [bool] Test() {
+
+        try {
+            #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
+            $RegistryPath = "HKLM:\SOFTWARE\Microsoft"
+
+            if (Test-Path -Path $RegistryPath) {
+                try {
+                    # Get the InstalledVersion only if the path exists
+                    $Version = Get-ItemProperty -Path $RegistryPath -Name "SQLNCLI11" -ErrorAction SilentlyContinue
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Verbose "Sql Client Error $($ErrorMessage)!"
+
+                    return $false
+                }
+            }
+            else {
+                return $false
+            }
+
+            If ($Version.InstalledVersion -ge "14.4.7001.0") {
+                Write-Host "Sql Client 11.4.7001.0 or greater $($Version.InstalledVersion) is installed"
+                return $true
+            }
+
+            return $false
+        }
+        catch {
+            return $false
+        }
+    }
+
+    [InstallSqlClient] Get() {
         return $this
     }
 }
@@ -413,7 +525,7 @@ class InstallVCRedist {
                 ipconfig /flushdns
                 start-sleep -seconds 60
                 Write-Verbose "Downloading VC Redist"
-                try{
+                try {
                     Invoke-WebRequest -Uri $url -OutFile $_path -ErrorAction Stop
                     #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
                 }
@@ -453,31 +565,35 @@ class InstallVCRedist {
 
     [bool] Test() {
 
-        #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
-        $RegistryPath = "HKLM:\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes"
+        try {
+            #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
+            $RegistryPath = "HKLM:\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes"
 
-        if (Test-Path -Path $RegistryPath) {
-            try {
-                # Get the InstalledVersion only if the path exists
-                $Version = Get-ItemProperty -Path $RegistryPath -Name "X64"
+            if (Test-Path -Path $RegistryPath) {
+                try {
+                    # Get the InstalledVersion only if the path exists
+                    $Version = Get-ItemProperty -Path $RegistryPath -Name "X64" -ErrorAction SilentlyContinue
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Verbose "VC Redist Error $($ErrorMessage)!"
+
+                    return $false
+                }
             }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Verbose "VC Redist Error $($ErrorMessage)!"
-
+            else {
                 return $false
             }
-        }
-        else {
+
+            If ($Version.Major -ge "14") {
+                Write-Host "VC Redist 14 or greater $($Version.InstalledVersion) is installed"
+                return $true
+            }
             return $false
         }
-
-        If ($Version.Major -ge "14") {
-            Write-Host "VC Redist 14 or greater $($Version.InstalledVersion) is installed"
-            return $true
+        catch {
+            return $false
         }
-
-        return $false
     }
 
     [InstallVCRedist] Get() {

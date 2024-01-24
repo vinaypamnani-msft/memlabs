@@ -9,6 +9,7 @@ DscResourcesToExport = @(
     'InstallDotNet4',
     'InstallODBCDriver',
     'InstallVCRedist',
+    'InstallSqlClient',
     'InstallAndConfigWSUS',
     'InstallAZCopy',
     'WriteEvent',

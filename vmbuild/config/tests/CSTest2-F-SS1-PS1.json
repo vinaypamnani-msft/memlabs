@@ -26,7 +26,8 @@
       "sqlInstanceDir": "E:\\SQL",
       "sqlInstanceName": "MSSQLSERVER",
       "SqlServiceAccount": "LocalSystem",
-      "SqlAgentAccount": "LocalSystem"
+      "SqlAgentAccount": "LocalSystem",
+      "sqlPort": "1433"
     }
   ],
   "cmOptions": {

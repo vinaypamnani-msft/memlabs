@@ -508,6 +508,9 @@ finally {
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
         Write-Log "### $Configuration Terminated" -HostOnly
+        Write-Log "To Retry from the current phase, run the following command from the current powershell window: " -Failure -NoIndent
+        Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase" -Failure -NoIndent
+        Write-Log "If this was cancelled on phase 8, please restore the phase 8 auto snapshot before retrying (in the domain menu)" -Failure -NoIndent
         Write-Host
     }
 
