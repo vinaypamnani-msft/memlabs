@@ -5,6 +5,7 @@ $global:VM_Create = {
     try {
         $global:ScriptBlockName = "VM_Create"
         # Dot source common
+        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
 
@@ -352,7 +353,7 @@ $global:VM_Create = {
 $global:VM_Config = {
     try {
         $global:ScriptBlockName = "VM_Config"
-
+        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
         # Get variables from parent scope
         $deployConfig = $using:deployConfigCopy
         $currentItem = $using:currentItem
@@ -416,8 +417,25 @@ $global:VM_Config = {
             return
         }
 
+
+        if ($Phase -gt 2) {
+            Write-Progress2 $Activity -Status "Testing IP Address" -percentcomplete 9 -force
+            #169.254.239.16
+            $IPAddress = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetIPConfiguration).Ipv4Address.IpAddress } -DisplayName "GetIPs"
+            if ($IPAddress.ScriptBlockOutput) {
+                foreach ($ip in $IPAddress.ScriptBlockOutput) {
+                    if ($ip.StartsWith("169.254")) {
+                        $count = (Get-VMSwitch).Count
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Could not obtain a DHCP IP Address ($ip) ($count Hyper-V switches in use. If this is over 20, this could be the issue)" -Failure -OutputStream
+                        return
+                    }
+                }
+            }
+        }
+
         # inject tools
         if ($Phase -eq 2) {
+
             Write-Progress2 $Activity -Status "Injecting Tools" -percentcomplete 10 -force
             $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress
             if (-not $injected) {
@@ -523,6 +541,7 @@ $global:VM_Config = {
         $Expand_Archive = {
 
             $global:ScriptBlockName = "Expand_Archive"
+            Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
             # Create init log
             $log = "C:\staging\DSC\DSC_Init.txt"
             $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
@@ -561,7 +580,7 @@ $global:VM_Config = {
 
             try {
                 $global:ScriptBlockName = "DSC_InstallModules"
-
+                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $Phase = $using:Phase
@@ -648,6 +667,7 @@ $global:VM_Config = {
 
             try {
                 $global:ScriptBlockName = "DSC_ClearStatus"
+                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
 
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
@@ -753,6 +773,7 @@ $global:VM_Config = {
 
             try {
                 $global:ScriptBlockName = "DSC_CreateSingleConfig"
+                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $deployConfig = $using:deployConfig
@@ -833,6 +854,7 @@ $global:VM_Config = {
             param($DscFolder)
             try {
                 $global:ScriptBlockName = "DSC_CreateMultiConfig"
+                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
 
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
@@ -949,6 +971,7 @@ $global:VM_Config = {
             param($DscFolder)
             try {
                 $global:ScriptBlockName = "DSC_StartConfig"
+                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $ConfigurationData = $using:ConfigurationData
@@ -1113,7 +1136,7 @@ $global:VM_Config = {
                     $failure = $false
                     $dscStatusPolls = 0 # Do this every 30 seconds or so
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Polling DSC Status via Get-DscConfigurationStatus" -Verbose
-                    $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                    $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
                         $ProgressPreference = 'SilentlyContinue'
                         Get-DscConfigurationStatus
                         $ProgressPreference = 'Continue'
@@ -1221,7 +1244,7 @@ $global:VM_Config = {
                 }
                 $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
                 $stopwatch2.Start()
-                $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
+                $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
                 $stopwatch2.Stop()
 
                 if (-not $status -or ($status.ScriptBlockFailed)) {
@@ -1230,8 +1253,9 @@ $global:VM_Config = {
                     }
                     else {
                         [int]$failedHeartbeats++
+                        start-sleep -Seconds 10
                     }
-                    start-sleep -Seconds 10
+
                     # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
                     if ($failedHeartbeats -gt 10) {
                         try {
@@ -1249,14 +1273,14 @@ $global:VM_Config = {
 
                 if ($failedHeartbeats -ge $failedHeartbeatThreshold) {
                     try {
-                        Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
+                        #Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
 
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, forcefully restarting the VM" -failcount $failedHeartbeats -failcountMax $failedHeartbeatThreshold
 
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
-                        Stop-VM2 -name $currentItem.vmName -TurnOff
+                        Stop-VM2 -name $currentItem.vmName -Force
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Stopped"
-
+                        Start-Sleep -Seconds 20
                         Start-VM2 -Name $currentItem.vmName
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Started"
 

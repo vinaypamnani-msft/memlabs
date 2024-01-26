@@ -33,7 +33,9 @@
       },
       "memory": "4GB",
       "virtualProcs": 4,
-      "remoteSQLVM": "CS1SQL"
+      "remoteSQLVM": "CS1SQL",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "CS1SQL",
@@ -47,7 +49,8 @@
       "additionalDisks": {
         "E": "120GB"
       },
-      "sqlPort": "9876"
+      "sqlPort": "9876",
+      "InstallRP": false
     },
     {
       "vmName": "DPMP1",
@@ -60,7 +63,9 @@
       "virtualProcs": 4,
       "siteCode": "PS1",
       "installMP": true,
-      "installDP": true
+      "installDP": true,
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "FS1",
@@ -85,7 +90,9 @@
       },
       "memory": "4GB",
       "virtualProcs": 4,
-      "remoteSQLVM": "PS1SQL"
+      "remoteSQLVM": "PS1SQL",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "PS1SITE-P",
@@ -112,7 +119,8 @@
       "additionalDisks": {
         "E": "120GB"
       },
-      "sqlPort": "1433"
+      "sqlPort": "1433",
+      "InstallRP": false
     },
     {
       "vmName": "W10Client1",

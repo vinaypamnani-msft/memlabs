@@ -690,7 +690,7 @@ function Get-SQLAOConfig {
         }
     }
     if (-not ($PrimaryAO.ClusterIPAddress)) {
-        write-log "Cluster IP is not yet set. Skipping SQLAO Config"
+        write-log "Cluster IP is not yet set. Skipping SQLAO Config" -LogOnly
         return
         #throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
     }
@@ -725,7 +725,7 @@ function Get-SQLAOConfig {
         SQLAOPort                  = 1500
     }
 
-    Write-Log "SQLAO Config Generated"
+    Write-Log "SQLAO Config Generated" -LogOnly
     return $config
 }
 

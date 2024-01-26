@@ -530,8 +530,9 @@ finally {
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose
-        Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue
+        try{Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue} catch {}
     }
+    $global:ps_cache = @{}
 
     # Delete in progress or failed VM's
     if ($global:vm_remove_list.Count -gt 0) {

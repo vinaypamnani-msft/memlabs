@@ -1990,7 +1990,7 @@ function Wait-ForVm {
 
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
@@ -2046,7 +2046,7 @@ function Wait-ForVm {
 
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE complete. Checking SMB access"
                 Start-Sleep -Seconds 3
-                $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
+                $out = Invoke-VmCommand -VmName $VmName -AsJob -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "$VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
                 if ($readySmb) { Start-Sleep -Seconds 10 } # Extra wait to ensure wwahost has had a chance to start
@@ -2054,7 +2054,7 @@ function Wait-ForVm {
 
             # Wait until wwahost.exe is not found, or not longer running
             if ($readySmb) {
-                $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+                $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
 
                 if ($wwahost.ScriptBlockOutput) {
                     $wwahostrunning = $true
@@ -2079,7 +2079,7 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError | Out-Null
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError | Out-Null
         }
     }
 
@@ -2089,7 +2089,7 @@ function Wait-ForVm {
         Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
 
         do {
-            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
 
             if ($wwahost.ScriptBlockOutput) {
                 $ready = $true
@@ -2105,7 +2105,7 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null
         }
     }
 
@@ -2143,7 +2143,7 @@ function Wait-ForVm {
             }
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
             $ready = $true -eq $out.ScriptBlockOutput
             if ($ready) {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
@@ -2153,7 +2153,7 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError | Out-Null
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError | Out-Null
         }
     }
 
@@ -2191,6 +2191,10 @@ function Invoke-VmCommand {
         [switch]$CommandReturnsBool,
         [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
         [switch]$ShowVMSessionError,
+        [Parameter(Mandatory = $false, HelpMessage = "Run command as a job")]
+        [switch]$AsJob,
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
+        [int]$TimeoutSeconds = 180,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
@@ -2248,7 +2252,26 @@ function Invoke-VmCommand {
         # Run script block inside VM
         if (-not $failed) {
             try {
+                if ($AsJob) {
+                    $job = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue -AsJob
+                    $job | Wait-Job -Timeout $TimeoutSeconds
+                    if ($job.State -eq "Completed")
+                    {
+                        $return.ScriptBlockOutput = Receive-Job $job
+                        $failed = $false
+                    }
+                    else {
+                        $failed = $true
+                        $return.ScriptBlockFailed = $true
+                        Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                        if ($job.State -eq "Running") {
+                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                        }
+                        Stop-Job $job
+                    }
+                } else{
                 $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+                }
             }
             catch {
                 $failed = $true
@@ -2312,7 +2335,7 @@ function Invoke-VmCommand {
         }
     }
     catch {
-        Write-Log "$VmName`: Exception $_"
+        Write-Log "$VmName`: Invoke-VMCommand Exception $_"
     }
     return $return
 
@@ -2358,6 +2381,9 @@ function Get-VmSession {
         if ($ps.Availability -eq "Available") {
             Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
             return $ps
+        }else{
+            $global:ps_cache.Remove($cacheKey)
+            try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
         }
     }
 
@@ -2380,6 +2406,7 @@ function Get-VmSession {
         $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
         $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
         if ($Err0.Count -ne 0) {
+            try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
             if ($VmDomainName -ne $VmName) {
                 Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
@@ -2388,6 +2415,7 @@ function Get-VmSession {
                 Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
                 $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
+                    try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
                         Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
                     }
@@ -2399,9 +2427,11 @@ function Get-VmSession {
             }
             else {
                 if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
+                    try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
                 }
                 else {
+                    try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 }
                 continue
@@ -2414,9 +2444,10 @@ function Get-VmSession {
             $global:ps_cache[$cacheKey] = $ps
             return $ps
         }
+        try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
         Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Warning
     }
-
+    try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
     Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure
 }
 

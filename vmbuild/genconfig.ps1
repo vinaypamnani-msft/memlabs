@@ -5919,8 +5919,12 @@ function Add-NewVMForRole {
             $virtualMachine.tpmEnabled = $false
         }
         "DC" {
+            $virtualMachine.memory = "4GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true
             $virtualMachine.tpmEnabled = $false
+        }
+        "BDC" {
+            $virtualMachine.memory = "4GB"
         }
     }
 

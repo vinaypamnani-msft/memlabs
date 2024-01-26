@@ -1,6 +1,6 @@
 {
   "cmOptions": {
-    "version": "current-branch",
+    "version": "2309",
     "install": true,
     "pushClientToDomainMembers": true
   },
