@@ -466,8 +466,11 @@ try {
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
         if ($currentPhase -ge 2) {
             Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
-            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase" -Failure -NoIndent
-            Write-Log "If this failed on phase 8, please restore the phase 8 auto snapshot before retrying (in the domain menu)" -Failure -NoIndent
+            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
+            if ($currentPhase -eq 8) {
+                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+            }
         }
         Write-Host
     }
@@ -516,8 +519,12 @@ finally {
         Write-Log "### $Configuration Terminated" -HostOnly
         if ($currentPhase -ge 2) {
             Write-Log "To Retry from the current phase, run the following command from the current powershell window: " -Failure -NoIndent
-            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase" -Failure -NoIndent
-            Write-Log "If this was cancelled on phase 8, please restore the phase 8 auto snapshot before retrying (in the domain menu)" -Failure -NoIndent
+            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
+            if ($currentPhase -eq 8) {
+                Write-Log
+                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+            }
         }
         Write-Host
     }
@@ -530,7 +537,7 @@ finally {
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose
-        try{Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue} catch {}
+        try { Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue } catch {}
     }
     $global:ps_cache = @{}
 

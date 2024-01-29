@@ -498,7 +498,7 @@ $global:VM_Config = {
         if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO") {
             # Test DHCP Reservations
             Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
-            $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress } -DisplayName "Get 2nd Mac"
+            $script = Invoke-VmCommand -AsJob -SuppressLog -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress } -DisplayName "Get 2nd Mac"
             $MAC = $script.ScriptBlockOutput
             if ($MAC) {
                 $MAC=$MAC.ToLower()
