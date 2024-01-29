@@ -38,6 +38,12 @@ function Get-UserConfiguration {
 
         #Apply Fixes to Config
 
+        if ($config.cmOptions) {
+            if ($null -eq ($config.cmOptions.EVALVersion))
+            {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EVALVersion" -Value $false
+            }
+        }
         if ($null -ne $config.vmOptions.domainAdminName) {
             if ($null -eq ($config.vmOptions.adminName)) {
                 $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName
