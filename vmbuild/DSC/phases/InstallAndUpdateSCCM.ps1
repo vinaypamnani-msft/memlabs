@@ -169,7 +169,7 @@ CurrentBranch=1
     $productID = "EVAL"
 
     if ($CM -ne "CMTP") {
-        if (-not $($deployConfig.parameters.EVALVersion)) {
+        if (-not $($deployConfig.cmOptions.EVALVersion)) {
             if ($($deployConfig.parameters.ProductID)) {
                 $productID = $($deployConfig.parameters.ProductID)
             }
