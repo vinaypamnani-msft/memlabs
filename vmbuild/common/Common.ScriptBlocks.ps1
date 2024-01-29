@@ -501,6 +501,7 @@ $global:VM_Config = {
             $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress } -DisplayName "Get 2nd Mac"
             $MAC = $script.ScriptBlockOutput
             if ($MAC) {
+                $MAC=$MAC.ToLower()
                 $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
                 if ($reservation -and $reservation.Contains($MAC)) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC was found"
