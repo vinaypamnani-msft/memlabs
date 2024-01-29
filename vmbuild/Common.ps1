@@ -1823,16 +1823,27 @@ function New-VirtualMachine {
                 }
 
                 $ip = $null
-                Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
                 try {
                     $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                    if (! $ip) {
+                        $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                    }
+                    if (! $ip) {
+                        Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
+                        return $false
+                    }
+                    Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip }
+                    if ($ipa) {
+                        Remove-DhcpServerv4Reservation -IPAddress $ip
+                    }
                     Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                     Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
                 }
                 catch {
-                    write-log -failure "$VmName`:Failed to reserve IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
+                    write-log -failure "$VmName`:Failed to reserve IP address $ip for DNS: $dns and Mac:$($vmnet.MacAddress)"
                     Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
                     return $false
                 }
@@ -1846,6 +1857,15 @@ function New-VirtualMachine {
                     $clusterIP = $IPs[0]
                     $AGIP = $IPs[1]
 
+
+                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP }
+                    if ($ipa) {
+                        Remove-DhcpServerv4Reservation -IPAddress $clusterIP
+                    }
+                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP }
+                    if ($ipa) {
+                        Remove-DhcpServerv4Reservation -IPAddress $AGIP
+                    }
                     write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
 
                     if (-not $clusterIP -or -not $AGIP) {
@@ -2255,22 +2275,27 @@ function Invoke-VmCommand {
                 if ($AsJob) {
                     $job = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue -AsJob
                     $job | Wait-Job -Timeout $TimeoutSeconds
-                    if ($job.State -eq "Completed")
-                    {
+                    if ($job.State -eq "Completed") {
                         $return.ScriptBlockOutput = Receive-Job $job
+                        if (-not $SuppressLog) {
+                            Write-Log "$VmName`: Job '$DisplayName' Succeeded"
+                        }
                         $failed = $false
                     }
                     else {
                         $failed = $true
                         $return.ScriptBlockFailed = $true
-                        Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                        if (-not $SuppressLog) {
+                            Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                        }
                         if ($job.State -eq "Running") {
                             Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
                         }
-                        Stop-Job $job
+                        Stop-Job $job | Out-Null
                     }
-                } else{
-                $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+                }
+                else {
+                    $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
                 }
             }
             catch {
@@ -2381,9 +2406,10 @@ function Get-VmSession {
         if ($ps.Availability -eq "Available") {
             Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
             return $ps
-        }else{
+        }
+        else {
             $global:ps_cache.Remove($cacheKey)
-            try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+            try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
         }
     }
 
@@ -2406,7 +2432,7 @@ function Get-VmSession {
         $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
         $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
         if ($Err0.Count -ne 0) {
-            try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+            try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
             if ($VmDomainName -ne $VmName) {
                 Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
@@ -2415,7 +2441,7 @@ function Get-VmSession {
                 Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
                 $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
-                    try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
                         Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
                     }
@@ -2427,11 +2453,11 @@ function Get-VmSession {
             }
             else {
                 if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                    try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
                 }
                 else {
-                    try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 }
                 continue
@@ -2444,10 +2470,10 @@ function Get-VmSession {
             $global:ps_cache[$cacheKey] = $ps
             return $ps
         }
-        try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+        try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
         Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Warning
     }
-    try {Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
     Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure
 }
 

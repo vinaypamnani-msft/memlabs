@@ -418,16 +418,49 @@ $global:VM_Config = {
         }
 
 
-        if ($Phase -gt 2) {
-            Write-Progress2 $Activity -Status "Testing IP Address" -percentcomplete 9 -force
-            #169.254.239.16
-            $IPAddress = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetIPConfiguration).Ipv4Address.IpAddress } -DisplayName "GetIPs"
-            if ($IPAddress.ScriptBlockOutput) {
-                foreach ($ip in $IPAddress.ScriptBlockOutput) {
-                    if ($ip.StartsWith("169.254")) {
-                        $count = (Get-VMSwitch).Count
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Could not obtain a DHCP IP Address ($ip) ($count Hyper-V switches in use. If this is over 20, this could be the issue)" -Failure -OutputStream
-                        return
+        if ($Phase -ge 2) {
+            $retryCount = 0
+            $success = $false
+            while ($retrycount -le 3 -and $success -eq $false) {
+                Write-Progress2 $Activity -Status "Testing IP Address" -percentcomplete 9 -force
+                #169.254.239.16
+                $IPAddress = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetIPConfiguration).Ipv4Address.IpAddress } -DisplayName "GetIPs"
+                $success = $true
+                if ($IPAddress.ScriptBlockOutput) {
+                    foreach ($ip in $IPAddress.ScriptBlockOutput) {
+                        if ($ip.StartsWith("169.254")) {
+                            $success = $false
+                            #$currentItem.network
+
+                            if ($retryCount -eq 1) {
+                                Write-Progress2 $Activity -Status "Attempting to repair network $($currentItem.network) " -percentcomplete 10 -force
+                                stop-vm2 -Name $currentItem.vmname
+                                Remove-VMSwitch2 -NetworkName $($currentItem.network)
+                                Remove-DhcpServerv4Scope -scopeID $($currentItem.network)
+                                stop-service "DHCPServer" | Out-Null
+                                $dhcp = Start-DHCP
+                                start-sleep -seconds 10
+                                $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
+                                $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+                                $worked = Add-SwitchAndDhcp -NetworkName $currentItem.network -NetworkSubnet $currentItem.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
+
+                                start-vm2 -Name $currentItem.vmname
+                                $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName
+                                $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew .\cache } -DisplayName "FixIPs"
+                            }
+                            if ($retryCount -eq 0) {
+                                stop-service "DHCPServer" | Out-Null
+                                start-sleep -seconds 5
+                                $dhcp = Start-DHCP
+                                $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
+                            }
+                            if ($retryCount -eq 2) {
+                                $count = (Get-VMSwitch).Count
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Could not obtain a DHCP IP Address ($ip) Should be on $($currentItem.network) ($count Hyper-V switches in use. If this is over 20, this could be the issue)" -Failure -OutputStream
+                                return
+                            }
+                            $retryCount++
+                        }
                     }
                 }
             }
@@ -461,6 +494,64 @@ $global:VM_Config = {
             }
         }
 
+
+        if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO") {
+            # Test DHCP Reservations
+            Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
+            $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress } -DisplayName "Get 2nd Mac"
+            $MAC = $script.ScriptBlockOutput
+            if ($MAC) {
+                $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
+                if ($reservation -and $reservation.Contains($MAC)) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC was found"
+                }
+                else {
+                    #Get-DhcpServerv4Reservation -ClientId $MAC -ScopeId 10.250.250.0 -ErrorAction SilentlyContinue
+                    #if (!$reservation) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC not found" -Warning
+                    $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+                    if (-not ($dc.network)) {
+                        $dns = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
+                    }
+                    else {
+                        $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
+                    }
+                    $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2 -ErrorAction Stop
+                    if (! $iprange) {
+                        $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2 -ErrorAction Stop
+                    }
+                    if (! $iprange) {
+                        Write-Log "$VmName`: Could not acquire a free cluster DHCP Address" -Failure
+                        return $false
+                    }
+                    if ($currentItem.OtherNode) {
+                        $ip = $iprange[1]
+                    }
+                    else {
+                        $ip = $iprange[0]
+                    }
+                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" -erroraction SilentlyContinue | Where-Object { $_.IpAddress -eq $ip }
+                    if ($ipa) {
+                        Remove-DhcpServerv4Reservation -IPAddress $ip
+                    }
+                    Write-Progress2 $Activity -Status "Adding DHCP Reservations for scope 10.250.250.0 ip: $ip MAC: $MAC" -percentcomplete 11 -force
+                    Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $MAC -Description "Reservation for $($currentItem.VMName)" -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 15 -value $deployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                    Start-DHCP
+                    Start-Sleep -seconds 30
+                    $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "renew DHCP"
+                }
+
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName):  $MAC was not found" -Warning
+            }
+
+
+
+        }
         $Stop_RunningDSC = {
             # Stop any existing DSC runs
             try {
@@ -1110,6 +1201,9 @@ $global:VM_Config = {
 
         $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
         $timeout = $using:RoleConfigTimeoutMinutes
+        if ($Phase -eq 8) {
+            $timeout = $timeout * 2
+        }
         $timeSpan = New-TimeSpan -Minutes $timeout
         $stopWatch.Start()
 
@@ -1387,7 +1481,7 @@ $global:VM_Config = {
                 }
                 else {
                     if ($noStatus) {
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress"
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress. Polls: $dscStatusPolls Failed Heartbeats: $failedHeartbeats"
                     }
                     else {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $currentStatus
