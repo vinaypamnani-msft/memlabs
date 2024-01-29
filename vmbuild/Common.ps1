@@ -2701,6 +2701,9 @@ function Get-Tools {
         $url = $tool.URL
         $fileTargetRelative = $tool.Target
         $fileName = Split-Path $url -Leaf
+        if ($fileName.Contains("?")) {
+            $fileName = $fileName.Split("?")[0]
+        }
         $fileNameForDownload = Join-Path "tools" $fileName
         $downloadPath = Join-Path $Common.AzureToolsPath $fileName
 
