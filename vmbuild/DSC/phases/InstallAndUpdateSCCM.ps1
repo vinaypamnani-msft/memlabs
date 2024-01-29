@@ -169,8 +169,10 @@ CurrentBranch=1
     $productID = "EVAL"
 
     if ($CM -ne "CMTP") {
-        if ($($deployConfig.parameters.ProductID)) {
-            $productID = $($deployConfig.parameters.ProductID)
+        if (-not $($deployConfig.parameters.EVALVersion)) {
+            if ($($deployConfig.parameters.ProductID)) {
+                $productID = $($deployConfig.parameters.ProductID)
+            }
         }
     }
     $cmini = $cmini.Replace('%ProductID%', $productID)

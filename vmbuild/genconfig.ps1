@@ -965,9 +965,9 @@ function Select-MainMenu {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
         $preOptions = [ordered]@{}
-        $preOptions += [ordered]@{ "*G" = "---  Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $preOptions += [ordered]@{ "*G" = "---  Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t`t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($Global:Config.cmOptions) {
-            $preOptions += [ordered]@{"C" = "Global CM Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+            $preOptions += [ordered]@{"C" = "Global SCCM Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
         $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions = [ordered]@{}
@@ -5954,6 +5954,7 @@ function Add-NewVMForRole {
                 version                   = "current-branch"
                 install                   = $true
                 pushClientToDomainMembers = $true
+                EVALVersion        = $false
             }
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
         }
