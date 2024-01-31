@@ -361,6 +361,7 @@ $global:VM_Config = {
         $Phase = $using:Phase
         $ConfigurationData = $using:ConfigurationData
         $multiNodeDsc = $using:multiNodeDsc
+        $reservation = $using:reservation
 
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
@@ -417,6 +418,48 @@ $global:VM_Config = {
             return
         }
 
+
+        $Stop_RunningDSC = {
+            # Stop any existing DSC runs
+            try {
+                get-job | remove-job
+                Disable-DscDebug | Out-Null
+                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force | out-null
+                $job = Stop-DscConfiguration -Force -AsJob
+                $wait = Wait-Job -Timeout 120 $job
+                if ($wait.State -eq "Running") {
+                    Stop-Job $job
+                    get-job | remove-job
+                    Restart-Service -Name WinMgmt -force
+                }
+                else {
+                    if ($wait.State -eq "Completed") {
+                        get-job | remove-job
+                    }
+                    else {
+                        write-host "State = $($wait.State)"
+                        Stop-Job $job
+                        get-job | remove-job
+                        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
+                        Stop-DscConfiguration -Verbose -Force
+                    }
+
+                }
+
+
+            }
+            catch {
+                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
+                Stop-DscConfiguration -Verbose -Force
+            }
+        }
+
+        Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+        if ($result.ScriptBlockFailed) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
+        }
 
         if ($Phase -ge 2) {
             $retryCount = 0
@@ -496,55 +539,60 @@ $global:VM_Config = {
 
 
         if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO") {
+
+            $Get_MAC = {
+             (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress
+            }
             # Test DHCP Reservations
             Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
-            $script = Invoke-VmCommand -AsJob -SuppressLog -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress } -DisplayName "Get 2nd Mac"
+            $script = Invoke-VmCommand -SuppressLog -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Get_MAC -DisplayName "Get 2nd Mac"
+            Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
             $MAC = $script.ScriptBlockOutput
             if ($MAC) {
-                $MAC=$MAC.ToLower()
-                $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
-                if ($reservation -and $reservation.Contains($MAC)) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC was found"
-                }
-                else {
-                    #Get-DhcpServerv4Reservation -ClientId $MAC -ScopeId 10.250.250.0 -ErrorAction SilentlyContinue
-                    #if (!$reservation) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC not found" -Warning
-                    $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
-                    if (-not ($dc.network)) {
-                        $dns = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
+                $MAC = $MAC.ToLower()
+                if ($reservation) { #Reservation is now a using statement, as getting the data here causes status to break
+                    if ($reservation.Contains($MAC)) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC was found" -LogOnly
                     }
                     else {
-                        $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
-                    }
-                    $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2 -ErrorAction Stop
-                    if (! $iprange) {
+                        #Get-DhcpServerv4Reservation -ClientId $MAC -ScopeId 10.250.250.0 -ErrorAction SilentlyContinue
+                        #if (!$reservation) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC not found" -Warning -LogOnly
+                        $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+                        if (-not ($dc.network)) {
+                            $dns = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
+                        }
+                        else {
+                            $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
+                        }
                         $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2 -ErrorAction Stop
+                        if (! $iprange) {
+                            $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2 -ErrorAction Stop
+                        }
+                        if (! $iprange) {
+                            Write-Log "$VmName`: Could not acquire a free cluster DHCP Address" -Failure
+                            return $false
+                        }
+                        if ($currentItem.OtherNode) {
+                            $ip = $iprange[1]
+                        }
+                        else {
+                            $ip = $iprange[0]
+                        }
+                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" -erroraction SilentlyContinue | Where-Object { $_.IpAddress -eq $ip }
+                        if ($ipa) {
+                            Remove-DhcpServerv4Reservation -IPAddress $ip | Out-Null
+                        }
+                        Write-Progress2 $Activity -Status "Adding DHCP Reservations for scope 10.250.250.0 ip: $ip MAC: $MAC" -percentcomplete 11 -force
+                        Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $MAC -Description "Reservation for $($currentItem.VMName)" -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 15 -value $deployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Start-DHCP
+                        Start-Sleep -seconds 30
+                        $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "renew DHCP"
                     }
-                    if (! $iprange) {
-                        Write-Log "$VmName`: Could not acquire a free cluster DHCP Address" -Failure
-                        return $false
-                    }
-                    if ($currentItem.OtherNode) {
-                        $ip = $iprange[1]
-                    }
-                    else {
-                        $ip = $iprange[0]
-                    }
-                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" -erroraction SilentlyContinue | Where-Object { $_.IpAddress -eq $ip }
-                    if ($ipa) {
-                        Remove-DhcpServerv4Reservation -IPAddress $ip
-                    }
-                    Write-Progress2 $Activity -Status "Adding DHCP Reservations for scope 10.250.250.0 ip: $ip MAC: $MAC" -percentcomplete 11 -force
-                    Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $MAC -Description "Reservation for $($currentItem.VMName)" -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 15 -value $deployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    Start-DHCP
-                    Start-Sleep -seconds 30
-                    $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "renew DHCP"
                 }
-
             }
             else {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName):  $MAC was not found" -Warning
@@ -553,25 +601,7 @@ $global:VM_Config = {
 
 
         }
-        $Stop_RunningDSC = {
-            # Stop any existing DSC runs
-            try {
-                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
-                Stop-DscConfiguration -Verbose -Force
-                Disable-DscDebug
-            }
-            catch {
-                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
-                Stop-DscConfiguration -Verbose -Force
-            }
-        }
 
-        Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 20 -force
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
-        if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
-        }
 
         # Boot To OOBE?
         $bootToOOBE = $currentItem.role -eq "AADClient"
@@ -1258,6 +1288,11 @@ $global:VM_Config = {
                                 $errorObject = $badResource.Error | ConvertFrom-Json -ErrorAction SilentlyContinue
                                 if ($errorObject.FullyQualifiedErrorId -ne "NonTerminatingErrorFromProvider") {
                                     $msg = "$errorResourceId`: $($errorObject.FullyQualifiedErrorId) $($errorObject.Exception.Message)"
+                                    if ($msg.Contains("does not exist on SQL server")) {
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting on AD Replication to add account to machine"
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Warning -LogOnly
+                                        continue
+                                    }
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Warning -OutputStream
                                     $FailtimeSpan = New-TimeSpan -Minutes 35
                                     if ($FailStopWatch -and $FailStopWatch.Elapsed.TotalMinutes -gt 35) {

@@ -55,6 +55,9 @@ if ($ThisVM.remoteSQLVM) {
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
         $sqlServerName = $SQLVM.AlwaysOnListenerName
+        $sqlNode1 = $SQLVM.VMName
+        $sqlNode2 = $SQLVM.OtherNode
+        $sqlAOGroupName = $SQLVM.AlwaysOnGroupName
         $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
         $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
     }
@@ -392,6 +395,14 @@ if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and
 
 if ($UpdateRequired) {
 
+    if ($InstalltoAO) {
+        try {
+            Get-ChildItem "SQLSERVER:\Sql\$sqlServerName\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+            Get-ChildItem "SQLSERVER:\Sql\$sqlNode2\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+            Get-ChildItem "SQLSERVER:\Sql\$sqlNode1\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+        }
+        catch {}
+    }
     # Update actions file
     $Configuration.UpgradeSCCM.Status = 'Running'
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
@@ -629,6 +640,14 @@ if ($UpdateRequired) {
             continue
         }
 
+        if ($InstalltoAO) {
+            try {
+                Get-ChildItem "SQLSERVER:\Sql\$sqlServerName\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+                Get-ChildItem "SQLSERVER:\Sql\$sqlNode2\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+                Get-ChildItem "SQLSERVER:\Sql\$sqlNode1\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+            }
+            catch {}
+        }
         # trigger setup after the prerequisites check
         Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {

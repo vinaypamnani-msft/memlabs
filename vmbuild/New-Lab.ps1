@@ -295,10 +295,12 @@ try {
 
     Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
 
-    # Download tools
-    $success = Get-Tools -WhatIf:$WhatIf
-    if (-not $success) {
-        Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
+    if ($StartPhase -and $StartPhase -le 2) {
+        # Download tools
+        $success = Get-Tools -WhatIf:$WhatIf
+        if (-not $success) {
+            Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
+        }
     }
 
     if ($runPhase1) {
@@ -438,8 +440,12 @@ try {
                 Write-OrangePoint "Skipped Phase $i because -StopPhase is $StopPhase." -ForegroundColor Yellow -WriteLog
                 continue
             }
+            $lastPhase = $currentPhase
             $currentPhase = $i
             $configured = Start-Phase -Phase $i -deployConfig $deployConfig -WhatIf:$WhatIf
+            if ($global:PhaseSkipped) {
+                $currentPhase = $lastPhase
+            }
             if (-not $configured) {
                 break
             }
@@ -468,6 +474,7 @@ try {
             Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
             Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
             if ($currentPhase -eq 8) {
+                write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
                 Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
             }
@@ -475,6 +482,7 @@ try {
         Write-Host
     }
     else {
+        $currentPhase = 9
         Start-Maintenance -DeployConfig $deployConfig
 
         $updateExistingRequired = $false
@@ -516,12 +524,13 @@ finally {
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
         Set-TitleBar "Script Cancelled"
-        Write-Log "### $Configuration Terminated" -HostOnly
-        if ($currentPhase -ge 2) {
+        Write-Log "### $Configuration Terminated $currentPhase" -HostOnly
+
+        if ($currentPhase -ge 2 -and $currentPhase -le 9) {
             Write-Log "To Retry from the current phase, run the following command from the current powershell window: " -Failure -NoIndent
             Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
             if ($currentPhase -eq 8) {
-                Write-Log
+                write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
                 Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
             }

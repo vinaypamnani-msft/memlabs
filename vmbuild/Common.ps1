@@ -2292,6 +2292,7 @@ function Invoke-VmCommand {
                             Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
                         }
                         Stop-Job $job | Out-Null
+                        Remove-Job $job
                     }
                 }
                 else {

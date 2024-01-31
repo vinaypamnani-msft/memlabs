@@ -9,7 +9,7 @@ function Write-JobProgress {
         $latestActivity = $null
         $latestStatus = $null
         #Make sure the first child job exists
-        if ($null -ne $Job.ChildJobs[0].Progress) {
+        if ($null -ne $job -and $null -ne $Job.ChildJobs -and $null -ne $Job.ChildJobs[0].Progress) {
             #Extracts the latest progress of the job and writes the progress
             $latestPercentComplete = 0
             # Notes: "Preparing modules for first use" is translated when other than en-US
@@ -19,7 +19,12 @@ function Write-JobProgress {
                 $latestActivity = $lastProgress | Select-Object -expand Activity;
                 $latestStatus = $lastProgress | Select-Object -expand StatusDescription;
                 $jobName = $job.Name
-                $latestActivity = $latestActivity.Replace("$jobName`: ", "").Trim()
+                if ($latestActivity) {
+                    $latestActivity = $latestActivity.Replace("$jobName`: ", "").Trim()
+                }
+                if (-not $latestStatus) {
+                    $latestStatus = ""
+                }
             }
 
             if ($latestActivity -and $latestStatus.Trim().Length) {
@@ -32,7 +37,12 @@ function Write-JobProgress {
                 }
                 try {
                     $padding = 0
-                    $jobName2 = "  $($jobName.PadRight($padding," "))"
+                    $jobName2 = "[Unknown]"
+                    if ($jobName) {
+                        $jobName2 = "  $($jobName.PadRight($padding," "))"
+                    } else {
+                        $jobName = "[Unknown VM] [Unkown Role]"
+                    }
 
                     if ($Common.PS7) {
                         if ($AdditionalData) {
@@ -95,9 +105,10 @@ function Start-Phase {
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
         Write-OrangePoint "[Phase $Phase] Not Applicable. Skipping." -ForegroundColor Yellow -WriteLog
+        $global:PhaseSkipped = $true
         return $true
     }
-
+    $global:PhaseSkipped = $false
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData
     Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures."
 
@@ -213,6 +224,9 @@ function Start-PhaseJobs {
             }
         }
         else {
+            if ($Phase -eq 5) {
+                $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
+            }
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
                 Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
@@ -497,7 +511,7 @@ function Get-Phase2ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -notin  "AADClient",  "OSDClient", "Linux") {
+        if ($vm.role -notin "AADClient", "OSDClient", "Linux") {
             if (-not $vm.Hidden) {
                 return $cd
             }
