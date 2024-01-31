@@ -224,6 +224,7 @@ function Start-PhaseJobs {
             }
         }
         else {
+            $reservation = $null
             if ($Phase -eq 5) {
                 $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
             }
