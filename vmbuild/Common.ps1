@@ -1,3 +1,4 @@
+# Common.ps1
 [CmdletBinding()]
 param (
     [Parameter()]
@@ -709,6 +710,99 @@ function Get-File {
     finally {
         $Global:ProgressPreference = $OriginalProgressPreference
     }
+}
+
+function Copy-ItemSafe {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+        [Parameter(Mandatory = $true)]
+        [string] $Destination,
+        [Parameter(Mandatory = $true)]
+        [string] $VMName,
+        [Parameter(Mandatory = $true)]
+        [string] $VMDomainName,
+        [Parameter(Mandatory = $false)]
+        [switch] $Recurse,
+        [Parameter(Mandatory = $false)]
+        [switch] $Container,
+        [Parameter(Mandatory = $false)]
+        [switch] $WhatIf,
+        [Parameter(Mandatory = $false)]
+        [switch]$Force,
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
+        [int]$TimeoutSeconds = 180
+    )
+   #$PSScriptRoot = $using:PSScriptRoot
+    $location = $PSScriptRoot
+    $testpath = Join-Path $location "Common.ps1"
+    if (-not (Test-Path -PathType Leaf $testpath)){
+        write-host "Could not find $testpath"
+        $location = Split-Path $location -Parent
+        $testpath = Join-Path $location "Common.ps1"
+        if (-not (Test-Path -PathType Leaf $testpath)){
+            write-host "Could not find $testpath"
+            return $false
+        }
+    }
+    $enableVerbose = $true
+    $CopyItemScript = {
+        try {
+            Write-Host "CopyItemScript starting"
+            # Dot source common
+            $rootPath = $using:location
+            Write-Host "Loading common: . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose"
+            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+
+            $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName
+
+            if ($ps) {
+                Write-Log "[Copy-ItemSafe] [$($using:VMName)] Copying $($using:Path) to $($using:Destination) Whatif:$($using:WhatIF)"
+                Copy-Item -ToSession $ps -Path $using:Path -Destination $using:Destination -Recurse:$using:Recurse -Container:$using:Container -Force:$using:Force -verbose:$using:enableVerbose -WhatIf:$using:WhatIF
+            }
+            else {
+                Write-Log "[Copy-ItemSafe] Failed to get Powershell Session for $using:VMName"
+                return $false
+            }
+        }
+        catch {
+            write-log $_
+            return $false
+        }
+        return $true
+    }
+
+    write-log "[Copy-Itemsafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force"
+
+    $retries = 3
+    while ($retries -gt 0) {
+        $job = start-job -ScriptBlock $CopyItemScript
+        $wait = Wait-Job -Timeout $TimeoutSeconds -Job $job
+        $job
+        if ($wait.State -eq "Running") {
+            Stop-Job $job
+            remove-job -job $job
+            $retries--
+        }
+        else {
+            if ($wait.State -eq "Completed") {
+                $result = Receive-Job $job
+                write-log "[Copy-ItemSafe] returned: $result"
+                remove-job $job
+                return $true
+            }
+            else {
+                write-lob "[Copy-ItemSafe] State = $($wait.State)" -logonly
+                Stop-Job $job
+                remove-job $job
+                $retries--
+            }
+
+        }
+    }
+    return $false
+
 }
 function Start-CurlTransfer {
     [CmdletBinding()]
@@ -2909,10 +3003,12 @@ function Copy-ToolToVM {
         $progressPref = $ProgressPreference
         $ProgressPreference = "SilentlyContinue"
         if ($isContainer) {
+            #Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
             Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
         else {
-            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
+            #Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
+            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
     }
     catch {

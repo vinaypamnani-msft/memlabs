@@ -3598,41 +3598,43 @@ class InstallPBIRS {
             try {
                 if ($this.IsRemoteDatabaseServer) {
                     try {
-                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds
+                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     } catch {
-                        Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds
+                        Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
                 else {
                     try {
-                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds
+                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                     catch {
-                        Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds
+                        Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
             }
             catch {
                 Write-Verbose ("InstallPBIRS $_")
                 if ($this.IsRemoteDatabaseServer) {
-                    Write-Verbose ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase
+                    Write-Verbose ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
                 else {
-                    Write-Verbose ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase
+                    Write-Verbose ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
             }
             Write-Verbose ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
             Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+            Start-Sleep -seconds 10
+            Restart-Service -Name "PowerBIReportServer" -Force
+            Start-Sleep -Seconds 10
             Write-Verbose ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
             try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext } catch {}
-            Stop-Service PowerBIReportServer
-            Start-Service PowerBIReportServer
+            Restart-Service -Name "PowerBIReportServer" -Force
             try {
                 Get-Service | Where-Object { $_.Name -eq "SQLSERVERAGENT" -or $_.Name -like "SqlAgent*" } | Start-Service
             }

@@ -537,10 +537,12 @@ finally {
         }
         Write-Host
     }
-
+    Write-Host "Please Wait.. Stopping running jobs.. If this hangs, please restart vmbuild.cmd"
     Get-Job | Stop-Job
     if (-not $global:Common.DevBranch) {
         Get-Job | Remove-Job
+    }else {
+        Write-Host "You are on the development branch.  Jobs are not removed for debugging purposes. Please run 'Get-Job | Remove-Job' to cleanup old artifacts"
     }
 
     # Close PS Sessions
@@ -577,4 +579,5 @@ finally {
     Set-QuickEdit
 
     Write-Host
+    Write-Host Script exited.
 }

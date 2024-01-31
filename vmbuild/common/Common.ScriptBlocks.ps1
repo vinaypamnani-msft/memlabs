@@ -658,7 +658,7 @@ $global:VM_Config = {
         if ($result.ScriptBlockFailed) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC Files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         }
-        Copy-Item -ToSession $ps -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+        $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
         $Expand_Archive = {
 
