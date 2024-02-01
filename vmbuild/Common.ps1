@@ -732,7 +732,7 @@ function Copy-ItemSafe {
         [Parameter(Mandatory = $false)]
         [switch]$Force,
         [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
-        [int]$TimeoutSeconds = 180
+        [int]$TimeoutSeconds = 360
     )
    #$PSScriptRoot = $using:PSScriptRoot
     $location = $PSScriptRoot
@@ -793,7 +793,7 @@ function Copy-ItemSafe {
                 return $true
             }
             else {
-                write-lob "[Copy-ItemSafe] State = $($wait.State)" -logonly
+                write-log "[Copy-ItemSafe] State = $($wait.State)" -logonly
                 Stop-Job $job
                 remove-job $job
                 $retries--
