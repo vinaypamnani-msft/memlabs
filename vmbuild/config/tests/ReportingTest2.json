@@ -1,0 +1,205 @@
+{
+  "vmOptions": {
+    "prefix": "RP2-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "Reporting2.com",
+    "domainNetBiosName": "reporting2",
+    "adminName": "admin",
+    "network": "192.168.89.0",
+    "timeZone": "Eastern Standard Time",
+    "locale": "en-US"
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "DC1",
+      "role": "DC",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": false,
+      "InstallCA": true
+    },
+    {
+      "vmName": "PS1DPMP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2016",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "PS1"
+    },
+    {
+      "vmName": "PS1SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2016",
+      "memory": "10GB",
+      "virtualProcs": 8,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "BOB",
+      "sqlInstanceDir": "F:\\SQL",
+      "sqlPort": "2433",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB",
+        "F": "250GB"
+      },
+      "siteCode": "PS1",
+      "installSUP": false,
+      "installRP": true,
+      "siteName": "ConfigMgr Primary Site"
+    },
+    {
+      "vmName": "PS2DPMPRP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": true,
+      "siteCode": "PS2",
+      "enablePullDP": false
+    },
+    {
+      "vmName": "PS2SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2019",
+      "memory": "10GB",
+      "virtualProcs": 8,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "F:\\SQL",
+      "sqlPort": "1433",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB",
+        "F": "250GB"
+      },
+      "siteCode": "PS2",
+      "installSUP": false,
+      "installRP": false,
+      "siteName": "ConfigMgr Primary Site",
+      "network": "192.168.2.0"
+    },
+    {
+      "vmName": "PS3SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "PS3",
+      "installSUP": false,
+      "installRP": true,
+      "siteName": "ConfigMgr Primary Site",
+      "network": "192.168.3.0",
+      "remoteSQLVM": "PS3SQL"
+    },
+    {
+      "vmName": "PS3SQL",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2019",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "network": "192.168.3.0",
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "FRED",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "2433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "LocalSystem",
+      "SqlAgentAccount": "LocalSystem",
+      "installRP": false
+    },
+    {
+      "vmName": "PS4DPMPRP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2019",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": true,
+      "siteCode": "PS4",
+      "enablePullDP": false
+    },
+    {
+      "vmName": "PS4SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2016",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "PS4",
+      "installSUP": false,
+      "installRP": false,
+      "siteName": "ConfigMgr Primary Site",
+      "network": "192.168.4.0",
+      "remoteSQLVM": "PS4SQL"
+    },
+    {
+      "vmName": "PS4SQL",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2016",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "network": "192.168.4.0",
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "LocalSystem",
+      "SqlAgentAccount": "LocalSystem",
+      "installRP": false
+    }
+  ],
+  "cmOptions": {
+    "version": "current-branch",
+    "install": true,
+    "pushClientToDomainMembers": true,
+    "EVALVersion": false
+  }
+}

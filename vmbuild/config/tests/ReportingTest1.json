@@ -1,0 +1,259 @@
+{
+  "vmOptions": {
+    "prefix": "RP1-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "reporting1.com",
+    "domainNetBiosName": "reporting1",
+    "adminName": "admin",
+    "network": "192.168.90.0",
+    "timeZone": "Eastern Standard Time",
+    "locale": "en-US"
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "DC1",
+      "role": "DC",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": false,
+      "InstallCA": true
+    },
+    {
+      "vmName": "FS1",
+      "role": "FileServer",
+      "operatingSystem": "Server 2019",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "500GB",
+        "F": "200GB"
+      }
+    },
+    {
+      "vmName": "PS1DPMP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "PS1"
+    },
+    {
+      "vmName": "PS1SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "PS1",
+      "installSUP": false,
+      "installRP": true,
+      "siteName": "ConfigMgr Primary Site",
+      "remoteSQLVM": "PS1SQLAO1"
+    },
+    {
+      "vmName": "PS1SQLAO1",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2019",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "OtherNode": "PS1SQLAO2",
+      "fileServerVM": "FS1",
+      "ClusterName": "SQLCLUSTER",
+      "AlwaysOnGroupName": "PS1 Availibility Group",
+      "AlwaysOnListenerName": "ALWAYSON",
+      "SqlServiceAccount": "SQLCLUSTERSvc",
+      "SqlAgentAccount": "SQLCLUSTERAgent",
+      "installRP": false
+    },
+    {
+      "vmName": "PS1SQLAO2",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2019",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "SQLCLUSTERSvc",
+      "SqlAgentAccount": "SQLCLUSTERAgent"
+    },
+    {
+      "vmName": "PS2DPMPRP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": true,
+      "siteCode": "PS2",
+      "enablePullDP": false
+    },
+    {
+      "vmName": "PS2SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "PS2",
+      "installSUP": false,
+      "installRP": false,
+      "siteName": "ConfigMgr Primary Site",
+      "network": "192.168.2.0",
+      "remoteSQLVM": "PS2SQLAO1"
+    },
+    {
+      "vmName": "PS2SQLAO1",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2022",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "network": "192.168.2.0",
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "OtherNode": "PS2SQLAO2",
+      "fileServerVM": "FS1",
+      "ClusterName": "SQLCLUSTER2",
+      "AlwaysOnGroupName": "PS2 Availibility Group",
+      "AlwaysOnListenerName": "ALWAYSON2",
+      "SqlServiceAccount": "SQLCLUSTER2Svc",
+      "SqlAgentAccount": "SQLCLUSTER2Agent",
+      "installRP": false
+    },
+    {
+      "vmName": "PS2SQLAO2",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2022",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "network": "192.168.2.0",
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "SQLCLUSTER2Svc",
+      "SqlAgentAccount": "SQLCLUSTER2Agent"
+    },
+    {
+      "vmName": "PS3SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2019",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "PS3",
+      "installSUP": false,
+      "installRP": false,
+      "siteName": "ConfigMgr Primary Site",
+      "network": "192.168.3.0",
+      "remoteSQLVM": "PS3SQL"
+    },
+    {
+      "vmName": "PS3SQL",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2022",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "network": "192.168.3.0",
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "LocalSystem",
+      "SqlAgentAccount": "LocalSystem",
+      "installRP": true
+    },
+    {
+      "vmName": "W10CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 Latest (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "domainUser": "user2"
+    },
+    {
+      "vmName": "W11CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 Latest",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "domainUser": "user1"
+    }
+  ],
+  "cmOptions": {
+    "version": "2309",
+    "install": true,
+    "pushClientToDomainMembers": true,
+    "EVALVersion": true
+  }
+}
