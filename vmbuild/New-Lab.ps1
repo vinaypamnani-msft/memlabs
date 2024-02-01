@@ -537,14 +537,19 @@ finally {
         }
         Write-Host
     }
-    Write-Host "Please Wait.. Stopping running jobs.. If this hangs, please restart vmbuild.cmd"
-    Get-Job | Stop-Job
-    if (-not $global:Common.DevBranch) {
-        Get-Job | Remove-Job
-    }else {
-        Write-Host "You are on the development branch.  Jobs are not removed for debugging purposes. Please run 'Get-Job | Remove-Job' to cleanup old artifacts"
-    }
+    Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
+    foreach ($job in Get-Job) {
+        $job | Stop-Job
+        Write-Host -NoNewline "."
+    }
+    if (-not $global:Common.DevBranch) {
+        foreach ($job in Get-Job) {
+            $job | Remove-Job
+            Write-Host -NoNewline "."
+        }
+    }
+    Write-host "`r                                                                                                                              "
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose

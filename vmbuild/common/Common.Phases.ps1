@@ -227,6 +227,7 @@ function Start-PhaseJobs {
             $reservation = $null
             if ($Phase -eq 5) {
                 $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
+                $reservation = $reservation -replace "-",""
             }
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {

@@ -746,13 +746,13 @@ function Copy-ItemSafe {
             return $false
         }
     }
-    $enableVerbose = $true
+    $enableVerbose = $false
     $CopyItemScript = {
         try {
-            Write-Host "CopyItemScript starting"
+            #Write-Host "CopyItemScript starting"
             # Dot source common
             $rootPath = $using:location
-            Write-Host "Loading common: . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose"
+            #Write-Host "Loading common: . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose"
             . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
 
             $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName

@@ -2128,9 +2128,11 @@ class OpenFirewallPortForSCCM {
 
         Write-Verbose "Current Role is : $_Role"
 
+        New-NetFirewallRule -DisplayName "Cluster Network Outbound" -Profile Any -Direction Outbound -Action Allow -RemoteAddress "10.250.250.0/24"
+        New-NetFirewallRule -DisplayName "Cluster Network Inbound" -Profile Any -Direction Inbound -Action Allow -RemoteAddress "10.250.250.0/24"
 
-        New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
-        New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+        New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+        New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
         New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For RdcMan"
 
         if ($_Role -contains "DC") {

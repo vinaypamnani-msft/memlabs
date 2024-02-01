@@ -539,15 +539,17 @@ $global:VM_Config = {
 
 
         if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO") {
-
-            $Get_MAC = {
-             (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress
-            }
+            Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
+            $vm = Get-VM2 $currentItem.vmName
+            $MAC = ($vm.NetworkAdapters | Where-Object { $_.SwitchName -eq "Cluster" }).MacAddress
+            #$Get_MAC = {
+            # (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress
+            #}
             # Test DHCP Reservations
-            Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
-            $script = Invoke-VmCommand -SuppressLog -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Get_MAC -DisplayName "Get 2nd Mac"
-            Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
-            $MAC = $script.ScriptBlockOutput
+
+            #$script = Invoke-VmCommand -SuppressLog -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Get_MAC -DisplayName "Get 2nd Mac"
+            #Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
+            #$MAC = $script.ScriptBlockOutput
             if ($MAC) {
                 $MAC = $MAC.ToLower()
                 if ($reservation) { #Reservation is now a using statement, as getting the data here causes status to break
@@ -1517,7 +1519,7 @@ $global:VM_Config = {
                 }
                 else {
                     if ($noStatus) {
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress. Polls: $dscStatusPolls Failed Heartbeats: $failedHeartbeats"
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress. Polls: $dscStatusPolls Failed Heartbeats: $failedHeartbeats Status: $($dscStatus.ScriptBlockOutput.Status)"
                     }
                     else {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $currentStatus
