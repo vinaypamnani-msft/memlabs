@@ -1270,6 +1270,7 @@ $global:VM_Config = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
         $rebooted = $false
+        $dscFails = 0
         $dscStatusPolls = 0
         [int]$failCount = 0
         try {
@@ -1289,8 +1290,12 @@ $global:VM_Config = {
 
                     if (-not $dscStatus) {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Get-DscConfigurationStatus did not complete"
+                        $dscFails++
                         continue
+                    }else {
+                        $dscFails = 0
                     }
+
                     if (-not $rebooted -and $dscStatus.RebootRequested -eq $true) {
                         # Reboot the machine
                         start-sleep -Seconds 90 # Wait 90 seconds and re-request.. maybe its going to reboot itself.
@@ -1310,6 +1315,14 @@ $global:VM_Config = {
                     else {
                         $rebooted = $false
                     }
+
+                    if ($dscFails -ge 20) {
+                        stop-vm2 -name $currentItem.vmName
+                        start-sleep -Seconds 30
+                        start-vm2 -name $currentItem.vmName
+                        $dscFails = 0
+                    }
+
                     if ($dscStatus.ScriptBlockFailed) {
                         if ($currentStatus -is [string]) {
                             Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $($currentStatus.Trim() + "... ")
@@ -1321,7 +1334,6 @@ $global:VM_Config = {
                     }
                     else {
                         if ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -ne "Success") {
-
                             $badResources = $dscStatus.ScriptBlockOutput.ResourcesNotInDesiredState
                             foreach ($badResource in $badResources) {
                                 if (-not $badResource.Error) {
@@ -1609,7 +1621,8 @@ $global:VM_Config = {
 
             $disable_AutomaticUpdates = {
                 New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force
-                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Value 1 -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Type Dword -Value 1 -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "AUOptions" -Type Dword -Value 2 -Force
             }
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
