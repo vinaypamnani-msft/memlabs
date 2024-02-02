@@ -1109,7 +1109,7 @@ $global:VM_Config = {
             param($DscFolder)
             try {
                 $global:ScriptBlockName = "DSC_StartConfig"
-                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}e
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $ConfigurationData = $using:ConfigurationData
