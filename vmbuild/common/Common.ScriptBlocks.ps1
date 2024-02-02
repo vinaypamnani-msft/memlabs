@@ -1269,7 +1269,7 @@ $global:VM_Config = {
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
-
+        $rebooted = $false
         $dscStatusPolls = 0
         [int]$failCount = 0
         try {
@@ -1287,6 +1287,29 @@ $global:VM_Config = {
                         $ProgressPreference = 'Continue'
                     } -SuppressLog:$suppressNoisyLogging
 
+                    if (-not $dscStatus) {
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Get-DscConfigurationStatus did not complete"
+                        continue
+                    }
+                    if (-not $rebooted -and $dscStatus.RebootRequested -eq $true) {
+                        # Reboot the machine
+                        start-sleep -Seconds 90 # Wait 90 seconds and re-request.. maybe its going to reboot itself.
+                        $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
+                            $ProgressPreference = 'SilentlyContinue'
+                            Get-DscConfigurationStatus
+                            $ProgressPreference = 'Continue'
+                        } -SuppressLog:$suppressNoisyLogging
+                        # Reboot the machine
+                        if ($dscStatus.RebootRequested) {
+                            stop-vm2 -name $currentItem.vmName
+                            start-sleep -Seconds 30
+                            start-vm2 -name $currentItem.vmName
+                            $rebooted = $true
+                        }
+                    }
+                    else {
+                        $rebooted = $false
+                    }
                     if ($dscStatus.ScriptBlockFailed) {
                         if ($currentStatus -is [string]) {
                             Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $($currentStatus.Trim() + "... ")
