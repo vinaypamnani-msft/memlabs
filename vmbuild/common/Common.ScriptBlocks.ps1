@@ -381,7 +381,7 @@ $global:VM_Config = {
         write-host $msg
         throw
     }
-    try{
+    try {
         # Validate token exists
         if ($Common.FatalError) {
             Write-Log "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
@@ -492,13 +492,13 @@ $global:VM_Config = {
                                 Write-Progress2 $Activity -Status "Attempting to repair network $($currentItem.network) " -percentcomplete 10 -force
                                 stop-vm2 -Name $currentItem.vmname
                                 Remove-VMSwitch2 -NetworkName $($currentItem.network)
-                                Remove-DhcpServerv4Scope -scopeID $($currentItem.network)
+                                Remove-DhcpServerv4Scope -scopeID $($currentItem.network) -ErrorAction SilentlyContinue
                                 stop-service "DHCPServer" | Out-Null
                                 $dhcp = Start-DHCP
                                 start-sleep -seconds 10
                                 $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
                                 $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
-                                $worked = Add-SwitchAndDhcp -NetworkName $currentItem.network -NetworkSubnet $currentItem.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
+                                $worked = Add-SwitchAndDhcp -NetworkName $currentItem.network -NetworkSubnet $currentItem.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -erroraction SilentlyContinue
 
                                 start-vm2 -Name $currentItem.vmname
                                 $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName
@@ -900,10 +900,14 @@ $global:VM_Config = {
 
         Write-Progress2 $Activity -Status "Clearing DSC Status" -percentcomplete 65 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Clearing previous DSC status"
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
+        $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
-            return
+            start-sleep -seconds 60
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
         }
 
         $DSC_CreateSingleConfig = {

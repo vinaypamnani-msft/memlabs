@@ -43,11 +43,15 @@ function Remove-VMSwitch2 {
         [Parameter()]
         [switch] $WhatIf
     )
-
-    $switch = Get-VMSwitch2 -NetworkName $NetworkName
-    if ($switch) {
-        Write-Log "Hyper-V VM Switch '$($switch.Name)' exists. Removing." -SubActivity
-        $switch | Remove-VMSwitch -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+    try {
+        $switch = Get-VMSwitch2 -NetworkName $NetworkName
+        if ($switch) {
+            Write-Log "Hyper-V VM Switch '$($switch.Name)' exists. Removing." -SubActivity
+            $switch | Remove-VMSwitch -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        }
+    }
+    catch {
+        # We tried..
     }
 }
 
@@ -283,10 +287,10 @@ function Checkpoint-VM2 {
         try {
             Checkpoint-VM -VM $vm -SnapshotName $SnapshotName -ErrorAction Stop
         }
-        catch{
+        catch {
             start-sleep -Seconds 20
             $snapshots = Get-VMSnapshot -VM $vm
-            foreach($snapshot in $snapshots) {
+            foreach ($snapshot in $snapshots) {
                 if ($snapshot.Name -eq $SnapshotName) {
                     return [System.Management.Automation.Internal.AutomationNull]::Value
                 }

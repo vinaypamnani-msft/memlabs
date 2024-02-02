@@ -627,9 +627,9 @@ if ($UpdateRequired) {
 
         # trigger prerequisites check after the package downloaded
         Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
-        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075) {
+        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612 -and $updatepack.State -ne 196609) {
 
-            Write-DscStatus "Running prerequisites check for '$($updatepack.Name)'. Current State: $($state[$updatepack.State])"
+            Write-DscStatus "[$($state[$updatepack.State])] Prereq check for '$($updatepack.Name)'."
             Start-Sleep 120
             $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
         }
