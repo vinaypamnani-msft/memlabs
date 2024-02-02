@@ -1291,6 +1291,12 @@ $global:VM_Config = {
                     if (-not $dscStatus) {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Get-DscConfigurationStatus did not complete"
                         $dscFails++
+                        if ($dscFails -ge 20) {
+                            stop-vm2 -name $currentItem.vmName
+                            start-sleep -Seconds 30
+                            start-vm2 -name $currentItem.vmName
+                            $dscFails = 0
+                        }
                         continue
                     }else {
                         $dscFails = 0
@@ -1316,12 +1322,7 @@ $global:VM_Config = {
                         $rebooted = $false
                     }
 
-                    if ($dscFails -ge 20) {
-                        stop-vm2 -name $currentItem.vmName
-                        start-sleep -Seconds 30
-                        start-vm2 -name $currentItem.vmName
-                        $dscFails = 0
-                    }
+
 
                     if ($dscStatus.ScriptBlockFailed) {
                         if ($currentStatus -is [string]) {
