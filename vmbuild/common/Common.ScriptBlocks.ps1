@@ -5,7 +5,8 @@ $global:VM_Create = {
     try {
         $global:ScriptBlockName = "VM_Create"
         # Dot source common
-        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
+        try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
 
@@ -353,7 +354,7 @@ $global:VM_Create = {
 $global:VM_Config = {
     try {
         $global:ScriptBlockName = "VM_Config"
-        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
+        try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         # Get variables from parent scope
         $deployConfig = $using:deployConfigCopy
         $currentItem = $using:currentItem
@@ -678,7 +679,7 @@ $global:VM_Config = {
         $Expand_Archive = {
 
             $global:ScriptBlockName = "Expand_Archive"
-            Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
+            try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
             # Create init log
             $log = "C:\staging\DSC\DSC_Init.txt"
             $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
@@ -717,7 +718,7 @@ $global:VM_Config = {
 
             try {
                 $global:ScriptBlockName = "DSC_InstallModules"
-                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $Phase = $using:Phase
@@ -804,7 +805,7 @@ $global:VM_Config = {
 
             try {
                 $global:ScriptBlockName = "DSC_ClearStatus"
-                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
@@ -910,7 +911,7 @@ $global:VM_Config = {
 
             try {
                 $global:ScriptBlockName = "DSC_CreateSingleConfig"
-                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $deployConfig = $using:deployConfig
@@ -991,7 +992,7 @@ $global:VM_Config = {
             param($DscFolder)
             try {
                 $global:ScriptBlockName = "DSC_CreateMultiConfig"
-                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
@@ -1108,7 +1109,7 @@ $global:VM_Config = {
             param($DscFolder)
             try {
                 $global:ScriptBlockName = "DSC_StartConfig"
-                Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}e
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $ConfigurationData = $using:ConfigurationData
