@@ -371,7 +371,16 @@ $global:VM_Config = {
             Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
             return
         }
-
+    }
+    catch {
+        write-host "[$global:ScriptBlockName] had an exception during initialization $_"
+        $msg = $ExceptionInfo.ScriptStackTrace
+        write-host $msg
+        $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
+        write-host $msg
+        throw
+    }
+    try{
         # Validate token exists
         if ($Common.FatalError) {
             Write-Log "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
@@ -423,10 +432,10 @@ $global:VM_Config = {
             # Stop any existing DSC runs
             try {
                 get-job | remove-job
-                Disable-DscDebug | Out-Null
+
                 Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force | out-null
                 $job = Stop-DscConfiguration -Force -AsJob
-                $wait = Wait-Job -Timeout 120 $job
+                $wait = Wait-Job -Timeout 600 $job
                 if ($wait.State -eq "Running") {
                     Stop-Job $job
                     get-job | remove-job
@@ -445,7 +454,7 @@ $global:VM_Config = {
                     }
 
                 }
-
+                Disable-DscDebug -force | Out-Null
 
             }
             catch {
@@ -458,7 +467,10 @@ $global:VM_Config = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
         if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
+            }
         }
 
         if ($Phase -ge 2) {
@@ -552,7 +564,8 @@ $global:VM_Config = {
             #$MAC = $script.ScriptBlockOutput
             if ($MAC) {
                 $MAC = $MAC.ToLower()
-                if ($reservation) { #Reservation is now a using statement, as getting the data here causes status to break
+                if ($reservation) {
+                    #Reservation is now a using statement, as getting the data here causes status to break
                     if ($reservation.Contains($MAC)) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC was found" -LogOnly
                     }
@@ -1588,9 +1601,9 @@ $global:VM_Config = {
         }
     }
     catch {
-        Write-Progress2 "Exception Occurred" -Status "Failed end2 $_"
         Write-Exception -ExceptionInfo $_
         Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
+        Write-Progress "Exception Occurred" -Status "Failed end2 $_"
     }
 }
