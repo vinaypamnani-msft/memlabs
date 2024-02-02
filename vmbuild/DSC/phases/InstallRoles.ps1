@@ -107,7 +107,9 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
 
     #Add the SQL Instance, and port
     if ($sqlServer.sqlInstanceName) {
+        if ($sqlServer.sqlInstanceName -ne "MSSQLSERVER") {
         $sqlServerName = $sqlServerName + "\" + $sqlServer.sqlInstanceName
+        }
     }
     if ($sqlServer.sqlPort) {
         $sqlPort = $sqlServer.sqlPort
