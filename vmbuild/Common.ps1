@@ -734,14 +734,14 @@ function Copy-ItemSafe {
         [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
         [int]$TimeoutSeconds = 360
     )
-   #$PSScriptRoot = $using:PSScriptRoot
+    #$PSScriptRoot = $using:PSScriptRoot
     $location = $PSScriptRoot
     $testpath = Join-Path $location "Common.ps1"
-    if (-not (Test-Path -PathType Leaf $testpath)){
+    if (-not (Test-Path -PathType Leaf $testpath)) {
         write-host "Could not find $testpath"
         $location = Split-Path $location -Parent
         $testpath = Join-Path $location "Common.ps1"
-        if (-not (Test-Path -PathType Leaf $testpath)){
+        if (-not (Test-Path -PathType Leaf $testpath)) {
             write-host "Could not find $testpath"
             return $false
         }
@@ -1195,6 +1195,11 @@ function Test-NetworkNat {
 
 function Start-DHCP {
     # Install DHCP, if not found
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$Restart
+    )
+
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
         Write-Log "DHCP is not installed. Installing..."
@@ -1210,9 +1215,21 @@ function Start-DHCP {
         start-service "DHCPServer"
         start-sleep -seconds 5
     }
+    else {
+        if ($Restart) {
+            restart-service "DHCPServer"
+            start-sleep -seconds 5
+        }
+    }
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if ($dhcp.Status -ne 'Running') {
-        return $false
+        Start-Sleep -Seconds 10
+        start-service "DHCPServer"
+        start-sleep -seconds 30
+        $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
+        if ($dhcp.Status -ne 'Running') {
+            return $false
+        }
     }
     return $true
 }
@@ -1937,9 +1954,33 @@ function New-VirtualMachine {
                     Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
                 }
                 catch {
-                    write-log -failure "$VmName`:Failed to reserve IP address $ip for DNS: $dns and Mac:$($vmnet.MacAddress)"
-                    Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
-                    return $false
+                    #retry
+                    Start-DHCP -Restart
+                    $ip = $null
+                    try {
+                        $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                        if (! $ip) {
+                            $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                        }
+                        if (! $ip) {
+                            Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
+                            return $false
+                        }
+                        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip }
+                        if ($ipa) {
+                            Remove-DhcpServerv4Reservation -IPAddress $ip
+                        }
+                        Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                    }
+                    catch {
+                        write-log -failure "$VmName`:Failed to reserve IP address $ip for DNS: $dns and Mac:$($vmnet.MacAddress)"
+                        Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
+                        return $false
+                    }
                 }
 
                 $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
