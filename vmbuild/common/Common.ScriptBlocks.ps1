@@ -5,7 +5,7 @@ $global:VM_Create = {
     try {
         $global:ScriptBlockName = "VM_Create"
         # Dot source common
-        try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
@@ -354,7 +354,7 @@ $global:VM_Create = {
 $global:VM_Config = {
     try {
         $global:ScriptBlockName = "VM_Config"
-        try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         # Get variables from parent scope
         $deployConfig = $using:deployConfigCopy
         $currentItem = $using:currentItem
