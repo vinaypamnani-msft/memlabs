@@ -1948,6 +1948,11 @@ function New-VirtualMachine {
                     if ($ipa) {
                         Remove-DhcpServerv4Reservation -IPAddress $ip
                     }
+
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+
+
                     Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                     Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
                     Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
@@ -1971,6 +1976,9 @@ function New-VirtualMachine {
                         if ($ipa) {
                             Remove-DhcpServerv4Reservation -IPAddress $ip
                         }
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null

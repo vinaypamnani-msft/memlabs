@@ -599,6 +599,10 @@ $global:VM_Config = {
                         if ($ipa) {
                             Remove-DhcpServerv4Reservation -IPAddress $ip | Out-Null
                         }
+
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+
                         Write-Progress2 $Activity -Status "Adding DHCP Reservations for scope 10.250.250.0 ip: $ip MAC: $MAC" -percentcomplete 11 -force
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $MAC -Description "Reservation for $($currentItem.VMName)" -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null

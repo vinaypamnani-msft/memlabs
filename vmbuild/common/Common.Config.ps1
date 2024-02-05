@@ -656,7 +656,7 @@ function Get-SQLAOConfig {
         [Parameter(Mandatory = $true, HelpMessage = "SQLAONAME")]
         [object] $vmName
     )
-    Write-Log -verbose "Running Get-SQLAOConfig"
+    Write-Log "Running Get-SQLAOConfig for $vmName" -LogOnly
     $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
 
     if (-not $PrimaryAO) {
@@ -696,7 +696,7 @@ function Get-SQLAOConfig {
         }
     }
     if (-not ($PrimaryAO.ClusterIPAddress)) {
-        write-log "Cluster IP is not yet set. Skipping SQLAO Config" -LogOnly
+        write-log "Cluster IP is not yet set. Skipping SQLAO Config for $vmName" -LogOnly
         return
         #throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
     }
@@ -731,7 +731,7 @@ function Get-SQLAOConfig {
         SQLAOPort                  = 1500
     }
 
-    Write-Log "SQLAO Config Generated" -LogOnly
+    Write-Log "SQLAO Config Generated for $vmName" -LogOnly
     return $config
 }
 
