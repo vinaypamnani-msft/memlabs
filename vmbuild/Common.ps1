@@ -3690,8 +3690,8 @@ if (-not $Common.Initialized) {
     $colors = Get-Colors
 
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "230614"
-        LatestHotfixVersion   = "230614"
+        MemLabsVersion        = "240205"
+        LatestHotfixVersion   = "240205"
         PS7                   = $PS7
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
