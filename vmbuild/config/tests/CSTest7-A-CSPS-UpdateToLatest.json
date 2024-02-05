@@ -32,7 +32,9 @@
         "F": "120GB"
       },
       "siteCode": "CS1",
-      "sqlPort": "1433"
+      "sqlPort": "1433",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "PS1DPMP1",
@@ -45,7 +47,9 @@
       },
       "installDP": true,
       "installMP": true,
-      "siteCode": "PS1"
+      "siteCode": "PS1",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "PS1SITE",
@@ -63,7 +67,9 @@
         "F": "120GB"
       },
       "siteCode": "PS1",
-      "sqlPort": "1433"
+      "sqlPort": "1433",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "W10Client1",

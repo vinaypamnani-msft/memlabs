@@ -55,6 +55,9 @@ if ($ThisVM.remoteSQLVM) {
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
         $sqlServerName = $SQLVM.AlwaysOnListenerName
+        $sqlNode1 = $SQLVM.VMName
+        $sqlNode2 = $SQLVM.OtherNode
+        $sqlAOGroupName = $SQLVM.AlwaysOnGroupName
         $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
         $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
     }
@@ -105,6 +108,7 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
         Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
 
         if (!(Test-Path $cmsourcepath)) {
+            #BUG, FIXME, TIMHE: This does not work in 2303. Fix Me
             Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
         }
     }
@@ -166,8 +170,13 @@ CurrentBranch=1
     # Set ini values
     $installAction = if ($CurrentRole -eq "CAS") { "InstallCAS" } else { "InstallPrimarySite" }
     $productID = "EVAL"
-    if ($($deployConfig.parameters.ProductID)) {
-        $productID = $($deployConfig.parameters.ProductID)
+
+    if ($CM -ne "CMTP") {
+        if (-not $($deployConfig.cmOptions.EVALVersion)) {
+            if ($($deployConfig.parameters.ProductID)) {
+                $productID = $($deployConfig.parameters.ProductID)
+            }
+        }
     }
     $cmini = $cmini.Replace('%ProductID%', $productID)
     $cmini = $cmini.Replace('%InstallAction%', $installAction)
@@ -202,10 +211,20 @@ CurrentBranch=1
     else {
         $cmini = $cmini.Replace('Preview=0', "")
         if ($installAction -eq "InstallCAS") {
-            $cmini = $cmini.Replace('%SiteName%', "ConfigMgr CAS")
+            if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+                $cmini = $cmini.Replace('%SiteName%', $ThisVM.siteName)
+            }
+            else {
+                $cmini = $cmini.Replace('%SiteName%', "ConfigMgr CAS")
+            }
         }
         else {
-            $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+            if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+                $cmini = $cmini.Replace('%SiteName%', $ThisVM.siteName)
+            }
+            else {
+                $cmini = $cmini.Replace('%SiteName%', "ConfigMgr Primary Site")
+            }
         }
     }
 
@@ -237,10 +256,16 @@ CurrentBranch=1
     if (Test-Path $CMDirnew -PathType Container) {
         $CMDir = $CMDirnew
     }
-    else{
+    else {
         $CMDirnew = Join-Path $CMDir "cd.retail.LN"
         if (Test-Path $CMDirnew -PathType Container) {
             $CMDir = $CMDirnew
+        }
+        else {
+            $CMDirnew = Join-Path $CMDir "cd.preview"
+            if (Test-Path $CMDirnew -PathType Container) {
+                $CMDir = $CMDirnew
+            }
         }
     }
 
@@ -328,7 +353,8 @@ if (-not $smsProvider.FQDN) {
 # Set CMSite Provider
 $worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($smsProvider.FQDN)
 if (-not $worked) {
-    return
+    Write-DscStatus "Failed to load the ConfigMgr Powershell Components for site $SiteCode, and provider $($smsProvider.FQDN). Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
+    return $false
 }
 
 # Set the current location to be the site code.
@@ -369,6 +395,14 @@ if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and
 
 if ($UpdateRequired) {
 
+    if ($InstalltoAO) {
+        try {
+            Get-ChildItem "SQLSERVER:\Sql\$sqlServerName\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+            Get-ChildItem "SQLSERVER:\Sql\$sqlNode2\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+            Get-ChildItem "SQLSERVER:\Sql\$sqlNode1\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+        }
+        catch {}
+    }
     # Update actions file
     $Configuration.UpgradeSCCM.Status = 'Running'
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
@@ -593,9 +627,9 @@ if ($UpdateRequired) {
 
         # trigger prerequisites check after the package downloaded
         Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
-        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075) {
+        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612 -and $updatepack.State -ne 196609) {
 
-            Write-DscStatus "Running prerequisites check for '$($updatepack.Name)'. Current State: $($state[$updatepack.State])"
+            Write-DscStatus "[$($state[$updatepack.State])] Prereq check for '$($updatepack.Name)'."
             Start-Sleep 120
             $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
         }
@@ -606,6 +640,14 @@ if ($UpdateRequired) {
             continue
         }
 
+        if ($InstalltoAO) {
+            try {
+                Get-ChildItem "SQLSERVER:\Sql\$sqlServerName\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+                Get-ChildItem "SQLSERVER:\Sql\$sqlNode2\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+                Get-ChildItem "SQLSERVER:\Sql\$sqlNode1\DEFAULT\AvailabilityGroups\$sqlAOGroupName\AvailabilityDatabases" | Resume-SqlAvailabilityDatabase -ErrorAction SilentlyContinue
+            }
+            catch {}
+        }
         # trigger setup after the prerequisites check
         Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {

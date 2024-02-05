@@ -172,6 +172,44 @@ configuration Phase3
             }
         }
 
+        #add depend stuff
+     #   if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "Secondary") {
+            WriteStatus VCInstall {
+                DependsOn = $nextDepend
+                Status = "Downloading and installing VC redist"
+            }
+
+            InstallVCRedist VCInstall {
+                DependsOn = "[WriteStatus]VCInstall"
+                Path = "C:\temp\vc_redist.x64.exe"
+                Ensure   = "Present"
+            }
+
+            WriteStatus SQLClientInstall {
+                DependsOn = "[InstallVCRedist]VCInstall"
+                Status = "Downloading and installing SQL Client"
+            }
+
+            InstallSQLClient SQLClientInstall {
+                DependsOn = "[WriteStatus]SQLClientInstall"
+                Path = "C:\temp\sqlncli.msi"
+                Ensure   = "Present"
+            }
+
+            WriteStatus ODBCDriverInstall {
+                DependsOn = "[InstallSQLClient]SQLClientInstall"
+                Status = "Downloading and installing ODBC driver"
+            }
+
+            InstallODBCDriver ODBCDriverInstall {
+                DependsOn = "[WriteStatus]ODBCDriverInstall"
+                ODBCPath = "C:\temp\msodbcsql.msi"
+                Ensure   = "Present"
+            }
+
+            $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
+      #  }
+
         WriteStatus Complete {
             DependsOn = $nextDepend
             Status    = "Complete!"

@@ -135,6 +135,7 @@
             Status    = "Creating user accounts and groups"
         }
 
+
         $nextDepend = "[WriteStatus]CreateAccounts"
         $adObjectDependency = @($nextDepend)
         $i = 0
@@ -220,8 +221,8 @@
             ADReplicationSiteLink "HQSiteLink$($i)" {
                 Name                          = "SiteLink Default-First-Site-Name to $($site.SiteCode) 2-way"
                 SitesIncluded                 = @('Default-First-Site-Name', $site.SiteCode)
-                Cost                          = 100
-                ReplicationFrequencyInMinutes = 2
+                Cost                          = 99
+                ReplicationFrequencyInMinutes = 1
                 Ensure                        = 'Present'
                 OptionChangeNotification      = $true
                 OptionTwoWaySync              = $true

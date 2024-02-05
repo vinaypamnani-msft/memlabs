@@ -57,8 +57,11 @@ configuration Phase7
 
         $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $SqlServerInstance }
         #
+        $SqlServerInstance = $SqlServerInstance + "." + $deployConfig.vmOptions.DomainName
         if ($sqlServerVM.sqlInstanceName) {
+            if ($sqlServerVM.sqlInstanceName -ne "MSSQLSERVER") {
             $SqlServerInstance = $SqlServerInstance + "\" + $sqlServerVM.sqlInstanceName
+            }
         }
         if ($sqlServerVM.sqlPort) {
             $sqlPort = $sqlServerVM.sqlPort

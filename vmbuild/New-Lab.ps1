@@ -219,6 +219,8 @@ try {
         if ($configResult.Loaded) {
             Write-GreenCheck "Loaded Configuration: $Configuration"
             $userConfig = $configResult.Config
+            $Global:configfile = $configResult.ConfigPath
+            Write-Log -LogOnly "Config file: $($configResult.ConfigPath)"
         }
         else {
             Write-Log $configResult.Message -Failure
@@ -293,10 +295,12 @@ try {
 
     Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
 
-    # Download tools
-    $success = Get-Tools -WhatIf:$WhatIf
-    if (-not $success) {
-        Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
+    if ($StartPhase -and $StartPhase -le 2) {
+        # Download tools
+        $success = Get-Tools -WhatIf:$WhatIf
+        if (-not $success) {
+            Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
+        }
     }
 
     if ($runPhase1) {
@@ -436,8 +440,12 @@ try {
                 Write-OrangePoint "Skipped Phase $i because -StopPhase is $StopPhase." -ForegroundColor Yellow -WriteLog
                 continue
             }
-
+            $lastPhase = $currentPhase
+            $currentPhase = $i
             $configured = Start-Phase -Phase $i -deployConfig $deployConfig -WhatIf:$WhatIf
+            if ($global:PhaseSkipped) {
+                $currentPhase = $lastPhase
+            }
             if (-not $configured) {
                 break
             }
@@ -460,10 +468,21 @@ try {
 
     if (-not $prepared -or -not $configured) {
         Write-Host
+        Set-TitleBar "SCRIPT FINISHED WITH FAILURES"
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
+        if ($currentPhase -ge 2) {
+            Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
+            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
+            if ($currentPhase -eq 8) {
+                write-host
+                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+            }
+        }
         Write-Host
     }
     else {
+        $currentPhase = 9
         Start-Maintenance -DeployConfig $deployConfig
 
         $updateExistingRequired = $false
@@ -504,20 +523,39 @@ finally {
     # Ctrl + C brings us here :)
     if ($NewLabsuccess -ne $true) {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
-        Write-Log "### $Configuration Terminated" -HostOnly
+        Set-TitleBar "Script Cancelled"
+        Write-Log "### $Configuration Terminated $currentPhase" -HostOnly
+
+        if ($currentPhase -ge 2 -and $currentPhase -le 9) {
+            Write-Log "To Retry from the current phase, run the following command from the current powershell window: " -Failure -NoIndent
+            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
+            if ($currentPhase -eq 8) {
+                write-host
+                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+            }
+        }
         Write-Host
     }
+    Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
-    Get-Job | Stop-Job
-    if (-not $global:Common.DevBranch) {
-        Get-Job | Remove-Job
+    foreach ($job in Get-Job) {
+        $job | Stop-Job
+        Write-Host -NoNewline "."
     }
-
+    if (-not $global:Common.DevBranch) {
+        foreach ($job in Get-Job) {
+            $job | Remove-Job
+            Write-Host -NoNewline "."
+        }
+    }
+    Write-host "`r                                                                                                                              "
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose
-        Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue
+        try { Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue } catch {}
     }
+    $global:ps_cache = @{}
 
     # Delete in progress or failed VM's
     if ($global:vm_remove_list.Count -gt 0) {
@@ -546,4 +584,5 @@ finally {
     Set-QuickEdit
 
     Write-Host
+    Write-Host Script exited.
 }

@@ -1,3 +1,4 @@
+# Common.ps1
 [CmdletBinding()]
 param (
     [Parameter()]
@@ -332,6 +333,7 @@ function Write-Log {
 
     If ($Activity.IsPresent) {
         $info = $false
+        Set-TitleBar $Text
         Write-Host
         if ($NoNewLine.IsPresent) {
             $Text = "=== $Text"
@@ -339,6 +341,7 @@ function Write-Log {
         else {
             $Text = "=== $Text`r`n"
         }
+
         $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
     }
 
@@ -707,6 +710,99 @@ function Get-File {
     finally {
         $Global:ProgressPreference = $OriginalProgressPreference
     }
+}
+
+function Copy-ItemSafe {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+        [Parameter(Mandatory = $true)]
+        [string] $Destination,
+        [Parameter(Mandatory = $true)]
+        [string] $VMName,
+        [Parameter(Mandatory = $true)]
+        [string] $VMDomainName,
+        [Parameter(Mandatory = $false)]
+        [switch] $Recurse,
+        [Parameter(Mandatory = $false)]
+        [switch] $Container,
+        [Parameter(Mandatory = $false)]
+        [switch] $WhatIf,
+        [Parameter(Mandatory = $false)]
+        [switch]$Force,
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
+        [int]$TimeoutSeconds = 360
+    )
+    #$PSScriptRoot = $using:PSScriptRoot
+    $location = $PSScriptRoot
+    $testpath = Join-Path $location "Common.ps1"
+    if (-not (Test-Path -PathType Leaf $testpath)) {
+        write-host "Could not find $testpath"
+        $location = Split-Path $location -Parent
+        $testpath = Join-Path $location "Common.ps1"
+        if (-not (Test-Path -PathType Leaf $testpath)) {
+            write-host "Could not find $testpath"
+            return $false
+        }
+    }
+    $enableVerbose = $false
+    $CopyItemScript = {
+        try {
+            #Write-Host "CopyItemScript starting"
+            # Dot source common
+            $rootPath = $using:location
+            #Write-Host "Loading common: . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose"
+            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+
+            $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName
+
+            if ($ps) {
+                Write-Log "[Copy-ItemSafe] [$($using:VMName)] Copying $($using:Path) to $($using:Destination) Whatif:$($using:WhatIF)"
+                Copy-Item -ToSession $ps -Path $using:Path -Destination $using:Destination -Recurse:$using:Recurse -Container:$using:Container -Force:$using:Force -verbose:$using:enableVerbose -WhatIf:$using:WhatIF
+            }
+            else {
+                Write-Log "[Copy-ItemSafe] Failed to get Powershell Session for $using:VMName"
+                return $false
+            }
+        }
+        catch {
+            write-log $_
+            return $false
+        }
+        return $true
+    }
+
+    write-log "[Copy-Itemsafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force"
+
+    $retries = 3
+    while ($retries -gt 0) {
+        $job = start-job -ScriptBlock $CopyItemScript
+        $wait = Wait-Job -Timeout $TimeoutSeconds -Job $job
+        $job
+        if ($wait.State -eq "Running") {
+            Stop-Job $job
+            remove-job -job $job
+            $retries--
+        }
+        else {
+            if ($wait.State -eq "Completed") {
+                $result = Receive-Job $job
+                write-log "[Copy-ItemSafe] returned: $result"
+                remove-job $job
+                return $true
+            }
+            else {
+                write-log "[Copy-ItemSafe] State = $($wait.State)" -logonly
+                Stop-Job $job
+                remove-job $job
+                $retries--
+            }
+
+        }
+    }
+    return $false
+
 }
 function Start-CurlTransfer {
     [CmdletBinding()]
@@ -1099,6 +1195,11 @@ function Test-NetworkNat {
 
 function Start-DHCP {
     # Install DHCP, if not found
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$Restart
+    )
+
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
         Write-Log "DHCP is not installed. Installing..."
@@ -1114,9 +1215,21 @@ function Start-DHCP {
         start-service "DHCPServer"
         start-sleep -seconds 5
     }
+    else {
+        if ($Restart) {
+            restart-service "DHCPServer"
+            start-sleep -seconds 5
+        }
+    }
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if ($dhcp.Status -ne 'Running') {
-        return $false
+        Start-Sleep -Seconds 10
+        start-service "DHCPServer"
+        start-sleep -seconds 30
+        $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
+        if ($dhcp.Status -ne 'Running') {
+            return $false
+        }
     }
     return $true
 }
@@ -1821,18 +1934,61 @@ function New-VirtualMachine {
                 }
 
                 $ip = $null
-                Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
                 try {
                     $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                    if (! $ip) {
+                        $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                    }
+                    if (! $ip) {
+                        Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
+                        return $false
+                    }
+                    Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip }
+                    if ($ipa) {
+                        Remove-DhcpServerv4Reservation -IPAddress $ip
+                    }
+
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+
+
                     Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                     Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                    Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
                 }
                 catch {
-                    write-log -failure "$VmName`:Failed to reserve IP address for DNS: $dns and Mac:$($vmnet.MacAddress)"
-                    Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
-                    return $false
+                    #retry
+                    Start-DHCP -Restart
+                    $ip = $null
+                    try {
+                        $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                        if (! $ip) {
+                            $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                        }
+                        if (! $ip) {
+                            Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
+                            return $false
+                        }
+                        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip }
+                        if ($ipa) {
+                            Remove-DhcpServerv4Reservation -IPAddress $ip
+                        }
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+
+                        Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                    }
+                    catch {
+                        write-log -failure "$VmName`:Failed to reserve IP address $ip for DNS: $dns and Mac:$($vmnet.MacAddress)"
+                        Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
+                        return $false
+                    }
                 }
 
                 $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
@@ -1844,6 +2000,15 @@ function New-VirtualMachine {
                     $clusterIP = $IPs[0]
                     $AGIP = $IPs[1]
 
+
+                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP }
+                    if ($ipa) {
+                        Remove-DhcpServerv4Reservation -IPAddress $clusterIP
+                    }
+                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP }
+                    if ($ipa) {
+                        Remove-DhcpServerv4Reservation -IPAddress $AGIP
+                    }
                     write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
 
                     if (-not $clusterIP -or -not $AGIP) {
@@ -1913,7 +2078,7 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false, ParameterSetName = "VmTestPath")]
         [string]$PathToVerify,
         [Parameter(Mandatory = $false)]
-        [int]$TimeoutMinutes = 20,
+        [int]$TimeoutMinutes = 30,
         [Parameter(Mandatory = $false)]
         [int]$WaitSeconds = 10,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name to use for creating domain creds")]
@@ -1988,7 +2153,7 @@ function Wait-ForVm {
 
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
@@ -2044,7 +2209,7 @@ function Wait-ForVm {
 
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE complete. Checking SMB access"
                 Start-Sleep -Seconds 3
-                $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
+                $out = Invoke-VmCommand -VmName $VmName -AsJob -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "$VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
                 if ($readySmb) { Start-Sleep -Seconds 10 } # Extra wait to ensure wwahost has had a chance to start
@@ -2052,7 +2217,7 @@ function Wait-ForVm {
 
             # Wait until wwahost.exe is not found, or not longer running
             if ($readySmb) {
-                $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+                $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
 
                 if ($wwahost.ScriptBlockOutput) {
                     $wwahostrunning = $true
@@ -2077,7 +2242,7 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError | Out-Null
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError | Out-Null
         }
     }
 
@@ -2087,7 +2252,7 @@ function Wait-ForVm {
         Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
 
         do {
-            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
 
             if ($wwahost.ScriptBlockOutput) {
                 $ready = $true
@@ -2103,7 +2268,7 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null
         }
     }
 
@@ -2141,7 +2306,7 @@ function Wait-ForVm {
             }
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
             $ready = $true -eq $out.ScriptBlockOutput
             if ($ready) {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
@@ -2151,7 +2316,7 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError | Out-Null
+            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError | Out-Null
         }
     }
 
@@ -2189,6 +2354,10 @@ function Invoke-VmCommand {
         [switch]$CommandReturnsBool,
         [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
         [switch]$ShowVMSessionError,
+        [Parameter(Mandatory = $false, HelpMessage = "Run command as a job")]
+        [switch]$AsJob,
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
+        [int]$TimeoutSeconds = 180,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
@@ -2246,7 +2415,32 @@ function Invoke-VmCommand {
         # Run script block inside VM
         if (-not $failed) {
             try {
-                $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+                if ($AsJob) {
+                    $job = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue -AsJob
+                    $job | Wait-Job -Timeout $TimeoutSeconds
+                    if ($job.State -eq "Completed") {
+                        $return.ScriptBlockOutput = Receive-Job $job
+                        if (-not $SuppressLog) {
+                            Write-Log "$VmName`: Job '$DisplayName' Succeeded"
+                        }
+                        $failed = $false
+                    }
+                    else {
+                        $failed = $true
+                        $return.ScriptBlockFailed = $true
+                        if (-not $SuppressLog) {
+                            Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                        }
+                        if ($job.State -eq "Running") {
+                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                        }
+                        Stop-Job $job | Out-Null
+                        Remove-Job $job
+                    }
+                }
+                else {
+                    $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+                }
             }
             catch {
                 $failed = $true
@@ -2310,7 +2504,7 @@ function Invoke-VmCommand {
         }
     }
     catch {
-        Write-Log "$VmName`: Exception $_"
+        Write-Log "$VmName`: Invoke-VMCommand Exception $_"
     }
     return $return
 
@@ -2357,6 +2551,10 @@ function Get-VmSession {
             Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
             return $ps
         }
+        else {
+            $global:ps_cache.Remove($cacheKey)
+            try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+        }
     }
 
     $vm = get-vm2 -Name $VmName
@@ -2378,6 +2576,7 @@ function Get-VmSession {
         $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
         $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
         if ($Err0.Count -ne 0) {
+            try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
             if ($VmDomainName -ne $VmName) {
                 Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
@@ -2386,6 +2585,7 @@ function Get-VmSession {
                 Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
                 $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
+                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
                         Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
                     }
@@ -2397,9 +2597,11 @@ function Get-VmSession {
             }
             else {
                 if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
+                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
                 }
                 else {
+                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 }
                 continue
@@ -2412,9 +2614,10 @@ function Get-VmSession {
             $global:ps_cache[$cacheKey] = $ps
             return $ps
         }
+        try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
         Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Warning
     }
-
+    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
     Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure
 }
 
@@ -2433,7 +2636,7 @@ function Get-StorageConfig {
 
 
     if (-not (Test-Path $configPath)) {
-        $Common.FatalError = "Storage Config not found. Refer internal documentation."
+        $Common.FatalError = "Storage Config path '$configPath' not found. Refer internal documentation."
         Write-Log "File $configPath does not exist."
         return
     }
@@ -2642,6 +2845,9 @@ function Get-Tools {
         $url = $tool.URL
         $fileTargetRelative = $tool.Target
         $fileName = Split-Path $url -Leaf
+        if ($fileName.Contains("?")) {
+            $fileName = $fileName.Split("?")[0]
+        }
         $fileNameForDownload = Join-Path "tools" $fileName
         $downloadPath = Join-Path $Common.AzureToolsPath $fileName
 
@@ -2819,7 +3025,10 @@ function Copy-ToolToVM {
     $toolFileName = Split-Path $tool.url -Leaf
     $fileTargetRelative = Join-Path $tool.Target $toolFileName
 
+    Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative" -LogOnly
+
     if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+        Write-Log "$vmName`: File is marked to extract '$($tool.Name) since ExtractFolderIfZip is true" -Verbose
         $fileTargetRelative = $tool.Target
     }
 
@@ -2843,10 +3052,12 @@ function Copy-ToolToVM {
         $progressPref = $ProgressPreference
         $ProgressPreference = "SilentlyContinue"
         if ($isContainer) {
+            #Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
             Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
         else {
-            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
+            #Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
+            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
     }
     catch {
@@ -3103,25 +3314,27 @@ function Get-FileWithHash {
             #$localFileHash | Out-File -FilePath $localImageHashPath -Force
             $return.download = $true
         }
-
-        if ($localFileHash -eq $ExpectedHash) {
-            Write-Log "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
-            if ($ForceDownload.IsPresent) {
-                Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
-                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-                $return.download = $true
+        # For dynamically updated packages, its impossible to know the hash ahead of time, so we just re-download these every run
+        if ($ExpectedHash -ne "NONE") {
+            if ($localFileHash -eq $ExpectedHash) {
+                Write-Log "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
+                if ($ForceDownload.IsPresent) {
+                    Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
+                    Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                    $return.download = $true
+                }
+                else {
+                    # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
+                    $return.download = $false
+                    $return.success = $true
+                }
             }
             else {
-                # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
-                $return.download = $false
-                $return.success = $true
+                Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
+                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
+                $return.download = $true
             }
-        }
-        else {
-            Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
-            Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-            Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
-            $return.download = $true
         }
     }
     else {
@@ -3129,28 +3342,33 @@ function Get-FileWithHash {
     }
 
     if ($return.download) {
-        $worked = Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Downloading '$FileName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
+        $worked = Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Downloading '$FileName' to $localImagePath..." -Action "Downloading" -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf -ForceDownload
         if (-not $worked) {
             $return.success = $false
         }
         else {
-            # Calculate file hash, save to local hash file
-            Write-Log "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
-            $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
-            $localFileHash = $hashFileResult.Hash
-            if ($localFileHash -eq $ExpectedHash) {
-                $localFileHash | Out-File -FilePath $localImageHashPath -Force
-                Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
-                $return.success = $true
-            }
-            else {
-                if ($IgnoreHashFailure) {
+            if ($ExpectedHash -ne "NONE") {
+                # Calculate file hash, save to local hash file
+                Write-Log "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
+                $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+                $localFileHash = $hashFileResult.Hash
+                if ($localFileHash -eq $ExpectedHash) {
+                    $localFileHash | Out-File -FilePath $localImageHashPath -Force
+                    Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
                     $return.success = $true
                 }
                 else {
-                    Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
-                    $return.success = $false
+                    if ($IgnoreHashFailure) {
+                        $return.success = $true
+                    }
+                    else {
+                        Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
+                        $return.success = $false
+                    }
                 }
+            }
+            else {
+                $return.success = $true
             }
         }
     }
@@ -3378,6 +3596,27 @@ Function Set-PS7ProgressWidth {
     }
 }
 
+Function Set-TitleBar {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $Text
+    )
+
+    $VersionString = "MemLabs version $($global:Common.MemLabsVersion)"
+    if ($devBranch) {
+        $VersionString = $VersionString + " (DevBranch)"
+    }
+
+    if ($Global:ConfigFile) {
+        $config = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile))
+        $VersionString = $config + " - " + $VersionString
+    }
+    # Set Title bar
+    $host.ui.RawUI.WindowTitle = $VersionString + " - " + $Text
+}
+
 ####################
 ### DOT SOURCING ###
 ####################
@@ -3443,17 +3682,16 @@ if (-not $Common.Initialized) {
     $desktopPath = [Environment]::GetFolderPath("Desktop")
 
     # Get latest hotfix version
-    Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 7
-    $latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
 
-    Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 10
+
+    Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 7
     # Common global props
 
     $colors = Get-Colors
 
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "230614"
-        LatestHotfixVersion   = $latestHotfixVersion
+        MemLabsVersion        = "240205"
+        LatestHotfixVersion   = "240205"
         PS7                   = $PS7
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
@@ -3488,18 +3726,18 @@ if (-not $Common.Initialized) {
         StorageLocation = $null
         StorageToken    = $null
     }
+    Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
 
-    $VersionString = "MemLabs version $($global:Common.MemLabsVersion)"
-    if ($devBranch) {
-        $VersionString = $VersionString + " (DevBranch)"
-    }
-    Write-Log "$versionString Initializing" -LogOnly
-    $host.ui.RawUI.WindowTitle = $VersionString
+    Set-TitleBar "Init Phase"
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access
-    Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 12
+    Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
     Get-StorageConfig
+
+
+    Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
+    $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
 
     ### Set supported options
     Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13

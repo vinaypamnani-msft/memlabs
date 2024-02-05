@@ -14,7 +14,7 @@ Configuration Phase5
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
     #$netbiosName = $DomainName.Split(".")[0]
-    $netbiosName = $deployConfig.parameters.domainNetBiosName
+    $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Log share
@@ -49,7 +49,7 @@ Configuration Phase5
             $nextDepend = "[File]ClusterBackup$i"
 
             WriteStatus "WaitForDC$($primaryVM.vmName)" {
-                Status    = "Waiting for DC to Complete"
+                Status    = "Waiting for DC to Complete [ADGroup]SQLAOGroup$($primaryVM.vmName)"
                 DependsOn = $nextDepend
             }
 
@@ -57,7 +57,7 @@ Configuration Phase5
                 ResourceName     = "[ADGroup]SQLAOGroup$($primaryVM.vmName)"
                 NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
                 RetryIntervalSec = 5
-                RetryCount       = 450
+                RetryCount       = 400
                 Dependson        = $nextDepend
                 PsDscRunAsCredential = $Admincreds
             }
@@ -688,6 +688,24 @@ Configuration Phase5
 
         $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
 
+
+        $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+        WriteStatus WaitForDC {
+            Status    = "Waiting for $DC to Complete [ADGroup]SQLAOGroup$node1"
+            DependsOn = $nextDepend
+        }
+
+        WaitForAny DCComplete {
+           # ResourceName     = "[ADGroup]SQLAOGroup$node1"
+           ResourceName     = "[ADGroup]SQLAOGroup$node1"
+            NodeName         = $DC
+            RetryIntervalSec = 5
+            RetryCount       = 300
+            Dependson        = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = "[WaitForAny]DCComplete"
+
         WriteStatus WaitCluster {
             Status    = "Waiting for Cluster '$($Node1VM.ClusterName)' to become active"
             DependsOn = $nextDepend
@@ -775,21 +793,6 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[xClusterQuorum]ClusterWitness'
-
-        WriteStatus WaitForDC {
-            Status    = "Waiting for DC to Complete"
-            DependsOn = $nextDepend
-        }
-
-        WaitForAny DCComplete {
-            ResourceName     = "[ADGroup]SQLAOGroup$node1"
-            NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
-            RetryIntervalSec = 5
-            RetryCount       = 900
-            Dependson        = $nextDepend
-            PsDscRunAsCredential = $Admincreds
-        }
-        $nextDepend = "[WaitForAny]DCComplete"
 
         WriteStatus SqlLogins {
             Status    = "Adding SQL Logins"
@@ -892,8 +895,8 @@ Configuration Phase5
 
         SqlWaitForAG 'SQLConfigureAG-WaitAG' {
             Name                 = $node1VM.thisParams.SQLAO.AlwaysOnGroupName
-            RetryIntervalSec     = 5
-            RetryCount           = 450
+            RetryIntervalSec     = 10
+            RetryCount           = 300
             ServerName           = $node1
             InstanceName         = $node1vm.sqlInstanceName
             Dependson            = '[SqlAlwaysOnService]EnableHADR'

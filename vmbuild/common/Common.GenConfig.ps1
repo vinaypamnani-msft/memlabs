@@ -348,7 +348,7 @@ function Invoke-SnapshotDomain {
             try {
                 if ($tries -gt 10) {
                     $failures++
-                    continue
+                    return $failures
                 }
                 if (-not $quiet) {
                     Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent

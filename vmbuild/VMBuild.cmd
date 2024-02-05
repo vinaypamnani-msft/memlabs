@@ -2,7 +2,7 @@
 pushd "%~dp0"
 
 @ECHO ON
-@git config --global --add safe.directory E:\Memlabs
+git config --global --add safe.directory E:\Memlabs
 git pull
 
 @ECHO OFF

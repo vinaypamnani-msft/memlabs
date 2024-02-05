@@ -1,8 +1,8 @@
 {
   "cmOptions": {
-    "version": "current-branch",
+    "version": "2309",
     "install": true,
-    "pushClientToDomainMembers": true
+    "pushClientToDomainMembers": false
   },
   "vmOptions": {
     "prefix": "CT1-",
@@ -36,7 +36,9 @@
       },
       "memory": "12GB",
       "virtualProcs": 8,
-      "sqlPort": "1433"
+      "sqlPort": "1433",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "DPMP1",
@@ -50,7 +52,9 @@
       "siteCode": "PS1",
       "installMP": true,
       "installDP": true,
-      "network": "192.168.11.0"
+      "network": "192.168.11.0",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "PS1SITE",
@@ -67,7 +71,9 @@
       },
       "memory": "12GB",
       "virtualProcs": 8,
-      "sqlPort": "1433"
+      "sqlPort": "1433",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "W10Client1",

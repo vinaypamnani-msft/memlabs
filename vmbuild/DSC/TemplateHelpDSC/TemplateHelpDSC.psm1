@@ -288,6 +288,319 @@ class InstallDotNet4 {
 }
 
 
+
+[DscResource()]
+class InstallODBCDriver {
+    [DscProperty(Key)]
+    [string] $ODBCPath
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $_odbcpath = $this.ODBCPath
+        if (!(Test-Path $_odbcpath)) {
+            $odbcurl = "https://go.microsoft.com/fwlink/?linkid=2220989"
+
+            Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server from $($odbcurl)..."
+
+            try {
+                Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
+                Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                $ErrorMessage = $_.Exception.Message
+                Write-Verbose "Failed to Download Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
+                ipconfig /flushdns
+                start-sleep -seconds 60
+                Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
+                try {
+                    Invoke-WebRequest -Uri $odbcurl -OutFile $_odbcpath -ErrorAction Stop
+                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    # Force reboot
+                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    #$global:DSCMachineStatus = 1
+                    throw "Retry (Attempting Reboot) Failed to Download Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
+                    return
+                }
+
+            }
+        }
+
+        # Install ODBC Driver
+        $cmd = "msiexec"
+        $arg1 = "/i"
+        $arg2 = $_odbcpath
+        $arg3 = "IACCEPTMSODBCSQLLICENSETERMS=YES"
+        $arg4 = "/qn"
+        #$arg5 = "/lv c:\temp\odbcinstallation.log"
+
+        try {
+            Write-Verbose "Installing Microsoft ODBC Driver 18 for SQL Server..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
+            & $cmd $arg1 $arg2 $arg3 $arg4 #$arg5
+            Write-Verbose "Microsoft ODBC Driver 18 for SQL Server was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            throw "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 10
+    }
+
+    [bool] Test() {
+
+        try {
+            $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
+
+            if (Test-Path -Path $ODBCRegistryPath) {
+                try {
+                    # Get the InstalledVersion only if the path exists
+                    $ODBCVersion = Get-ItemProperty -Path $ODBCRegistryPath -Name "InstalledVersion" -ErrorAction SilentlyContinue
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Verbose "Microsoft ODBC Driver 18 for SQL Server Error $($ErrorMessage)!"
+
+                    return $false
+                }
+            }
+            else {
+                return $false
+            }
+
+            If ($ODBCVersion.InstalledVersion -ge "18.1.2.1") {
+                Write-Host "Microsoft ODBC Driver for SQL Server 18.1.2.1 or greater $($ODBCVersion.InstalledVersion) is installed"
+                return $true
+            }
+
+            return $false
+        }
+        catch {
+            return $false
+        }
+    }
+
+    [InstallODBCDriver] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
+class InstallSqlClient {
+    [DscProperty(Key)]
+    [string] $Path
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $_path = $this.Path
+        if (!(Test-Path $_path)) {
+            $url = "https://go.microsoft.com/fwlink/?linkid=2115684"
+
+            Write-Verbose "Downloading Sql Client from $($url)..."
+
+            try {
+                Write-Verbose "Downloading  Sql Client"
+                Start-BitsTransfer -Source $url -Destination $_path -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                $ErrorMessage = $_.Exception.Message
+                Write-Verbose "Failed to Download Sql Client with error: $ErrorMessage"
+                ipconfig /flushdns
+                start-sleep -seconds 60
+                Write-Verbose "Downloading Sql Client"
+                try {
+                    Invoke-WebRequest -Uri $url -OutFile $_path -ErrorAction Stop
+                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    # Force reboot
+                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    #$global:DSCMachineStatus = 1
+                    throw "Retry (Attempting Reboot) Failed to Download Sql Client with error: $ErrorMessage"
+                    return
+                }
+
+            }
+        }
+
+        # Install
+        #VC_redist.x64.exe /install /passive /quiet
+        $cmd = "msiexec"
+        $arg1 = "/i"
+        $arg2 = $_path
+        $arg3 = "IACCEPTSQLNCLILICENSETERMS=YES"
+        $arg4 = "/qn"
+        #$arg5 = "/lv c:\temp\odbcinstallation.log"
+
+        try {
+            Write-Verbose "Installing Sql Client..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
+            & $cmd $arg1 $arg2 $arg3 #$arg5
+            Write-Verbose "VC Redist was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            throw "Failed to install Sql Client with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 20
+    }
+
+    [bool] Test() {
+
+        try {
+            #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
+            $RegistryPath = "HKLM:\SOFTWARE\Microsoft\SQLNCLI11"
+
+            if (Test-Path -Path $RegistryPath) {
+                try {
+                    # Get the InstalledVersion only if the path exists
+                    $Version = Get-ItemProperty -Path $RegistryPath -ErrorAction SilentlyContinue
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Verbose "Sql Client Error $($ErrorMessage)!"
+
+                    return $false
+                }
+            }
+            else {
+                return $false
+            }
+
+            If ([System.Version]$($Version.InstalledVersion) -ge [System.Version]"11.4.7001.0") {
+                Write-Host "Sql Client 11.4.7001.0 or greater $($Version.InstalledVersion) is installed"
+                return $true
+            }
+
+            return $false
+        }
+        catch {
+            return $false
+        }
+    }
+
+    [InstallSqlClient] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
+class InstallVCRedist {
+    [DscProperty(Key)]
+    [string] $Path
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $_path = $this.Path
+        if (!(Test-Path $_path)) {
+            $url = "https://aka.ms/vs/15/release/vc_redist.x64.exe"
+
+            Write-Verbose "Downloading VC Redist from $($url)..."
+
+            try {
+                Write-Verbose "Downloading VC Redist"
+                Start-BitsTransfer -Source $url -Destination $_path -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                $ErrorMessage = $_.Exception.Message
+                Write-Verbose "Failed to Download VC Redist with error: $ErrorMessage"
+                ipconfig /flushdns
+                start-sleep -seconds 60
+                Write-Verbose "Downloading VC Redist"
+                try {
+                    Invoke-WebRequest -Uri $url -OutFile $_path -ErrorAction Stop
+                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    # Force reboot
+                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    #$global:DSCMachineStatus = 1
+                    throw "Retry (Attempting Reboot) Failed to Download VC Redist with error: $ErrorMessage"
+                    return
+                }
+
+            }
+        }
+
+        # Install
+        #VC_redist.x64.exe /install /passive /quiet
+        $cmd = $_path
+        $arg1 = "/install"
+        $arg2 = "/passive"
+        $arg3 = "/quiet"
+        #$arg4 = "/qn"
+        #$arg5 = "/lv c:\temp\odbcinstallation.log"
+
+        try {
+            Write-Verbose "Installing VC Redist..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3")
+            & $cmd $arg1 $arg2 $arg3 #$arg5
+            Write-Verbose "VC Redist was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            throw "Failed to install VC Redist with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 20
+    }
+
+    [bool] Test() {
+
+        try {
+            #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
+            $RegistryPath = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+
+            if (Test-Path -Path $RegistryPath) {
+                try {
+                    # Get the InstalledVersion only if the path exists
+                    $Version = Get-ItemProperty -Path $RegistryPath -ErrorAction SilentlyContinue
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Verbose "VC Redist Error $($ErrorMessage)!"
+
+                    return $false
+                }
+            }
+            else {
+                return $false
+            }
+
+            If ($Version.Major -ge "14") {
+                Write-Host "VC Redist 14 or greater $($Version.InstalledVersion) is installed"
+                return $true
+            }
+            return $false
+        }
+        catch {
+            return $false
+        }
+    }
+
+    [InstallVCRedist] Get() {
+        return $this
+    }
+}
+
 [DscResource()]
 class InstallAndConfigWSUS {
     [DscProperty(Key)]
@@ -523,13 +836,15 @@ class WaitForExtendSchemaFile {
         $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
         $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
         $extadschpath3 = Join-Path -Path $_FilePath -ChildPath "cd.retail.LN\SMSSETUP\BIN\X64\extadsch.exe"
-        while (!(Test-Path $extadschpath) -and !(Test-Path $extadschpath2) -and !(Test-Path $extadschpath3)) {
+        $extadschpath4 = Join-Path -Path $_FilePath -ChildPath "cd.preview\SMSSETUP\BIN\X64\extadsch.exe"
+        while (!(Test-Path $extadschpath) -and !(Test-Path $extadschpath2) -and !(Test-Path $extadschpath3) -and !(Test-Path $extadschpath4)) {
             Write-Verbose "Testing $extadschpath and $extadschpath2 and $extadschpath3"
             Write-Verbose "Wait for extadsch.exe exist on $($this.MachineName), will try 10 seconds later..."
             Start-Sleep -Seconds 10
             $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
             $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
             $extadschpath3 = Join-Path -Path $_FilePath -ChildPath "cd.retail.LN\SMSSETUP\BIN\X64\extadsch.exe"
+            $extadschpath4 = Join-Path -Path $_FilePath -ChildPath "cd.preview\SMSSETUP\BIN\X64\extadsch.exe"
         }
 
         Write-Verbose "Extending the Active Directory schema..."
@@ -554,6 +869,11 @@ class WaitForExtendSchemaFile {
         if (Test-Path $extadschpath3) {
             Write-Verbose "Running $extadschpath3"
             & $extadschpath3 | out-null
+        }
+
+        if (Test-Path $extadschpath4) {
+            Write-Verbose "Running $extadschpath4"
+            & $extadschpath4 | out-null
         }
         Write-Verbose "Done."
     }
@@ -1366,49 +1686,53 @@ class RegisterTaskScheduler {
         $_ScriptArgument = $this.ScriptArgument
         $_AdminCreds = $this.AdminCreds
 
-        $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
-        if (!(Test-Path $ProvisionToolPath)) {
-            New-Item $ProvisionToolPath -ItemType directory | Out-Null
-        }
 
-        $exists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
-        if ($exists) {
-            if ($exists.state -eq "Running") {
-                stop-Process -Name setup -Force -ErrorAction SilentlyContinue
-                stop-Process -Name setupwpf -Force -ErrorAction SilentlyContinue
-                $exists | Stop-ScheduledTask -ErrorAction SilentlyContinue
+
+        $RegisterTime = [datetime]::Now
+        $waitTime = 15
+
+        $success = $this.RegisterTask()
+        $lastRunTime = $this.GetLastRunTime()
+        $failCount = 0
+
+        Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
+        while ($lastRunTime -lt $RegisterTime) {
+            Write-Verbose "Checking to see if task has started Attempt $failCount"
+            Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
+
+            if ($failCount -gt 2) {
+                Write-Verbose "Manually starting the task"
+                Start-ScheduledTask -TaskName $_TaskName
+                start-sleep $waitTime
+                $lastRunTime = $this.GetLastRunTime()
             }
-            Unregister-ScheduledTask -TaskName $_TaskName -Confirm:$false
+
+            if ($failCount -eq 5) {
+                Write-Verbose "Task has not ran yet after 5 Cyles. Re-Registering Task"
+                #Unregister existing task
+                $success = $this.RegisterTask()
+
+            }
+
+            if ($failCount -eq 8) {
+                Write-Verbose "Task failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
+                throw "Task failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
+            }
+
+            if ($lastRunTime -gt $RegisterTime) {
+                Write-Verbose "Task was successfully started at $lastRunTime"
+                break
+            }
+            else {
+                Write-Verbose "Task has not ran yet. Last run time was: $lastRunTime"
+                $failCount++
+            }
+            start-sleep -Seconds $waitTime
+            $lastRunTime = $this.GetLastRunTime()
         }
-
-        $sourceDirctory = "$_ScriptPath\*"
-        $destDirctory = "$ProvisionToolPath\"
-
-        Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
-
-        $TaskDescription = "vmbuild task"
-        $TaskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-        $TaskScript = "$ProvisionToolPath\$_ScriptName"
-
-        Write-Verbose "Task script full path is : $TaskScript "
-
-        $TaskArg = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $TaskScript $_ScriptArgument"
-
-        Write-Verbose "command is : $TaskArg"
-
-        $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
-
-        $TaskStartTime = [datetime]::Now.AddMinutes(1)
-        $Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
-
-        $Principal = New-ScheduledTaskPrincipal -UserId $_AdminCreds.UserName -RunLevel Highest
-        $Password = $_AdminCreds.GetNetworkCredential().Password
+        Write-Verbose "Task was successfully started at $lastRunTime"
 
 
-
-        $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Description $TaskDescription -Principal $Principal
-
-        $Task | Register-ScheduledTask -TaskName $_TaskName -User $_AdminCreds.UserName -Password $Password -Force
 
         # $TaskStartTime = [datetime]::Now.AddMinutes(2)
         # $service = new-object -ComObject("Schedule.Service")
@@ -1433,32 +1757,104 @@ class RegisterTaskScheduler {
 
     [bool] Test() {
 
+        $exists = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+        if ($exists) {
+            if ($exists.state -eq "Running") {
+                return $true
+            }
+        }
         return $false
-        try {
-            $ConfigurationFile = Join-Path -Path "C:\Staging\DSC" -ChildPath "ScriptWorkflow.json"
-            if (-not (Test-Path $ConfigurationFile)) {
-                return $false
-            }
-
-            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-            if (-not ($Configuration.ScriptWorkflow)) {
-                return $false
-            }
-            if ($Configuration.ScriptWorkflow.Status -eq 'NotStart') {
-                $Configuration.ScriptWorkflow.Status = 'Scheduled'
-                $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-                return $false
-            }
-
-            return $true
-        }
-        catch {
-            return $false
-        }
     }
 
     [RegisterTaskScheduler] Get() {
         return $this
+    }
+
+
+    [bool] RegisterTask() {
+        $ProvisionToolPath = "$env:windir\temp\ProvisionScript"
+        if (!(Test-Path $ProvisionToolPath)) {
+            New-Item $ProvisionToolPath -ItemType directory | Out-Null
+        }
+        Write-Verbose "Checking for existing task: $($this.TaskName)"
+        $exists = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+        if ($exists) {
+            Write-Verbose "Task $($this.TaskName) already exists. Removing"
+            if ($exists.state -eq "Running") {
+                stop-Process -Name setup -Force -ErrorAction SilentlyContinue
+                stop-Process -Name setupwpf -Force -ErrorAction SilentlyContinue
+                $exists | Stop-ScheduledTask -ErrorAction SilentlyContinue
+            }
+            Unregister-ScheduledTask -TaskName $($this.TaskName) -Confirm:$false
+            Write-Verbose "Task $($this.TaskName) Removed"
+            Start-Sleep -Seconds 10
+        }
+
+        $sourceDirctory = "$($this.ScriptPath)\*"
+        $destDirctory = "$ProvisionToolPath\"
+
+        Write-Verbose "Copying $sourceDirctory to  $destDirctory"
+        Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
+
+        $TaskDescription = "vmbuild task"
+        $TaskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $TaskScript = "$ProvisionToolPath\$($this.ScriptName)"
+
+        Write-Verbose "Task script full path is : $TaskScript "
+
+        $TaskArg = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $TaskScript $($this.ScriptArgument)"
+
+        $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
+        Write-Verbose "New-ScheduledTaskAction : $TaskCommand $TaskArg"
+
+        # Seconds to wait to start task
+        $waitTime = 15
+        $TaskStartTime = [datetime]::Now.AddSeconds($waitTime)
+        $RegisterTime = [datetime]::Now
+        #$Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
+        #Write-Verbose "Time is now: $RegisterTime Task Scheduled to run at $TaskStartTime"
+
+        $Principal = New-ScheduledTaskPrincipal -UserId $($this.AdminCreds.UserName) -RunLevel Highest
+        $Password = $($this.AdminCreds).GetNetworkCredential().Password
+
+
+
+        $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
+
+        $Task | Register-ScheduledTask -TaskName $($this.TaskName) -User $($this.AdminCreds.UserName) -Password $Password -Force | out-Null
+
+        start-sleep -Seconds $waitTime
+
+        Write-Verbose "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) is starting"
+        Start-ScheduledTask -TaskName $($this.TaskName)
+        Write-Verbose "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) has Started."
+
+        return $true
+
+    }
+
+    [datetime] GetLastRunTime() {
+
+        $filterXML = @'
+        <QueryList>
+         <Query Id="0" Path="Microsoft-Windows-TaskScheduler/Operational">
+          <Select Path="Microsoft-Windows-TaskScheduler/Operational">
+           *[EventData/Data[@Name='TaskName']='\TEMPLATE']
+          </Select>
+         </Query>
+        </QueryList>
+'@
+
+        $filterXML = $filterXML -replace ("TEMPLATE", $this.TaskName)
+        $Lastevent = (Get-WinEvent  -FilterXml $filterXML -ErrorAction Stop) | Where-Object { $_.ID -eq 100 } | Select-Object -First 1
+
+        if ($Lastevent) {
+            Write-Verbose "Last Run Time is $($Lastevent.TimeCreated)"
+            return $Lastevent.TimeCreated
+        }
+        Write-Verbose "No Last Run Time found returning $([datetime]::Min)"
+        return [datetime]::Min
+
     }
 }
 
@@ -1732,9 +2128,11 @@ class OpenFirewallPortForSCCM {
 
         Write-Verbose "Current Role is : $_Role"
 
+        New-NetFirewallRule -DisplayName "Cluster Network Outbound" -Profile Any -Direction Outbound -Action Allow -RemoteAddress "10.250.250.0/24"
+        New-NetFirewallRule -DisplayName "Cluster Network Inbound" -Profile Any -Direction Inbound -Action Allow -RemoteAddress "10.250.250.0/24"
 
-        New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Domain -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
-        New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Domain -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+        New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
+        New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
         New-NetFirewallRule -DisplayName 'RDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Group "For RdcMan"
 
         if ($_Role -contains "DC") {
@@ -3164,7 +3562,7 @@ class InstallPBIRS {
     [void] Set() {
         try {
             $_Creds = $this.DBcredentials
-            write-verbose ("Configuring PBIRS for $($this.SqlServer) in $($this.ContentPath)")
+            write-verbose ("Configuring PBIRS for $($this.SqlServer) in $($this.InstallPath)")
 
 
             $pbirsSetup = "C:\temp\PowerBIReportServer.exe"
@@ -3181,7 +3579,7 @@ class InstallPBIRS {
             }
 
             try {
-                New-Item -Path $this.ContentPath -ItemType Directory -Force
+                New-Item -Path $this.InstallPath -ItemType Directory -Force
             }
             catch {
                 write-verbose ("InstallPBIRS $_")
@@ -3201,25 +3599,44 @@ class InstallPBIRS {
 
             try {
                 if ($this.IsRemoteDatabaseServer) {
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds
+                    try {
+                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
+                    } catch {
+                        Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
+                    }
                 }
                 else {
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds
+                    try {
+                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
+                    }
+                    catch {
+                        Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
+                    }
                 }
             }
             catch {
                 Write-Verbose ("InstallPBIRS $_")
                 if ($this.IsRemoteDatabaseServer) {
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase
+                    Write-Verbose ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
                 else {
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase
+                    Write-Verbose ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
             }
+            Write-Verbose ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
             Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+            Start-Sleep -seconds 10
+            Restart-Service -Name "PowerBIReportServer" -Force
+            Start-Sleep -Seconds 10
+            Write-Verbose ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
             try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext } catch {}
-            Stop-Service PowerBIReportServer
-            Start-Service PowerBIReportServer
+            Restart-Service -Name "PowerBIReportServer" -Force
             try {
                 Get-Service | Where-Object { $_.Name -eq "SQLSERVERAGENT" -or $_.Name -like "SqlAgent*" } | Start-Service
             }
@@ -3243,7 +3660,9 @@ class InstallPBIRS {
             }
 
             if ($service) {
-                return $true
+                if ($service.status -eq "Running") {
+                    return $true
+                }
             }
 
             return $false

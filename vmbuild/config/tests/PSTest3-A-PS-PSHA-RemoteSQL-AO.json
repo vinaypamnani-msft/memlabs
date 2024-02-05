@@ -39,7 +39,9 @@
       },
       "installDP": true,
       "installMP": true,
-      "siteCode": "PS1"
+      "siteCode": "PS1",
+      "InstallRP": false,
+      "InstallSUP": false
     },
     {
       "vmName": "PS1SITE",
@@ -52,7 +54,9 @@
         "E": "250GB"
       },
       "siteCode": "PS1",
-      "remoteSQLVM": "PS1SQL"
+      "InstallRP": false,
+      "InstallSUP": false,
+      "remoteSQLVM": "PS1SQLAO1"
     },
     {
       "vmName": "PS1SITE-P",
@@ -68,18 +72,46 @@
       "remoteContentLibVM": "FS1"
     },
     {
-      "vmName": "PS1SQL",
-      "role": "DomainMember",
-      "operatingSystem": "Server 2022",
-      "memory": "8GB",
+      "vmName": "PS1SQLAO1",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2019",
+      "memory": "7GB",
       "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
       "sqlVersion": "SQL Server 2019",
-      "sqlInstanceName": "SCCM",
+      "sqlInstanceName": "MSSQLSERVER",
       "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
       "additionalDisks": {
-        "E": "120GB"
+        "E": "250GB"
       },
-      "sqlPort": "6543"
+      "OtherNode": "PS1SQLAO2",
+      "fileServerVM": "FS1",
+      "ClusterName": "SQLCLUSTER",
+      "AlwaysOnGroupName": "PS1 Availibility Group",
+      "AlwaysOnListenerName": "ALWAYSON",
+      "SqlServiceAccount": "SQLCLUSTERSvc",
+      "SqlAgentAccount": "SQLCLUSTERAgent",
+      "installRP": false
+    },
+    {
+      "vmName": "PS1SQLAO2",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2019",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "SQLCLUSTERSvc",
+      "SqlAgentAccount": "SQLCLUSTERAgent"
     },
     {
       "vmName": "W10Client1",

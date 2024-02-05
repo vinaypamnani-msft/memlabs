@@ -24,18 +24,29 @@ function Start-Maintenance {
     $countNotNeeded = $allVMs.Count - $vmCount
 
     $text = "Performing maintenance"
+    $maintenanceDoNotStart = $false
     Write-Log $text -Activity
 
-    if ($vmCount -gt 0) {
-        $response = Read-YesorNoWithTimeout -Prompt "$($vmsNeedingMaintenance.Count) VM(s) [$($vmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
-        if ($response -eq "n") {
+    if ($applyNewOnly -eq $false) {
+        if ($vmCount -gt 0) {
+            $response = Read-YesorNoWithTimeout -Prompt "$($vmsNeedingMaintenance.Count) VM(s) [$($vmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
+            if ($response -eq "n") {
+                return
+            }
+
+            $response = Read-YesorNoWithTimeout -Prompt "Start VM's that are stopped for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
+            if ($response -eq "y") {
+                Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
+            }
+            else {
+                Write-Log "$vmCount VM's need maintenance. VM's will NOT be started (if stopped)."
+                $maintenanceDoNotStart = $true
+            }
+        }
+        else {
+            Write-Log "No maintenance required." -Success
             return
         }
-        Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
-    }
-    else {
-        Write-Log "No maintenance required." -Success
-        return
     }
 
     $progressId = Get-Random
@@ -69,6 +80,13 @@ function Start-Maintenance {
     # Perform maintenance on other VM's
     foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
         $i++
+        if ($maintenanceDoNotStart) {
+            if ($vm.State -ne "Running") {
+                $countSkipped++
+                continue
+            }
+        }
+
         Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         if ($vm.domain -in $criticalDomains) {
             Write-Log "$($vm.vmName)`: Maintenance skipped, DC maintenance failed." -Highlight
@@ -94,7 +112,9 @@ function Start-Maintenance {
     Write-Host
     Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -SubActivity
     Write-Progress2 -Id $progressId -Activity $text -Completed
-    Write-Progress2 -Activity $global:MaintenanceActivity -Completed
+    if ($global:MaintenanceActivity) {
+        Write-Progress2 -Activity $global:MaintenanceActivity -Completed
+    }
 }
 
 function Show-FailedDomains {
@@ -451,7 +471,6 @@ function Get-VMFixes {
     }
 
     $fixesToPerform = @()
-
     ### Domain account password expiration
 
     $Fix_DomainAccount = {
@@ -757,6 +776,50 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_DisableIEESC
         RunAsAccount      = $vmNote.adminName
         InjectFiles       = @("Disable-IEESC.ps1") # must exist in filesToInject\staging dir
+    }
+
+
+    $Fix_AccountExpiry = {
+
+        $RegistryPath = 'HKLM:\\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'
+        $Name = 'DisablePasswordChange'
+        $Value = '1'
+        New-ItemProperty -Path $RegistryPath -Name $Name -Value $Value -PropertyType DWORD -Force | Out-Null
+        return $true
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-AccountExpiry"
+        FixVersion        = "230922"
+        AppliesToThisVM   = $false
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("DC", "OSDClient", "Linux", "AADClient")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_AccountExpiry
+
+    }
+
+    $Fix_LocalAdminAccount = {
+        param ($password)
+        $p = ConvertTo-SecureString $password -AsPlainText -Force
+        Set-LocalUser -Password $p "Administrator"
+        Enable-LocalUser "Administrator"
+        return $true
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix_LocalAdminAccount"
+        FixVersion        = "230927"
+        AppliesToThisVM   = $false
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("DC", "OSDClient", "Linux", "AADClient")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_LocalAdminAccount
+        ArgumentList      = @($Common.LocalAdmin.GetNetworkCredential().Password)
     }
 
     # ========================

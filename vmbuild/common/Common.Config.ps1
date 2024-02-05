@@ -38,6 +38,12 @@ function Get-UserConfiguration {
 
         #Apply Fixes to Config
 
+        if ($config.cmOptions) {
+            if ($null -eq ($config.cmOptions.EVALVersion))
+            {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EVALVersion" -Value $false
+            }
+        }
         if ($null -ne $config.vmOptions.domainAdminName) {
             if ($null -eq ($config.vmOptions.adminName)) {
                 $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName
@@ -161,6 +167,7 @@ function Get-FilesForConfiguration {
         $result = Get-UserConfiguration -Configuration $Configuration
         if ($result.Loaded) {
             $config = $result.Config
+            $Global:ConfigFile = $ConfigPath
         }
     }
 
@@ -649,7 +656,7 @@ function Get-SQLAOConfig {
         [Parameter(Mandatory = $true, HelpMessage = "SQLAONAME")]
         [object] $vmName
     )
-    Write-Log -verbose "Running Get-SQLAOConfig"
+    Write-Log "Running Get-SQLAOConfig for $vmName" -LogOnly
     $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
 
     if (-not $PrimaryAO) {
@@ -689,7 +696,7 @@ function Get-SQLAOConfig {
         }
     }
     if (-not ($PrimaryAO.ClusterIPAddress)) {
-        write-log "Cluster IP is not yet set. Skipping SQLAO Config"
+        write-log "Cluster IP is not yet set. Skipping SQLAO Config for $vmName" -LogOnly
         return
         #throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
     }
@@ -724,7 +731,7 @@ function Get-SQLAOConfig {
         SQLAOPort                  = 1500
     }
 
-    Write-Log "SQLAO Config Generated"
+    Write-Log "SQLAO Config Generated for $vmName" -LogOnly
     return $config
 }
 

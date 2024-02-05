@@ -1,6 +1,6 @@
 {
   "cmOptions": {
-    "version": "current-branch",
+    "version": "2309",
     "install": true,
     "pushClientToDomainMembers": true
   },
@@ -58,7 +58,7 @@
       "sqlVersion": "SQL Server 2019",
       "sqlInstanceName": "MSSQLSERVER",
       "sqlInstanceDir": "E:\\SQL",
-      "sqlPort": "4890",
+      "sqlPort": 1433,
       "additionalDisks": {
         "E": "120GB"
       },
@@ -82,7 +82,7 @@
       "sqlVersion": "SQL Server 2019",
       "sqlInstanceName": "MSSQLSERVER",
       "sqlInstanceDir": "E:\\SQL",
-      "sqlPort": "4890",
+      "sqlPort": 1433,
       "additionalDisks": {
         "E": "120GB"
       },

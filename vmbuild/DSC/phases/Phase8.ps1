@@ -64,22 +64,22 @@ Configuration Phase8
         }
 
         SqlScript 'DisableAgentJob' {
-            ServerName       = $thisvm.VmName
-            InstanceName     = $thisVM.sqlInstanceName
+            ServerName           = $thisvm.VmName
+            InstanceName         = $thisVM.sqlInstanceName
             #Credential       = $Admincreds
-            SetFilePath      = $AgentJobSet
-            TestFilePath     = $AgentJobTest
-            GetFilePath      = $AgentJobGet
-            DisableVariables = $true
-            Variable     = @('FilePath=C:\temp\')
+            SetFilePath          = $AgentJobSet
+            TestFilePath         = $AgentJobTest
+            GetFilePath          = $AgentJobGet
+            DisableVariables     = $true
+            Variable             = @('FilePath=C:\temp\')
             PsDscRunAsCredential =  $Admincreds
-            Encrypt = "Optional"
+            Encrypt              = "Optional"
         }
         $nextDepend = '[SqlScript]DisableAgentJob'
 
 
         $WaitFor = @()
-        $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $node.NodeName -and $_.role -in "CAS", "Primary"}
+        $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $node.NodeName -and $_.role -in "CAS", "Primary" }
         if ($serverToWait) {
             $WaitFor += $serverToWait.vmName
         }
@@ -114,17 +114,17 @@ Configuration Phase8
         }
 
         SqlScript 'EnableAgentJob' {
-            ServerName       = $thisvm.VmName
-            InstanceName     = $thisVM.sqlInstanceName
+            ServerName           = $thisvm.VmName
+            InstanceName         = $thisVM.sqlInstanceName
             #Credential       = $Admincreds
-            SetFilePath      = $AgentJobSet
-            TestFilePath     = $AgentJobTest
-            GetFilePath      = $AgentJobGet
-            DisableVariables = $true
-            DependsOn        = $nextDepend
-            Variable     = @('FilePath=C:\temp\')
+            SetFilePath          = $AgentJobSet
+            TestFilePath         = $AgentJobTest
+            GetFilePath          = $AgentJobGet
+            DisableVariables     = $true
+            DependsOn            = $nextDepend
+            Variable             = @('FilePath=C:\temp\')
             PsDscRunAsCredential =  $Admincreds
-            Encrypt = "Optional"
+            Encrypt              = "Optional"
         }
         $nextDepend = '[SqlScript]EnableAgentJob'
 
@@ -174,9 +174,9 @@ Configuration Phase8
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
                 MachineName = if ($CSName) { $CSName } else { $PSName }
-                ExtFolder   = $CM
-                Ensure      = "Present"
-                DependsOn   = "[WriteStatus]WaitExtSchema"
+                ExtFolder = $CM
+                Ensure    = "Present"
+                DependsOn = "[WriteStatus]WaitExtSchema"
             }
         }
 
@@ -192,8 +192,6 @@ Configuration Phase8
 
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
         $PSName = $ThisVM.thisParams.ParentSiteServer
-
-
 
         #$ParentSiteCode = ($deployConfig.virtualMachines | where-object { $_.vmName -eq ($Node.NodeName) }).ParentSiteCode
         #$PSName = ($deployConfig.virtualMachines | where-object { $_.Role -eq "Primary" -and $_.SiteCode -eq $ParentSiteCode }).vmName
@@ -212,18 +210,29 @@ Configuration Phase8
             DependsOn     = "[WriteStatus]WaitPrimary"
         }
 
-        WriteStatus Complete {
-            DependsOn = "[WaitForEvent]WaitPrimary"
-            Status    = "Complete!"
-        }
-
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
+            DependsOn = "[WaitForEvent]WaitPrimary"
         }
+
+        WriteStatus ODBCDriverInstall {
+            DependsOn = "[WriteEvent]WriteConfigFinished"
+            Status = "Downloading and installing ODBC driver version 18"
+        }
+    
+        InstallODBCDriver ODBCDriverInstall {
+            ODBCPath  = "C:\temp\msodbcsql.msi"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]ODBCDriverInstall"            
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[InstallODBCDriver]ODBCDriverInstall"
+            Status    = "Complete!"
+        }        
     }
 
     Node $AllNodes.Where{ $_.Role -eq 'CAS' -or $_.Role -eq "Primary" }.NodeName
@@ -243,6 +252,20 @@ Configuration Phase8
         }
 
         $nextDepend = "[InstallADK]ADKInstall"
+
+        WriteStatus ODBCDriverInstall {
+            DependsOn = $nextDepend
+            Status = "Downloading and installing ODBC driver version 18"
+        }
+    
+        InstallODBCDriver ODBCDriverInstall {
+            ODBCPath  = "C:\temp\msodbcsql.msi"
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]ODBCDriverInstall"            
+        }
+
+        $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
+
         if (-not $ThisVM.thisParams.ParentSiteServer -and -not $ThisVM.hidden) {
 
             $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"

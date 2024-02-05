@@ -1,3 +1,4 @@
+#New-BaseImage.ps1
 param (
     [Parameter(Mandatory = $false, HelpMessage = "ISO File to extract install.wim from.")]
     [string]$IsoPath,
@@ -139,7 +140,7 @@ if ($importWim) {
 
 # Verify we have the WIM
 if ($null -eq $wimPath -and -not $WhatIf) {
-    Write-Log "$WimFileName was not found. Exiting!" -Failure
+    Write-Log "$WimFileName at $($Common.StagingWimPath) was not found. Exiting!" -Failure
     return
 }
 

@@ -148,9 +148,16 @@ $Install_Secondary = {
                     $SQLSetting = New-CMSqlServerSetting -CopySqlServerExpressOnSecondarySite -SqlServerServiceBrokerPort 4022 -SqlServerServicePort 1433
                 }
 
+
+                $siteName = "Secondary Site"
+
+                if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+                    $siteName = $ThisVM.siteName
+                }
+
                 New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                     -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                    -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
+                    -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
                 Start-Sleep -Seconds 15
             }
             catch {
@@ -160,7 +167,7 @@ $Install_Secondary = {
                     Start-Sleep -Seconds 300
                     New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                         -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                        -SiteName "Secondary Site" -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
+                        -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
                 }
                 catch {
                     $_ | Out-File $global:StatusLog -Append

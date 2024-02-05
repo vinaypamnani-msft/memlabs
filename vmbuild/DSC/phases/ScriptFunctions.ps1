@@ -400,13 +400,19 @@ function Install-SRP {
         if (-not $installed) {
             Write-DscStatus "Reporting Point Role not detected on $ServerFQDN. Adding Reporting Point Point role using DB Server [$SqlServerName], DB Name [$DatabaseName], UserName [$UserName]"
             Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" 2>&1 | Out-File $global:StatusLog -Append
-            Start-Sleep -Seconds 60
+            Start-Sleep -Seconds 30
         }
         else {
             Write-DscStatus "Reporting Point Role detected on $ServerFQDN"
             $installed = $true
         }
 
+        ig ($i -eq 5) {
+            try {
+                Get-Service -Name SMS_EXECUTIVE | Restart-Service
+            }
+            catch {}
+        }
         if ($i -gt 10) {
             Write-DscStatus "No Progress for Reporting Point Role after $i tries, Giving up."
             $installFailure = $true

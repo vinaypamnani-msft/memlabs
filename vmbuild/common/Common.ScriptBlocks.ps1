@@ -5,6 +5,8 @@ $global:VM_Create = {
     try {
         $global:ScriptBlockName = "VM_Create"
         # Dot source common
+        #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
 
@@ -139,9 +141,9 @@ $global:VM_Create = {
             Write-Progress2 "Waiting for OOBE" -Status "Starting" -percentcomplete 0 -force
             start-sleep -seconds 3
             # Wait for VM to finish OOBE
-            $oobeTimeout = 15
-            if ($deployConfig.virtualMachines.Count -gt 5) {
-                $oobeTimeout = $deployConfig.virtualMachines.Count + 10
+            $oobeTimeout = 25
+            if ($deployConfig.virtualMachines.Count -gt 3) {
+                $oobeTimeout = $deployConfig.virtualMachines.Count + $oobeTimeout
             }
 
             $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
@@ -225,8 +227,12 @@ $global:VM_Create = {
         # Set PS Execution Policy (required on client OS)
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
         if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
-            return
+            start-sleep -seconds 60
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
         }
 
         # This gets set to true later, if a required fix failed to get applied. When version isn't updated, VM Maintenance could attempt fix again.
@@ -348,7 +354,7 @@ $global:VM_Create = {
 $global:VM_Config = {
     try {
         $global:ScriptBlockName = "VM_Config"
-
+        #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
         # Get variables from parent scope
         $deployConfig = $using:deployConfigCopy
         $currentItem = $using:currentItem
@@ -356,6 +362,7 @@ $global:VM_Config = {
         $Phase = $using:Phase
         $ConfigurationData = $using:ConfigurationData
         $multiNodeDsc = $using:multiNodeDsc
+        $reservation = $using:reservation
 
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
@@ -365,7 +372,16 @@ $global:VM_Config = {
             Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
             return
         }
-
+    }
+    catch {
+        write-host "[$global:ScriptBlockName] had an exception during initialization $_"
+        $msg = $ExceptionInfo.ScriptStackTrace
+        write-host $msg
+        $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
+        write-host $msg
+        throw
+    }
+    try {
         # Validate token exists
         if ($Common.FatalError) {
             Write-Log "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
@@ -412,8 +428,103 @@ $global:VM_Config = {
             return
         }
 
+
+        $Stop_RunningDSC = {
+            # Stop any existing DSC runs
+            try {
+                get-job | remove-job
+
+                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force | out-null
+                $job = Stop-DscConfiguration -Force -AsJob
+                $wait = Wait-Job -Timeout 600 $job
+                if ($wait.State -eq "Running") {
+                    Stop-Job $job
+                    get-job | remove-job
+                    Restart-Service -Name WinMgmt -force
+                }
+                else {
+                    if ($wait.State -eq "Completed") {
+                        get-job | remove-job
+                    }
+                    else {
+                        write-host "State = $($wait.State)"
+                        Stop-Job $job
+                        get-job | remove-job
+                        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
+                        Stop-DscConfiguration -Verbose -Force
+                    }
+
+                }
+                Disable-DscDebug -force | Out-Null
+
+            }
+            catch {
+                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
+                Stop-DscConfiguration -Verbose -Force
+            }
+        }
+
+        Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+        if ($result.ScriptBlockFailed) {
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
+            }
+        }
+
+        if ($Phase -ge 2) {
+            $retryCount = 0
+            $success = $false
+            while ($retrycount -le 3 -and $success -eq $false) {
+                Write-Progress2 $Activity -Status "Testing IP Address" -percentcomplete 9 -force
+                #169.254.239.16
+                $IPAddress = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetIPConfiguration).Ipv4Address.IpAddress } -DisplayName "GetIPs"
+                $success = $true
+                if ($IPAddress.ScriptBlockOutput) {
+                    foreach ($ip in $IPAddress.ScriptBlockOutput) {
+                        if ($ip.StartsWith("169.254")) {
+                            $success = $false
+                            #$currentItem.network
+
+                            if ($retryCount -eq 1) {
+                                Write-Progress2 $Activity -Status "Attempting to repair network $($currentItem.network) " -percentcomplete 10 -force
+                                stop-vm2 -Name $currentItem.vmname
+                                Remove-VMSwitch2 -NetworkName $($currentItem.network)
+                                Remove-DhcpServerv4Scope -scopeID $($currentItem.network) -ErrorAction SilentlyContinue
+                                stop-service "DHCPServer" | Out-Null
+                                $dhcp = Start-DHCP
+                                start-sleep -seconds 10
+                                $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
+                                $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+                                $worked = Add-SwitchAndDhcp -NetworkName $currentItem.network -NetworkSubnet $currentItem.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -erroraction SilentlyContinue
+
+                                start-vm2 -Name $currentItem.vmname
+                                $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName
+                                $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew .\cache } -DisplayName "FixIPs"
+                            }
+                            if ($retryCount -eq 0) {
+                                stop-service "DHCPServer" | Out-Null
+                                start-sleep -seconds 5
+                                $dhcp = Start-DHCP
+                                $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
+                            }
+                            if ($retryCount -eq 2) {
+                                $count = (Get-VMSwitch).Count
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Could not obtain a DHCP IP Address ($ip) Should be on $($currentItem.network) ($count Hyper-V switches in use. If this is over 20, this could be the issue)" -Failure -OutputStream
+                                return
+                            }
+                            $retryCount++
+                        }
+                    }
+                }
+            }
+        }
+
         # inject tools
         if ($Phase -eq 2) {
+
             Write-Progress2 $Activity -Status "Injecting Tools" -percentcomplete 10 -force
             $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress
             if (-not $injected) {
@@ -439,25 +550,78 @@ $global:VM_Config = {
             }
         }
 
-        $Stop_RunningDSC = {
-            # Stop any existing DSC runs
-            try {
-                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
-                Stop-DscConfiguration -Verbose -Force
-                Disable-DscDebug
+
+        if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO") {
+            Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
+            $vm = Get-VM2 $currentItem.vmName
+            $MAC = ($vm.NetworkAdapters | Where-Object { $_.SwitchName -eq "Cluster" }).MacAddress
+            #$Get_MAC = {
+            # (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress
+            #}
+            # Test DHCP Reservations
+
+            #$script = Invoke-VmCommand -SuppressLog -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Get_MAC -DisplayName "Get 2nd Mac"
+            #Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
+            #$MAC = $script.ScriptBlockOutput
+            if ($MAC) {
+                $MAC = $MAC.ToLower()
+                if ($reservation) {
+                    #Reservation is now a using statement, as getting the data here causes status to break
+                    if ($reservation.Contains($MAC)) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC was found" -LogOnly
+                    }
+                    else {
+                        #Get-DhcpServerv4Reservation -ClientId $MAC -ScopeId 10.250.250.0 -ErrorAction SilentlyContinue
+                        #if (!$reservation) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC not found" -Warning -LogOnly
+                        $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+                        if (-not ($dc.network)) {
+                            $dns = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
+                        }
+                        else {
+                            $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
+                        }
+                        $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2 -ErrorAction Stop
+                        if (! $iprange) {
+                            $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2 -ErrorAction Stop
+                        }
+                        if (! $iprange) {
+                            Write-Log "$VmName`: Could not acquire a free cluster DHCP Address" -Failure
+                            return $false
+                        }
+                        if ($currentItem.OtherNode) {
+                            $ip = $iprange[1]
+                        }
+                        else {
+                            $ip = $iprange[0]
+                        }
+                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" -erroraction SilentlyContinue | Where-Object { $_.IpAddress -eq $ip }
+                        if ($ipa) {
+                            Remove-DhcpServerv4Reservation -IPAddress $ip | Out-Null
+                        }
+
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+
+                        Write-Progress2 $Activity -Status "Adding DHCP Reservations for scope 10.250.250.0 ip: $ip MAC: $MAC" -percentcomplete 11 -force
+                        Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $MAC -Description "Reservation for $($currentItem.VMName)" -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Set-DhcpServerv4OptionValue -optionID 15 -value $deployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
+                        Start-DHCP
+                        Start-Sleep -seconds 30
+                        $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "renew DHCP"
+                    }
+                }
             }
-            catch {
-                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
-                Stop-DscConfiguration -Verbose -Force
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName):  $MAC was not found" -Warning
             }
+
+
+
         }
 
-        Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 20 -force
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
-        if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
-        }
 
         # Boot To OOBE?
         $bootToOOBE = $currentItem.role -eq "AADClient"
@@ -514,11 +678,12 @@ $global:VM_Config = {
         if ($result.ScriptBlockFailed) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC Files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
         }
-        Copy-Item -ToSession $ps -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+        $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
         $Expand_Archive = {
 
             $global:ScriptBlockName = "Expand_Archive"
+            try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
             # Create init log
             $log = "C:\staging\DSC\DSC_Init.txt"
             $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
@@ -557,7 +722,7 @@ $global:VM_Config = {
 
             try {
                 $global:ScriptBlockName = "DSC_InstallModules"
-
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $Phase = $using:Phase
@@ -644,6 +809,7 @@ $global:VM_Config = {
 
             try {
                 $global:ScriptBlockName = "DSC_ClearStatus"
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
@@ -738,10 +904,14 @@ $global:VM_Config = {
 
         Write-Progress2 $Activity -Status "Clearing DSC Status" -percentcomplete 65 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Clearing previous DSC status"
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
+        $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
-            return
+            start-sleep -seconds 60
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
         }
 
         $DSC_CreateSingleConfig = {
@@ -749,6 +919,7 @@ $global:VM_Config = {
 
             try {
                 $global:ScriptBlockName = "DSC_CreateSingleConfig"
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $deployConfig = $using:deployConfig
@@ -829,6 +1000,7 @@ $global:VM_Config = {
             param($DscFolder)
             try {
                 $global:ScriptBlockName = "DSC_CreateMultiConfig"
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
@@ -945,6 +1117,7 @@ $global:VM_Config = {
             param($DscFolder)
             try {
                 $global:ScriptBlockName = "DSC_StartConfig"
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $ConfigurationData = $using:ConfigurationData
@@ -1004,11 +1177,12 @@ $global:VM_Config = {
                     $nodeList.Add($node) | Out-Null
                 }
                 $attempts = 0
+                $maxAttempts = 150
                 do {
                     $attempts++
                     $allNodesReady = $true
                     $nonReadyNodes = $nodeList.Clone()
-                    $percent = [Math]::Min($attempts, 100)
+                    $percent = [Math]::Min($attempts, $maxAttempts)
                     Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
                     foreach ($node in $nonReadyNodes) {
                         if (-not $node) {
@@ -1022,17 +1196,27 @@ $global:VM_Config = {
                         else {
                             $nodeList.Remove($node) | Out-Null
                             if ($nodeList.Count -eq 0) {
-                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -status "All nodes are ready" -PercentComplete 100
+                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -status "All nodes are ready" -PercentComplete 100
                                 $allNodesReady = $true
                             }
                             else {
-                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent
+                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent
                             }
                         }
                     }
 
+                    if ($attempts -eq 80) {
+                        foreach ($node in $nodeList) {
+                            Write-Progress2 "Restarting $node" -PercentComplete $percent
+                            Stop-Vm2 -Name $node -force:$true
+                            Start-Sleep -seconds 20
+                            Start-VM2 -Name $node
+                            Start-Sleep -seconds 60
+                        }
+                    }
+
                     Start-Sleep -Seconds 6
-                } until ($allNodesReady -or $attempts -ge 100)
+                } until ($allNodesReady -or $attempts -ge $maxAttempts)
 
                 if (-not $allNodesReady) {
                     Write-Progress2 "Failed waiting on VMs [$($nodeList -join ',')].  Please cancel and retry this phase."
@@ -1072,6 +1256,9 @@ $global:VM_Config = {
 
         $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
         $timeout = $using:RoleConfigTimeoutMinutes
+        if ($Phase -eq 8) {
+            $timeout = $timeout * 2
+        }
         $timeSpan = New-TimeSpan -Minutes $timeout
         $stopWatch.Start()
 
@@ -1086,7 +1273,8 @@ $global:VM_Config = {
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
-
+        $rebooted = $false
+        $dscFails = 0
         $dscStatusPolls = 0
         [int]$failCount = 0
         try {
@@ -1098,11 +1286,47 @@ $global:VM_Config = {
                     $failure = $false
                     $dscStatusPolls = 0 # Do this every 30 seconds or so
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Polling DSC Status via Get-DscConfigurationStatus" -Verbose
-                    $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                    $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
                         $ProgressPreference = 'SilentlyContinue'
                         Get-DscConfigurationStatus
                         $ProgressPreference = 'Continue'
                     } -SuppressLog:$suppressNoisyLogging
+
+                    if (-not $dscStatus) {
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Get-DscConfigurationStatus did not complete"
+                        $dscFails++
+                        if ($dscFails -ge 20) {
+                            stop-vm2 -name $currentItem.vmName
+                            start-sleep -Seconds 30
+                            start-vm2 -name $currentItem.vmName
+                            $dscFails = 0
+                        }
+                        continue
+                    }else {
+                        $dscFails = 0
+                    }
+
+                    if (-not $rebooted -and $dscStatus.RebootRequested -eq $true) {
+                        # Reboot the machine
+                        start-sleep -Seconds 90 # Wait 90 seconds and re-request.. maybe its going to reboot itself.
+                        $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
+                            $ProgressPreference = 'SilentlyContinue'
+                            Get-DscConfigurationStatus
+                            $ProgressPreference = 'Continue'
+                        } -SuppressLog:$suppressNoisyLogging
+                        # Reboot the machine
+                        if ($dscStatus.RebootRequested) {
+                            stop-vm2 -name $currentItem.vmName
+                            start-sleep -Seconds 30
+                            start-vm2 -name $currentItem.vmName
+                            $rebooted = $true
+                        }
+                    }
+                    else {
+                        $rebooted = $false
+                    }
+
+
 
                     if ($dscStatus.ScriptBlockFailed) {
                         if ($currentStatus -is [string]) {
@@ -1115,7 +1339,6 @@ $global:VM_Config = {
                     }
                     else {
                         if ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -ne "Success") {
-
                             $badResources = $dscStatus.ScriptBlockOutput.ResourcesNotInDesiredState
                             foreach ($badResource in $badResources) {
                                 if (-not $badResource.Error) {
@@ -1125,6 +1348,11 @@ $global:VM_Config = {
                                 $errorObject = $badResource.Error | ConvertFrom-Json -ErrorAction SilentlyContinue
                                 if ($errorObject.FullyQualifiedErrorId -ne "NonTerminatingErrorFromProvider") {
                                     $msg = "$errorResourceId`: $($errorObject.FullyQualifiedErrorId) $($errorObject.Exception.Message)"
+                                    if ($msg.Contains("does not exist on SQL server")) {
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting on AD Replication to add account to machine"
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Warning -LogOnly
+                                        continue
+                                    }
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) : $msg" -Warning -OutputStream
                                     $FailtimeSpan = New-TimeSpan -Minutes 35
                                     if ($FailStopWatch -and $FailStopWatch.Elapsed.TotalMinutes -gt 35) {
@@ -1206,7 +1434,7 @@ $global:VM_Config = {
                 }
                 $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
                 $stopwatch2.Start()
-                $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
+                $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
                 $stopwatch2.Stop()
 
                 if (-not $status -or ($status.ScriptBlockFailed)) {
@@ -1215,8 +1443,9 @@ $global:VM_Config = {
                     }
                     else {
                         [int]$failedHeartbeats++
+                        start-sleep -Seconds 10
                     }
-                    start-sleep -Seconds 10
+
                     # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
                     if ($failedHeartbeats -gt 10) {
                         try {
@@ -1234,14 +1463,14 @@ $global:VM_Config = {
 
                 if ($failedHeartbeats -ge $failedHeartbeatThreshold) {
                     try {
-                        Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
+                        #Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
 
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, forcefully restarting the VM" -failcount $failedHeartbeats -failcountMax $failedHeartbeatThreshold
 
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
-                        Stop-VM2 -name $currentItem.vmName -TurnOff
+                        Stop-VM2 -name $currentItem.vmName -Force
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Stopped"
-
+                        Start-Sleep -Seconds 20
                         Start-VM2 -Name $currentItem.vmName
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Started"
 
@@ -1348,7 +1577,7 @@ $global:VM_Config = {
                 }
                 else {
                     if ($noStatus) {
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress"
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress. Polls: $dscStatusPolls Failed Heartbeats: $failedHeartbeats Status: $($dscStatus.ScriptBlockOutput.Status)"
                     }
                     else {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $currentStatus
@@ -1394,6 +1623,14 @@ $global:VM_Config = {
             }
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_StickyKeys -DisplayName "Disable StickyKeys"
+
+            $disable_AutomaticUpdates = {
+                New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Type Dword -Value 1 -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "AUOptions" -Type Dword -Value 2 -Force
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
         }
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
@@ -1410,9 +1647,9 @@ $global:VM_Config = {
         }
     }
     catch {
-        Write-Progress2 "Exception Occurred" -Status "Failed end2 $_"
         Write-Exception -ExceptionInfo $_
         Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
+        Write-Progress "Exception Occurred" -Status "Failed end2 $_"
     }
 }
