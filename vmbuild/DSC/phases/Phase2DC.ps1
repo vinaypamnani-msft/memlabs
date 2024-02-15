@@ -9,7 +9,7 @@
     )
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc', 'GroupPolicyDsc'
 
     # Define log share
     $LogFolder = "DSC"
@@ -321,6 +321,100 @@
             }
 
             $waitOnDependency += "[DelegateControl]Add$server"
+        }
+
+        $count = 0
+        [System.Collections.ArrayList]$groupMembers = @()
+        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite") }
+        foreach ($member in $GroupMembersList) {
+            $count = $groupMembers.Add($member.vmName + "$")
+        }
+
+        if ($count) {
+
+            ADGroup ConfigMgrSiteServers {
+                Ensure      = 'Present'
+                GroupName   = 'ConfigMgr Site Servers'
+                GroupScope  = "Global"
+                Category    = "Security"
+                Description = 'ConfigMgr Site Servers'
+                MembersToInclude  = $groupMembers
+                DependsOn   = $waitOnDependency
+            }
+            $waitOnDependency = "[ADGroup]ConfigMgrSiteServers"
+        }
+
+        $count = 0
+        [System.Collections.ArrayList]$groupMembers = @()
+        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite") }
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP }
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP }
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP }
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP }
+
+        foreach ($member in $GroupMembersList) {
+            $count = $groupMembers.Add($member.vmName + "$")
+        }
+
+        $groupMembers = $groupMembers | Select-Object -Unique
+        if ($count) {
+
+            ADGroup ConfigMgrIISServers {
+                Ensure      = 'Present'
+                GroupName   = 'ConfigMgr IIS Servers'
+                GroupScope  = "Global"
+                Category    = "Security"
+                Description = 'ConfigMgr IIS Servers'
+                MembersToInclude  = $groupMembers
+                DependsOn   = $waitOnDependency
+            }
+            $waitOnDependency = "[ADGroup]ConfigMgrIISServers"
+        }
+
+
+        if ($ThisVM.InstallCA) {
+
+            $GPOName = "Certificate AutoEnrollment"
+            $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
+            $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+            GroupPolicy GroupPolicyConfig  {
+                Name = $GPOName
+                DependsOn   = $waitOnDependency
+            }
+
+            GPLink GPLinkConfig  {
+                Path = $DNName
+                GPOName = $GPOName
+                DependsOn   = "[GroupPolicy]GroupPolicyConfig"
+            }
+
+            GPRegistryValue GPRegistryValueConfig1 {
+                Name = $GPOName
+                Key = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+                ValueName = "AEPolicy"
+                ValueType = "DWord"
+                Value = "7"
+                DependsOn   = "[GPLink]GPLinkConfig"
+            }
+
+            GPRegistryValue GPRegistryValueConfig2 {
+                Name = $GPOName
+                Key = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+                ValueName = "OfflineExpirationPercent"
+                ValueType = "DWord"
+                Value = "10"
+                DependsOn   = "[GPLink]GPLinkConfig"
+            }
+
+            GPRegistryValue GPRegistryValueConfig3 {
+                Name = $GPOName
+                Key = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+                ValueName = "OfflineExpirationStoreNames"
+                ValueType = "String"
+                Value = "MY"
+                DependsOn   = "[GPLink]GPLinkConfig"
+            }
+            $waitOnDependency = "[GPRegistryValue]GPRegistryValueConfig3"
         }
 
         RemoteDesktopAdmin RemoteDesktopSettings {

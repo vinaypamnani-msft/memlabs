@@ -1949,8 +1949,8 @@ function New-VirtualMachine {
                         Remove-DhcpServerv4Reservation -IPAddress $ip
                     }
 
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
 
 
                     Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
@@ -1976,8 +1976,8 @@ function New-VirtualMachine {
                         if ($ipa) {
                             Remove-DhcpServerv4Reservation -IPAddress $ip
                         }
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
 
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
@@ -2967,22 +2967,24 @@ function Install-Tools {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
             continue
         }
+        $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
+        if ($out.ScriptBlockOutput -ne $true) {
+            foreach ($tool in $Common.AzureFileList.Tools) {
 
-        foreach ($tool in $Common.AzureFileList.Tools) {
+                if ($tool.NoUpdate) { continue }
 
-            if ($tool.NoUpdate) { continue }
+                if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-            if ($ToolName -and $tool.Name -ne $ToolName) { continue }
+                if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { continue }
 
-            if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { continue }
+                if ($ShowProgress) {
+                    Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
+                }
 
-            if ($ShowProgress) {
-                Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
-            }
-
-            $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
-            if (-not $worked) {
-                $success = $false
+                $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
+                if (-not $worked) {
+                    $success = $false
+                }
             }
         }
     }

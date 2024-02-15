@@ -41,7 +41,8 @@ try {
         'xFailOverCluster',
         'AccessControlDsc',
         'UpdateServicesDsc',
-        'LanguageDsc'
+        'LanguageDsc',
+        'GroupPolicyDsc'
     )
 
     foreach ($module in $modules) {

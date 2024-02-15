@@ -3679,3 +3679,50 @@ class InstallPBIRS {
     }
 
 }
+
+[DscResource()]
+class AddCertificateTemplate {
+    [DscProperty(Key)]
+    [string]$TemplateName
+
+    [DscProperty(Mandatory)]
+    [string]$DNPath
+    [void] Set() {
+
+        $_TemplateName = $this.TemplateName
+        $_DNPath = $this.DNPath
+
+        $_Status = "Adding Certificate Template $_TemplateName"
+        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
+        $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
+        "$time $_Status" | Out-File -FilePath $StatusLog -Append
+
+        $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
+        if (!Test-Path -Path $_Path -PathType Leaf) {
+            throw "Could not find $_Path"
+        }
+        $TargetFile = "c:\temp\$_TemplateName.ldf"
+        (Get-Content $_Path).Replace('DC=TEMPLATE,DC=com', $_DNPath) | Set-Content $TargetFile -Force
+        ldifde -i -k -f $TargetFile | Out-File -FilePath $StatusLog -Append
+        Add-CATemplate $_TemplateName -Force
+    }
+
+    [bool] Test() {
+
+        $_TemplateName = $this.TemplateName
+
+        $count = (Get-CATemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+
+        if ($count -gt 0) {
+            return $true
+        }
+
+        return $false
+    }
+
+    [AddCertificateTemplate] Get() {
+        return $this
+    }
+
+}
+
