@@ -43,6 +43,10 @@ function Get-UserConfiguration {
             {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EVALVersion" -Value $false
             }
+            if ($null -eq ($config.cmOptions.UsePKI))
+            {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UsePKI" -Value $false
+            }
         }
         if ($null -ne $config.vmOptions.domainAdminName) {
             if ($null -eq ($config.vmOptions.adminName)) {

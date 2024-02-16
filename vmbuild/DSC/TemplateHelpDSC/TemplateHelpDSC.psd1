@@ -51,7 +51,8 @@ DscResourcesToExport = @(
     'ADServicePrincipalName2',
     'ConfigureWSUS',
     'InstallPBIRS',
-    'AddCertificateTemplate'
+    'AddCertificateTemplate',
+    'AddCertificateToIIS'
 
 )
 

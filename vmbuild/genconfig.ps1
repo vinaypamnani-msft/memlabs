@@ -860,7 +860,11 @@ function get-CMOptionsSummary {
     if ($Global:Config.cmOptions.EVALVersion -or $Global:Config.cmOptions.version -eq "tech-preview") {
         $license = "[EVAL]"
     }
-    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license"
+    $pki = "[EHTTP]"
+    if ($Global:Config.cmOptions.UsePKI) {
+        $pki = "[PKI]"
+    }
+    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki"
     return $Output
 }
 
@@ -5958,7 +5962,8 @@ function Add-NewVMForRole {
                 version                   = "current-branch"
                 install                   = $true
                 pushClientToDomainMembers = $true
-                EVALVersion        = $false
+                EVALVersion               = $false
+                UsePKI                    = $false
             }
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
         }

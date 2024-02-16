@@ -374,6 +374,12 @@
 
         if ($ThisVM.InstallCA) {
 
+
+            WriteStatus CertTemplates {
+                DependsOn =$waitOnDependency
+                Status    = "Installing Certificate Templates"
+            }
+
             $GPOName = "Certificate AutoEnrollment"
             $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
             $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"

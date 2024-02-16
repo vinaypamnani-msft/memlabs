@@ -23,6 +23,7 @@ function Remove-VirtualMachine {
     $vmTest = Get-VM2 -Name $VmName -Fallback
 
     if ($vmTest) {
+        $parent = (get-item $($vmTest.Path)).Parent
         Write-Log "VM '$VmName' exists. Removing." -SubActivity
 
         if ($vmFromList.ClusterIPAddress) {
@@ -65,6 +66,12 @@ function Remove-VirtualMachine {
 
         Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
         Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
+
+
+        $count = (Get-ChildItem $parent | Measure-Object).Count
+        if ($count -eq 0) {
+            Remove-Item -Path $parent
+        }
     }
     else {
         Write-Log "VM '$VmName' does not exist in Hyper-V." -Warning

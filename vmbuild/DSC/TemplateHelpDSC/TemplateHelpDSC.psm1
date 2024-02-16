@@ -3712,17 +3712,55 @@ class AddCertificateTemplate {
             throw "Could not find $_Path"
         }
         $TargetFile = "c:\temp\$_TemplateName.ldf"
+        Write-Verbose "TargetFile $TargetFile source: $_Path"
         (Get-Content $_Path).Replace('DC=TEMPLATE,DC=com', $_DNPath) | Set-Content $TargetFile -Force
+        Write-Verbose "Running ldifde -i -k -f $TargetFile"
         ldifde -i -k -f $TargetFile | Out-File -FilePath $StatusLog -Append
-        Add-CATemplate $_TemplateName -Force
 
         if ($_Group) {
+            Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
-            Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0 -Scope CurrentUser
+
+            Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
+            Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0
+
+            start-sleep -seconds 10
+            Write-Verbose "Get-Command -Module PSPKI"
             Get-Command -Module PSPKI  | Out-null
-            Get-CertificateTemplate -Name $_TemplateName | Get-CertificateTemplateAcl | Add-CertificateTemplateAcl -Identity $_group -AccessType Allow -AccessMask $_Permissions | Set-CertificateTemplateAcl
+            Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."
+            PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl
         }
 
+        try {
+            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
+        }
+        catch {}
+
+        $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+        if ($count -eq 0) {
+            try {
+                Write-Verbose "PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name Webserver2"
+                PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name Webserver2
+            }
+            catch {
+                try {
+                    Write-Verbose "ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop"
+                    ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop
+                }
+                catch {
+                    # Reboot
+                    if (-not (Test-Path "C:\temp\certreboot.txt")) {
+                        Write-Verbose "Rebooting $_"
+                        New-Item "C:\temp\certreboot.txt"
+                        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                        $global:DSCMachineStatus = 1
+                        return
+                    }
+                    throw
+                }
+            }
+
+        }
 
     }
 
@@ -3730,7 +3768,7 @@ class AddCertificateTemplate {
 
         $_TemplateName = $this.TemplateName
 
-        $count = (Get-CATemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+        $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
 
         if ($count -gt 0) {
             return $true
@@ -3740,6 +3778,48 @@ class AddCertificateTemplate {
     }
 
     [AddCertificateTemplate] Get() {
+        return $this
+    }
+
+}
+
+
+[DscResource()]
+class AddCertificateToIIS {
+    [DscProperty(Key)]
+    [string]$FriendlyName
+
+    [void] Set() {
+
+        $_FriendlyName = $this.FriendlyName
+
+
+        $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+        if (-not $cert) {
+            throw "Could not find cert with friendly Name $_FriendlyName"
+        }
+        try {
+            netsh http delete sslcert ipport=0.0.0.0:443
+        }
+        catch {}
+
+        netsh http add sslcert ipport=0.0.0.0:443 certhash=$($cert.Thumbprint) appid='{4dc3e181-e14b-4a21-b022-59fc669b0914}' certstorename=My verifyclientcertrevocation=enable
+
+    }
+
+    [bool] Test() {
+
+        $_FriendlyName = $this.FriendlyName
+        $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+        $certdata = netsh http show sslcert ipport=0.0.0.0:443
+        if ($certdata.ToLower() -match $($cert.Thumbprint) ) {
+            return $true
+        }
+
+        return $false
+    }
+
+    [AddCertificateToIIS] Get() {
         return $this
     }
 

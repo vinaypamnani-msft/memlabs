@@ -83,6 +83,10 @@ configuration Phase3
             $AddIISCert = $false
         }
 
+        if (-not $deployConfig.cmOptions.UsePKI) {
+            $AddIISCert = $false
+        }
+
         WriteStatus AddLocalAdmin {
             Status = "Adding required accounts [$($ThisVM.thisParams.LocalAdminAccounts -join ',')] to Administrators group"
         }
@@ -231,8 +235,12 @@ configuration Phase3
             $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
 
             if ($AddIISCert){
-
+                WriteStatus AddIISCerts {
+                    Status = "Adding IIS Certificate for PKI"
+                    DependsOn = $nextDepend
+                }
                 $subject = $ThisVM.vmName + "." + $DomainName
+                $friendlyName = 'ConfigMgr SSL Cert for Web Server2'
                 CertReq SSLCert
                 {
                     #CARootName          = 'test-dc01-ca'
@@ -245,13 +253,19 @@ configuration Phase3
                     KeyUsage            = '0xa0'
                     CertificateTemplate = 'WebServer2'
                     AutoRenew           = $true
-                    FriendlyName        = 'ConfigMgr SSL Cert for Web Server2'
+                    FriendlyName        =  $friendlyName
                     Credential          = $Credential
                     KeyType             = 'RSA'
                     RequestType         = 'CMC'
                     DependsOn = $nextDepend
                 }
                 $nextDepend = "[CertReq]SSLCert"
+
+                AddCertificateToIIS AddCert{
+                    FriendlyName        =  $friendlyName
+                    DependsOn = $nextDepend
+                }
+                $nextDepend = "[AddCertificateToIIS]AddCert"
             }
 
 
