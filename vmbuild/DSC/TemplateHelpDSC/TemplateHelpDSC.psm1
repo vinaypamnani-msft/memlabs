@@ -3600,17 +3600,18 @@ class InstallPBIRS {
             try {
                 if ($this.IsRemoteDatabaseServer) {
                     try {
-                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
-                    } catch {
+                        Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
+                    }
+                    catch {
                         Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
                         Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
                 else {
                     try {
-                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                     catch {
                         Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
@@ -3687,10 +3688,19 @@ class AddCertificateTemplate {
 
     [DscProperty(Mandatory)]
     [string]$DNPath
+
+    [DscProperty()]
+    [string]$GroupName
+
+    [DscProperty()]
+    [string]$Permissions
+
     [void] Set() {
 
         $_TemplateName = $this.TemplateName
         $_DNPath = $this.DNPath
+        $_Group = $this.GroupName
+        $_Permissions = $this.Permissions
 
         $_Status = "Adding Certificate Template $_TemplateName"
         $StatusLog = "C:\staging\DSC\DSC_Log.txt"
@@ -3698,13 +3708,22 @@ class AddCertificateTemplate {
         "$time $_Status" | Out-File -FilePath $StatusLog -Append
 
         $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
-        if (!Test-Path -Path $_Path -PathType Leaf) {
+        if (!(Test-Path -Path $_Path -PathType Leaf)) {
             throw "Could not find $_Path"
         }
         $TargetFile = "c:\temp\$_TemplateName.ldf"
         (Get-Content $_Path).Replace('DC=TEMPLATE,DC=com', $_DNPath) | Set-Content $TargetFile -Force
         ldifde -i -k -f $TargetFile | Out-File -FilePath $StatusLog -Append
         Add-CATemplate $_TemplateName -Force
+
+        if ($_Group) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+            Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0 -Scope CurrentUser
+            Get-Command -Module PSPKI  | Out-null
+            Get-CertificateTemplate -Name $_TemplateName | Get-CertificateTemplateAcl | Add-CertificateTemplateAcl -Identity $_group -AccessType Allow -AccessMask $_Permissions | Set-CertificateTemplateAcl
+        }
+
+
     }
 
     [bool] Test() {

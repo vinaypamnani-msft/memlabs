@@ -42,7 +42,8 @@ try {
         'AccessControlDsc',
         'UpdateServicesDsc',
         'LanguageDsc',
-        'GroupPolicyDsc'
+        'GroupPolicyDsc',
+        'CertificateDsc'
     )
 
     foreach ($module in $modules) {

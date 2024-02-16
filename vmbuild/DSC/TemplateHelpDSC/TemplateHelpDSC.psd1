@@ -49,8 +49,9 @@ DscResourcesToExport = @(
     'ClusterRemoveUnwantedIPs',
     'ClusterSetOwnerNodes',
     'ADServicePrincipalName2',
-    'ConfigureWSUS'
-    'InstallPBIRS'
+    'ConfigureWSUS',
+    'InstallPBIRS',
+    'AddCertificateTemplate'
 
 )
 

@@ -12,6 +12,7 @@ configuration Phase3
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc'
     Import-DscResource -ModuleName 'LanguageDsc'
+    Import-DscResource -ModuleName 'CertificateDsc'
 
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -52,14 +53,34 @@ configuration Phase3
             }
         }
 
+        $AddIISCert = $false
         # Install feature roles
         $featureRoles = @($ThisVM.role)
         if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") {
             $featureRoles += "Site Server"
+            $AddIISCert = $true
         }
 
         if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") {
            $featureRoles += "WSUS"
+           $AddIISCert = $true
+        }
+
+        if ($ThisVM.installRP -eq $true) {
+            $AddIISCert = $true
+        }
+
+        if ($ThisVM.installMP -eq $true) {
+            $AddIISCert = $true
+        }
+
+        if ($ThisVM.installDP -eq $true) {
+            $AddIISCert = $true
+        }
+
+        $DCVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+        if (-not $DCVM.InstallCA) {
+            $AddIISCert = $false
         }
 
         WriteStatus AddLocalAdmin {
@@ -208,6 +229,32 @@ configuration Phase3
             }
 
             $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
+
+            if ($AddIISCert){
+
+                $subject = $ThisVM.vmName + "." + $DomainName
+                CertReq SSLCert
+                {
+                    #CARootName          = 'test-dc01-ca'
+                    #CAServerFQDN        = 'dc01.test.pha'
+                    Subject             = $subject
+                    KeyLength           = '2048'
+                    Exportable          = $false
+                    ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                    OID                 = '1.3.6.1.5.5.7.3.1'
+                    KeyUsage            = '0xa0'
+                    CertificateTemplate = 'WebServer2'
+                    AutoRenew           = $true
+                    FriendlyName        = 'ConfigMgr SSL Cert for Web Server2'
+                    Credential          = $Credential
+                    KeyType             = 'RSA'
+                    RequestType         = 'CMC'
+                    DependsOn = $nextDepend
+                }
+                $nextDepend = "[CertReq]SSLCert"
+            }
+
+
       #  }
 
         WriteStatus Complete {
