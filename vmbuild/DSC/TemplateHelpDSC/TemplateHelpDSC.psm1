@@ -3841,7 +3841,42 @@ class AddCertificateTemplate {
 
 }
 
+[DscResource()]
+class RebootNow {
+    [DscProperty(Key)]
+    [string]$FileName
 
+    [void] Set() {
+
+        $_FileName = $this.FileName
+
+
+        if (-not (Test-Path $_FileName)) {
+            Write-Verbose "Rebooting"
+            New-Item $_FileName
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+            return
+        }
+
+        Write-Verbose "Not Rebooting"
+    }
+
+    [bool] Test() {
+
+        $_FileName = $this.FileName
+        if (-not (Test-Path $_FileName)) {
+            return $false
+        }
+
+        return $true
+    }
+
+    [RebootNow] Get() {
+        return $this
+    }
+
+}
 [DscResource()]
 class AddCertificateToIIS {
     [DscProperty(Key)]

@@ -235,6 +235,19 @@ configuration Phase3
             $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
 
             if ($AddIISCert){
+
+
+                WriteStatus RebootNow {
+                    Status = "Rebooting to get Group Membership"
+                    DependsOn = $nextDepend
+                }
+
+                RebootNow RebootNow {
+                    FileName = 'C:\Temp\IISGroupReboot.txt'
+                    DependsOn = $nextDepend
+                }
+                $nextDepend = "[RebootNow]RebootNow"
+
                 WriteStatus AddIISCerts {
                     Status = "Adding IIS Certificate for PKI"
                     DependsOn = $nextDepend
@@ -254,7 +267,8 @@ configuration Phase3
                     CertificateTemplate = 'WebServer2'
                     AutoRenew           = $true
                     FriendlyName        =  $friendlyName
-                    Credential          = $Credential
+                    #Credential          = $Credential
+                    #UseMachineContext   = $true
                     KeyType             = 'RSA'
                     RequestType         = 'CMC'
                     DependsOn = $nextDepend
