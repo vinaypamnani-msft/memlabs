@@ -1,3 +1,4 @@
+#CreateGuestDscZip.ps1
 param(
     $configName,
     $vmName,

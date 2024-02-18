@@ -346,7 +346,8 @@
 
         $iiscount = 0
         [System.Collections.ArrayList]$groupMembers = @()
-        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite") }
+        $GroupMembersList = @()
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite") }
         $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP }
         $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP }
         $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP }
@@ -376,7 +377,7 @@
 
 
             WriteStatus CertTemplates {
-                DependsOn =$waitOnDependency
+                DependsOn = $waitOnDependency
                 Status    = "Installing Certificate Templates"
             }
 
