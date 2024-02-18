@@ -3728,27 +3728,76 @@ class AddCertificateTemplate {
             Write-Verbose "Get-Command -Module PSPKI"
             Get-Command -Module PSPKI  | Out-null
             Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."
-            PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl
+            $retries = 0
+            $success = $false
+            while ($retries -lt 10 -and $success -eq $false) {
+                $retries++
+                try {
+                    Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop"
+                    $template = PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop
+
+                    Write-Verbose "PSPKI\Get-CertificateTemplateAcl -ErrorAction stop"
+                    $templateacl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction stop
+
+                    Write-Verbose "PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions -ErrorAction stop"
+                    $templateacl2 = $templateacl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions -ErrorAction stop
+
+                    Write-Verbose "PSPKI\Set-CertificateTemplateAcl -ErrorAction stop"
+                    $templateacl2 | PSPKI\Set-CertificateTemplateAcl -ErrorAction stop
+                    $success = $true
+                }
+                catch {
+                    try {
+                        Write-Verbose "Starting CertSvc: $_"
+                        Start-Service -Name CertSvc -ErrorAction SilentlyContinue
+                        start-sleep -Seconds 60
+                    }
+                    catch {
+                        Write-Verbose "Starting CertSvc: $_"
+                    }
+
+                    try {
+                        Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl"
+                        PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl
+                        $success = $true
+                    }
+                    catch {
+                        Write-Verbose "$_"
+                        if (-not (Test-Path "C:\temp\certreboot2.txt")) {
+                            Write-Verbose "Rebooting $_"
+                            New-Item "C:\temp\certreboot2.txt"
+                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                            $global:DSCMachineStatus = 1
+                            return
+                        }
+                    }
+                }
+            }
         }
 
         try {
             Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
+            start-sleep -seconds 60
         }
         catch {}
 
-        $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
-        if ($count -eq 0) {
+        $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+        while ($count -eq 0) {
             try {
-                Write-Verbose "PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name Webserver2"
-                PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name Webserver2
+                Write-Verbose "ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop"
+                ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop
             }
             catch {
                 try {
-                    Write-Verbose "ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop"
-                    ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop
+                    Start-Service -Name CertSvc
+                    Start-Sleep -Seconds 10
+                    Write-Verbose "$_"
+                    Write-Verbose "PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName"
+                    PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName
                 }
                 catch {
                     # Reboot
+                    Write-Verbose "$_"
                     if (-not (Test-Path "C:\temp\certreboot.txt")) {
                         Write-Verbose "Rebooting $_"
                         New-Item "C:\temp\certreboot.txt"
@@ -3759,7 +3808,7 @@ class AddCertificateTemplate {
                     throw
                 }
             }
-
+            $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
         }
 
     }
@@ -3767,9 +3816,18 @@ class AddCertificateTemplate {
     [bool] Test() {
 
         $_TemplateName = $this.TemplateName
-
-        $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
-
+        try {
+            Write-Verbose " -- ADCSAdministration\get-Catemplate"
+            $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+        }
+        catch {
+            Write-Verbose "$_"
+            Write-Verbose " -- Restart-Service -Name CertSvc"
+            Restart-Service -Name CertSvc
+            start-sleep -seconds 60
+            Write-Verbose " -- ADCSAdministration\get-Catemplate"
+            $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+        }
         if ($count -gt 0) {
             return $true
         }
