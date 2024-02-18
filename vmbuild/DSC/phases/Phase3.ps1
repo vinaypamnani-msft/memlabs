@@ -253,18 +253,17 @@ configuration Phase3
                     DependsOn = $nextDepend
                 }
                 $subject = $ThisVM.vmName + "." + $DomainName
-                $friendlyName = 'ConfigMgr SSL Cert for Web Server2'
+                $friendlyName = 'ConfigMgr WebServer Certificate'
                 CertReq SSLCert
                 {
-                    #CARootName          = 'test-dc01-ca'
-                    #CAServerFQDN        = 'dc01.test.pha'
                     Subject             = $subject
+                    SubjectAltName      = "DNS=" + $subject
                     KeyLength           = '2048'
                     Exportable          = $false
                     ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
-                    OID                 = '1.3.6.1.5.5.7.3.1'
-                    KeyUsage            = '0xa0'
-                    CertificateTemplate = 'WebServer2'
+                    #OID                 = '1.3.6.1.5.5.7.3.1'
+                    #KeyUsage            = '0xa0'
+                    CertificateTemplate = 'ConfigMgrWebServerCertificate'
                     AutoRenew           = $true
                     FriendlyName        =  $friendlyName
                     #Credential          = $Credential
@@ -275,11 +274,43 @@ configuration Phase3
                 }
                 $nextDepend = "[CertReq]SSLCert"
 
+
                 AddCertificateToIIS AddCert{
                     FriendlyName        =  $friendlyName
                     DependsOn = $nextDepend
                 }
                 $nextDepend = "[AddCertificateToIIS]AddCert"
+
+                $friendlyName = 'ConfigMgr Client DistributionPoint Certificate'
+                CertReq SSLCert2
+                {
+                    Subject             = "Client DistributionPoint Cert"
+                    #SubjectAltName      = "DNS=" + $subject
+                    KeyLength           = '2048'
+                    Exportable          = $true
+                    ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                    #OID                 = '1.3.6.1.5.5.7.3.1'
+                    #KeyUsage            = '0xa0'
+                    CertificateTemplate = 'ConfigMgrClientDistributionPointCertificate'
+                    AutoRenew           = $true
+                    FriendlyName        =  $friendlyName
+                    #Credential          = $Credential
+                    #UseMachineContext   = $true
+                    KeyType             = 'RSA'
+                    RequestType         = 'CMC'
+                    DependsOn = $nextDepend
+                }
+                $nextDepend = "[CertReq]SSLCert2"
+
+                CertificateExport SSLCert
+                {
+                    Type         = 'PFX'
+                    FriendlyName = $friendlyName
+                    Path         = 'c:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
+                    Password     = $Admincreds
+                    DependsOn = $nextDepend
+                }
+                $nextDepend = "[CertificateExport]SSLCert"
             }
 
 

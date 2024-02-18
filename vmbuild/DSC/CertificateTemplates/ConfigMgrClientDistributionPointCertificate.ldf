@@ -1,0 +1,39 @@
+dn: CN=ConfigMgrClientDistributionPointCertificate,CN=Certificate Templates,CN=Public Key Services,CN=Services,CN=Configuration,DC=TEMPLATE,DC=com
+changetype: add
+cn: ConfigMgrClientDistributionPointCertificate
+displayName: ConfigMgr Client Distribution Point Certificate
+distinguishedName: 
+ CN=ConfigMgrClientDistributionPointCertificate,CN=Certificate Templates,CN=Pub
+ lic Key Services,CN=Services,CN=Configuration,DC=TEMPLATE,DC=com
+dSCorePropagationData: 20240218142942.0Z
+dSCorePropagationData: 16010101000000.0Z
+flags: 131680
+instanceType: 4
+msPKI-Cert-Template-OID: 
+ 1.3.6.1.4.1.311.21.8.5616737.12267755.3555977.7424861.9094410.141.10675016.188
+ 3547
+msPKI-Certificate-Application-Policy: 1.3.6.1.5.5.7.3.2
+msPKI-Certificate-Name-Flag: 134217728
+msPKI-Enrollment-Flag: 32
+msPKI-Minimal-Key-Size: 2048
+msPKI-Private-Key-Flag: 16842768
+msPKI-RA-Signature: 0
+msPKI-Template-Minor-Revision: 1
+msPKI-Template-Schema-Version: 2
+name: ConfigMgrClientDistributionPointCertificate
+objectCategory: 
+ CN=PKI-Certificate-Template,CN=Schema,CN=Configuration,DC=TEMPLATE,DC=com
+objectClass: top
+objectClass: pKICertificateTemplate
+pKICriticalExtensions: 2.5.29.15
+pKIDefaultCSPs: 1,Microsoft RSA SChannel Cryptographic Provider
+pKIDefaultKeySpec: 1
+pKIExpirationPeriod:: AEA5hy7h/v8=
+pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.2
+pKIKeyUsage:: oAA=
+pKIMaxIssuingDepth: 0
+pKIOverlapPeriod:: AICmCv/e//8=
+revision: 100
+showInAdvancedViewOnly: TRUE
+
+

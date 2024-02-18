@@ -423,15 +423,32 @@
             $waitOnDependency = "[GPRegistryValue]GPRegistryValueConfig3"
 
             if ($iisCount) {
-                AddCertificateTemplate WebServer2 {
-                    TemplateName = "WebServer2"
+                AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
+                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
                     DNPath       = $DNName
                     GroupName    = 'ConfigMgr IIS Servers'
                     Permissions  = 'Read, Enroll'
                     DependsOn    = $waitOnDependency
                 }
-                $waitOnDependency = "[AddCertificateTemplate]WebServer2"
+                $waitOnDependency = "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
+
+                AddCertificateTemplate ConfigMgrWebServerCertificate {
+                    TemplateName = "ConfigMgrWebServerCertificate"
+                    DNPath       = $DNName
+                    GroupName    = 'ConfigMgr IIS Servers'
+                    Permissions  = 'Read, Enroll'
+                    DependsOn    = $waitOnDependency
+                }
+                $waitOnDependency = "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
             }
+            AddCertificateTemplate ConfigMgrClientCertificate {
+                TemplateName = "ConfigMgrClientCertificate"
+                DNPath       = $DNName
+                GroupName    = 'Domain Computers'
+                Permissions  = 'Read, Enroll, AutoEnroll'
+                DependsOn    = $waitOnDependency
+            }
+            $waitOnDependency = "[AddCertificateTemplate]ConfigMgrClientCertificate"
         }
 
         RemoteDesktopAdmin RemoteDesktopSettings {
