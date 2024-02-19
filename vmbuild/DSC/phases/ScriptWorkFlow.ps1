@@ -255,6 +255,13 @@ $Configuration.ScriptWorkflow.Status = "Completed"
 $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-# Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
-$ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
-. $ScriptFile $ConfigFilePath $LogPath $firstRun
+if (-not $deployConfig.cmOptions.UsePKI) {
+    # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
+    . $ScriptFile $ConfigFilePath $LogPath $firstRun
+}
+else {
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
+    . $ScriptFile $ConfigFilePath $LogPath $firstRun
+}
+

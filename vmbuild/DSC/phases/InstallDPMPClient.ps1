@@ -19,7 +19,10 @@ $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMach
 $ClientNames = $thisVM.thisParams.ClientPush
 $cm_svc = "$NetbiosDomainName\cm_svc"
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
-
+$usePKI = $deployConfig.cmOptions.UsePKI
+if (-not $usePKI) {
+    $usePKI = $false
+}
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -127,7 +130,7 @@ foreach ($DP in $DPs) {
     }
 
     $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
-    Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode
+    Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode -usePKI:$usePKI
 }
 
 foreach ($MP in $MPs) {
@@ -138,7 +141,7 @@ foreach ($MP in $MPs) {
     }
 
     $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
-    Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode
+    Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode -usePKI:$usePKI
 }
 
 
@@ -156,7 +159,7 @@ foreach ($PDP in $PullDPs) {
 
     $DPFQDN = $PDP.ServerName.Trim() + "." + $DomainFullName
     $SourceDPFQDN = $PDP.SourceDP.Trim() + "." + $DomainFullName
-    Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN
+    Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI
 }
 
 # Force install DP/MP on PS Site Server if none present
@@ -165,12 +168,12 @@ $mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
 
 if ($dpCount -eq 0) {
     Write-DscStatus "No DP's were found in this site. Forcing DP install on Site Server $ThisMachineName"
-    Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
+    Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
 }
 
 if ($mpCount -eq 0) {
     Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName"
-    Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
+    Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
 }
 
 # Create Boundary groups

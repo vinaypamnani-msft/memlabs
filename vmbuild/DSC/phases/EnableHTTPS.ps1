@@ -1,4 +1,4 @@
-#enableEHTTP.ps1
+#enableHTTPS.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath,
@@ -11,8 +11,8 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
-
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$DCName = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" }).vmName
 # Read Site Code from registry
 Write-DscStatus "Setting PS Drive for ConfigMgr" -NoStatus
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -47,30 +47,38 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 # Set the current location to be the site code.
 Set-Location "$($SiteCode):\" @initParams
 
-# Enable EHTTP, some components are still installing and they reset it to Disabled.
 # Keep setting it every 30 seconds, 10 times and bail...
 $enabled = $false
 $attempts = 0
-$maxAttempts = 30
+$maxAttempts = 5
 
 if (-not $FirstRun) {
     # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
     $attempts = $maxAttempts
 }
 
-Write-DscStatus "Enabling e-HTTP" -NoStatus
+Write-DscStatus "Enabling HTTPS" -NoStatus
+
+$CAName = $DCName + "-CA"
+$CertPath = "c:\temp\rootca.cer"
+
+if (-not (Test-Path $CertPath)) {
+    Get-Item  Cert:\LocalMachine\CA\* | Where-Object { $_.Subject -cmatch $CAName } | Export-Certificate -FilePath $CertPath -Force
+}
+
 do {
     $attempts++
-    Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
+    Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath | Out-File $global:StatusLog -Append
     Start-Sleep 15
+
     $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
-    $enabled = ($prop.Value -band 1024) -eq 1024
-    Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled" -RetrySeconds 15 -NoStatus
+    $enabled = ($prop.Value -eq 63)
+    Write-DscStatus "IISSSLState Value is $($prop.Value). HTTPS enabled: $enabled" -RetrySeconds 15 -NoStatus
 } until ($attempts -ge $maxAttempts)
 
 if (-not $enabled) {
-    Write-DscStatus "e-HTTP not enabled after trying $attempts times, skip." -NoStatus
+    Write-DscStatus "HTTPS not enabled after trying $attempts times, skip." -NoStatus
 }
 else {
-    Write-DscStatus "e-HTTP was enabled." -NoStatus
+    Write-DscStatus "HTTPS was enabled." -NoStatus
 }

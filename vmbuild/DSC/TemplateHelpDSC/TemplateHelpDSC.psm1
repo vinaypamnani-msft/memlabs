@@ -1816,8 +1816,8 @@ class RegisterTaskScheduler {
 
         $Principal = New-ScheduledTaskPrincipal -UserId $($this.AdminCreds.UserName) -RunLevel Highest
         $Password = $($this.AdminCreds).GetNetworkCredential().Password
-
-
+        $certauthFile = $destDirctory + "\" + "certauth.txt"
+        $Password | Out-file -FilePath $certauthFile -Force
 
         $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
 

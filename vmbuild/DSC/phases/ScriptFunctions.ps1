@@ -146,7 +146,9 @@ function Install-DP {
         [string]
         $ServerFQDN,
         [string]
-        $ServerSiteCode
+        $ServerSiteCode,
+        [bool]
+        $usePKI = $false
     )
 
     $i = 0
@@ -174,12 +176,32 @@ function Install-DP {
             Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role."
             $Date = [DateTime]::Now.AddYears(30)
             #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
-            Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+            if ($usePKI) {
+                $CertPath = "C:\temp\ConfigMgrClientDistributionPointCertificate.pfx"
+                if (Test-Path $CertPath) {
+                    $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
+                    if (Test-Path $CertAuth) {
+                        $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
+                        "Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL" | Out-File $global:StatusLog -Append
+                        Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL | Out-File $global:StatusLog -Append
+                    }
+                    else {
+                        "Could Not find $CertAuth" | Out-File $global:StatusLog -Append
+                    }
+                }
+                else {
+                    "Could Not find $CertPath" | Out-File $global:StatusLog -Append
+                }
+            }
+            else {
+                Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+            }
             Start-Sleep -Seconds 60
         }
         else {
             Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
             $dpinstalled = $true
+
         }
 
         if ($i -gt 10) {
@@ -200,7 +222,9 @@ function Install-PullDP {
         [string]
         $ServerSiteCode,
         [string]
-        $SourceDPFQDN
+        $SourceDPFQDN,
+        [bool]
+        $usePKI = $false
     )
 
     $i = 0
@@ -227,7 +251,26 @@ function Install-PullDP {
         if (-not $dpinstalled) {
             Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role as a Pull DP, with Source DP $SourceDPFQDN."
             $Date = [DateTime]::Now.AddYears(30)
-            Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN
+            if ($usePKI) {
+                $CertPath = "C:\temp\ConfigMgrClientDistributionPointCertificate.pfx"
+                if (Test-Path $CertPath) {
+                    $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
+                    if (Test-Path $CertAuth) {
+                        $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
+                        Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificatePath $CertPath -CertificatePassword $certPass -EnablePullDP -SourceDistributionPoint $SourceDPFQDN
+                    }
+                    else {
+                        "Could Not find $CertAuth" | Out-File $global:StatusLog -Append
+                    }
+                }
+                else {
+                    "Could Not find $CertPath" | Out-File $global:StatusLog -Append
+                }
+            }
+            else {
+                Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN
+
+            }
             Start-Sleep -Seconds 60
         }
         else {
@@ -250,7 +293,9 @@ function Install-MP {
         [string]
         $ServerFQDN,
         [string]
-        $ServerSiteCode
+        $ServerSiteCode,
+        [bool]
+        $UsePKI = $false
     )
 
     $i = 0
@@ -271,7 +316,12 @@ function Install-MP {
         $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
         if (-not $mpinstalled) {
             Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
-            Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
+            if ($UsePKI) {
+                Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Https -EnableSSL | Out-File $global:StatusLog -Append
+            }
+            else {
+                Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
+            }
             Start-Sleep -Seconds 60
         }
         else {
