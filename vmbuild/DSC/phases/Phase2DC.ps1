@@ -354,10 +354,13 @@
         $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP }
 
         foreach ($member in $GroupMembersList) {
-            $iiscount = $groupMembers.Add($member.vmName + "$")
+            $memberName = $member.vmName + "$"
+            if (-not $groupMembers.Contains($memberName)) {
+                $iiscount = $groupMembers.Add($memberName)
+                $iiscount++
+            }
         }
 
-        $groupMembers = $groupMembers | Select-Object -Unique
         if ($iiscount) {
 
             ADGroup ConfigMgrIISServers {
