@@ -69,7 +69,7 @@ if (-not (Test-Path $CertPath)) {
 do {
     $attempts++
     Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath | Out-File $global:StatusLog -Append
-    $NameSpace = "ROOT\SMS\site_$SideCode"
+    $NameSpace = "ROOT\SMS\site_$SiteCode"
     #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
     # Get the WMI object
     $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
