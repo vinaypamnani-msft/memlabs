@@ -69,6 +69,19 @@ if (-not (Test-Path $CertPath)) {
 do {
     $attempts++
     Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath | Out-File $global:StatusLog -Append
+    $NameSpace = "ROOT\SMS\site_$SideCode"
+    # Get the WMI object
+$component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+# Get the Props array
+$props = $component.Props
+# Find the index of the IISSSLState property in the Props array
+$index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+# Change the Value of the IISSSLState property
+$props[$index].Value = 63
+# Assign the modified Props array back to the component
+$component.Props = $props
+# Save the changes
+$component.Put()
     Start-Sleep 15
 
     $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
