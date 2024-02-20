@@ -90,18 +90,35 @@ configuration Phase6
             Status = "Configuring WSUS to use ContentDir [$($contentDir)] and DB [$sqlServer]"
         }
 
+
+        $usePKI = $deployConfig.cmOptions.UsePKI
+
+        if ($usePKI) {
+            $SSLHost = $thisVM.vmName+"." + $DomainName
+            $SSLTemplate = 'ConfigMgr WebServer Certificate'
+        }
+        else{
+            $SSLHost = $null
+            $SSLTemplate = $null
+        }
+
         if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
             ConfigureWSUS UpdateServices {
                 DependsOn            = @('[WindowsFeatureSet]UpdateServices')
                 ContentPath          = $contentDir
                 SqlServer            = $sqlServer
                 PsDscRunAsCredential = $Admincreds
+                HTTPSUrl             = $SSLHost
+                TemplateName         = $SSLTemplate
+
             }
         }
         else {
             ConfigureWSUS UpdateServices {
                 DependsOn   = @('[WindowsFeatureSet]UpdateServices')
                 ContentPath = $contentDir
+                HTTPSUrl             = $SSLHost
+                TemplateName         = $SSLTemplate
             }
         }
 

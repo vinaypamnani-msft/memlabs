@@ -3480,7 +3480,16 @@ class ConfigureWSUS {
     [DscProperty()]
     [string]$SqlServer
 
+    [DscProperty()]
+    [string]$HTTPSUrl
+
+    [DscProperty()]
+    [string]$TemplateName
+
     [void] Set() {
+
+        $_HTTPSurl = $this.HTTPSUrl
+        $_FriendlyName = $this.TemplateName
         try {
             write-verbose ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
@@ -3510,6 +3519,27 @@ class ConfigureWSUS {
             Write-Verbose "Failed to Configure WSUS"
             Write-Verbose "$_"
             throw
+        }
+
+        if ($this.HTTPSUrl) {
+            New-WebBinding -Name "WSUS Administration" -Protocol https -Port 8531 -IPAddress *
+            $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+            if (-not $cert) {
+                throw "Could not find cert with friendly Name $_FriendlyName"
+            }
+
+            $cert | New-Item -Path IIS:\SslBindings\0.0.0.0!8531
+
+            $wsussslparams = @('ApiRemoting30', 'ClientWebService', 'DSSAuthWebService', 'ServerSyncWebService', 'SimpleAuthWebService')
+            foreach ($item in $wsussslparams)
+            {
+                $cfgSection = Get-IISConfigSection -Location "WSUS Administration/$item" -SectionPath "system.webServer/security/access";
+                Set-IISConfigAttributeValue -ConfigElement $cfgSection -AttributeName "sslFlags" -AttributeValue "Ssl";
+            }
+
+            write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' configuressl $_HTTPSurl")
+            & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' configuressl $_HTTPSurl
+
         }
     }
 
@@ -3895,8 +3925,8 @@ class AddCertificateToIIS {
             netsh http delete sslcert ipport=0.0.0.0:443
         }
         catch {}
-        New-WebBinding -Name "Default Web Site" -Protocol https -Port 443 -IPAddress *
         netsh http add sslcert ipport=0.0.0.0:443 certhash=$($cert.Thumbprint) appid='{4dc3e181-e14b-4a21-b022-59fc669b0914}' certstorename=My verifyclientcertrevocation=enable
+        New-WebBinding -Name "Default Web Site" -Protocol https -Port 443 -IPAddress *
 
     }
 

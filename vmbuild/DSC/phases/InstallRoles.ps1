@@ -13,6 +13,10 @@ $DomainFullName = $deployConfig.vmOptions.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CSName = $ThisVM.thisParams.ParentSiteServer
+$usePKI = $deployConfig.cmOptions.UsePKI
+if (-not $usePKI){
+    $usePKI = $false
+}
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -190,7 +194,7 @@ foreach ($SUP in $SUPs) {
     }
 
     $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
-    Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode
+    Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode -usePKI:$usePKI
 }
 
 # Configure SUP
