@@ -3895,7 +3895,7 @@ class AddCertificateToIIS {
             netsh http delete sslcert ipport=0.0.0.0:443
         }
         catch {}
-
+        New-WebBinding -Name "Default Web Site" -Protocol https -Port 443 -IPAddress *
         netsh http add sslcert ipport=0.0.0.0:443 certhash=$($cert.Thumbprint) appid='{4dc3e181-e14b-4a21-b022-59fc669b0914}' certstorename=My verifyclientcertrevocation=enable
 
     }
