@@ -237,6 +237,8 @@ if ($scenario -eq "Hierarchy") {
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
+
+
     }
 }
 
@@ -265,3 +267,6 @@ else {
     . $ScriptFile $ConfigFilePath $LogPath $firstRun
 }
 
+$ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
+Set-Location $LogPath
+. $ScriptFile $ConfigFilePath $LogPath

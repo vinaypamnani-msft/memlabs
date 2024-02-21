@@ -28,28 +28,28 @@ configuration Phase3
         # Install Language Packs
         if ($l -and $l.LanguageTag -and $l.LanguageTag -ne "en-US") {
             LanguagePack InstallLanguagePack {
-                LanguagePackName = $l.LanguageTag
+                LanguagePackName     = $l.LanguageTag
                 LanguagePackLocation = "C:\LanguagePacks"
             }
 
             Language ConfigureLanguage {
-                IsSingleInstance = "Yes"
-                LocationID = $l.LocationID
-                MUILanguage = $l.MUILanguage
-                MUIFallbackLanguage = $l.MUIFallbackLanguage
-                SystemLocale = $l.SystemLocale
-                AddInputLanguages = $l.AddInputLanguages
+                IsSingleInstance     = "Yes"
+                LocationID           = $l.LocationID
+                MUILanguage          = $l.MUILanguage
+                MUIFallbackLanguage  = $l.MUIFallbackLanguage
+                SystemLocale         = $l.SystemLocale
+                AddInputLanguages    = $l.AddInputLanguages
                 RemoveInputLanguages = $l.RemoveInputLanguages
-                UserLocale = $l.UserLocale
-                CopySystem = $true
-                CopyNewUser = $true
-                Dependson = "[LanguagePack]InstallLanguagePack"
+                UserLocale           = $l.UserLocale
+                CopySystem           = $true
+                CopyNewUser          = $true
+                Dependson            = "[LanguagePack]InstallLanguagePack"
             }
 
             LocalConfigurationManager {
                 RebootNodeIfNeeded = $true
-                ActionAfterReboot = "ContinueConfiguration"
-                ConfigurationMode = "ApplyAndAutoCorrect"
+                ActionAfterReboot  = "ContinueConfiguration"
+                ConfigurationMode  = "ApplyAndAutoCorrect"
             }
         }
 
@@ -62,8 +62,8 @@ configuration Phase3
         }
 
         if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") {
-           $featureRoles += "WSUS"
-           $AddIISCert = $true
+            $featureRoles += "WSUS"
+            $AddIISCert = $true
         }
 
         if ($ThisVM.installRP -eq $true) {
@@ -198,92 +198,92 @@ configuration Phase3
         }
 
         #add depend stuff
-     #   if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "Secondary") {
-            WriteStatus VCInstall {
+        #   if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "Secondary") {
+        WriteStatus VCInstall {
+            DependsOn = $nextDepend
+            Status    = "Downloading and installing VC redist"
+        }
+
+        InstallVCRedist VCInstall {
+            DependsOn = "[WriteStatus]VCInstall"
+            Path      = "C:\temp\vc_redist.x64.exe"
+            Ensure    = "Present"
+        }
+
+        WriteStatus SQLClientInstall {
+            DependsOn = "[InstallVCRedist]VCInstall"
+            Status    = "Downloading and installing SQL Client"
+        }
+
+        InstallSQLClient SQLClientInstall {
+            DependsOn = "[WriteStatus]SQLClientInstall"
+            Path      = "C:\temp\sqlncli.msi"
+            Ensure    = "Present"
+        }
+
+        WriteStatus ODBCDriverInstall {
+            DependsOn = "[InstallSQLClient]SQLClientInstall"
+            Status    = "Downloading and installing ODBC driver"
+        }
+
+        InstallODBCDriver ODBCDriverInstall {
+            DependsOn = "[WriteStatus]ODBCDriverInstall"
+            ODBCPath  = "C:\temp\msodbcsql.msi"
+            Ensure    = "Present"
+        }
+
+        $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
+
+        if ($AddIISCert) {
+
+
+            WriteStatus RebootNow {
+                Status    = "Rebooting to get Group Membership"
                 DependsOn = $nextDepend
-                Status = "Downloading and installing VC redist"
             }
 
-            InstallVCRedist VCInstall {
-                DependsOn = "[WriteStatus]VCInstall"
-                Path = "C:\temp\vc_redist.x64.exe"
-                Ensure   = "Present"
+            RebootNow RebootNow {
+                FileName  = 'C:\Temp\IISGroupReboot.txt'
+                DependsOn = $nextDepend
             }
+            $nextDepend = "[RebootNow]RebootNow"
 
-            WriteStatus SQLClientInstall {
-                DependsOn = "[InstallVCRedist]VCInstall"
-                Status = "Downloading and installing SQL Client"
+            WriteStatus AddIISCerts {
+                Status    = "Adding IIS Certificate for PKI"
+                DependsOn = $nextDepend
             }
-
-            InstallSQLClient SQLClientInstall {
-                DependsOn = "[WriteStatus]SQLClientInstall"
-                Path = "C:\temp\sqlncli.msi"
-                Ensure   = "Present"
+            $subject = $ThisVM.vmName + "." + $DomainName
+            $friendlyName = 'ConfigMgr WebServer Certificate'
+            CertReq SSLCert {
+                Subject             = $subject
+                SubjectAltName      = "DNS=" + $subject
+                KeyLength           = '2048'
+                Exportable          = $false
+                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                #OID                 = '1.3.6.1.5.5.7.3.1'
+                #KeyUsage            = '0xa0'
+                CertificateTemplate = 'ConfigMgrWebServerCertificate'
+                AutoRenew           = $true
+                FriendlyName        = $friendlyName
+                #Credential          = $Credential
+                #UseMachineContext   = $true
+                KeyType             = 'RSA'
+                RequestType         = 'CMC'
+                DependsOn           = $nextDepend
             }
+            $nextDepend = "[CertReq]SSLCert"
 
-            WriteStatus ODBCDriverInstall {
-                DependsOn = "[InstallSQLClient]SQLClientInstall"
-                Status = "Downloading and installing ODBC driver"
+
+            AddCertificateToIIS AddCert {
+                FriendlyName = $friendlyName
+                DependsOn    = $nextDepend
             }
+            $nextDepend = "[AddCertificateToIIS]AddCert"
 
-            InstallODBCDriver ODBCDriverInstall {
-                DependsOn = "[WriteStatus]ODBCDriverInstall"
-                ODBCPath = "C:\temp\msodbcsql.msi"
-                Ensure   = "Present"
-            }
-
-            $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
-
-            if ($AddIISCert){
-
-
-                WriteStatus RebootNow {
-                    Status = "Rebooting to get Group Membership"
-                    DependsOn = $nextDepend
-                }
-
-                RebootNow RebootNow {
-                    FileName = 'C:\Temp\IISGroupReboot.txt'
-                    DependsOn = $nextDepend
-                }
-                $nextDepend = "[RebootNow]RebootNow"
-
-                WriteStatus AddIISCerts {
-                    Status = "Adding IIS Certificate for PKI"
-                    DependsOn = $nextDepend
-                }
-                $subject = $ThisVM.vmName + "." + $DomainName
-                $friendlyName = 'ConfigMgr WebServer Certificate'
-                CertReq SSLCert
-                {
-                    Subject             = $subject
-                    SubjectAltName      = "DNS=" + $subject
-                    KeyLength           = '2048'
-                    Exportable          = $false
-                    ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
-                    #OID                 = '1.3.6.1.5.5.7.3.1'
-                    #KeyUsage            = '0xa0'
-                    CertificateTemplate = 'ConfigMgrWebServerCertificate'
-                    AutoRenew           = $true
-                    FriendlyName        =  $friendlyName
-                    #Credential          = $Credential
-                    #UseMachineContext   = $true
-                    KeyType             = 'RSA'
-                    RequestType         = 'CMC'
-                    DependsOn = $nextDepend
-                }
-                $nextDepend = "[CertReq]SSLCert"
-
-
-                AddCertificateToIIS AddCert{
-                    FriendlyName        =  $friendlyName
-                    DependsOn = $nextDepend
-                }
-                $nextDepend = "[AddCertificateToIIS]AddCert"
+            if ($ThisVM.role -eq "Primary") {
 
                 $friendlyName = 'ConfigMgr Client DistributionPoint Certificate'
-                CertReq SSLCert2
-                {
+                CertReq SSLCert2 {
                     Subject             = "Client DistributionPoint Cert"
                     #SubjectAltName      = "DNS=" + $subject
                     KeyLength           = '2048'
@@ -293,28 +293,28 @@ configuration Phase3
                     #KeyUsage            = '0xa0'
                     CertificateTemplate = 'ConfigMgrClientDistributionPointCertificate'
                     AutoRenew           = $true
-                    FriendlyName        =  $friendlyName
+                    FriendlyName        = $friendlyName
                     #Credential          = $Credential
                     #UseMachineContext   = $true
                     KeyType             = 'RSA'
                     RequestType         = 'CMC'
-                    DependsOn = $nextDepend
+                    DependsOn           = $nextDepend
                 }
                 $nextDepend = "[CertReq]SSLCert2"
 
-                CertificateExport SSLCert
-                {
+                CertificateExport SSLCert {
                     Type         = 'PFX'
                     FriendlyName = $friendlyName
                     Path         = 'c:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
                     Password     = $Admincreds
-                    DependsOn = $nextDepend
+                    DependsOn    = $nextDepend
                 }
                 $nextDepend = "[CertificateExport]SSLCert"
             }
+        }
 
 
-      #  }
+        #  }
 
         WriteStatus Complete {
             DependsOn = $nextDepend
