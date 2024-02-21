@@ -2109,6 +2109,12 @@ Function Show-Summary {
             Write-RedX "ConfigMgr will not be installed."
         }
 
+        if ($fixedConfig.cmOptions.usePKI) {
+            Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and reporting roles"
+        }
+        else{
+            Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
+        }
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
             Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"
