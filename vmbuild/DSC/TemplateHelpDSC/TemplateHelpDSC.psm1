@@ -3522,7 +3522,7 @@ class ConfigureWSUS {
         }
 
         if ($this.HTTPSUrl) {
-            New-WebBinding -Name "WSUS Administration" -Protocol https -Port 8531 -IPAddress *
+            #New-WebBinding -Name "WSUS Administration" -Protocol https -Port 8531 -IPAddress *
             $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
             if (-not $cert) {
                 throw "Could not find cert with friendly Name $_FriendlyName"

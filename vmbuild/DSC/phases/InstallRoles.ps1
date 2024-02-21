@@ -199,7 +199,8 @@ foreach ($SUP in $SUPs) {
 
 # Configure SUP
 #$productsToAdd = @("Windows 10, version 1903 and later", "Microsoft Server operating system-21H2")
-$productsToAdd = @("PowerShell - x64")
+$productsToAdd = @("SQL Server 2005")
+#$productsToAdd = @("PowerShell - x64")
 #$classificationsToAdd = @("Critical Updates", "Security Updates", "Updates")
 $classificationsToAdd = @("Tools")
 if ($configureSUP) {
@@ -253,8 +254,7 @@ if ($configureSUP) {
                         "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
                         "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
                     }
-
-                    Write-DscStatus "Waiting for SUM Sync on $($syncState.WSUSServerName) to finish. Current State: $($syncState.LastSyncState) $syncStateString"
+                    Write-DscStatus "SUM Sync: Current State: $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)]"
                     if ($syncState.LastSyncState -eq 6702) {
                         $syncFinished = $true
                         Write-DscStatus "SUM Sync finished."
