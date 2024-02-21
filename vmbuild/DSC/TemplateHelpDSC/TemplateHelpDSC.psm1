@@ -3601,10 +3601,10 @@ class InstallPBIRS {
     [bool]$IsRemoteDatabaseServer
 
     [DscProperty()]
-    [bool]$TemplateName
+    [string]$TemplateName
 
     [DscProperty()]
-    [bool]$DNSName
+    [string]$DNSName
 
     [void] Set() {
         try {
@@ -3677,10 +3677,15 @@ class InstallPBIRS {
                     Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
             }
+
+
             Write-Verbose ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
+            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+
 
             if ($this.TemplateName) {
-
+                Write-Verbose ("Enabling HTTPS")
+                start-sleep -seconds 20
                 $_FriendlyName = $this.TemplateName
                 $_dnsName = $this.DNSName
 
@@ -3712,9 +3717,7 @@ class InstallPBIRS {
                 $rsconfig.SetServiceState($false, $false, $false)
                 $rsconfig.SetServiceState($true, $true, $true)
             }
-            else {
-                Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
-            }
+
             Start-Sleep -seconds 10
             Restart-Service -Name "PowerBIReportServer" -Force
             Start-Sleep -Seconds 10
