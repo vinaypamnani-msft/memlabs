@@ -3600,6 +3600,11 @@ class InstallPBIRS {
     [DscProperty()]
     [bool]$IsRemoteDatabaseServer
 
+    [DscProperty()]
+    [bool]$TemplateName
+
+    [DscProperty()]
+    [bool]$DNSName
 
     [void] Set() {
         try {
@@ -3673,7 +3678,43 @@ class InstallPBIRS {
                 }
             }
             Write-Verbose ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
-            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+
+            if ($this.TemplateName) {
+
+                $_FriendlyName = $this.TemplateName
+                $_dnsName = $this.DNSName
+
+                $httpsPort = 443
+                $ipAddress = "0.0.0.0"
+                $lcid = (Get-Culture).Lcid
+
+                $wmiName = (Get-WmiObject -namespace root\Microsoft\SqlServer\ReportServer  -class __Namespace -ComputerName $env:COMPUTERNAME).Name
+                $version = (Get-WmiObject -namespace root\Microsoft\SqlServer\ReportServer\$wmiName -class __Namespace).Name
+                $rsConfig = Get-WmiObject -namespace "root\Microsoft\SqlServer\ReportServer\$wmiName\$version\Admin" -class MSReportServer_ConfigurationSetting
+
+                $rsConfig.RemoveURL("ReportServerWebApp", "https://+:$httpsPort", $lcid)
+                $rsConfig.RemoveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
+                $rsConfig.ReserveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
+
+                $rsConfig.RemoveURL("ReportServerWebService", "https://+:$httpsPort", $lcid)
+                $rsConfig.RemoveURL("ReportServerWebService", "https://$($_dnsName):$httpsPort", $lcid)
+                $rsConfig.ReserveURL("ReportServerWebService", "https://$($_dnsName):$httpsPort", $lcid)
+                $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+                if (-not $cert) {
+                    throw "Could not find cert with friendly Name $_FriendlyName"
+                }
+                $thumbprint = $cert.ThumbPrint.ToLower()
+                $rsConfig.CreateSSLCertificateBinding('ReportServerWebApp', $Thumbprint, $ipAddress, $httpsport, $lcid)
+                $rsConfig.CreateSSLCertificateBinding('ReportServerWebService', $Thumbprint, $ipAddress, $httpsport, $lcid)
+                $rsConfig.SetSecureConnectionLevel("1")
+                $rsConfig.DeleteEncryptedInformation()
+                $rsConfig.ReencryptSecureInformation()
+                $rsconfig.SetServiceState($false, $false, $false)
+                $rsconfig.SetServiceState($true, $true, $true)
+            }
+            else {
+                Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+            }
             Start-Sleep -seconds 10
             Restart-Service -Name "PowerBIReportServer" -Force
             Start-Sleep -Seconds 10

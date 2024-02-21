@@ -88,6 +88,14 @@ configuration Phase7
             DependsOn = "[ModuleAdd]SQLServerModule"
         }
 
+        $usePKI = $deployConfig.cmOptions.UsePKI
+        if ($usePKI) {
+            $templateName = 'ConfigMgr WebServer Certificate'
+            $dnsName = $thisVm.vmName + "." + $DomainName
+        }else {
+            $templateName = $null
+            $dnsName = $null
+        }
         InstallPBIRS InstallPBIRS {
             InstallPath          = "C:\PBIRS"
             SQLServer            = $SqlServerInstance
@@ -95,6 +103,8 @@ configuration Phase7
             RSInstance           = "PBIRS"
             DBcredentials          = $Admincreds
             IsRemoteDatabaseServer = $IsRemoteDatabaseServer
+            TemplateName         = $templateName
+            DNSName              = $dnsName
             PsDscRunAsCredential = $Admincreds
             DependsOn = "[ModuleAdd]SQLServerModule"
         }
