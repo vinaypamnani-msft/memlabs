@@ -2109,7 +2109,7 @@ Function Show-Summary {
             Write-RedX "ConfigMgr will not be installed."
         }
 
-        if ($fixedConfig.cmOptions.usePKI) {
+        if ($deployConfig.cmOptions.usePKI) {
             Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and reporting roles"
         }
         else{
