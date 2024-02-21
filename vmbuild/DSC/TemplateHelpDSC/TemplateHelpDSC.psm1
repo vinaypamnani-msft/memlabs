@@ -3482,7 +3482,7 @@ class ConfigureWSUS {
 
     [DscProperty()]
     [string]$HTTPSUrl
-
+    # Should usually be 'ConfigMgr WebServer Certificate'
     [DscProperty()]
     [string]$TemplateName
 
@@ -3522,17 +3522,29 @@ class ConfigureWSUS {
         }
 
         if ($this.HTTPSUrl) {
-            #New-WebBinding -Name "WSUS Administration" -Protocol https -Port 8531 -IPAddress *
+
             $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
             if (-not $cert) {
                 throw "Could not find cert with friendly Name $_FriendlyName"
             }
+            (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https") | Remove-WebBinding
 
-            $cert | New-Item -Path IIS:\SslBindings\0.0.0.0!8531
+            $webBinding = (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https")
+            if (-not $webBinding) {
+                #New-WebBinding -Name "WSUS Administration" -Protocol https -Port 8531 -IPAddress *
+                $webBinding = New-WebBinding -Name "WSUS Administration" -IPAddress "*" -Port 8531  -Protocol "https"
+
+            }
+            $webBinding = (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https")
+            if (-not $webBinding) {
+                throw "Could not create webbinding for 8531"
+            }
+            $webBinding.AddSslCertificate($($cert.Thumbprint), "my")
+
+            #$cert | New-Item -Path IIS:\SslBindings\0.0.0.0!8531
 
             $wsussslparams = @('ApiRemoting30', 'ClientWebService', 'DSSAuthWebService', 'ServerSyncWebService', 'SimpleAuthWebService')
-            foreach ($item in $wsussslparams)
-            {
+            foreach ($item in $wsussslparams) {
                 $cfgSection = Get-IISConfigSection -Location "WSUS Administration/$item" -SectionPath "system.webServer/security/access";
                 Set-IISConfigAttributeValue -ConfigElement $cfgSection -AttributeName "sslFlags" -AttributeValue "Ssl";
             }
