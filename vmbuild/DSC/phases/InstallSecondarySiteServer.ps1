@@ -162,6 +162,7 @@ $Install_Secondary = {
                 }
 
                 if ($usePki) {
+                    Write-DscStatus "Adding secondary site server on $secondaryFQDN With PKI" -NoStatus
                     $CertPath = "C:\temp\ConfigMgrClientDistributionPointCertificate.pfx"
                     if (Test-Path $CertPath) {
                         $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
@@ -169,11 +170,12 @@ $Install_Secondary = {
                             $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
                             New-CMSecondarySite -Https -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                                 -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                                -SiteName $siteName -SqlServerSetting $SQLSetting -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
+                                -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
                         }
                     }
                 }
                 else {
+                    Write-DscStatus "Adding secondary site server on $secondaryFQDN Without PKI" -NoStatus
                     New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                         -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
                         -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
@@ -193,7 +195,7 @@ $Install_Secondary = {
                                 $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
                                 New-CMSecondarySite -Https -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                                     -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                                    -SiteName $siteName -SqlServerSetting $SQLSetting -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
+                                    -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
                             }
                         }
                     }

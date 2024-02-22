@@ -3064,17 +3064,17 @@ class ModuleAdd {
         $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
         IF ($null -eq $module) {
-            Install-Module -Name PowerShellGet -Force -Scope $_userScope
+            Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope
         }
 
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
         IF ($null -eq $module) {
             IF ($this.Clobber -eq 'Yes') {
-                Install-Module -Name $_moduleName -Force -Scope $_userScope -AllowClobber
+                Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber
             }
             ELSE {
-                Install-Module -Name $_moduleName -Force -Scope $_userScope
+                Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope
             }
 
         }
@@ -3806,9 +3806,12 @@ class AddCertificateTemplate {
         if ($_Group) {
             Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+            $module = Get-InstalledModule -Name PSPKI -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
-            Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
-            Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0
+            IF ($null -eq $module) {
+                Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
+                Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0
+            }
 
             start-sleep -seconds 10
             Write-Verbose "Get-Command -Module PSPKI"

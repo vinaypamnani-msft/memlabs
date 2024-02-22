@@ -424,7 +424,13 @@
                 Value     = "MY"
                 DependsOn = "[GPLink]GPLinkConfig"
             }
-            $waitOnDependency = "[GPRegistryValue]GPRegistryValueConfig3"
+            $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
+            $waitOnDependency = @("[GPRegistryValue]GPRegistryValueConfig3")
+
+            ModuleAdd PSPKI {
+                Key             = 'Always'
+                CheckModuleName = 'PSPKI'
+            }
 
             if ($iisCount) {
                 AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
@@ -432,27 +438,27 @@
                     DNPath       = $DNName
                     GroupName    = 'ConfigMgr IIS Servers'
                     Permissions  = 'Read, Enroll'
-                    DependsOn    = $waitOnDependency
+                    DependsOn    = $nextDepend
                 }
-                $waitOnDependency = "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
 
                 AddCertificateTemplate ConfigMgrWebServerCertificate {
                     TemplateName = "ConfigMgrWebServerCertificate"
                     DNPath       = $DNName
                     GroupName    = 'ConfigMgr IIS Servers'
                     Permissions  = 'Read, Enroll'
-                    DependsOn    = $waitOnDependency
+                    DependsOn    = $nextDepend
                 }
-                $waitOnDependency = "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
             }
             AddCertificateTemplate ConfigMgrClientCertificate {
                 TemplateName = "ConfigMgrClientCertificate"
                 DNPath       = $DNName
                 GroupName    = 'Domain Computers'
                 Permissions  = 'Read, Enroll, AutoEnroll'
-                DependsOn    = $waitOnDependency
+                DependsOn    = $nextDepend
             }
-            $waitOnDependency = "[AddCertificateTemplate]ConfigMgrClientCertificate"
+            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
         }
 
         RemoteDesktopAdmin RemoteDesktopSettings {
