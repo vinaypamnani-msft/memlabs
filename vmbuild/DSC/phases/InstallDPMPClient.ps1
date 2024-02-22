@@ -61,7 +61,7 @@ if (Test-Path $cm_svc_file) {
     $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
     Write-DscStatus "Adding cm_svc domain account as CM account"
     Start-Sleep -Seconds 5
-    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode | Out-File $global:StatusLog -Append
+    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
     Remove-Item -Path $cm_svc_file -Force -Confirm:$false
 
     # Set client push account
@@ -327,7 +327,7 @@ foreach ($client in $ClientNameList) {
     }
     if ($success) {
         Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true | Out-File $global:StatusLog -Append
+        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
         Start-Sleep -Seconds 5
     }
 }

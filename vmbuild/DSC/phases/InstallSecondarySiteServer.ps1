@@ -157,7 +157,7 @@ $Install_Secondary = {
 
                 New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                     -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                    -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
+                    -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
                 Start-Sleep -Seconds 15
             }
             catch {
@@ -167,7 +167,7 @@ $Install_Secondary = {
                     Start-Sleep -Seconds 300
                     New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                         -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                        -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate | Out-File $global:StatusLog -Append
+                        -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
                 }
                 catch {
                     $_ | Out-File $global:StatusLog -Append

@@ -112,7 +112,7 @@ foreach ($client in $ClientNameList) {
     }
     if ($success) {
         Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true | Out-File $global:StatusLog -Append
+        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
         Start-Sleep -Seconds 5
     }
 
@@ -127,7 +127,7 @@ while ($failcount -le 30) {
             continue
         }
         Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true | Out-File $global:StatusLog -Append
+        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
 
         $device = Get-CMDevice -Name $client
         $status = $device.ClientActiveStatus
