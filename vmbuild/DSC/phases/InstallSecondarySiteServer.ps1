@@ -21,6 +21,10 @@ $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisMachineFQDN = $ThisMachineName + "." + $DomainFullName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$usePKI = $deployConfig.cmOptions.UsePKI
+if (-not $usePKI) {
+    $usePKI = $false
+}
 $SecondaryVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
 # Read Site Code from registry
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -85,6 +89,7 @@ $Install_Secondary = {
     $smsProvider = $using:smsProvider
     $SecondaryVM = $using:SecondaryVM
     $DomainFullName = $using:DomainFullName
+    $usePKI = $using:UsePKI
 
     $mtx = $null
     try {
@@ -144,7 +149,8 @@ $Install_Secondary = {
                         #$SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -InstanceName $SecondaryVM.sqlInstanceName -SqlServerServiceBrokerPort 4022 -SqlServerServicePort $SecondaryVM.thisParams.sqlPort
                         $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -InstanceName $SecondaryVM.sqlInstanceName -SqlServerServiceBrokerPort 4022
                     }
-                }else {
+                }
+                else {
                     $SQLSetting = New-CMSqlServerSetting -CopySqlServerExpressOnSecondarySite -SqlServerServiceBrokerPort 4022 -SqlServerServicePort 1433
                 }
 
@@ -155,9 +161,23 @@ $Install_Secondary = {
                     $siteName = $ThisVM.siteName
                 }
 
-                New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
-                    -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                    -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
+                if ($usePki) {
+                    $CertPath = "C:\temp\ConfigMgrClientDistributionPointCertificate.pfx"
+                    if (Test-Path $CertPath) {
+                        $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
+                        if (Test-Path $CertAuth) {
+                            $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
+                            New-CMSecondarySite -Https -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
+                                -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
+                                -SiteName $siteName -SqlServerSetting $SQLSetting -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
+                        }
+                    }
+                }
+                else {
+                    New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
+                        -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
+                        -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
+                }
                 Start-Sleep -Seconds 15
             }
             catch {
@@ -165,9 +185,23 @@ $Install_Secondary = {
                     $_ | Out-File $global:StatusLog -Append
                     Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_. Retrying once." -MachineName $SecondaryName
                     Start-Sleep -Seconds 300
-                    New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
-                        -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                        -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
+                    if ($usePki) {
+                        $CertPath = "C:\temp\ConfigMgrClientDistributionPointCertificate.pfx"
+                        if (Test-Path $CertPath) {
+                            $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
+                            if (Test-Path $CertAuth) {
+                                $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
+                                New-CMSecondarySite -Https -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
+                                    -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
+                                    -SiteName $siteName -SqlServerSetting $SQLSetting -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
+                            }
+                        }
+                    }
+                    else {
+                        New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
+                            -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
+                            -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
+                    }
                 }
                 catch {
                     $_ | Out-File $global:StatusLog -Append
