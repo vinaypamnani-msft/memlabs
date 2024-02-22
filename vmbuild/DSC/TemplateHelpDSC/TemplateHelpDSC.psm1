@@ -1167,7 +1167,7 @@ class InstallDP {
         }
 
         $Date = [DateTime]::Now.AddYears(10)
-        Add-CMDistributionPoint -SiteSystemServerName $DPServerFullName -SiteCode $this.SiteCode -CertificateExpirationTimeUtc $Date
+        Add-CMDistributionPoint -SiteSystemServerName $DPServerFullName -SiteCode $this.SiteCode -CertificateExpirationTimeUtc $Date -Force
     }
 
     [bool] Test() {

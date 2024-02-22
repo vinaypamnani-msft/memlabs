@@ -183,7 +183,7 @@ function Install-DP {
                     if (Test-Path $CertAuth) {
                         $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
                         "Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL" | Out-File $global:StatusLog -Append
-                        Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL | Out-File $global:StatusLog -Append
+                        Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL -Force| Out-File $global:StatusLog -Append
                     }
                     else {
                         "Could Not find $CertAuth" | Out-File $global:StatusLog -Append
@@ -194,7 +194,7 @@ function Install-DP {
                 }
             }
             else {
-                Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+                Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date -Force| Out-File $global:StatusLog -Append
             }
             Start-Sleep -Seconds 60
         }
@@ -257,7 +257,7 @@ function Install-PullDP {
                     $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
                     if (Test-Path $CertAuth) {
                         $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
-                        Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificatePath $CertPath -CertificatePassword $certPass -EnablePullDP -SourceDistributionPoint $SourceDPFQDN
+                        Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificatePath $CertPath -CertificatePassword $certPass -EnablePullDP -SourceDistributionPoint $SourceDPFQDN -Force
                     }
                     else {
                         "Could Not find $CertAuth" | Out-File $global:StatusLog -Append
@@ -268,7 +268,7 @@ function Install-PullDP {
                 }
             }
             else {
-                Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN
+                Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN -Force
 
             }
             Start-Sleep -Seconds 60

@@ -282,7 +282,17 @@ if (-not $pushClients) {
 
 # Wait for collection to populate
 $CollectionName = "All Systems"
-Write-DscStatus "Waiting for clients to appear in '$CollectionName'"
+if ($ClientNames) {
+    Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
+}
+else {
+    Write-DscStatus "Skipping Client Push. No Clients to push."
+    $Configuration.InstallClient.Status = 'Completed'
+    $Configuration.InstallClient.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
+
 $ClientNameList = $ClientNames.split(",")
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 Start-Sleep -Seconds 5
