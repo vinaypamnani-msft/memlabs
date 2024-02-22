@@ -52,6 +52,7 @@ DscResourcesToExport = @(
     'ConfigureWSUS',
     'InstallPBIRS',
     'AddCertificateTemplate',
+    'ImportCertifcateTemplate',
     'AddCertificateToIIS',
     'RebootNow'
 

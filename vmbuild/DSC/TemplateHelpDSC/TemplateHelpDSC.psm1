@@ -3768,25 +3768,18 @@ class InstallPBIRS {
 }
 
 [DscResource()]
-class AddCertificateTemplate {
+class ImportCertifcateTemplate {
     [DscProperty(Key)]
     [string]$TemplateName
 
     [DscProperty(Mandatory)]
     [string]$DNPath
 
-    [DscProperty()]
-    [string]$GroupName
-
-    [DscProperty()]
-    [string]$Permissions
-
     [void] Set() {
 
         $_TemplateName = $this.TemplateName
         $_DNPath = $this.DNPath
-        $_Group = $this.GroupName
-        $_Permissions = $this.Permissions
+
 
         $_Status = "Adding Certificate Template $_TemplateName"
         $StatusLog = "C:\staging\DSC\DSC_Log.txt"
@@ -3802,13 +3795,115 @@ class AddCertificateTemplate {
         (Get-Content $_Path).Replace('DC=TEMPLATE,DC=com', $_DNPath) | Set-Content $TargetFile -Force
         Write-Verbose "Running ldifde -i -k -f $TargetFile"
         ldifde -i -k -f $TargetFile | Out-File -FilePath $StatusLog -Append
+    }
+
+    [bool] Test() {
+
+        $_TemplateName = $this.TemplateName
+        try {
+            $ConfigContext = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+            $ConfigContext = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$ConfigContext"
+            $filter = "(cn=$_TemplateName)"
+            $ds = New-object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$ConfigContext", $filter)
+            $found = $ds.Findone()
+            if ($found) {
+                return $true
+            }
+            return $false
+        }
+        catch {
+            Write-Verbose "$_"
+            Write-Verbose " -- Restart-Service -Name CertSvc"
+            Restart-Service -Name CertSvc
+            start-sleep -seconds 60
+            Write-Verbose " -- ADCSAdministration\get-Catemplate"
+            $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+        }
+        if ($count -gt 0) {
+            return $true
+        }
+
+        return $false
+    }
+
+    [ImportCertifcateTemplate] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class RebootNow {
+    [DscProperty(Key)]
+    [string]$FileName
+
+    [void] Set() {
+
+        $_FileName = $this.FileName
+
+
+        if (-not (Test-Path $_FileName)) {
+            Write-Verbose "Rebooting"
+            New-Item $_FileName
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+            return
+        }
+
+        Write-Verbose "Not Rebooting"
+    }
+
+    [bool] Test() {
+
+        $_FileName = $this.FileName
+        if (-not (Test-Path $_FileName)) {
+            return $false
+        }
+
+        return $true
+    }
+
+    [RebootNow] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class AddCertificateTemplate {
+    [DscProperty(Key)]
+    [string]$TemplateName
+
+    [DscProperty()]
+    [string]$GroupName
+
+    [DscProperty()]
+    [string]$Permissions
+
+    [void] Set() {
+
+        $_TemplateName = $this.TemplateName
+        $_Group = $this.GroupName
+        $_Permissions = $this.Permissions
+
+        $_Status = "Adding Certificate Template $_TemplateName"
+        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
+        $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
+        "$time $_Status" | Out-File -FilePath $StatusLog -Append
+
+        $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
+        if (!(Test-Path -Path $_Path -PathType Leaf)) {
+            throw "Could not find $_Path"
+        }
+
 
         if ($_Group) {
-            Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+
             $module = Get-InstalledModule -Name PSPKI -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
             IF ($null -eq $module) {
+                Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
                 Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0
             }
@@ -3931,42 +4026,6 @@ class AddCertificateTemplate {
 }
 
 [DscResource()]
-class RebootNow {
-    [DscProperty(Key)]
-    [string]$FileName
-
-    [void] Set() {
-
-        $_FileName = $this.FileName
-
-
-        if (-not (Test-Path $_FileName)) {
-            Write-Verbose "Rebooting"
-            New-Item $_FileName
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-            $global:DSCMachineStatus = 1
-            return
-        }
-
-        Write-Verbose "Not Rebooting"
-    }
-
-    [bool] Test() {
-
-        $_FileName = $this.FileName
-        if (-not (Test-Path $_FileName)) {
-            return $false
-        }
-
-        return $true
-    }
-
-    [RebootNow] Get() {
-        return $this
-    }
-
-}
-[DscResource()]
 class AddCertificateToIIS {
     [DscProperty(Key)]
     [string]$FriendlyName
@@ -3984,18 +4043,38 @@ class AddCertificateToIIS {
             netsh http delete sslcert ipport=0.0.0.0:443
         }
         catch {}
-        netsh http add sslcert ipport=0.0.0.0:443 certhash=$($cert.Thumbprint) appid='{4dc3e181-e14b-4a21-b022-59fc669b0914}' certstorename=My verifyclientcertrevocation=enable
-        New-WebBinding -Name "Default Web Site" -Protocol https -Port 443 -IPAddress *
+
+
+        #netsh http add sslcert ipport=0.0.0.0:443 certhash=$($cert.Thumbprint) appid='{4dc3e181-e14b-4a21-b022-59fc669b0914}' certstorename=My verifyclientcertrevocation=enable
+        #New-WebBinding -Name "Default Web Site" -Protocol https -Port 443 -IPAddress *
+
+
+        $webBinding = (Get-WebBinding -Name "Default Web Site" -Port 443 -Protocol "https")
+        if (-not $webBinding) {
+            New-WebBinding -Name "Default Web Site" -IPAddress "*" -Port 443  -Protocol "https"
+        }
+        $webBinding = (Get-WebBinding -Name "Default Web Site" -Port 443 -Protocol "https")
+        if (-not $webBinding) {
+            throw "Could not create webbinding for 443"
+        }
+        $webBinding.AddSslCertificate($($cert.Thumbprint), "my")
 
     }
 
     [bool] Test() {
 
-        $_FriendlyName = $this.FriendlyName
-        $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
-        $certdata = netsh http show sslcert ipport=0.0.0.0:443
-        if ($certdata.ToLower() -match $($cert.Thumbprint) ) {
-            return $true
+        try {
+            $_FriendlyName = $this.FriendlyName
+            $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+            $certdata = netsh http show sslcert ipport=0.0.0.0:443
+            $thumprint = $($cert.Thumbprint).ToLower()
+            if ($certdata.ToLower() -match $thumprint ) {
+                return $true
+            }
+        }
+        catch {
+            Write-Verbose "$_"
+            return $false
         }
 
         return $false

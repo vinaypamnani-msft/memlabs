@@ -39,6 +39,26 @@
     # Wait on machines to join domain
     $waitOnDomainJoin = $ThisVM.thisParams.ServersToWaitOn
 
+    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
+    $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+
+    $iiscount = 0
+    [System.Collections.ArrayList]$groupMembers = @()
+    $GroupMembersList = @()
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP }
+    [System.Collections.ArrayList]$iisgroupMembers = @()
+    foreach ($member in $GroupMembersList) {
+        $memberName = $member.vmName + "$"
+        if (-not $iisgroupMembers.Contains($memberName)) {
+            $iiscount = $iisgroupMembers.Add($memberName)
+            $iiscount++
+        }
+    }
+
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
@@ -56,6 +76,7 @@
         Computer NewName {
             Name = $ThisMachineName
         }
+
 
         WriteStatus InitDisks {
             DependsOn = "[Computer]NewName"
@@ -257,6 +278,7 @@
         }
 
         $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
+        $waitOnDependency = "[DnsServerForwarder]DnsServerForwarder"
         if ($ThisVM.InstallCA) {
 
             WriteStatus ADCS {
@@ -270,10 +292,40 @@
             }
 
             $nextDepend = "[InstallCA]InstallCA"
+
+            WriteStatus ImportCertifcateTemplate {
+                DependsOn = $nextDepend
+                Status    = "Importing Template to Domain"
+            }
+
+            $waitOnDependency = @($nextDepend)
+
+            if ($iisCount) {
+                ImportCertifcateTemplate ConfigMgrClientDistributionPointCertificate {
+                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                    DNPath       = $DNName
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientDistributionPointCertificate"
+
+                ImportCertifcateTemplate ConfigMgrWebServerCertificate {
+                    TemplateName = "ConfigMgrWebServerCertificate"
+                    DNPath       = $DNName
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrWebServerCertificate"
+            }
+            ImportCertifcateTemplate ConfigMgrClientCertificate {
+                TemplateName = "ConfigMgrClientCertificate"
+                DNPath       = $DNName
+                DependsOn    = $nextDepend
+            }
+            $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
+
         }
 
         WriteStatus InstallDotNet {
-            DependsOn = $nextDepend
+            DependsOn = $waitOnDependency
             Status    = "Installing .NET 4.8"
         }
 
@@ -325,9 +377,10 @@
 
         $sitecount = 0
         [System.Collections.ArrayList]$groupMembers = @()
-        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite") }
+        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") }
         foreach ($member in $GroupMembersList) {
             $sitecount = $groupMembers.Add($member.vmName + "$")
+            $sitecount++
         }
 
         if ($sitecount) {
@@ -344,23 +397,6 @@
             $waitOnDependency = "[ADGroup]ConfigMgrSiteServers"
         }
 
-        $iiscount = 0
-        [System.Collections.ArrayList]$groupMembers = @()
-        $GroupMembersList = @()
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite") }
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP }
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP }
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP }
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP }
-
-        foreach ($member in $GroupMembersList) {
-            $memberName = $member.vmName + "$"
-            if (-not $groupMembers.Contains($memberName)) {
-                $iiscount = $groupMembers.Add($memberName)
-                $iiscount++
-            }
-        }
-
         if ($iiscount) {
 
             ADGroup ConfigMgrIISServers {
@@ -369,7 +405,7 @@
                 GroupScope       = "Global"
                 Category         = "Security"
                 Description      = 'ConfigMgr IIS Servers'
-                MembersToInclude = $groupMembers
+                MembersToInclude = $iisgroupMembers
                 DependsOn        = $waitOnDependency
             }
             $waitOnDependency = "[ADGroup]ConfigMgrIISServers"
@@ -385,8 +421,7 @@
             }
 
             $GPOName = "Certificate AutoEnrollment"
-            $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-            $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+
             GroupPolicy GroupPolicyConfig {
                 Name      = $GPOName
                 DependsOn = $waitOnDependency
@@ -425,17 +460,17 @@
                 DependsOn = "[GPLink]GPLinkConfig"
             }
             $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
-            $waitOnDependency = @("[GPRegistryValue]GPRegistryValueConfig3")
 
             ModuleAdd PSPKI {
                 Key             = 'Always'
                 CheckModuleName = 'PSPKI'
+                DependsOn       = $nextDepend
             }
-
+            $nextDepend = "[ModuleAdd]PSPKI"
+            $waitOnDependency = @("[ModuleAdd]PSPKI")
             if ($iisCount) {
                 AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
                     TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                    DNPath       = $DNName
                     GroupName    = 'ConfigMgr IIS Servers'
                     Permissions  = 'Read, Enroll'
                     DependsOn    = $nextDepend
@@ -444,7 +479,6 @@
 
                 AddCertificateTemplate ConfigMgrWebServerCertificate {
                     TemplateName = "ConfigMgrWebServerCertificate"
-                    DNPath       = $DNName
                     GroupName    = 'ConfigMgr IIS Servers'
                     Permissions  = 'Read, Enroll'
                     DependsOn    = $nextDepend
@@ -453,7 +487,6 @@
             }
             AddCertificateTemplate ConfigMgrClientCertificate {
                 TemplateName = "ConfigMgrClientCertificate"
-                DNPath       = $DNName
                 GroupName    = 'Domain Computers'
                 Permissions  = 'Read, Enroll, AutoEnroll'
                 DependsOn    = $nextDepend

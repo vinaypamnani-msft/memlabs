@@ -110,7 +110,7 @@ function Start-Phase {
     }
     $global:PhaseSkipped = $false
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData
-    Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures."
+    Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures. Time: $($result.Elapsed)"
 
     if ($result.Failed -gt 0) {
         return $false
@@ -288,6 +288,8 @@ function Wait-Phase {
     $hideCursor = "$esc[?25l"
     $showCursor = "$esc[?25h"
 
+    $StartTime = $(get-date)
+
     try {
 
         Write-Host -NoNewline "$hideCursor" # Reduce flickering in Progress bars
@@ -297,6 +299,7 @@ function Wait-Phase {
             Failed  = 0
             Success = 0
             Warning = 0
+            Elapsed = $null
         }
 
         $global:JobProgressHistory = @()
@@ -384,6 +387,7 @@ function Wait-Phase {
 
         } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
 
+        $return.Elapsed = $(get-date) - $StartTime
         return $return
     }
     catch {

@@ -248,8 +248,8 @@ configuration Phase3
             }
             $nextDepend = "[RebootNow]RebootNow"
 
-            WriteStatus AddIISCerts {
-                Status    = "Adding IIS Certificate for PKI"
+            WriteStatus RequestIISCerts {
+                Status    = "Requesting IIS Certificate for PKI"
                 DependsOn = $nextDepend
             }
             $subject = $ThisVM.vmName + "." + $DomainName
@@ -273,7 +273,10 @@ configuration Phase3
             }
             $nextDepend = "[CertReq]SSLCert"
 
-
+            WriteStatus AddIISCerts {
+                Status    = "Adding IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
             AddCertificateToIIS AddCert {
                 FriendlyName = $friendlyName
                 DependsOn    = $nextDepend
