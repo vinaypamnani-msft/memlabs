@@ -253,6 +253,7 @@ $global:VM_Create = {
 
         # Add TLS keys, without these upgradeToLatest can fail when accessing the new endpoints that require TLS 1.2
         $Set_TLS12Keys = {
+            param([String]$domainName)
 
             $netRegKey = "HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319"
             if (Test-Path $netRegKey) {
@@ -267,6 +268,18 @@ $global:VM_Create = {
                 New-ItemProperty -Path $netRegKey32 -Name "SchUseStrongCrypto" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
                 New-ItemProperty -Path $netRegKey32 -Name "MemLabsComment" -Value "SystemDefaultTlsVersions and SchUseStrongCrypto set by MemLabs" -PropertyType STRING -Force -ErrorAction SilentlyContinue | Out-Null
             }
+
+            # Set the domain to be included in intranet sites for IE/Edge for kerberos to work
+            try {
+                if ($domainName -and ($domainName -ne "WORKGROUP")) {
+                    New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains" -Force
+                    New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\$domainName" -Force
+                    Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains" -Name "@" -Value "" -Force
+                    New-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\$domainName" -Name "*" -Value 1 -PropertyType DWORD -Force
+                }
+            }
+            catch {}
+
         }
 
         if ($createVM) {
@@ -296,7 +309,7 @@ $global:VM_Create = {
             }
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting TLS 1.2 registry keys."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Set_TLS12Keys -DisplayName "Setting TLS 1.2 Registry Keys"
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Set_TLS12Keys -DisplayName "Setting TLS 1.2 Registry Keys" -ArgumentList $domainNameForLogging
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set TLS 1.2 Registry Keys." -Warning -OutputStream
             }

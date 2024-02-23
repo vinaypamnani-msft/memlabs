@@ -256,7 +256,7 @@ configuration Phase3
             $friendlyName = 'ConfigMgr WebServer Certificate'
             CertReq SSLCert {
                 Subject             = $subject
-                SubjectAltName      = "DNS=" + $subject
+                SubjectAltName      = "DNS=" + $subject + "&DNS=" + $($ThisVM.VmName)
                 KeyLength           = '2048'
                 Exportable          = $false
                 ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'

@@ -1167,7 +1167,7 @@ class InstallDP {
         }
 
         $Date = [DateTime]::Now.AddYears(10)
-        Add-CMDistributionPoint -SiteSystemServerName $DPServerFullName -SiteCode $this.SiteCode -CertificateExpirationTimeUtc $Date -Force
+        Add-CMDistributionPoint -SiteSystemServerName $DPServerFullName -SiteCode $this.SiteCode -CertificateExpirationTimeUtc $Date -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force
     }
 
     [bool] Test() {
@@ -2486,6 +2486,7 @@ class InstallFeatureForSCCM {
                 Install-WindowsFeature BITS, BITS-IIS-Ext
                 Install-WindowsFeature -Name "Rdc"
                 Install-WindowsFeature -Name UpdateServices-UI
+                Install-WindowsFeature -Name WDS
             }
             if ($_Role -contains "Application Catalog website point") {
                 #IIS
