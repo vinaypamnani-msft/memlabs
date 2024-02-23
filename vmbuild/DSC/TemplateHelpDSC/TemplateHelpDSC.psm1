@@ -2418,7 +2418,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "3"
+    [string] $Version = "4"
 
     [void] Set() {
         $_Role = $this.Role
