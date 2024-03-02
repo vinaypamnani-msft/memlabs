@@ -251,6 +251,9 @@ $global:VM_Create = {
             Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
         }
 
+        $Fix_WorkGroupMachines = {
+            New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "LocalAccountTokenFilterPolicy" -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+        }
         # Add TLS keys, without these upgradeToLatest can fail when accessing the new endpoints that require TLS 1.2
         $Set_TLS12Keys = {
             param([String]$domainName)
@@ -314,6 +317,13 @@ $global:VM_Create = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set TLS 1.2 Registry Keys." -Warning -OutputStream
             }
 
+            if ($currentItem.role -in "WorkgroupMember","InternetClient") {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Fix_WorkGroupMachines"
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_WorkGroupMachines -DisplayName "Fix_WorkGroupMachines"
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed Fix_WorkGroupMachines" -Warning -OutputStream
+                }
+            }
             # Set vm note
             if (-not $skipVersionUpdate) {
                 New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
@@ -955,6 +965,7 @@ $global:VM_Config = {
                 # Set current role
                 switch (($currentItem.role)) {
                     "DC" { $dscRole += "DC" }
+                    "OtherDC" { $dscRole += "OtherDC" }
                     "BDC" { $dscRole += "BDC" }
                     "WorkgroupMember" { $dscRole += "WorkgroupMember" }
                     "AADClient" { $dscRole += "WorkgroupMember" }
@@ -1032,6 +1043,11 @@ $global:VM_Config = {
                 $adminCreds = $using:Common.LocalAdmin
                 $Phase = $using:Phase
                 $dscRole = "Phase$Phase"
+
+
+                switch (($currentItem.role)) {
+                    "OtherDC" { return }
+                }
 
                 # Define DSC variables
                 $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole).ps1"

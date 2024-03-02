@@ -456,6 +456,7 @@ function Get-ConfigurationData {
             $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
         }
 
+
         $global:preparePhasePercent++
         Start-Sleep -Milliseconds 201
         Write-Progress2 "Preparing Phase $Phase" -Status "Starting required VMs (if needed)" -PercentComplete $global:preparePhasePercent
@@ -547,7 +548,7 @@ function Get-Phase3ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux") {
+        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux", "OtherDC") {
             continue
         }
 
@@ -591,7 +592,7 @@ function Get-Phase4ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
             continue
         }
 
@@ -708,7 +709,7 @@ function Get-Phase6ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
             continue
         }
 
@@ -758,7 +759,7 @@ function Get-Phase7ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
             continue
         }
 

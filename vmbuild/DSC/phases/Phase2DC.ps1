@@ -42,6 +42,13 @@
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
+    $OtherDC = $false
+
+    $OtherDCVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "OtherDC" }
+    if ($OtherDCVM) {
+        $OtherDC = $true
+    }
+
     $iiscount = 0
     [System.Collections.ArrayList]$groupMembers = @()
     $GroupMembersList = @()
@@ -279,6 +286,35 @@
 
         $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
         $waitOnDependency = "[DnsServerForwarder]DnsServerForwarder"
+
+        if ($OtherDC) {
+            DnsServerConditionalForwarder 'Forwarder1' {
+                Name             = $($OtherDCVM.thisParams.Domain)
+                MasterServers    = @($($OtherDCVM.thisParams.IPAddr))
+                ReplicationScope = 'Forest'
+                Ensure           = 'Present'
+                DependsOn        = $nextDepend
+            }
+
+            $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"
+            $waitOnDependency = "[DnsServerConditionalForwarder]Forwarder1"
+
+            ADDomainTrust 'Trust'
+            {
+                Ensure               = 'Present'
+                SourceDomainName     = $DomainName
+                TargetDomainName     = $($OtherDCVM.thisParams.Domain)
+                TargetCredential     = $Admincreds
+                TrustDirection       = 'Bidirectional'
+                TrustType            = 'Forest'
+                AllowTrustRecreation = $true
+                DependsOn        = $nextDepend
+            }
+
+            $nextDepend = "[ADDomainTrust]Trust"
+            $waitOnDependency = "[ADDomainTrust]Trust"
+        }
+
         if ($ThisVM.InstallCA) {
 
             WriteStatus ADCS {

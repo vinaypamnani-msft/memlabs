@@ -3638,6 +3638,34 @@ Function Get-SqlVersionMenu {
     }
 }
 
+Function Get-ForestTrustMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+
+
+    $domains = Get-List -Type UniqueDomain
+    $domains += "NONE"
+    $valid = $false
+    while ($valid -eq $false) {
+        $property."$name" = Get-Menu "Select Forest to Trust" $($domains) $CurrentValue -Test:$false
+        if (Get-TestResult -SuccessOnWarning) {
+            return
+        }
+        else {
+            if ($property."$name" -eq $CurrentValue) {
+                return
+            }
+        }
+    }
+}
+
 
 Function Set-SiteServerLocalSql {
     [CmdletBinding()]
@@ -5040,6 +5068,10 @@ function Select-Options {
                     Set-ParentSiteCodeMenu -property $property -name $name -CurrentValue $value
                     continue MainLoop
                 }
+                "ForestTrust" {
+                    Get-ForestTrustMenu -property $property -name $name -CurrentValue $value
+                    continue MainLoop
+                }
                 "sqlVersion" {
                     Get-SqlVersionMenu -property $property -name $name -CurrentValue $value
                     continue MainLoop
@@ -5834,11 +5866,11 @@ function Add-NewVMForRole {
             if ($OperatingSystem -notlike "*Server*") {
                 $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 [int]$i = 1
-                $userPrefix = "user"
+                $userPrefix = "$($configToModify.vmOptions.prefix)user"
                 while ($true) {
                     $preferredUserName = $userPrefix + $i
                     if ($users -contains $preferredUserName) {
-                        write-log -verbose "$preferredUserName already existsTrying next"
+                        write-log -verbose "$preferredUserName already exists Trying next"
                         $i++
                     }
                     else {
@@ -5929,6 +5961,7 @@ function Add-NewVMForRole {
         "DC" {
             $virtualMachine.memory = "4GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ForestTrust' -Value "NONE"
             $virtualMachine.tpmEnabled = $false
         }
         "BDC" {

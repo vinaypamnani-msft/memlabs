@@ -2586,13 +2586,23 @@ function Get-VmSession {
                 $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
                     try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-                    if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
+                    $VM = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
+                    if ($VM) {
+
+                        $username3 = "$($VM.Domain)\$($Common.LocalAdmin.UserName)"
+                        $creds = New-Object System.Management.Automation.PSCredential ($username3, $Common.LocalAdmin.Password)
+                        $cacheKey = $VmName + "-$($VM.Domain)"
+                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                     }
-                    else {
-                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
+                    if (-not $ps) {
+                        if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
+                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning
+                        }
+                        else {
+                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning -Verbose
+                        }
+                        continue
                     }
-                    continue
                 }
             }
             else {

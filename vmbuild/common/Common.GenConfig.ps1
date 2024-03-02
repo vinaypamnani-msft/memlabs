@@ -119,8 +119,7 @@ Function Read-SingleKeyWithTimeout {
             if ($UseReadHost) {
                 $read = Read-Host
                 #write-host "read = $read"
-                if ($read -eq [string]::empty)
-                {
+                if ($read -eq [string]::empty) {
                     return $null
                 }
                 return $read
@@ -391,7 +390,12 @@ function Get-CriticalVMs {
         NONCRIT = @()
     }
 
-    $allvms += get-list -type vm -DomainName $domain -SmartUpdate
+    if ($vmNames) {
+        $allvms += get-list -type vm -SmartUpdate
+    }
+    else {
+        $allvms += get-list -type vm -DomainName $domain -SmartUpdate
+    }
 
     $vms = @()
     if ($vmNames) {
@@ -727,6 +731,13 @@ function ConvertTo-DeployConfigEx {
                 }
             }
 
+            "OtherDC" {
+                $ODC = Get-list -Type VM | Where-Object {$_.vmName -eq $thisVm.VmName }
+                $thisParams | Add-Member -MemberType NoteProperty -Name "Domain" -Value $ODC.domain
+                $ODCIP = $ODC.network -replace "\d{1,3}$","1"
+
+                $thisParams | Add-Member -MemberType NoteProperty -Name "IPAddr" -Value $ODCIP
+            }
             "DC" {
                 $DomainAccountsUPN = @()
                 $DomainComputers = @()

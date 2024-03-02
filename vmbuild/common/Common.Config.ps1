@@ -366,6 +366,16 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
+    # Add DCs from other domains, if needed
+    $dc = $config.virtualMachines | Where-Object { $_.role -eq "DC" }
+
+    if ($dc) {
+        if ($null -ne $dc.ForestTrust -and $dc.ForestTrust -ne "NONE") {
+            $OtherDC = get-list -Type vm -DomainName $dc.ForestTrust | Where-Object {$_.Role -eq "DC" }
+            Add-ExistingVMToDeployConfig -vmName $OtherDC.vmName -configToModify $config -OtherDC:$true
+        }
+    }
+
     # Add Primary to list, when adding SiteSystem
     $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
     foreach ($system in $systems) {
@@ -547,7 +557,9 @@ function Add-ExistingVMToDeployConfig {
         [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
         [object] $configToModify,
         [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
-        [bool] $hidden = $true
+        [bool] $hidden = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Is This a DC from another domain?")]
+        [bool] $OtherDC = $false
     )
 
     Write-Log -verbose "Adding $vmName to Deploy config"
@@ -594,6 +606,9 @@ function Add-ExistingVMToDeployConfig {
 
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
+    }
+    if ($OtherDC) {
+        $newVMObject.role = "OtherDC"
     }
     if ($null -eq $configToModify.virtualMachines) {
         $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
