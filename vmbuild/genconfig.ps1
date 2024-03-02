@@ -3650,7 +3650,7 @@ Function Get-ForestTrustMenu {
     )
 
 
-    $domains = Get-List -Type UniqueDomain
+    $domains = @(Get-List -Type UniqueDomain)
     $domains += "NONE"
     $valid = $false
     while ($valid -eq $false) {
