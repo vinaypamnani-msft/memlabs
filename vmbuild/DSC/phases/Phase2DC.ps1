@@ -299,8 +299,7 @@
             $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"
             $waitOnDependency = "[DnsServerConditionalForwarder]Forwarder1"
 
-            ADDomainTrust 'Trust'
-            {
+            ADDomainTrust 'Trust' {
                 Ensure               = 'Present'
                 SourceDomainName     = $DomainName
                 TargetDomainName     = $($OtherDCVM.thisParams.Domain)
@@ -308,7 +307,7 @@
                 TrustDirection       = 'Bidirectional'
                 TrustType            = 'Forest'
                 AllowTrustRecreation = $true
-                DependsOn        = $nextDepend
+                DependsOn            = $nextDepend
             }
 
             $nextDepend = "[ADDomainTrust]Trust"
@@ -410,6 +409,8 @@
 
             $waitOnDependency += "[DelegateControl]Add$server"
         }
+
+
 
         $sitecount = 0
         [System.Collections.ArrayList]$groupMembers = @()
@@ -530,6 +531,34 @@
             $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
         }
 
+        if ($ThisVM.externalDomainJoinSiteCode) {
+
+
+            WriteStatus WaitExtSchema {
+                DependsOn = $waitOnDependency
+                Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
+            }
+
+            WaitForExtendSchemaFile WaitForExtendSchemaFile {
+                MachineName = $ThisVM.ThisParams.ExternalTopLevelSiteServer
+                ExtFolder   = "CMCB"
+                Ensure      = "Present"
+                DependsOn   = $waitOnDependency
+            }
+            $waitOnDependency = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
+
+            DelegateControl "AddremoteIISGroup" {
+                Machine        = 'ConfigMgr IIS Servers'
+                DomainFullName = $ThisVM.ForestTrust
+                Ensure         = "Present"
+                DependsOn      = $waitOnDependency
+                IsGroup        = $true
+            }
+
+            $waitOnDependency = "[DelegateControl]AddremoteIISGroup"
+
+
+        }
         RemoteDesktopAdmin RemoteDesktopSettings {
             IsSingleInstance   = 'yes'
             Ensure             = 'Present'

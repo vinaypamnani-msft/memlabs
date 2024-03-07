@@ -39,12 +39,10 @@ function Get-UserConfiguration {
         #Apply Fixes to Config
 
         if ($config.cmOptions) {
-            if ($null -eq ($config.cmOptions.EVALVersion))
-            {
+            if ($null -eq ($config.cmOptions.EVALVersion)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EVALVersion" -Value $false
             }
-            if ($null -eq ($config.cmOptions.UsePKI))
-            {
+            if ($null -eq ($config.cmOptions.UsePKI)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UsePKI" -Value $false
             }
         }
@@ -371,7 +369,7 @@ function Add-ExistingVMsToDeployConfig {
 
     if ($dc) {
         if ($null -ne $dc.ForestTrust -and $dc.ForestTrust -ne "NONE") {
-            $OtherDC = get-list -Type vm -DomainName $dc.ForestTrust | Where-Object {$_.Role -eq "DC" }
+            $OtherDC = get-list -Type vm -DomainName $dc.ForestTrust | Where-Object { $_.Role -eq "DC" }
             Add-ExistingVMToDeployConfig -vmName $OtherDC.vmName -configToModify $config -OtherDC:$true
         }
     }
@@ -952,13 +950,31 @@ function Get-SiteServerForSiteCode {
         [ValidateSet("Name", "VM")]
         [string] $type = "Name",
         [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
-        [bool] $SmartUpdate = $true
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
+        [string] $DomainName
+
     )
     if (-not $SiteCode) {
         throw "SiteCode is NULL"
         return $null
     }
+
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    if ($DomainName) {
+        $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) })
+        if ($vmList) {
+            if ($type -eq "Name") {
+                return ($vmList | Select-Object -First 1).vmName
+            }
+            else {
+                return $vmList | Select-Object -First 1
+            }
+        }
+        return
+    }
+
+
     $configVMs = @()
     $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
     if ($configVMs) {
@@ -2127,7 +2143,7 @@ Function Show-Summary {
         if ($deployConfig.cmOptions.usePKI) {
             Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and reporting roles"
         }
-        else{
+        else {
             Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
         }
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }

@@ -774,6 +774,18 @@ function ConvertTo-DeployConfigEx {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "DomainComputers" -Value  $DomainComputers -Force
                 }
 
+
+                if ($thisVM.externalDomainJoinSiteCode) {
+                    $RemoteSS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.externalDomainJoinSiteCode -DomainName $thisVM.ForestTrust -type VM
+                    $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"
+                    $ExternalTopLevelSiteServer = $ExternalSiteServer
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalSiteServer" -Value $ExternalSiteServer -Force
+                    if ($RemoteSS.ParentSiteCode) {
+                        $RemoteCAS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $RemoteSS.ParentSiteCode -DomainName $thisVM.ForestTrust -type VM
+                        $ExternalTopLevelSiteServer = "$($RemoteCAS.VmName).$($thisVM.ForestTrust)"
+                    }
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalTopLevelSiteServer" -Value $ExternalTopLevelSiteServer -Force
+                }
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentAccount } | Select-Object -ExpandProperty SQLAgentAccount -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SqlServiceAccount } | Select-Object -ExpandProperty SqlServiceAccount -Unique

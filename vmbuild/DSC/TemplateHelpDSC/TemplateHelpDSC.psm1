@@ -237,7 +237,15 @@ class InstallDotNet4 {
         $setup = "C:\temp\$($this.FileName)"
         if (!(Test-Path $setup)) {
             Write-Verbose "Downloading .NET $($this.FileName) from $($this.DownloadUrl)..."
-            Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
+            try {
+                Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                Write-Verbose $_
+                ipconfig /flushdns
+                Start-Sleep -Seconds 120
+                Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
+            }
         }
 
         # Install
@@ -898,6 +906,9 @@ class DelegateControl {
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
+    [DscProperty()]
+    [bool] $IsGroup
+
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
@@ -918,14 +929,21 @@ class DelegateControl {
         $cmd = "dsacls.exe"
         $arg1 = "CN=System Management,CN=System,$root"
         $arg2 = "/G"
-        $arg3 = "" + $DomainName + "\" + $this.Machine + "`$:GA;;"
-        $arg4 = "/I:T"
+        if ($this.IsGroup) {
+            $arg3 = "" + $this.DomainFullName + "\" + $this.Machine + "`:GA;;"
+        }
+        else {
+            $arg3 = "" + $DomainName + "\" + $this.Machine + "`$:GA;;"
 
+        }
+        $arg4 = "/I:T"
+        Write-Verbose "Running $cmd $arg1 $arg2 $arg3 $arg4"
         & $cmd $arg1 $arg2 $arg3 $arg4
     }
 
     [bool] Test() {
         $_machinename = $this.Machine
+        $DomainName = $this.DomainFullName.split('.')[0]
         $root = (Get-ADRootDSE).defaultNamingContext
         try {
             Get-ADObject "CN=System Management,CN=System,$root"
@@ -935,12 +953,20 @@ class DelegateControl {
             return $false
         }
 
+        Write-Verbose "Testing for *$($DomainName)\$($_machinename)* IsGroup: $($this.IsGroup)"
         $cmd = "dsacls.exe"
         $arg1 = "CN=System Management,CN=System,$root"
         $permissioninfo = & $cmd $arg1
 
-        if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-            return $true
+        if ($this.IsGroup) {
+            if (($permissioninfo | Where-Object { $_ -like "*$($DomainName)\$($_machinename)*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+                return $true
+            }
+        }
+        else {
+            if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+                return $true
+            }
         }
 
         return $false

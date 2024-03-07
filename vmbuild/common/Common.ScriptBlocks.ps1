@@ -1415,13 +1415,24 @@ $global:VM_Config = {
                                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: ADServerDownException from VM. Restarting the VM" -Warning
                                         Stop-VM2 -name $currentItem.vmName
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Stopped"
-
+                                        Start-Sleep -Seconds 20
                                         Start-VM2 -Name $currentItem.vmName
-                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 60 seconds to check status."
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 300 seconds to check status."
 
-                                        Start-Sleep -Seconds 300
+                                        Start-Sleep -Seconds 100
+
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 200 seconds to check status."
+
+                                        Start-Sleep -Seconds 100
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 100 seconds to check status."
+
+                                        Start-Sleep -Seconds 90
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 10 seconds to check status."
+
+                                        Start-Sleep -Seconds 10
                                         $state = Get-VM2 -Name $currentItem.vmName
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Current State: $($state.state)"
+                                        Continue
                                     }
                                     if (-not $failure) {
                                         continue

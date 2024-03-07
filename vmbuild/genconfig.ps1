@@ -3654,7 +3654,12 @@ Function Get-ForestTrustMenu {
     $domains += "NONE"
     $valid = $false
     while ($valid -eq $false) {
-        $property."$name" = Get-Menu "Select Forest to Trust" $($domains) $CurrentValue -Test:$false
+        $result = Get-Menu "Select Forest to Trust" $($domains) $CurrentValue -Test:$false
+        $property."$name" = $result
+
+        if ($result -ne "NONE") {
+            Get-PrimarySitesForDomain $property $result
+        }
         if (Get-TestResult -SuccessOnWarning) {
             return
         }
@@ -3666,6 +3671,31 @@ Function Get-ForestTrustMenu {
     }
 }
 
+Function Get-PrimarySitesForDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To get Primary Sites")]
+        [string] $Domain
+    )
+
+    $targetPrimaries = @((Get-list -type vm -DomainName $Domain | Where-Object { $_.Role -eq "Primary" } ).SiteCode)
+
+    if ($targetPrimaries) {
+        $targetPrimaries += "NONE"
+        $valid = $false
+        while ($valid -eq $false) {
+            $property.externalDomainJoinSiteCode
+            $result = Get-Menu "Select Primary site code in $Domain to configure to manage clients in this domain" $($targetPrimaries) "NONE" -Test:$false
+            $property | Add-Member -MemberType NoteProperty -Name "externalDomainJoinSiteCode" -Value $result -Force
+
+            if (Get-TestResult -SuccessOnWarning) {
+                return
+            }
+        }
+    }
+}
 
 Function Set-SiteServerLocalSql {
     [CmdletBinding()]
@@ -5866,7 +5896,7 @@ function Add-NewVMForRole {
             if ($OperatingSystem -notlike "*Server*") {
                 $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 [int]$i = 1
-                $userPrefix = "$($configToModify.vmOptions.prefix)user"
+                $userPrefix = $oldConfig.vmOptions.prefix.toLower() + "user"
                 while ($true) {
                     $preferredUserName = $userPrefix + $i
                     if ($users -contains $preferredUserName) {
