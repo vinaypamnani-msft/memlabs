@@ -6989,7 +6989,7 @@ if ($Common.DevBranch) {
         $zipLastWriteTime = (Get-ChildItem ".\DSC\DSC.zip").LastWriteTime + (New-TimeSpan -Minutes 1)
     }
     if (-not $zipLastWriteTime -or ($psdLastWriteTime -gt $zipLastWriteTime) -or ($psmLastWriteTime -gt $zipLastWriteTime)) {
-        & ".\dsc\createGuestDscZip.ps1" | Out-Host
+        powershell .\dsc\createGuestDscZip.ps1 | Out-Host
         Set-Location $PSScriptRoot | Out-Null
     }
 }

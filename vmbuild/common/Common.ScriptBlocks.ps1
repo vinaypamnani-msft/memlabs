@@ -1144,6 +1144,7 @@ $global:VM_Config = {
                 }
 
                 # Compile config, to create MOF
+                $cd
                 "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
                 & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $credsForDSC -ConfigurationData $cd -OutputPath $dscConfigPath
             }
