@@ -940,6 +940,7 @@ class DelegateControl {
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
+        $_machinename = $this.Machine
         $root = (Get-ADRootDSE).defaultNamingContext
         $ou = $null
         try {
@@ -964,8 +965,38 @@ class DelegateControl {
 
         }
         $arg4 = "/I:T"
-        Write-Verbose "Running $cmd $arg1 $arg2 $arg3 $arg4"
-        & $cmd $arg1 $arg2 $arg3 $arg4
+
+
+        $retries = 0
+        $maxretries = 15
+        while ($retries -le $maxretries) {
+
+            $retries++
+            Write-Verbose "Running $cmd $arg1 $arg2 $arg3 $arg4"
+            & $cmd $arg1 $arg2 $arg3 $arg4
+
+            Write-Verbose "Testing for *$($DomainName)\$($_machinename)* IsGroup: $($this.IsGroup)"
+            $tcmd = "dsacls.exe"
+            $targ1 = "CN=System Management,CN=System,$root"
+            $permissioninfo = & $tcmd $targ1
+
+            if ($this.IsGroup) {
+                if (($permissioninfo | Where-Object { $_ -like "*$($DomainName)\$($_machinename)*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+                   break
+                }
+            }
+            else {
+                if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+                   break
+                }
+            }
+
+            Write-Verbose "$cmd $arg1 did not contain the new permissions. Sleeping 60 seconds and trying again"
+            Start-Sleep -Seconds 60
+
+        }
+
+
     }
 
     [bool] Test() {
