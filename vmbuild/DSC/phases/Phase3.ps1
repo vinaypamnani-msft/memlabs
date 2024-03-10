@@ -150,6 +150,12 @@ configuration Phase3
             $nextDepend = "[InstallSSMS]SSMS"
         }
 
+        GpUpdate GpUpdate {
+            Run = "True"
+            DependsOn = $nextDepend
+        }
+        $nextDepend = "[GpUpdate]GpUpdate"
+
         if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "PassiveSite") {
 
             $prevDepend = $nextDepend

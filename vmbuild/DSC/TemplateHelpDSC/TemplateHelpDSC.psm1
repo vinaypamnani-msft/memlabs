@@ -836,10 +836,37 @@ class WaitForExtendSchemaFile {
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
+    [DscProperty()]
+    [System.Management.Automation.PSCredential] $AdminCreds
+
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
+
+
+        $success = $false
+        while ($success -eq $false) {
+            if ($this.AdminCreds) {
+                $user = $this.AdminCreds.UserName
+                $pass = $this.AdminCreds.GetNetworkCredential().Password
+                Write-Verbose "Running New-SmbMapping -RemotePath \\$($this.MachineName) -UserName $user -Password $pass"
+                $smb = New-SmbMapping -RemotePath "\\$($this.MachineName)" -UserName $user -Password $pass
+                if ($smb) {
+                    Write-Verbose "Mapping success: $smb"
+                    $success = $true
+                }
+                else {
+                    Write-Verbose "Mapping Failure.."
+                    start-sleep -Seconds 30
+                }
+            }
+            else {
+                Write-Verbose "No AdminCreds passed.. Moving on"
+                $success = $true
+            }
+        }
+
         $_FilePath = "\\$($this.MachineName)\$($this.ExtFolder)"
         $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
         $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
@@ -2759,6 +2786,9 @@ class InstallCA {
     [DscProperty(Key)]
     [string] $HashAlgorithm
 
+    [DscProperty()]
+    [string] $RootCA
+
     [void] Set() {
         try {
             $_HashAlgorithm = $this.HashAlgorithm
@@ -2766,7 +2796,13 @@ class InstallCA {
             #Install CA
             Import-Module ServerManager
             Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools
-            Install-AdcsCertificationAuthority -CAType EnterpriseRootCa -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" -KeyLength 2048 -HashAlgorithmName $_HashAlgorithm -force
+
+            if ($this.RootCA) {
+                Install-AdcsCertificationAuthority -CAType EnterpriseSubordinateCa  -ParentCA $($this.RootCA) -force
+            }
+            else {
+                Install-AdcsCertificationAuthority -CAType EnterpriseRootCa -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" -KeyLength 2048 -HashAlgorithmName $_HashAlgorithm -force
+            }
 
             $StatusPath = "$env:windir\temp\InstallCAStatus.txt"
             "Finished" >> $StatusPath
@@ -2793,6 +2829,39 @@ class InstallCA {
 
 }
 
+[DscResource()]
+class UpdateCAPrefs {
+    [DscProperty(Key)]
+    [string] $RootCA
+
+    [void] Set() {
+        try {
+            certutil -setreg Policy\EditFlags +EDITF_ENABLELDAPREFERRALS
+            Restart-Service -Name certsvc
+            $StatusPath = "$env:windir\temp\UpdateCAStatus.txt"
+            "Finished" >> $StatusPath
+
+            Write-Verbose "Finished installing CA."
+        }
+        catch {
+            Write-Verbose "Failed to install CA."
+        }
+    }
+
+    [bool] Test() {
+        $StatusPath = "$env:windir\temp\UpdateCAStatus.txt"
+        if (Test-Path $StatusPath) {
+            return $true
+        }
+
+        return $false
+    }
+
+    [UpdateCAPrefs] Get() {
+        return $this
+    }
+
+}
 
 [DscResource()]
 class ClusterSetOwnerNodes {
@@ -3841,6 +3910,8 @@ class ImportCertifcateTemplate {
         catch {
             Write-Verbose "$_"
             Write-Verbose " -- Restart-Service -Name CertSvc"
+            $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+            Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
             Restart-Service -Name CertSvc
             start-sleep -seconds 60
             Write-Verbose " -- ADCSAdministration\get-Catemplate"
@@ -3897,6 +3968,55 @@ class RebootNow {
 }
 
 [DscResource()]
+class InstallRootCertificate {
+    [DscProperty(Key)]
+    [string]$CAName
+
+
+    [void] Set() {
+
+        $_FileName = "C:\Temp\rootCA.cer"
+
+
+        if (-not (Test-Path $_FileName)) {
+            Write-Verbose "Install Root Cert"
+
+            $cmd = "certutil.exe"
+            $arg1 = "-config"
+            $arg2 = $this.CAName
+            $arg3 = "-ca.cert"
+            $arg4 = $_FileName
+            & $cmd $arg1 $arg2 $arg3 $arg4
+
+
+            certutil.exe -dspublish -f $_FileName RootCA
+            certutil.exe -dspublish -f $_FileName NtauthCA
+            certutil.exe -dspublish -f $_FileName SubCA
+
+        }
+
+
+    }
+
+    [bool] Test() {
+
+        $_FileName = "C:\Temp\rootCA.cer"
+        if (-not (Test-Path $_FileName)) {
+            return $false
+        }
+
+        return $true
+    }
+
+    [InstallRootCertificate] Get() {
+        return $this
+    }
+
+}
+
+
+
+[DscResource()]
 class AddCertificateTemplate {
     [DscProperty(Key)]
     [string]$TemplateName
@@ -3906,6 +4026,9 @@ class AddCertificateTemplate {
 
     [DscProperty()]
     [string]$Permissions
+
+    [DscProperty()]
+    [bool]$PermissionsOnly
 
     [void] Set() {
 
@@ -3918,11 +4041,18 @@ class AddCertificateTemplate {
         $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
         "$time $_Status" | Out-File -FilePath $StatusLog -Append
 
-        $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
-        if (!(Test-Path -Path $_Path -PathType Leaf)) {
-            throw "Could not find $_Path"
+
+        if (-not $this.PermissionsOnly) {
+            $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
+            if (!(Test-Path -Path $_Path -PathType Leaf)) {
+                throw "Could not find $_Path"
+            }
         }
 
+        $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+        Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+        Write-Verbose "reStarting CertSvc: $_"
+        restart-Service -Name CertSvc -ErrorAction SilentlyContinue
 
         if ($_Group) {
 
@@ -3959,8 +4089,10 @@ class AddCertificateTemplate {
                 }
                 catch {
                     try {
+                        $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
                         Write-Verbose "Starting CertSvc: $_"
-                        Start-Service -Name CertSvc -ErrorAction SilentlyContinue
+                        start-Service -Name CertSvc -ErrorAction SilentlyContinue
                         start-sleep -Seconds 60
                     }
                     catch {
@@ -3987,45 +4119,51 @@ class AddCertificateTemplate {
         }
 
         try {
+            $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+            Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
             Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
             start-sleep -seconds 60
         }
         catch {}
-
-        $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
-        while ($count -eq 0) {
-            try {
-                Write-Verbose "ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop"
-                ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop
-            }
-            catch {
+        if (-not $this.PermissionsOnly) {
+            $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+            while ($count -eq 0) {
                 try {
-                    Start-Service -Name CertSvc
-                    Start-Sleep -Seconds 10
-                    Write-Verbose "$_"
-                    Write-Verbose "PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName"
-                    PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName
+                    Write-Verbose "ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop"
+                    ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop
                 }
                 catch {
-                    # Reboot
-                    Write-Verbose "$_"
-                    if (-not (Test-Path "C:\temp\certreboot.txt")) {
-                        Write-Verbose "Rebooting $_"
-                        New-Item "C:\temp\certreboot.txt"
-                        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-                        $global:DSCMachineStatus = 1
-                        return
+                    try {
+                        Start-Service -Name CertSvc
+                        Start-Sleep -Seconds 10
+                        Write-Verbose "$_"
+                        Write-Verbose "PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName"
+                        PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName
                     }
-                    throw
+                    catch {
+                        # Reboot
+                        Write-Verbose "$_"
+                        if (-not (Test-Path "C:\temp\certreboot.txt")) {
+                            Write-Verbose "Rebooting $_"
+                            New-Item "C:\temp\certreboot.txt"
+                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                            $global:DSCMachineStatus = 1
+                            return
+                        }
+                        throw
+                    }
                 }
+                $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
             }
-            $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
         }
-
     }
 
     [bool] Test() {
 
+
+        if ($this.PermissionsOnly) {
+            return $false
+        }
         $_TemplateName = $this.TemplateName
         try {
             Write-Verbose " -- ADCSAdministration\get-Catemplate"
@@ -4034,6 +4172,8 @@ class AddCertificateTemplate {
         catch {
             Write-Verbose "$_"
             Write-Verbose " -- Restart-Service -Name CertSvc"
+            $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+            Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
             Restart-Service -Name CertSvc
             start-sleep -seconds 60
             Write-Verbose " -- ADCSAdministration\get-Catemplate"
@@ -4113,3 +4253,157 @@ class AddCertificateToIIS {
 
 }
 
+[DscResource()]
+class AddToAdminGroup {
+    [DscProperty(Key)]
+    [string]$DomainName
+
+    [DscProperty()]
+    [System.Management.Automation.PSCredential] $RemoteCreds
+
+    [DscProperty(Mandatory)]
+    [string[]] $AccountNames
+
+    [DscProperty(Key)]
+    [string] $TargetGroup
+    [void] Set() {
+
+
+        $retries = 30
+        $tryno = 0
+        while ($tryno -le $retries) {
+            $tryno++
+            try {
+                if ($this.DomainName -ne "NONE") {
+                    foreach ($AccountName in $this.AccountNames) {
+
+                        if ($AccountName.EndsWith("$")) {
+                            Write-Verbose "Adding Computer $($this.DomainName)\$AccountName"
+                            $user1 = Get-ADComputer -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
+                        }
+                        else {
+                            Write-Verbose "Adding User  $($this.DomainName)\$AccountName"
+                            $user1 = Get-ADuser -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
+                        }
+                        Add-ADGroupMember -Identity $this.TargetGroup -Members $user1
+                    }
+                }
+                else {
+                    foreach ($AccountName in $this.AccountNames) {
+
+                        if ($AccountName.EndsWith("$")) {
+                            Write-Verbose "Adding Computer $AccountName"
+                            $user2 = Get-ADComputer -Identity $AccountName
+                        }
+                        else {
+                            Write-Verbose "Adding User $AccountName"
+                            $user2 = Get-ADuser -Identity $AccountName
+                        }
+                        Add-ADGroupMember -Identity $this.TargetGroup -Members $user2
+                    }
+                }
+            }
+            catch {
+                Write-Verbose $_
+                start-sleep -seconds 60
+                continue
+            }
+            Write-Verbose "Done."
+            return
+        }
+
+    }
+
+    [bool] Test() {
+
+        return $false
+    }
+
+    [AddToAdminGroup] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class RunPkiSync {
+    [DscProperty(Key)]
+    [string]$SourceForest
+
+    [DscProperty(Key)]
+    [string]$TargetForest
+    [void] Set() {
+
+
+        while ($true) {
+
+            try {
+                Write-Verbose "Attempting to connect to $($this.TargetForest)"
+                $TargetForestContext = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext Forest, $this.TargetForest
+                $TargetForObj = [System.DirectoryServices.ActiveDirectory.Forest]::GetForest($TargetForestContext)
+                if (-not $TargetForObj) {
+                    throw "Could not connect to $($this.TargetForest)"
+                }
+
+            }
+            catch {
+                ipconfig /flushdns
+                gpupdate.exe /force
+                Write-Verbose $_
+                Start-Sleep -Seconds 30
+                continue
+            }
+            try {
+                Write-Verbose "Attempting to connect to $($this.SourceForest)"
+                $SourceForestContext = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext Forest, $this.SourceForest
+                $SourceForObj = [System.DirectoryServices.ActiveDirectory.Forest]::GetForest($SourceForestContext)
+                if (-not $SourceForObj) {
+                    throw "Could not connect to $($this.SourceForest)"
+                }
+            }
+            catch {
+                ipconfig /flushdns
+                gpupdate.exe /force
+                Write-Verbose $_
+                Start-Sleep -Seconds 30
+                continue
+            }
+
+            break
+        }
+
+
+        C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest -targetforest $this.TargetForest -f
+    }
+
+    [bool] Test() {
+
+        return $false
+    }
+
+    [RunPkiSync] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class GpUpdate {
+    [DscProperty(Key)]
+    [string]$Run
+
+    [void] Set() {
+
+        gpupdate.exe /force
+    }
+
+    [bool] Test() {
+
+        return $false
+    }
+
+    [GpUpdate] Get() {
+        return $this
+    }
+
+}

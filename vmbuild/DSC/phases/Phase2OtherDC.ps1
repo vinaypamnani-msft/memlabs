@@ -80,18 +80,89 @@
             #DependsOn          = $waitOnDependency
         }
 
-        DnsServerConditionalForwarder 'Forwarder1'
-        {
+        DnsServerConditionalForwarder 'Forwarder1' {
             Name             = ($deployConfig.vmOptions.domainName)
             MasterServers    = @($DCIPAddr)
             ReplicationScope = 'Forest'
             Ensure           = 'Present'
-            DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
+            DependsOn        = "[RemoteDesktopAdmin]RemoteDesktopSettings"
         }
+
+        $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"
+
+        UpdateCAPrefs UpdateCAPrefs {
+            DependsOn     = $nextDepend
+            RootCa        = $ThisVM.vmName
+        }
+
+        $nextDepend = "[UpdateCAPrefs]UpdateCAPrefs"
+
+        AddToAdminGroup AddRemoteAdmins {
+            DomainName   = ($deployConfig.vmOptions.domainName)
+            RemoteCreds  = $DomainCreds
+            AccountNames = @($DomainAdminName, $Admincreds.UserName)
+            TargetGroup = "Administrators"
+            DependsOn    = $nextDepend
+        }
+        $nextDepend = "[AddToAdminGroup]AddRemoteAdmins"
+
+        #AddCertificateTemplate SubCACert {
+        #    TemplateName    = "SubCA"
+        #    GroupName       = "$DomainName\$($RealDC.vmName)$"
+        #    Permissions     = 'Read, Enroll'
+        #    PermissionsOnly = $true
+        #    DependsOn       = $nextDepend
+        #}
+
+        #$nextDepend = "[AddCertificateTemplate]SubCACert"
+
+        $iiscount = 0
+        $GroupMembersList = @()
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") }
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP }
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP }
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP }
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP }
+        [System.Collections.ArrayList]$iisgroupMembers = @()
+        foreach ($member in $GroupMembersList) {
+            $memberName = $member.vmName + "$"
+            if (-not $iisgroupMembers.Contains($memberName)) {
+                $iiscount = $iisgroupMembers.Add($memberName)
+                $iiscount++
+            }
+        }
+
+        if ($iisCount) {
+            AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
+                TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                GroupName    = "$DomainName\ConfigMgr IIS Servers"
+                Permissions  = 'Read, Enroll'
+                PermissionsOnly = $true
+                DependsOn    = $nextDepend
+            }
+            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
+
+            AddCertificateTemplate ConfigMgrWebServerCertificate {
+                TemplateName = "ConfigMgrWebServerCertificate"
+                GroupName    = "$DomainName\ConfigMgr IIS Servers"
+                Permissions  = 'Read, Enroll'
+                PermissionsOnly = $true
+                DependsOn    = $nextDepend
+            }
+            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+        }
+        AddCertificateTemplate ConfigMgrClientCertificate {
+            TemplateName = "ConfigMgrClientCertificate"
+            GroupName    = "$DomainName\Domain Computers"
+            Permissions  = 'Read, Enroll, AutoEnroll'
+            PermissionsOnly = $true
+            DependsOn    = $nextDepend
+        }
+        $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
 
 
         WriteStatus Complete {
-            DependsOn = "[DnsServerConditionalForwarder]Forwarder1"
+            DependsOn = $nextDepend
             Status    = "Complete!"
         }
 

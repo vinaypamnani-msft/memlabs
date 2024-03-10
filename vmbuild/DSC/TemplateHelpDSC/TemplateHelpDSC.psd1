@@ -54,7 +54,13 @@ DscResourcesToExport = @(
     'AddCertificateTemplate',
     'ImportCertifcateTemplate',
     'AddCertificateToIIS',
-    'RebootNow'
+    'RebootNow',
+    'AddToAdminGroup',
+    'UpdateCAPrefs',
+    'InstallRootCertificate',
+    'RunPkiSync',
+    'GpUpdate'
+
 
 )
 

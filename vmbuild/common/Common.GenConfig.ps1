@@ -776,6 +776,15 @@ function ConvertTo-DeployConfigEx {
 
 
                 if ($thisVM.externalDomainJoinSiteCode) {
+
+                    $OtherDC = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object {$_.Role -eq "DC"})
+                    if ($OtherDC.InstallCA) {
+                        #ADA-DC1.adatum.com\adatum-ADA-DC1-CA
+                        $OtherDomainShort = $($ThisVM.ForestTrust).Split(".")[0]
+                        $OtherRootCA = "$($OtherDc.VmName).$($ThisVM.ForestTrust)\$($OtherDomainShort)-$($OtherDc.VmName)-CA"
+                        $thisParams | Add-Member -MemberType NoteProperty -Name "RootCA" -Value $OtherRootCA -Force
+                    }
+
                     $RemoteSS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.externalDomainJoinSiteCode -DomainName $thisVM.ForestTrust -type VM
                     $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"
                     $ExternalTopLevelSiteServer = $ExternalSiteServer

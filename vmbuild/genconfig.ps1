@@ -3658,6 +3658,7 @@ Function Get-ForestTrustMenu {
         $property."$name" = $result
 
         if ($result -ne "NONE") {
+            $property.InstallCA = $false
             Get-PrimarySitesForDomain $property $result
         }
         if (Get-TestResult -SuccessOnWarning) {
