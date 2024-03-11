@@ -65,9 +65,9 @@ if (Test-Path $cm_svc_file) {
     #Remove-Item -Path $cm_svc_file -Force -Confirm:$false
 
     # Set client push account
-    Write-DscStatus "Setting the Client Push Account"
-    Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
-    Start-Sleep -Seconds 5
+    #Write-DscStatus "Setting the Client Push Account"
+    #Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
+    #Start-Sleep -Seconds 5
 
     $ForestDiscoveryAccount = "$DomainFullName\admin"
 
@@ -87,7 +87,7 @@ if (Test-Path $cm_svc_file) {
     $DomainB = $DomainFullName.Split(".")[1]
     $LDAPPath = "LDAP://DC=$DomainA,DC=$DomainB"
     Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery $LDAPPath"
-    Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $sitecode -Enabled $true -addActiveDirectoryContainer @($LDAPPath) -UserName $ForestDiscoveryAccount *>&1 | Out-File $global:StatusLog -Append
+    Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $sitecode -Enabled $true -addActiveDirectoryContainer @($LDAPPath) -UserName $ForestDiscoveryAccount -Verbose *>&1 | Out-File $global:StatusLog -Append
 
     Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectoryUserDiscovery $LDAPPath"
     Set-CMDiscoveryMethod -ActiveDirectoryUserDiscovery -SiteCode $sitecode -Enabled $true -AddActiveDirectoryContainer @($LDAPPath) -UserName  $ForestDiscoveryAccount -EnableIncludeGroup $true -EnableRecursive $true -Verbose *>&1 | Out-File $global:StatusLog -Append
