@@ -91,7 +91,7 @@ if (Test-Path $cm_svc_file) {
     $DomainB = $DomainFullName.Split(".")[1]
     $LDAPPath = "LDAP://DC=$DomainA,DC=$DomainB"
     Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery $LDAPPath"
-    Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $sitecode -Enabled $true -addActiveDirectoryContainer @($LDAPPath) -UserName $ForestDiscoveryAccount -Verbose -EnableIncludeGroup $true -EnableRecursive"
+    Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $sitecode -Enabled $true -addActiveDirectoryContainer @($LDAPPath) -UserName $ForestDiscoveryAccount -Verbose -EnableIncludeGroup $$true -EnableRecursive $$true"
     Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $sitecode -Enabled $true -addActiveDirectoryContainer @($LDAPPath) -UserName $ForestDiscoveryAccount -EnableIncludeGroup $true -EnableRecursive $true -Verbose *>&1 | Out-File $global:StatusLog -Append
 
     Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectoryUserDiscovery $LDAPPath"
@@ -113,7 +113,14 @@ if (Test-Path $cm_svc_file) {
         Add-CMBoundaryToGroup -BoundaryName "$DomainFullName - $network" -BoundaryGroupName $network *>&1 | Out-File $global:StatusLog -Append
     }
     Write-DscStatus "Set-CMClientPushInstallation $cm_svc"
-    Set-CMClientPushInstallation -SiteCode $SiteCode -EnableAutomaticClientPushInstallation $True -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
+    $accounts = (get-CMClientPushInstallation -SiteCode PS1).EmbeddedPropertyLists.Reserved2.values
+
+    if ($cm_svc -in $accounts) {
+        Write-DscStatus "Skip Set-CMClientPushInstallation since $cm_svc already exists"
+    }
+    else {
+        Set-CMClientPushInstallation -SiteCode $SiteCode -EnableAutomaticClientPushInstallation $True -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
+    }
 
     # Restart services to make sure push account is acknowledged by CCM
     Write-DscStatus "Restarting services"
