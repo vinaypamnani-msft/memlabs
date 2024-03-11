@@ -12,7 +12,8 @@ Configuration Phase8
 
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
-    $DomainName = $deployConfig.parameters.domainName
+
+
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # Log share
@@ -23,6 +24,7 @@ Configuration Phase8
     $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
     # Domain Creds
+    $DomainName = $deployConfig.parameters.domainName
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
@@ -53,7 +55,15 @@ Configuration Phase8
 
     Node $AllNodes.Where{ $_.Role -eq 'SqlServer' }.NodeName
     {
-        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
+         # Domain Creds
+    $DomainName = $deployConfig.parameters.domainName
+    if ($ThisVM.Domain) {
+        $DomainName = $ThisVM.Domain
+    }
+    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
+
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Disable-AgentJob-Set.sql"
         $AgentJobTest = "C:\staging\DSC\SQLScripts\AgentJob-Test.sql"
         $AgentJobGet = "C:\staging\DSC\SQLScripts\AgentJob-Get.sql"
@@ -136,7 +146,14 @@ Configuration Phase8
 
     Node $AllNodes.Where{ $_.Role -eq 'DC' }.NodeName
     {
-        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
+           # Domain Creds
+    $DomainName = $deployConfig.parameters.domainName
+    if ($ThisVM.Domain) {
+        $DomainName = $ThisVM.Domain
+    }
+    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.PSName
         $CSName = $ThisVM.thisParams.CSName
 
@@ -190,7 +207,14 @@ Configuration Phase8
     Node $AllNodes.Where{ $_.Role -eq "Secondary" }.NodeName
     {
 
-        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
+           # Domain Creds
+    $DomainName = $deployConfig.parameters.domainName
+    if ($ThisVM.Domain) {
+        $DomainName = $ThisVM.Domain
+    }
+    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.ParentSiteServer
 
         #$ParentSiteCode = ($deployConfig.virtualMachines | where-object { $_.vmName -eq ($Node.NodeName) }).ParentSiteCode
@@ -222,23 +246,30 @@ Configuration Phase8
             DependsOn = "[WriteEvent]WriteConfigFinished"
             Status = "Downloading and installing ODBC driver version 18"
         }
-    
+
         InstallODBCDriver ODBCDriverInstall {
             ODBCPath  = "C:\temp\msodbcsql.msi"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]ODBCDriverInstall"            
+            DependsOn = "[WriteStatus]ODBCDriverInstall"
         }
 
         WriteStatus Complete {
             DependsOn = "[InstallODBCDriver]ODBCDriverInstall"
             Status    = "Complete!"
-        }        
+        }
     }
 
     Node $AllNodes.Where{ $_.Role -eq 'CAS' -or $_.Role -eq "Primary" }.NodeName
     {
         $ThisMachineName = $Node.NodeName
-        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
+           # Domain Creds
+    $DomainName = $deployConfig.parameters.domainName
+    if ($ThisVM.Domain) {
+        $DomainName = $ThisVM.Domain
+    }
+    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         WriteStatus ADKInstall {
             Status = "Downloading and installing ADK"
@@ -257,16 +288,16 @@ Configuration Phase8
             DependsOn = $nextDepend
             Status = "Downloading and installing ODBC driver version 18"
         }
-    
+
         InstallODBCDriver ODBCDriverInstall {
             ODBCPath  = "C:\temp\msodbcsql.msi"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]ODBCDriverInstall"            
+            DependsOn = "[WriteStatus]ODBCDriverInstall"
         }
 
         $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
 
-        if (-not $ThisVM.thisParams.ParentSiteServer -and -not $ThisVM.hidden) {
+        if (-not $ThisVM.thisParams.ParentSiteServer -and (-not $($ThisVM.hidden))) {
 
             $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
             if ($CM -eq "CMTP") {
@@ -334,7 +365,14 @@ Configuration Phase8
     Node $AllNodes.Where{ $_.Role -eq 'PassiveSite' }.NodeName
     {
         $ThisMachineName = $Node.NodeName
-        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
+           # Domain Creds
+    $DomainName = $deployConfig.parameters.domainName
+    if ($ThisVM.Domain) {
+        $DomainName = $ThisVM.Domain
+    }
+    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         WriteStatus ADKInstall {
             Status = "Downloading and installing ADK"

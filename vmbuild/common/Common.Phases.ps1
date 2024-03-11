@@ -40,7 +40,8 @@ function Write-JobProgress {
                     $jobName2 = "[Unknown]"
                     if ($jobName) {
                         $jobName2 = "  $($jobName.PadRight($padding," "))"
-                    } else {
+                    }
+                    else {
                         $jobName = "[Unknown VM] [Unkown Role]"
                     }
 
@@ -178,6 +179,25 @@ function Start-PhaseJobs {
             continue
         }
 
+        #Special Case for Cross Domain workflows
+        $valid = $false
+        Write-Log "Checking $($currentItem.vmname) $($currentItem.Role) in Phase $Phase, Domain $($currentItem.domain) Hidden: $($currentItem.hidden)" -LogOnly
+
+        if ($Phase -ge 2 -and $currentItem.hidden -and ($currentItem.domain -and ($currentItem.domain -ne $deployConfig.vmOptions.domainName))) {
+            if ($Phase -eq 2 -and ($currentItem.role -in ("OtherDC"))) {
+                $valid = $true
+            }
+
+            if ($Phase -eq 8 -and ($currentItem.role -in ("Primary"))) {
+                $valid = $true
+            }
+
+            if ($valid -eq $false) {
+                continue
+            }
+        }
+
+
         # Skip Phase 1 for machines that exist - should never hit this
         if ($Phase -eq 1 -and $currentItem.vmName -in $existingVMs.vmName) {
             continue
@@ -189,7 +209,9 @@ function Start-PhaseJobs {
         }
 
         # Skip multi-node DSC (& monitoring) for all machines except those in the ConfigurationData.AllNodes
-        if ($multiNodeDsc -and $currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) {
+        $vmNamefull = "$($currentItem.vmName).$($currentItem.domain)"
+        if ($multiNodeDsc -and ($currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) -and ($vmNamefull -notin $ConfigurationData.AllNodes.NodeName)) {
+            Write-Log -Verbose "Skipping $($currentItem.vmName) because it does not exist in ConfigData"
             continue
         }
 
@@ -227,7 +249,7 @@ function Start-PhaseJobs {
             $reservation = $null
             if ($Phase -eq 5) {
                 $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
-                $reservation = $reservation -replace "-",""
+                $reservation = $reservation -replace "-", ""
             }
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
@@ -520,6 +542,8 @@ function Get-Phase2ConfigurationData {
         # Filter out workgroup machines
         if ($vm.role -notin "AADClient", "OSDClient", "Linux") {
             if (-not $vm.Hidden) {
+                $cd
+                Write-Host "xxxReturning $cd for $($vm.vmName)"
                 return $cd
             }
         }
@@ -552,6 +576,9 @@ function Get-Phase3ConfigurationData {
             continue
         }
 
+        if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
+            continue
+        }
         $newItem = @{
             NodeName = $vm.vmName
             Role     = $vm.Role
@@ -596,6 +623,10 @@ function Get-Phase4ConfigurationData {
             continue
         }
 
+        if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
+            continue
+        }
+
         $newItem = @{
             NodeName = $vm.vmName
             Role     = $vm.Role
@@ -637,6 +668,11 @@ function Get-Phase5ConfigurationData {
     if ($primaryNodes) {
 
         foreach ($primaryNode in $primaryNodes) {
+
+
+            if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
+                continue
+            }
 
             $global:preparePhasePercent++
 
@@ -712,7 +748,9 @@ function Get-Phase6ConfigurationData {
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
             continue
         }
-
+        if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
+            continue
+        }
         $newItem = @{
             NodeName = $vm.vmName
             Role     = "WSUS"
@@ -760,6 +798,10 @@ function Get-Phase7ConfigurationData {
 
         # Filter out workgroup machines
         if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
+            continue
+        }
+
+        if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
             continue
         }
 
@@ -814,55 +856,74 @@ function Get-Phase8ConfigurationData {
                 continue
             }
 
-            $newItem = @{
-                NodeName = $vm.vmName
-                Role     = $vm.Role
+            $MultiDomain = $false
+            if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
+                if ($vm.role -ne "Primary") {
+                    continue
+                }
+                $MultiDomain = $true
+            }
+
+            if ($MultiDomain) {
+                $newItem = @{
+                    NodeName = "$($vm.vmName).$($vm.domain)"
+                    #NodeName = "$($vm.vmName)"
+                    Role     = $vm.Role
+                }
+            }
+            else {
+                $newItem = @{
+                    NodeName = $vm.vmName
+                    Role     = $vm.Role
+                }
             }
             $cd.AllNodes += $newItem
             $NumberOfNodesAdded = $NumberOfNodesAdded + 1
 
-            if ($vm.PassiveSite) {
-                if ($fsVMsAdded -notcontains $vm.remoteContentLibVM) {
-                    $newItem = @{
-                        NodeName = $vm.remoteContentLibVM
-                        Role     = "FileServer"
-                    }
-                    $fsVMsAdded += $vm.remoteContentLibVM
-                    $cd.AllNodes += $newItem
-                    $NumberOfNodesAdded = $NumberOfNodesAdded + 1
-                }
-            }
-
-
-            if ($vm.RemoteSQLVM) {
-                $remoteSQL = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vm.RemoteSQLVM }
-                $newItem = @{
-                    NodeName = $remoteSQL.vmName
-                    Role     = "SqlServer"
-                }
-                if ($cd.AllNodes.NodeName -notcontains $($newItem.NodeName)) {
-                    $cd.AllNodes += $newItem
-                    $NumberOfNodesAdded = $NumberOfNodesAdded + 1
-                }
-                if ($remoteSQL.OtherNode) {
-
-                    if ($fsVMsAdded -notcontains $remoteSQL.fileServerVM) {
+            if (-not $MultiDomain) {
+                if ($vm.PassiveSite) {
+                    if ($fsVMsAdded -notcontains $vm.remoteContentLibVM) {
                         $newItem = @{
-                            NodeName = $remoteSQL.fileServerVM
+                            NodeName = $vm.remoteContentLibVM
                             Role     = "FileServer"
                         }
-                        $fsVMsAdded += $remoteSQL.fileServerVM
+                        $fsVMsAdded += $vm.remoteContentLibVM
                         $cd.AllNodes += $newItem
                         $NumberOfNodesAdded = $NumberOfNodesAdded + 1
                     }
+                }
 
+
+                if ($vm.RemoteSQLVM) {
+                    $remoteSQL = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vm.RemoteSQLVM }
                     $newItem = @{
-                        NodeName = $remoteSQL.OtherNode
+                        NodeName = $remoteSQL.vmName
                         Role     = "SqlServer"
                     }
                     if ($cd.AllNodes.NodeName -notcontains $($newItem.NodeName)) {
                         $cd.AllNodes += $newItem
                         $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                    }
+                    if ($remoteSQL.OtherNode) {
+
+                        if ($fsVMsAdded -notcontains $remoteSQL.fileServerVM) {
+                            $newItem = @{
+                                NodeName = $remoteSQL.fileServerVM
+                                Role     = "FileServer"
+                            }
+                            $fsVMsAdded += $remoteSQL.fileServerVM
+                            $cd.AllNodes += $newItem
+                            $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                        }
+
+                        $newItem = @{
+                            NodeName = $remoteSQL.OtherNode
+                            Role     = "SqlServer"
+                        }
+                        if ($cd.AllNodes.NodeName -notcontains $($newItem.NodeName)) {
+                            $cd.AllNodes += $newItem
+                            $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                        }
                     }
                 }
             }

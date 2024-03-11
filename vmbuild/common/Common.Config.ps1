@@ -371,11 +371,16 @@ function Add-ExistingVMsToDeployConfig {
         if ($null -ne $dc.ForestTrust -and $dc.ForestTrust -ne "NONE") {
             $OtherDC = get-list -Type vm -DomainName $dc.ForestTrust | Where-Object { $_.Role -eq "DC" }
             Add-ExistingVMToDeployConfig -vmName $OtherDC.vmName -configToModify $config -OtherDC:$true
+            if ($null -ne $dc.externalDomainJoinSiteCode -and $dc.externalDomainJoinSiteCode -ne "NONE") {
+                $RemoteSiteServer = Get-SiteServerForSiteCode -deployConfig $config -SiteCode $dc.externalDomainJoinSiteCode -DomainName $dc.ForestTrust -type VM
+                Add-ExistingVMToDeployConfig -vmName $RemoteSiteServer.vmName -configToModify $config
+            }
+
         }
     }
 
     # Add Primary to list, when adding SiteSystem
-    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden}
     foreach ($system in $systems) {
         $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
@@ -388,7 +393,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding Secondary
-    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" -and -not $_.Hidden}
     foreach ($Secondary in $Secondaries) {
         $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM -SmartUpdate:$false
         if ($primary) {
@@ -400,7 +405,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding Passive
-    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and -not $_.Hidden}
     foreach ($PassiveVM in $PassiveVMs) {
         $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
         if ($ActiveNode) {
@@ -415,7 +420,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add CAS to list, when adding primary
-    $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
+    $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" -and -not $_.Hidden}
     foreach ($PriVM in $PriVMS) {
         if ($PriVM.parentSiteCode) {
             $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode -type VM -SmartUpdate:$false
@@ -439,7 +444,7 @@ function Add-ExistingVMsToDeployConfig {
 
 
     # Add FS to list, when adding SQLAO
-    $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
+    $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not $_.Hidden}
     foreach ($SQLAOVM in $SQLAOVMs) {
         if ($SQLAOVM.FileServerVM) {
             Add-ExistingVMToDeployConfig -vmName $SQLAOVM.FileServerVM -configToModify $config
@@ -454,7 +459,7 @@ function Add-ExistingVMsToDeployConfig {
 
 
 
-    $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" }
+    $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" -and -not $_.Hidden}
     foreach ($sup in $wsus) {
         if ($sup.InstallSUP) {
             $ss = Get-SiteServerForSiteCode -deployConfig $config -sitecode $sup.siteCode -type VM -SmartUpdate:$false
@@ -587,7 +592,7 @@ function Add-ExistingVMToDeployConfig {
         "inProgress",
         "success",
         "deployedOS",
-        "domain",
+        #"domain",
         "network",
         "prefix",
         "memLabsDeployVersion",
@@ -995,7 +1000,7 @@ function Get-SiteServerForSiteCode {
             return $existingVMs | Select-Object -First 1
         }
     }
-    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode"
+    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $DomainName"
     return $null
 }
 

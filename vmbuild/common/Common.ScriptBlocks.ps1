@@ -52,6 +52,9 @@ $global:VM_Create = {
         # Set domain name, depending on whether we need to create new VM or use existing one
         if (-not $createVM -or ($currentItem.role -in ("DC", "BDC")) ) {
             $domainName = $deployConfig.parameters.DomainName
+            if ($currentItem.domain) {
+                $domainName = $currentItem.domain
+            }
         }
         else {
             $domainName = "WORKGROUP"
@@ -432,6 +435,9 @@ $global:VM_Config = {
         # Set domain name, depending on whether we need to create new VM or use existing one
         if ($currentItem.hidden -or ($currentItem.role -in ("DC", "BDC")) -or $Phase -gt 2) {
             $domainName = $deployConfig.parameters.DomainName
+            if ($currentItem.domain) {
+                $domainName = $currentItem.domain
+            }
         }
         else {
             $domainName = "WORKGROUP"
@@ -1186,10 +1192,37 @@ $global:VM_Config = {
                     # Use domainCreds instead of local Creds for multi-node DSC
                     #$userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
                     $userdomain = $deployConfig.vmOptions.domainNetBiosName
+
+                    if ($phase -eq 8) {
+                        $RemoteSiteServer = $deployConfig.VirtualMachines | Where-Object {$_.Hidden -and $_.Role -eq "Primary" -and $_.Domain}
+                        "Phase 8 Remote Site Server $($RemoteSiteServer.vmName) $($RemoteSiteServer.Domain)" | Out-File $log -Append
+                        if ($RemoteSiteServer) {
+                            $userdomain = $RemoteSiteServer.Domain
+                        }
+                    }
                     $user = "$userdomain\$($using:Common.LocalAdmin.UserName)"
                     $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
+                    get-job  | Stop-Job | out-null
+                    get-job  | Remove-Job | out-null
+
                     "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
                     Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
+
+                    $wait = Wait-Job -Timeout 30 -name $currentItem.vmName
+                    $job = get-job -name $currentItem.vmName
+                    "Job.State $($job.State)" | Out-File $log -Append
+                    if ($job.State -ne "Running") {
+                        $job | Out-File $log -Append
+                        $data = Receive-Job -name $currentItem.vmName
+                        if ($wait.State -eq "Completed") {
+                            $data| Out-File $log -Append
+                        }else{
+                            $data| Out-File $log -Append
+                            Write-Error $data
+                            return $data
+                        }
+                    }
+
                 }
             }
             catch {
@@ -1597,6 +1630,12 @@ $global:VM_Config = {
 
                     # Check if complete
                     $complete = $status.ScriptBlockOutput -eq "Complete!"
+                    if (-not $complete){
+                        $complete = $status.ScriptBlockOutput -eq "Setting up ConfigMgr. Status: Complete!"
+                    }
+                    if (-not $complete){
+                        $complete = ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -eq "Success")
+                    }
 
                     $bailEarly = $false
                     if ($complete) {

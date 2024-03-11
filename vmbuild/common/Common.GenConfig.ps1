@@ -889,6 +889,9 @@ function ConvertTo-DeployConfigEx {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
             }
             "Primary" {
+                if ($_.Hidden) {
+                    break
+                }
                 $reportingSecondaries = @()
                 $reportingSecondaries += ($deployConfig.virtualMachines | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }).siteCode
                 $reportingSecondaries += (get-list -type vm -domain $deployConfig.vmOptions.domainName | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }).siteCode
@@ -1074,7 +1077,7 @@ function ConvertTo-DeployConfigEx {
         }
 
         #Get the SiteServer this VM's SiteCode reports to.  If it has a passive node, get that as -P
-        if ($thisVM.siteCode) {
+        if ($thisVM.siteCode -and -not $thisVM.Hidden) {
             $SiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
             $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer" -Value $SiteServerVM.vmName -Force
             Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
@@ -1099,7 +1102,7 @@ function ConvertTo-DeployConfigEx {
             }
         }
         #Get the VM Name of the Parent Site Code Site Server
-        if ($thisVM.parentSiteCode) {
+        if ($thisVM.parentSiteCode -and -not $thisVM.Hidden) {
             $parentSiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
             $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServer" -Value $parentSiteServerVM.vmName -Force
             $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM

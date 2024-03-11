@@ -2523,6 +2523,9 @@ function Get-VmSession {
         [switch]$ShowVMSessionError
     )
 
+
+    $VmName = $VmName.Split(".")[0]
+
     $ps = $null
 
     # Cache key

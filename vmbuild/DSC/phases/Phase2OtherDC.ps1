@@ -46,23 +46,6 @@
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
-    $iiscount = 0
-    [System.Collections.ArrayList]$groupMembers = @()
-    $GroupMembersList = @()
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP }
-    [System.Collections.ArrayList]$iisgroupMembers = @()
-    foreach ($member in $GroupMembersList) {
-        $memberName = $member.vmName + "$"
-        if (-not $iisgroupMembers.Contains($memberName)) {
-            $iiscount = $iisgroupMembers.Add($memberName)
-            $iiscount++
-        }
-    }
-
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
@@ -118,11 +101,11 @@
 
         $iiscount = 0
         $GroupMembersList = @()
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") }
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP }
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP }
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP }
-        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP }
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary")-and -not $_.Hidden}
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP -and -not $_.Hidden}
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP -and -not $_.Hidden}
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and -not $_.Hidden}
+        $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and -not $_.Hidden}
         [System.Collections.ArrayList]$iisgroupMembers = @()
         foreach ($member in $GroupMembersList) {
             $memberName = $member.vmName + "$"

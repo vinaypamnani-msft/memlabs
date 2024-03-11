@@ -16,8 +16,19 @@ $scenario = "Standalone"
 if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
 
 # contains passive?
-$containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
-$containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
+$containsPassive = $false
+$containsSecondary = $false
+
+if ($CurrentRole -eq "Primary" -and $ThisVM.hidden -and $ThisVM.domain) {
+    $scenario = "MultiDomain"
+    Write-DscStatus "Multi Domain Scenerio"
+}
+else {
+    # contains passive?
+    $containsPassive = $deployConfig.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $ThisVM.siteCode }
+    $containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
+}
+
 
 # Script Workflow json file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -176,25 +187,43 @@ if ($domainControllers.Count -gt 1) {
     Start-Sleep -Seconds 3
 }
 
+if ($scenario -eq "MultiDomain") {
+    Write-DscStatus "$scenario Running InstallMultiDomainPKI.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallMultiDomainPKI.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+
+    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration.ScriptWorkflow.Status = "Completed"
+    $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-DscStatus "Complete!"
+    return
+}
+
 if ($scenario -eq "Standalone") {
 
     #Install CM and Config
+    Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
     if ($containsSecondary) {
         # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+        Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
     #Install DP/MP/Client
+    Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
+    Write-DscStatus "$scenario Running InstallRoles.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
@@ -206,10 +235,12 @@ if ($scenario -eq "Hierarchy") {
     if ($CurrentRole -eq "CAS") {
 
         #Install CM and Config
+        Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
+        Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
@@ -218,22 +249,26 @@ if ($scenario -eq "Hierarchy") {
     elseif ($CurrentRole -eq "Primary") {
 
         #Install CM and Config
+        Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+            Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
             Set-Location $LogPath
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
         #Install DP/MP/Client
+        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
+        Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
@@ -244,6 +279,7 @@ if ($scenario -eq "Hierarchy") {
 
 if ($containsPassive) {
     # Install Passive Site Server
+    Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
@@ -256,17 +292,24 @@ $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 $Configuration.ScriptWorkflow.Status = "Completed"
 $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-DscStatus "Complete!"
 
 if (-not $deployConfig.cmOptions.UsePKI) {
     # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
+    Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
     . $ScriptFile $ConfigFilePath $LogPath $firstRun
+    Write-DscStatus "Complete!"
 }
 else {
+    Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
     . $ScriptFile $ConfigFilePath $LogPath $firstRun
+    Write-DscStatus "Complete!"
 }
 
+Write-DscStatus "Always Running PushClients.ps1"
 $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
 Set-Location $LogPath
 . $ScriptFile $ConfigFilePath $LogPath
+Write-DscStatus "Complete!"

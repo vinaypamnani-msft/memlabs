@@ -53,11 +53,11 @@
     $iiscount = 0
     [System.Collections.ArrayList]$groupMembers = @()
     $GroupMembersList = @()
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.Hidden}
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP -and -not $_.Hidden }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP -and -not $_.Hidden }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and -not $_.Hidden}
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and -not $_.Hidden}
     [System.Collections.ArrayList]$iisgroupMembers = @()
     foreach ($member in $GroupMembersList) {
         $memberName = $member.vmName + "$"
@@ -432,7 +432,7 @@
 
         $sitecount = 0
         [System.Collections.ArrayList]$groupMembers = @()
-        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") }
+        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.hidden }
         foreach ($member in $GroupMembersList) {
             $sitecount = $groupMembers.Add($member.vmName + "$")
             $sitecount++
