@@ -113,7 +113,7 @@ if (Test-Path $cm_svc_file) {
         Add-CMBoundaryToGroup -BoundaryName "$DomainFullName - $network" -BoundaryGroupName $network *>&1 | Out-File $global:StatusLog -Append
     }
     Write-DscStatus "Set-CMClientPushInstallation $cm_svc"
-    $accounts = (get-CMClientPushInstallation -SiteCode PS1).EmbeddedPropertyLists.Reserved2.values
+    $accounts = (get-CMClientPushInstallation -SiteCode $sitecode).EmbeddedPropertyLists.Reserved2.values
 
     if ($cm_svc -in $accounts) {
         Write-DscStatus "Skip Set-CMClientPushInstallation since $cm_svc already exists"
