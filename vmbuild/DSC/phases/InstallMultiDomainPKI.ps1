@@ -74,16 +74,23 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Creating New-CMActiveDirectoryForest"
     New-CMActiveDirectoryForest -Description "Multi Forest $DomainFullName" -EnableDiscovery $true -UserName $ForestDiscoveryAccount -Password $secure -ForestFqdn $DomainFullName *>&1 | Out-File $global:StatusLog -Append
 
+
     $sitedef = Get-CMSiteDefinition -SiteCode $SiteCode
 
     Write-DscStatus "Enable Discovery Set-CMActiveDirectoryForest"
     Set-CMActiveDirectoryForest -EnableDiscovery $true -Id 2 -AddPublishingSite $sitedef *>&1 | Out-File $global:StatusLog -Append
 
+    Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery"
+    Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery -SiteCode $SiteCode -Enabled $true -Verbose | Out-File $global:StatusLog -Append
+
     $DomainA = $DomainFullName.Split(".")[0]
     $DomainB = $DomainFullName.Split(".")[1]
     $LDAPPath = "LDAP://DC=$DomainA,DC=$DomainB"
-    Write-DscStatus "Set-CMDiscoveryMethod $LDAPPath"
+    Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery $LDAPPath"
     Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $sitecode -Enabled $true -addActiveDirectoryContainer @($LDAPPath) -UserName $ForestDiscoveryAccount *>&1 | Out-File $global:StatusLog -Append
+
+    Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectoryUserDiscovery $LDAPPath"
+    Set-CMDiscoveryMethod -ActiveDirectoryUserDiscovery -SiteCode $sitecode -Enabled $true -AddActiveDirectoryContainer @($LDAPPath) -UserName  $ForestDiscoveryAccount -EnableIncludeGroup $true -EnableRecursive $true -Verbose *>&1 | Out-File $global:StatusLog -Append
 
     $clients = @($deployConfig.virtualMachines | Where-Object { $_.Role -eq "DomainMember" })
     $networks = @()
