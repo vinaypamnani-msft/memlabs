@@ -17,20 +17,24 @@ function Get-UserConfiguration {
 
     # Add extension
     if (-not $Configuration.ToLowerInvariant().EndsWith(".json")) {
-        $Configuration = "$Configuration.json"
-    }
-
-    # Get deployment configuration
-    $configPath = Join-Path $Common.ConfigPath $Configuration
-    if (-not (Test-Path $configPath)) {
-        $testConfigPath = Join-Path $Common.ConfigPath "tests\$Configuration"
-        if (-not (Test-Path $testConfigPath)) {
-            $return.Message = "Get-UserConfiguration: $Configuration not found in $configPath or $testConfigPath. Please create the config manually or use genconfig.ps1, and try again."
-            return $return
+        if (-not $Configuration.ToLowerInvariant().EndsWith(".memlabs")) {
+            $Configuration = "$Configuration.json"
         }
-        $configPath = $testConfigPath
     }
 
+    $configPath = $Configuration
+    if (-not (Test-Path $configPath)) {
+        # Get deployment configuration
+        $configPath = Join-Path $Common.ConfigPath $Configuration
+        if (-not (Test-Path $configPath)) {
+            $testConfigPath = Join-Path $Common.ConfigPath "tests\$Configuration"
+            if (-not (Test-Path $testConfigPath)) {
+                $return.Message = "Get-UserConfiguration: $Configuration not found in $configPath or $testConfigPath. Please create the config manually or use genconfig.ps1, and try again."
+                return $return
+            }
+            $configPath = $testConfigPath
+        }
+    }
     try {
         Write-Log "Loading $configPath." -LogOnly
         $return.ConfigPath = $configPath
@@ -380,7 +384,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding SiteSystem
-    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden}
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
     foreach ($system in $systems) {
         $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
@@ -393,7 +397,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding Secondary
-    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" -and -not $_.Hidden}
+    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" -and -not $_.Hidden }
     foreach ($Secondary in $Secondaries) {
         $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM -SmartUpdate:$false
         if ($primary) {
@@ -405,7 +409,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding Passive
-    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and -not $_.Hidden}
+    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and -not $_.Hidden }
     foreach ($PassiveVM in $PassiveVMs) {
         $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
         if ($ActiveNode) {
@@ -420,7 +424,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add CAS to list, when adding primary
-    $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" -and -not $_.Hidden}
+    $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" -and -not $_.Hidden }
     foreach ($PriVM in $PriVMS) {
         if ($PriVM.parentSiteCode) {
             $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode -type VM -SmartUpdate:$false
@@ -444,7 +448,7 @@ function Add-ExistingVMsToDeployConfig {
 
 
     # Add FS to list, when adding SQLAO
-    $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not $_.Hidden}
+    $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not $_.Hidden }
     foreach ($SQLAOVM in $SQLAOVMs) {
         if ($SQLAOVM.FileServerVM) {
             Add-ExistingVMToDeployConfig -vmName $SQLAOVM.FileServerVM -configToModify $config
@@ -459,7 +463,7 @@ function Add-ExistingVMsToDeployConfig {
 
 
 
-    $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" -and -not $_.Hidden}
+    $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" -and -not $_.Hidden }
     foreach ($sup in $wsus) {
         if ($sup.InstallSUP) {
             $ss = Get-SiteServerForSiteCode -deployConfig $config -sitecode $sup.siteCode -type VM -SmartUpdate:$false

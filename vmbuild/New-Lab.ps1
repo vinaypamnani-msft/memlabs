@@ -1,3 +1,4 @@
+#New-Lab.ps1
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]

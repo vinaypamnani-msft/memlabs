@@ -1,3 +1,4 @@
+#Enable-LogMachine.ps1
 $fixFlag = "EnableLogMachine.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 
