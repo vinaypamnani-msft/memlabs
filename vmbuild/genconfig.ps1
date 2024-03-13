@@ -3658,8 +3658,16 @@ Function Get-ForestTrustMenu {
         $property."$name" = $result
 
         if ($result -ne "NONE") {
-            $property.InstallCA = $false
+            $remoteCA = (get-list -type vm -DomainName $result | Where-Object { $_.Role -eq "DC" } | Select-Object InstallCA).InstallCA
+            if ($remoteCA) {
+                Write-OrangePoint "Domain $result already has a CA. Disabling CA in this domain"
+                $property.InstallCA = $false
+            }
             Get-PrimarySitesForDomain $property $result
+        }
+        else {
+            $property.psobject.properties.remove('externalDomainJoinSiteCode')
+            $property.InstallCA = $true
         }
         if (Get-TestResult -SuccessOnWarning) {
             return
@@ -3687,7 +3695,7 @@ Function Get-PrimarySitesForDomain {
         $targetPrimaries += "NONE"
         $valid = $false
         while ($valid -eq $false) {
-            $property.externalDomainJoinSiteCode
+            #$property.externalDomainJoinSiteCode
             $result = Get-Menu "Select Primary site code in $Domain to configure to manage clients in this domain" $($targetPrimaries) "NONE" -Test:$false
             $property | Add-Member -MemberType NoteProperty -Name "externalDomainJoinSiteCode" -Value $result -Force
 
@@ -4418,6 +4426,15 @@ function Get-AdditionalValidations {
             }
             $newName = Rename-VirtualMachine -vm $property
         }
+        "installCA" {
+            if ($property.ForestTrust) {
+                $remoteCA = (get-list -type vm -DomainName $property.ForestTrust | Where-Object { $_.Role -eq "DC" } | Select-Object InstallCA).InstallCA
+                if ($remoteCA) {
+                    Add-ErrorMessage -property $name -Warning "Domain $($property.ForestTrust) already has a CA. Disabling CA in this domain"
+                    $property.InstallCA = $false
+                }
+            }
+        }
         "installDP" {
 
             if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -eq "CAS") {
@@ -5101,6 +5118,10 @@ function Select-Options {
                 }
                 "ForestTrust" {
                     Get-ForestTrustMenu -property $property -name $name -CurrentValue $value
+                    continue MainLoop
+                }
+                "externalDomainJoinSiteCode" {
+                    Get-PrimarySitesForDomain -property $property -domain $property.ForestTrust
                     continue MainLoop
                 }
                 "sqlVersion" {
