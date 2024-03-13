@@ -1697,24 +1697,18 @@ function Select-NewDomainConfig {
             "1" {
                 Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "CAS" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -SiteCode "CS1" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
                 $version = "current-branch"
             }
 
             "2" {
                 Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -SiteCode "PS1" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
                 $version = "current-branch"
 
             }
             "3" {
                 Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -SiteCode "CTP" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
                 $usedPrefixes = Get-List -Type UniquePrefix
                 if ("CTP-" -notin $usedPrefixes) {
                     $prefix = "CTP-"
@@ -1724,8 +1718,6 @@ function Select-NewDomainConfig {
             }
             "4" {
                 Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
             }
         }
         $valid = $true
@@ -1761,6 +1753,10 @@ function Select-NewDomainConfig {
                 }
             }
         }
+
+        Add-NewVMForRole -Role "DomainMember" -Domain $domain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
+        Add-NewVMForRole -Role "DomainMember" -Domain $domain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
+
 
         if ($valid) {
             Show-SubnetNote
