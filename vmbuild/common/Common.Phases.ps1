@@ -188,7 +188,7 @@ function Start-PhaseJobs {
                 $valid = $true
             }
 
-            if ($Phase -eq 8 -and ($currentItem.role -in ("Primary"))) {
+            if ($Phase -eq 9 -and ($currentItem.role -in ("Primary"))) {
                 $valid = $true
             }
 
@@ -459,8 +459,11 @@ function Get-ConfigurationData {
                         write-log "Auto Snapshot $autoSnapshotName completed."
                     }
                 }
+
             }
+
         }
+        "9" { $cd = Get-Phase9ConfigurationData -deployConfig $deployConfig }
         Default { return }
     }
     if ($global:Common.VerboseEnabled) {
@@ -858,25 +861,14 @@ function Get-Phase8ConfigurationData {
 
             $MultiDomain = $false
             if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
-                if ($vm.role -ne "Primary") {
-                    continue
-                }
-                $MultiDomain = $true
+                continue
             }
 
-            if ($MultiDomain) {
-                $newItem = @{
-                    NodeName = "$($vm.vmName).$($vm.domain)"
-                    #NodeName = "$($vm.vmName)"
-                    Role     = $vm.Role
-                }
+            $newItem = @{
+                NodeName = $vm.vmName
+                Role     = $vm.Role
             }
-            else {
-                $newItem = @{
-                    NodeName = $vm.vmName
-                    Role     = $vm.Role
-                }
-            }
+
             $cd.AllNodes += $newItem
             $NumberOfNodesAdded = $NumberOfNodesAdded + 1
 
@@ -941,4 +933,62 @@ function Get-Phase8ConfigurationData {
         return
     }
     return $cd
+}
+
+function Get-Phase9ConfigurationData {
+    param (
+        [object]$deployConfig
+    )
+
+    $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+    $NumberOfNodesAdded = 0
+    # Configuration Data
+    $cd = @{
+        AllNodes = @(
+            @{
+                NodeName = $dc.vmName
+                Role     = 'DC'
+            }
+        )
+    }
+
+    $MultiDomain = $false
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in ("Primary") -and $_.hidden }) {
+        if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
+            if ($vm.role -ne "Primary") {
+                continue
+            }
+            $MultiDomain = $true
+        }
+        if ($MultiDomain) {
+            $newItem = @{
+                NodeName = "$($vm.vmName).$($vm.domain)"
+                #NodeName = "$($vm.vmName)"
+                Role     = $vm.Role
+            }
+        }
+        else {
+            $newItem = @{
+                NodeName = $vm.vmName
+                Role     = $vm.Role
+            }
+        }
+        $cd.AllNodes += $newItem
+        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+
+    }
+
+    $all = @{
+        NodeName                    = "*"
+        PSDscAllowDomainUser        = $true
+        PSDscAllowPlainTextPassword = $true
+    }
+    $cd.AllNodes += $all
+
+
+    if ($NumberOfNodesAdded -eq 0) {
+        return
+    }
+    return $cd
+
 }

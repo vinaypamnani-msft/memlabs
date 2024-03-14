@@ -1193,9 +1193,9 @@ $global:VM_Config = {
                     #$userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
                     $userdomain = $deployConfig.vmOptions.domainNetBiosName
 
-                    if ($phase -eq 8) {
+                    if ($phase -eq 9) {
                         $RemoteSiteServer = $deployConfig.VirtualMachines | Where-Object {$_.Hidden -and $_.Role -eq "Primary" -and $_.Domain}
-                        "Phase 8 Remote Site Server $($RemoteSiteServer.vmName) $($RemoteSiteServer.Domain)" | Out-File $log -Append
+                        "Phase 9 Remote Site Server $($RemoteSiteServer.vmName) $($RemoteSiteServer.Domain)" | Out-File $log -Append
                         if ($RemoteSiteServer) {
                             $userdomain = $RemoteSiteServer.Domain
                         }

@@ -36,10 +36,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 8)]
+    [ValidateRange(2, 9)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 8)]
+    [ValidateRange(2, 9)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
@@ -152,6 +152,10 @@ function Write-Phase {
 
         8 {
             Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
+        }
+
+        9 {
+            Write-Log "Phase $Phase - Setup Multi-Forest ConfigMgr" -Activity
         }
     }
 }
@@ -411,7 +415,7 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 8
+    $maxPhase = 9
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
