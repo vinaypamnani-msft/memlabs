@@ -98,7 +98,14 @@ if (Test-Path $cm_svc_file) {
     $clients = @($deployConfig.virtualMachines | Where-Object { $_.Role -eq "DomainMember" })
     $networks = @()
     foreach ($client in $clients) {
+
+        $siteServersNetworks = @(($deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary" -and -not $_.hidden }).ThisParams.vmNetwork)
+
         Write-DscStatus "Checking $($client.ThisParams.vmNetwork)"
+        if ($($client.ThisParams.vmNetwork) -in $siteServersNetworks) {
+            Write-DscStatus "Skipping $($client.vmName) because $($client.ThisParams.vmNetwork) belongs to a local site server"
+            continue
+        }
         if (-not ($networks.Contains($($client.ThisParams.vmNetwork)))) {
             $networks += $client.ThisParams.vmNetwork
         }
