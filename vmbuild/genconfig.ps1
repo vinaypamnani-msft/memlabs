@@ -5442,6 +5442,19 @@ function get-VMString {
             $name += " [RP]"
         }
     }
+
+    if ($virtualMachine.InstallCA) {
+        $name += " [CA]"
+    }
+
+    if ($virtualMachine.ForestTrust) {
+        $name += " Trust [$($virtualMachine.ForestTrust)"
+        if ($virtualMachine.externalDomainJoinSiteCode){
+            $name += "-->$($virtualMachine.externalDomainJoinSiteCode)"
+        }
+        $name += "]"
+    }
+
     write-log "Name is $name" -verbose
 
     $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen", "%MediumSeaGreen", "%SpringGreen", "%Lime", "%LimeGreen")

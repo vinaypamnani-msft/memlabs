@@ -2100,6 +2100,8 @@ Function Show-Summary {
     )
 
     $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
+    $DC = $deployConfig.virtualMachines  | Where-Object { $_.role -eq "DC" }
+
     #$CHECKMARK = ([char]8730)
     $containsPS = $fixedConfig.role -contains "Primary"
     $containsSecondary = $fixedConfig.role -contains "Secondary"
@@ -2108,6 +2110,18 @@ Function Show-Summary {
     $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
     Write-Verbose "ContainsPS: $containsPS ContainsSiteSystem: $containsSiteSystem ContainsMember: $containsMember ContainsPassive: $containsPassive"
+    if ($DC.ForestTrust) {
+        Write-GreenCheck "Forest Trust: This domain will join a Forest Trust with $($DC.ForestTrust)"
+        $remoteDC = Get-List -type VM -DomainName $DC.ForestTrust | Where-Object { $_.Role -eq "DC" }
+        if ($remoteDC -and $remoteDC.InstallCA) {
+            Write-GreenCheck "Forest Trust: This domain be configured to use the Certificate Authority in $($DC.ForestTrust)"
+        }
+
+        if ($DC.externalDomainJoinSiteCode) {
+            Write-GreenCheck "Forest Trust: Site code $($DC.externalDomainJoinSiteCode) in domain $($DC.ForestTrust) will be configured to manage client machines in this domain"
+        }
+    }
+
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
 
         if ($containsPS -or $containsSecondary) {
@@ -2155,6 +2169,7 @@ Function Show-Summary {
         else {
             Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
         }
+
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
             Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"
