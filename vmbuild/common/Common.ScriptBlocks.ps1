@@ -1634,7 +1634,7 @@ $global:VM_Config = {
                         $complete = $status.ScriptBlockOutput -eq "Setting up ConfigMgr. Status: Complete!"
                     }
                     if (-not $complete){
-                        $complete = ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -eq "Success")
+                        #$complete = ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -eq "Success")
                     }
 
                     $bailEarly = $false

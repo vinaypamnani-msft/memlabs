@@ -546,7 +546,7 @@ function Get-Phase2ConfigurationData {
         if ($vm.role -notin "AADClient", "OSDClient", "Linux") {
             if (-not $vm.Hidden) {
                 $cd
-                Write-Host "xxxReturning $cd for $($vm.vmName)"
+                #Write-Host "xxxReturning $cd for $($vm.vmName)"
                 return $cd
             }
         }
