@@ -210,7 +210,7 @@ class InstallSSMS {
             }
         }
         if (Test-Path $smssinstallpath3) {
-            If ((Get-Item $smssinstallpath2).length -gt 0kb) {
+            If ((Get-Item $smssinstallpath3).length -gt 0kb) {
                 Write-Verbose "Test - Installing SSMS... $smssinstallpath3 exists"
                 return $true
             }
