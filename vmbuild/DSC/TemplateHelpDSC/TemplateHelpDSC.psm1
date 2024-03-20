@@ -178,6 +178,7 @@ class InstallSSMS {
                 & $cmd $arg1 $arg2 $arg3 | out-null
                 Write-Verbose "SSMS Installed Successfully!"
 
+                start-sleep -Seconds 60
                 # Reboot
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
@@ -193,6 +194,7 @@ class InstallSSMS {
     [bool] Test() {
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
+        $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE\ssms.exe"
 
         if (Test-Path $smssinstallpath) {
             If ((Get-Item $smssinstallpath).length -gt 0kb) {
@@ -207,8 +209,14 @@ class InstallSSMS {
                 return $true
             }
         }
+        if (Test-Path $smssinstallpath3) {
+            If ((Get-Item $smssinstallpath3).length -gt 0kb) {
+                Write-Verbose "Test - Installing SSMS... $smssinstallpath3 exists"
+                return $true
+            }
+        }
 
-        Write-Verbose "Test - Installing SSMS... $smssinstallpath2 does not exist"
+        Write-Verbose "Test - Installing SSMS... $smssinstallpath3 does not exist"
         return $false
     }
 
