@@ -216,9 +216,12 @@ function Remove-Domain {
                         [String]$forestDomain,
                         [String]$DomainName
                     )
+                    write-host "Running on $env:ComputerName as $env:Username"
+                    write-host "Netdom trust $forestDomain /Domain:$DomainName /Remove /Force"
                     Netdom trust $forestDomain /Domain:$DomainName /Remove /Force
                 }
                 $result = Invoke-VmCommand -VmName $RemoteDC.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($forestDomain, $domainName) -SuppressLog
+                write-log $result.ScriptBlockOutput
             }
         }
     }

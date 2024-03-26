@@ -980,10 +980,25 @@ class DelegateControl {
         $maxretries = 15
         while ($retries -le $maxretries) {
 
+            ipconfig /flushdns
+
+            if ($retries -eq 5) {
+                $_FileName = "C:\temp\SysMgmt.txt"
+
+                if (-not (Test-Path $_FileName)) {
+                    Write-Verbose "Rebooting"
+                    New-Item $_FileName
+                    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    $global:DSCMachineStatus = 1
+                    return
+                }
+            }
+
             $retries++
             Write-Verbose "Running $cmd $arg1 $arg2 $arg3 $arg4"
-            & $cmd $arg1 $arg2 $arg3 $arg4
+            $result = & $cmd $arg1 $arg2 $arg3 $arg4 *>&1
 
+            Write-Verbose "Result $result"
 
             $tcmd = "dsacls.exe"
             $targ1 = "CN=System Management,CN=System,$root"
