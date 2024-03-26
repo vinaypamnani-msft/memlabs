@@ -859,7 +859,8 @@ class WaitForExtendSchemaFile {
                 $user = $this.AdminCreds.UserName
                 $pass = $this.AdminCreds.GetNetworkCredential().Password
                 Write-Verbose "Running New-SmbMapping -RemotePath \\$($this.MachineName) -UserName $user -Password $pass"
-                $smb = New-SmbMapping -RemotePath "\\$($this.MachineName)" -UserName $user -Password $pass
+                $machine = "\\$($this.MachineName)"
+                $smb = New-SmbMapping -RemotePath $machine -UserName $user -Password $pass
                 if ($smb) {
                     Write-Verbose "Mapping success: $smb"
                     $success = $true

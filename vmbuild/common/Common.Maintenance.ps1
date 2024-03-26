@@ -740,7 +740,7 @@ function Get-VMFixes {
         }
 
         # Action
-        $taskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $taskCommand = "cmd /c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
         $taskArgs = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
         $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
 
@@ -790,7 +790,7 @@ function Get-VMFixes {
     }
 
     # Action
-    $taskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $taskCommand = "cmd /c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     $taskArgs = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
     $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
 

@@ -572,6 +572,11 @@
             }
             $waitOnDependency = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
 
+            WriteStatus WaitIISGroup {
+                DependsOn = $waitOnDependency
+                Status    = "Waiting for $($ThisVM.ForestTrust)\'ConfigMgr IIS Servers' to be a member on System Management Container"
+            }
+
             DelegateControl "AddremoteIISGroup" {
                 Machine        = 'ConfigMgr IIS Servers'
                 DomainFullName = $ThisVM.ForestTrust

@@ -323,7 +323,7 @@ $global:VM_Create = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set TLS 1.2 Registry Keys." -Warning -OutputStream
             }
 
-            if ($currentItem.role -in "WorkgroupMember","InternetClient") {
+            if ($currentItem.role -in "WorkgroupMember", "InternetClient") {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Fix_WorkGroupMachines"
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_WorkGroupMachines -DisplayName "Fix_WorkGroupMachines"
                 if ($result.ScriptBlockFailed) {
@@ -829,8 +829,12 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -DisplayName "Expand_Archive ScriptBlock"
             if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
+                start-sleep -Seconds 60
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -DisplayName "Expand_Archive ScriptBlock"
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
             }
             Write-Progress2 $Activity -Status "Installing Modules" -percentcomplete 55 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Installing DSC Modules."
@@ -1194,7 +1198,7 @@ $global:VM_Config = {
                     $userdomain = $deployConfig.vmOptions.domainNetBiosName
 
                     if ($phase -eq 9) {
-                        $RemoteSiteServer = $deployConfig.VirtualMachines | Where-Object {$_.Hidden -and $_.Role -eq "Primary" -and $_.Domain}
+                        $RemoteSiteServer = $deployConfig.VirtualMachines | Where-Object { $_.Hidden -and $_.Role -eq "Primary" -and $_.Domain }
                         "Phase 9 Remote Site Server $($RemoteSiteServer.vmName) $($RemoteSiteServer.Domain)" | Out-File $log -Append
                         if ($RemoteSiteServer) {
                             $userdomain = $RemoteSiteServer.Domain
@@ -1215,9 +1219,10 @@ $global:VM_Config = {
                         $job | Out-File $log -Append
                         $data = Receive-Job -name $currentItem.vmName
                         if ($wait.State -eq "Completed") {
-                            $data| Out-File $log -Append
-                        }else{
-                            $data| Out-File $log -Append
+                            $data | Out-File $log -Append
+                        }
+                        else {
+                            $data | Out-File $log -Append
                             Write-Error $data
                             return $data
                         }
@@ -1630,10 +1635,10 @@ $global:VM_Config = {
 
                     # Check if complete
                     $complete = $status.ScriptBlockOutput -eq "Complete!"
-                    if (-not $complete){
+                    if (-not $complete) {
                         $complete = $status.ScriptBlockOutput -eq "Setting up ConfigMgr. Status: Complete!"
                     }
-                    if (-not $complete){
+                    if (-not $complete) {
                         #$complete = ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -eq "Success")
                     }
 

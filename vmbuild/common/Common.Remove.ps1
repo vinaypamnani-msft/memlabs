@@ -200,13 +200,31 @@ function Remove-Domain {
 
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
     $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+    $DC = $vmsToDelete | Where-Object {$_.Role -eq "DC"}
+
     $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
+
+    if ($DC) {
+        if ($DC.ForestTrust) {
+            $RemoteDC = Get-List -Type Vm -DomainName $DC.ForestTrust | Where-Object {$_.Role -eq "DC"}
+            if ($RemoteDC) {
+                Write-Log "Removing Trust on $($DC.ForestTrust) for '$DomainName'" -Activity
+
+                $scriptBlock1 = {
+                    Netdom trust $($DC.ForestTrust) /Domain:$DomainName /Remove /Force
+                }
+                $result = Invoke-VmCommand -VmName $RemoteDC.vmName -VmDomainName $DC.ForestTrust -ScriptBlock $scriptBlock1 -SuppressLog
+            }
+        }
+    }
 
     if ($vmsToDelete) {
         foreach ($vm in $vmsToDelete) {
             Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
         }
     }
+
+
 
     if ($scopesToDelete) {
         Write-Log "Removing ALL DHCP Scopes for '$DomainName'" -Activity
