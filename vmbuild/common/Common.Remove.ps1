@@ -206,14 +206,19 @@ function Remove-Domain {
 
     if ($DC) {
         if ($DC.ForestTrust) {
-            $RemoteDC = Get-List -Type Vm -DomainName $DC.ForestTrust | Where-Object {$_.Role -eq "DC"}
+            $forestDomain = $DC.ForestTrust
+            $RemoteDC = Get-List -Type Vm -DomainName $forestDomain | Where-Object {$_.Role -eq "DC"}
             if ($RemoteDC) {
-                Write-Log "Removing Trust on $($DC.ForestTrust) for '$DomainName'" -Activity
+                Write-Log "Removing Trust on $forestDomain for '$DomainName'" -Activity
 
                 $scriptBlock1 = {
-                    Netdom trust $($DC.ForestTrust) /Domain:$DomainName /Remove /Force
+                    param(
+                        [String]$forestDomain,
+                        [String]$DomainName
+                    )
+                    Netdom trust $forestDomain /Domain:$DomainName /Remove /Force
                 }
-                $result = Invoke-VmCommand -VmName $RemoteDC.vmName -VmDomainName $DC.ForestTrust -ScriptBlock $scriptBlock1 -SuppressLog
+                $result = Invoke-VmCommand -VmName $RemoteDC.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($forestDomain, $domainName) -SuppressLog
             }
         }
     }
