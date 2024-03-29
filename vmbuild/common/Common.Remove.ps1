@@ -211,6 +211,7 @@ function Remove-Domain {
             if ($RemoteDC) {
                 Write-Log "Removing Trust on $forestDomain for '$DomainName'" -Activity
 
+                start-vm2 -Name $RemoteDC.VmName
                 $scriptBlock1 = {
                     param(
                         [String]$forestDomain,

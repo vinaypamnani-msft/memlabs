@@ -32,9 +32,9 @@ Function Write-ProgressElapsed {
         $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
         $msg = ""
         if ($showTimeout) {
-            $msg = "Waiting $TimeSpan minutes. "
+            $msg = "Waiting $TimeSpan  "
         }
-        $msg = $msg + "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))"
+        $msg = $msg + "Elapsed: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))"
         if ($FailCount) {
             $msg = $msg + " Failed $FailCount / $FailCountMax"
         }

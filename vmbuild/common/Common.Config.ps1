@@ -1008,6 +1008,63 @@ function Get-SiteServerForSiteCode {
     return $null
 }
 
+
+function Get-SqlServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
+        [object] $SiteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
+        [ValidateSet("Name", "VM")]
+        [string] $type = "Name",
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
+        [string] $DomainName
+
+    )
+    if (-not $SiteCode) {
+        throw "SiteCode is NULL"
+        return $null
+    }
+
+
+    if ($DomainName) {
+        $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode -DomainName $DomainName -type VM
+    }
+    else {
+        $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode -type VM
+    }
+    if ($SiteServer.RemoteSQLVM) {
+        if ($type -eq "Name") {
+            Return $SiteServer.RemoteSQLVM
+        }
+        else {
+            if ($DomainName) {
+                $remoteSQL = get-list -type VM -domain $DomainName | Where-Object { $_.VmName -eq $SiteServer.RemoteSQLVM }
+            }
+            else {
+                $remoteSQL = $deployConfig.virtualMachines | Where-Object { $_.VmName -eq $SiteServer.RemoteSQLVM }
+            }
+            if ($type -eq "Name") {
+                return $remoteSQL.vmName
+            }
+            else {
+                return $remoteSQL
+            }
+        }
+    }
+
+    if ($type -eq "Name") {
+        return $SiteServer.vmName
+    }
+    else {
+        return $SiteServer
+    }
+}
+
 function get-RoleForSitecode {
     [CmdletBinding()]
     param (

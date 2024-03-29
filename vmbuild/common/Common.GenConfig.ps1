@@ -864,6 +864,20 @@ function ConvertTo-DeployConfigEx {
                     }
                 }
             }
+            "SiteSystem" {
+                if ($thisVM.InstallSUP) {
+                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                    Add-VMToAccountLists -thisVM $thisVM -VM $SS -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
+
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
+                    if ($PassiveVM) {
+                        Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
+                    }
+
+                    $sql = Get-SqlServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type Name
+                    $thisParams | Add-Member -MemberType NoteProperty -Name "WSUSSqlServer" -Value $sql  -Force
+                }
+            }
             "WSUS" {
                 if ($thisVM.InstallSUP) {
                     $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
@@ -1017,6 +1031,7 @@ function ConvertTo-DeployConfigEx {
             if ($SiteServerVM) {
                 Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
             }
+
             if (-not $SiteServerVM) {
                 $OtherNode = $deployConfig.virtualMachines | Where-Object { $_.OtherNode -eq $thisVM.vmName }
 
@@ -1031,6 +1046,14 @@ function ConvertTo-DeployConfigEx {
 
             if ($SiteServerVM) {
                 Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+
+                $siteCode = $SiteServerVM.SiteCode
+
+                $SUP = $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName) } | Select-Object -first 1
+                if ($SUP) {
+                    Add-VMToAccountLists -thisVM $thisVM -VM $SUP -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+                }
+
             }
             if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
                 $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM

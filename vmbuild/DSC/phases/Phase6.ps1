@@ -29,13 +29,20 @@ configuration Phase6
         $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
         $wsusFeatures = @("UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI")
         $sqlServer = "WID"
-        if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
+        if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM -or $thisVM.thisParams.WSUSSqlServer) {
             $wsusFeatures += "UpdateServices-DB"
+
             if ($thisVM.remoteSQLVM) {
                 $sqlServer = $thisVM.remoteSQLVM
             }
             else {
-                $sqlServer = $thisVM.vmName
+                if ( $thisVM.thisParams.WSUSSqlServer) {
+                    $sqlServer = $thisVM.thisParams.WSUSSqlServer
+
+                }
+                else {
+                    $sqlServer = $thisVM.vmName
+                }
             }
 
             $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $sqlServer }
@@ -94,10 +101,10 @@ configuration Phase6
         $usePKI = $deployConfig.cmOptions.UsePKI
 
         if ($usePKI) {
-            $SSLHost = $thisVM.vmName+"." + $DomainName
+            $SSLHost = $thisVM.vmName + "." + $DomainName
             $SSLTemplate = 'ConfigMgr WebServer Certificate'
         }
-        else{
+        else {
             $SSLHost = $null
             $SSLTemplate = $null
         }
@@ -115,10 +122,10 @@ configuration Phase6
         }
         else {
             ConfigureWSUS UpdateServices {
-                DependsOn   = @('[WindowsFeatureSet]UpdateServices')
-                ContentPath = $contentDir
-                HTTPSUrl             = $SSLHost
-                TemplateName         = $SSLTemplate
+                DependsOn    = @('[WindowsFeatureSet]UpdateServices')
+                ContentPath  = $contentDir
+                HTTPSUrl     = $SSLHost
+                TemplateName = $SSLTemplate
             }
         }
 
