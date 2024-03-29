@@ -383,14 +383,23 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
-    # Add Primary to list, when adding SiteSystem
+    # Add Primary to list, when adding SiteSystem, also add the current site server to the list.
     $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
     foreach ($system in $systems) {
         $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
+            if ($systemSite.RemoteSQLVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config
+            }
         }
-
+        $systemSite = Get-SiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
+        if ($systemSite) {
+            Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
+            if ($systemSite.RemoteSQLVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config
+            }
+        }
         if ($systemSite.pullDPSourceDP) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.pullDPSourceDP -configToModify $config
         }
