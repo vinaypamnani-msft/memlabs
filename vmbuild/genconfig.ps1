@@ -2872,6 +2872,7 @@ function Show-GenConfigErrorMessages {
 
     if ((($global:GenConfigErrorMessages | Measure-Object).Count) -gt 0) {
         Write-Host
+        Write-Verbose "Showing Show-GenConfigErrorMessages"
         Write-Host2 ">>>>>>>>>>>>>>  ERROR: Validation Failures were encountered:`r`n" -ForegroundColor Crimson
         foreach ($err in $global:GenConfigErrorMessages) {
             write-redx $err.message
@@ -3571,7 +3572,9 @@ Function Get-SiteCodeMenu {
         [Parameter(Mandatory = $false, HelpMessage = "Current value")]
         [Object] $CurrentValue,
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
-        [Object] $ConfigToCheck = $global:config
+        [Object] $ConfigToCheck = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [bool] $test = $true
     )
 
     if ($property.Role -eq "SiteSystem") {
@@ -3594,7 +3597,7 @@ Function Get-SiteCodeMenu {
         #$property."$name" = $result
     }
     try {
-        if (Get-TestResult -SuccessOnWarning) {
+        if ($test -and (Get-TestResult -config $configToCheck -SuccessOnWarning)) {
             return
         }
         else {
@@ -4101,6 +4104,7 @@ function Add-ErrorMessage {
         Level    = $level
         Message  = $message
     }
+    Write-Verbose "Add-ErrorMessage $message"
 }
 
 
@@ -5284,6 +5288,7 @@ Function Get-TestResult {
                     Level    = "ERROR"
                     Message  = $msg
                 }
+                Write-Verbose "GenConfig Get-TestResult $msg"
             }
             #Write-ValidationMessages -TestObject $c
             #$MyInvocation | Out-Host
@@ -5992,7 +5997,7 @@ function Add-NewVMForRole {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
                 }
                 else {
-                    Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
+                    Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify -test:$false
                 }
 
                 if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $virtualMachine.siteCode) -eq "CAS") {
@@ -6633,7 +6638,7 @@ function Select-VirtualMachines {
                         }
 
                         $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
-                        $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
+                        $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false
                         if (([string]::IsNullOrEmpty($newValue))) {
                             return
                         }
