@@ -20,7 +20,27 @@ function Start-Maintenance {
 
     # Filter in-progress
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
-    $vmCount = ($vmsNeedingMaintenance | Measure-Object).Count
+    $newVmsNeedingMaintenance = @()
+    foreach ($vm in $vmsNeedingMaintenance) {
+        $mutexName = $vm.vmName
+
+        try{
+        $Mutex = [System.Threading.Mutex]::OpenExisting($MutexName)
+        }
+        catch{
+            Write-Log -Verbose "Mutex $mutexName does not exist.. VM not in use."
+            #Mutex does not exist.
+            $newVmsNeedingMaintenance = $newVmsNeedingMaintenance + $vm
+            continue
+        }
+        if ($Mutex) {
+            Write-Log -Verbose "Mutex $mutexName exists.. VM in use."
+            try{
+                [void]$Mutex.ReleaseMutex()
+            } catch{}
+        }
+    }
+    $vmCount = ($newVmsNeedingMaintenance | Measure-Object).Count
     $countNotNeeded = $allVMs.Count - $vmCount
 
     $text = "Performing maintenance"
@@ -29,7 +49,7 @@ function Start-Maintenance {
 
     if ($applyNewOnly -eq $false) {
         if ($vmCount -gt 0) {
-            $response = Read-YesorNoWithTimeout -Prompt "$($vmsNeedingMaintenance.Count) VM(s) [$($vmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
+            $response = Read-YesorNoWithTimeout -Prompt "$($newVmsNeedingMaintenance.Count) VM(s) [$($newVmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
             if ($response -eq "n") {
                 return
             }
@@ -57,7 +77,7 @@ function Start-Maintenance {
 
     # Perform maintenance... run it on DC's first, rest after.
     $failedDomains = @()
-    foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
+    foreach ($vm in $newVmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
         $i++
         Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
@@ -78,7 +98,7 @@ function Start-Maintenance {
     }
 
     # Perform maintenance on other VM's
-    foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
+    foreach ($vm in $newVmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
         $i++
         if ($maintenanceDoNotStart) {
             if ($vm.State -ne "Running") {

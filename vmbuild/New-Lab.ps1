@@ -187,7 +187,7 @@ try {
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
     ### Run maintenance
-    if (!$Configuration) {
+    if (-not $Configuration) {
         Start-Maintenance
     }
 
@@ -282,7 +282,14 @@ try {
         Write-Host
         return
     }
-
+ #Create VM Mutexes
+ $mtx = New-Object System.Threading.Mutex($false, $mutexName)
+ $global:mutexes = @()
+ foreach ($vm in $deployConfig.virtualMachines) {
+     $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
+     write-log -Verbose "Created Mutex $($vm.vmName)"
+     $global:mutexes += $mtx
+ }
     # Skip if any VM in progress
     if ($runPhase1 -and (Test-InProgress -DeployConfig $deployConfig)) {
         Write-Host
@@ -520,6 +527,16 @@ catch {
 }
 finally {
 
+    foreach ($mutex in $global:mutexes) {
+        try{
+        [void]$mutex.ReleaseMutex()
+        } catch{}
+        try{
+        [void]$mutex.Dispose()
+        } catch{}
+
+    }
+    $global:mutexes = @()
 
     if ($enableDebug) {
         Write-Host 'Config Stored in $global:DebugConfig'
