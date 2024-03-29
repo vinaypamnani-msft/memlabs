@@ -32,17 +32,20 @@ configuration Phase6
         if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM -or $thisVM.thisParams.WSUSSqlServer) {
             $wsusFeatures += "UpdateServices-DB"
 
-            if ($thisVM.remoteSQLVM) {
-                $sqlServer = $thisVM.remoteSQLVM
+            if ($thisVm.sqlVersion) {
+                $sqlServer = $thisVM.vmName
             }
             else {
-                if ( $thisVM.thisParams.WSUSSqlServer) {
-                    $sqlServer = $thisVM.thisParams.WSUSSqlServer
-
+                if ($thisVM.remoteSQLVM) {
+                    $sqlServer = $thisVM.remoteSQLVM
                 }
                 else {
-                    $sqlServer = $thisVM.vmName
+                    if ( $thisVM.thisParams.WSUSSqlServer) {
+                        $sqlServer = $thisVM.thisParams.WSUSSqlServer
+
+                    }
                 }
+
             }
 
             $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $sqlServer }
