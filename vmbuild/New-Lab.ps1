@@ -495,6 +495,17 @@ try {
     }
     else {
         $currentPhase = 9
+        foreach ($mutex in $global:mutexes) {
+            try{
+            [void]$mutex.ReleaseMutex()
+            } catch{}
+            try{
+            [void]$mutex.Dispose()
+            } catch{}
+
+        }
+        $global:mutexes = @()
+
         Start-Maintenance -DeployConfig $deployConfig
 
         $updateExistingRequired = $false

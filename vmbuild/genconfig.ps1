@@ -921,8 +921,11 @@ function Get-ExistingVMs {
     $existingMachines = get-list -type vm -domain $config.vmOptions.DomainName | Where-Object { $_.vmName }
 
     foreach ($vm in $config.virtualMachines) {
-        if ($vm.modified -and $vm.vmName -in $existingMachines.vmName) {
-            $existingMachines = @($existingMachines | Where-Object { $_.vmName -ne $vm.vmName })
+        # if ($vm.modified -and $vm.vmName -in $existingMachines.vmName) {
+        $vmName = $config.vmOptions.Prefix + $($vm.vmName)
+        Write-Log -Verbose "Checking if $($vmName) is in ExistingMahcines"
+        if ($vmName -in $existingMachines.vmName) {
+            $existingMachines = @($existingMachines | Where-Object { $_.vmName -ne $vmName })
         }
     }
 
@@ -968,7 +971,7 @@ function Get-ExistingVMs {
 }
 
 function Select-MainMenu {
-    $global:existingMachines = Get-ExistingVMs
+    $global:existingMachines = Get-ExistingVMs -config $global:config
     while ($true) {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
@@ -4777,6 +4780,13 @@ function Get-AdditionalInformation {
             }
         }
 
+        "domainUser" {
+            $prefixLower = $global:config.vmOptions.Prefix.ToLower()
+            if (-not $data.StartsWith($prefixLower)) {
+                $data = $data.PadRight(21) + "($($prefixLower+$data))"
+            }
+        }
+
         "memory" {
             #add Available memory
         }
@@ -5454,7 +5464,7 @@ function get-VMString {
 
     if ($virtualMachine.ForestTrust) {
         $name += " Trust [$($virtualMachine.ForestTrust)"
-        if ($virtualMachine.externalDomainJoinSiteCode){
+        if ($virtualMachine.externalDomainJoinSiteCode) {
             $name += "-->$($virtualMachine.externalDomainJoinSiteCode)"
         }
         $name += "]"
@@ -5933,21 +5943,22 @@ function Add-NewVMForRole {
                 $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 [int]$i = 1
                 $userPrefix = $oldConfig.vmOptions.prefix.toLower() + "user"
+                $userNoPrefix = "user"
                 while ($true) {
                     $preferredUserName = $userPrefix + $i
-                    if ($users -contains $preferredUserName) {
+                    $noPrefixUserName = $userNoPrefix + $i
+                    if ($users -contains $preferredUserName -or $users -contains $noPrefixUserName) {
                         write-log -verbose "$preferredUserName already exists Trying next"
                         $i++
                     }
                     else {
-                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $preferredUserName
+                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $noPrefixUserName
                         break
                     }
-
                 }
             }
         }
-        "DomainMember (Server)" { }
+        "DomainMember (Server)" {}
         "DomainMember (Client)" {
             if ($OperatingSystem -like "*Server*") {
                 $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
@@ -5959,14 +5970,16 @@ function Add-NewVMForRole {
             $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
             [int]$i = 1
             $userPrefix = $oldConfig.vmOptions.prefix.toLower() + "user"
+            $userNoPrefix = "user"
             while ($true) {
                 $preferredUserName = $userPrefix + $i
-                if ($users -contains $preferredUserName) {
-                    write-log -verbose "$preferredUserName already existsTrying next"
+                $noPrefixUserName = $userNoPrefix + $i
+                if ($users -contains $preferredUserName -or $users -contains $noPrefixUserName) {
+                    write-log -verbose "$preferredUserName already exists Trying next"
                     $i++
                 }
                 else {
-                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $preferredUserName
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $noPrefixUserName
                     break
                 }
 

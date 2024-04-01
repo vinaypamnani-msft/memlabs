@@ -245,13 +245,15 @@ function New-DeployConfig {
         foreach ($item in $virtualMachines | Where-Object { -not $_.Hidden -and $_.vmName } ) {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
             if ($item.pullDPSourceDP -and -not $item.pullDPSourceDP.StartsWith($configObject.vmOptions.prefix)) {
-
                 $item.pullDPSourceDP = $configObject.vmOptions.prefix + $item.pullDPSourceDP
             }
 
             if ($item.remoteSQLVM -and -not $item.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-
                 $item.remoteSQLVM = $configObject.vmOptions.prefix + $item.remoteSQLVM
+            }
+
+            if ($item.domainUser) {
+                $item.domainUser = $configObject.vmOptions.prefix + $item.domainUser
             }
         }
 
