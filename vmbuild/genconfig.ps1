@@ -5736,6 +5736,8 @@ function Add-NewVMForRole {
             }
         }
     }
+
+
     $actualRoleName = ($Role -split " ")[0]
 
     if ($role -eq "SqlServer") {
@@ -5781,6 +5783,11 @@ function Add-NewVMForRole {
     }
     if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC", "Linux")) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
+    }
+
+    #Match Windows 10 or 11
+    if ($operatingSystem.Contains("Windows 1")) {
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false
     }
 
     $existingDPMP = $null
@@ -5962,6 +5969,7 @@ function Add-NewVMForRole {
         "DomainMember (Client)" {
             if ($OperatingSystem -like "*Server*") {
                 $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false
             }
             else {
                 $virtualMachine.operatingSystem = $OperatingSystem
@@ -5989,7 +5997,6 @@ function Add-NewVMForRole {
             if ($virtualMachine.operatingSystem.Contains("Windows 11") ) {
                 $virtualMachine.Memory = "4GB"
             }
-
         }
         "OSDClient" {
             $virtualMachine.memory = "2GB"

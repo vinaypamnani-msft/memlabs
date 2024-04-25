@@ -1730,6 +1730,20 @@ $global:VM_Config = {
             }
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
+
+            $disable_AutomaticUpdatesFakeWSUS = {
+                New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "WUServer" -Type String -Value "http://localhost" -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "WUStatusServer" -Type String -Value "http://localhost" -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "UseWUServer" -Type Dword -Value 1 -Force
+            }
+
+            if ($currentItem.useFakeWSUSServer) {
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdatesFakeWSUS -DisplayName "Use Fake WSUS Server"
+            }
+            else {
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
+            }
         }
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
