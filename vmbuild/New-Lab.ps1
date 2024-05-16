@@ -43,13 +43,20 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
     [Parameter(Mandatory = $false, HelpMessage = "Best not to use this. Skips configuration validation.")]
-    [switch]$SkipValidation
+    [switch]$SkipValidation,
+    [Parameter(Mandatory = $false, HelpMessage = "Migrate old VMs")]
+    [switch]$Migrate
 
 )
 
 # Tell common to re-init
 if ($Common.Initialized) {
     $Common.Initialized = $false
+}
+
+if ($Migrate) {
+    $StopPhase = 2
+    $SkipPhase = 2
 }
 
 $NewLabsuccess = $false

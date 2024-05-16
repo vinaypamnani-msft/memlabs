@@ -40,7 +40,8 @@ function Write-JobProgress {
                     $jobName2 = "[Unknown]"
                     if ($jobName) {
                         $jobName2 = "  $($jobName.PadRight($padding," "))"
-                    } else {
+                    }
+                    else {
                         $jobName = "[Unknown VM] [Unkown Role]"
                     }
 
@@ -219,7 +220,9 @@ function Start-PhaseJobs {
             else {
                 if ($Phase -eq 1) {
                     # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
-                    $global:vm_remove_list += ($jobName -split " ")[0]
+                    if (-not $Migrate) {
+                        $global:vm_remove_list += ($jobName -split " ")[0]
+                    }
                 }
             }
         }
@@ -227,7 +230,7 @@ function Start-PhaseJobs {
             $reservation = $null
             if ($Phase -eq 5) {
                 $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
-                $reservation = $reservation -replace "-",""
+                $reservation = $reservation -replace "-", ""
             }
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {

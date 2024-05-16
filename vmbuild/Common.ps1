@@ -1691,6 +1691,8 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $false)]
         [switch]$tpmEnabled,
         [Parameter(Mandatory = $false)]
+        [switch]$Migrate,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -1733,26 +1735,28 @@ function New-VirtualMachine {
             return $false
         }
 
-        # Make sure Existing VM Path is gone!
-        $VmSubPath = Join-Path $VmPath $VmName
-        if (Test-Path -Path $VmSubPath) {
-            Write-Log "$VmName`: Found existing directory for $VmName. Purging $VmSubPath folder..."
-            Remove-Item -Path $VmSubPath -Force -Recurse | out-null
-            Write-Log "$VmName`: Purge complete."
-        }
+        if (-not $Migrate) {
+            # Make sure Existing VM Path is gone!
+            $VmSubPath = Join-Path $VmPath $VmName
+            if (Test-Path -Path $VmSubPath) {
+                Write-Log "$VmName`: Found existing directory for $VmName. Purging $VmSubPath folder..."
+                Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+                Write-Log "$VmName`: Purge complete."
+            }
 
-        # Retry if its not gone.
-        if (Test-Path -Path $VmSubPath) {
-            Start-Sleep -Seconds 30
-            Write-Log "$VmName`: (Retry) Found existing directory for $VmName. Purging $VmSubPath folder..."
-            Remove-Item -Path $VmSubPath -Force -Recurse | out-null
-            Write-Log "$VmName`: Purge complete."
-        }
+            # Retry if its not gone.
+            if (Test-Path -Path $VmSubPath) {
+                Start-Sleep -Seconds 30
+                Write-Log "$VmName`: (Retry) Found existing directory for $VmName. Purging $VmSubPath folder..."
+                Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+                Write-Log "$VmName`: Purge complete."
+            }
 
-        #Fail if its not gone.
-        if (Test-Path -Path $VmSubPath) {
-            Write-Log "$VmName`: Could not delete $VmSubPath folder... Exit."
-            return $false
+            #Fail if its not gone.
+            if (Test-Path -Path $VmSubPath) {
+                Write-Log "$VmName`: Could not delete $VmSubPath folder... Exit."
+                return $false
+            }
         }
 
         Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
@@ -1776,22 +1780,28 @@ function New-VirtualMachine {
         $osDiskName = "$($VmName)_OS.vhdx"
         $osDiskPath = Join-Path $vm.Path $osDiskName
 
-        if (-not $OSDClient.IsPresent) {
-            $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
-            if (-not $worked) {
-                Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
-                return $false
+        if (-not $Migrate) {
+            if (-not $OSDClient.IsPresent) {
+                $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
+                if (-not $worked) {
+                    Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+                    return $false
+                }
             }
-        }
-        else {
-            Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
-            $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
-            if (-not $worked) {
-                Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
-                return $false
+            else {
+                Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
+                $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
+                if (-not $worked) {
+                    Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+                    return $false
+                }
             }
         }
 
+        if (-not (Test-Path $osDiskPath)) {
+            Write-Log "Could not find file $osDiskPath" -Failure
+            return
+        }
         Write-Log "$VmName`: Enabling Hyper-V Guest Services"
         Write-Progress2 $Activity -Status "Enabling Hyper-V Guest Services" -percentcomplete 35 -force
         Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | out-null
@@ -1865,7 +1875,13 @@ function New-VirtualMachine {
                 $newDiskName = "$VmName`_$label`_$count.vhdx"
                 $newDiskPath = Join-Path $vm.Path $newDiskName
                 Write-Log "$VmName`: Adding $newDiskPath"
-                New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic | out-null
+                if (-not $Migrate) {
+                    New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic | out-null
+                }
+                if (-not (Test-Path $newDiskPath)) {
+                    Write-Log "Failed to find $newDiskPath" -Failure
+                    return
+                }
                 Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath | out-null
                 $count++
             }
@@ -1949,8 +1965,8 @@ function New-VirtualMachine {
                         Remove-DhcpServerv4Reservation -IPAddress $ip
                     }
 
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
 
 
                     Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
@@ -1976,8 +1992,8 @@ function New-VirtualMachine {
                         if ($ipa) {
                             Remove-DhcpServerv4Reservation -IPAddress $ip
                         }
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
 
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
@@ -2099,7 +2115,7 @@ function Wait-ForVm {
     $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
     $timeSpan = New-TimeSpan -Minutes $TimeoutMinutes
     $stopWatch.Start()
-
+    $vmTest = Get-VM2 -Name $VmName
     if ($VmState) {
         Write-Log "$VmName`: Waiting for VM to go in $VmState state..."
         do {
@@ -2153,7 +2169,7 @@ function Wait-ForVm {
 
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
 
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
@@ -2408,6 +2424,11 @@ function Invoke-VmCommand {
 
         if (-not $ps) {
             $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
+        }
+
+        if (-not $ps -and $VmDomainName -eq "WORKGROUP")  {
+            $domain2 = (Get-VMNote -VMName $vmName).domain
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount "admin" -ShowVMSessionError:$ShowVMSessionError
         }
 
         $failed = $null -eq $ps

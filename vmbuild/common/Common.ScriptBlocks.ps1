@@ -15,6 +15,7 @@ $global:VM_Create = {
         $currentItem = $using:currentItem
         $azureFileList = $using:Common.AzureFileList
         $Phase = $using:Phase
+        $Migrate = $using:Migrate
 
         if (-not ($Common.LogPath)) {
             Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
@@ -109,6 +110,7 @@ $global:VM_Create = {
                 SwitchName      = $vmSwitch.Name
                 tpmEnabled      = $tpmEnabled
                 DeployConfig    = $deployConfig
+                Migrate         = $Migrate
             }
 
             if ($currentItem.role -eq "OSDClient") {
@@ -133,23 +135,25 @@ $global:VM_Create = {
                 return
             }
 
-            if ($currentItem.role -in ("OSDClient", "Linux")) {
-                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
-                return
-            }
-            Write-Progress2 "Waiting for OOBE" -Status "Starting" -percentcomplete 0 -force
-            start-sleep -seconds 3
-            # Wait for VM to finish OOBE
-            $oobeTimeout = 25
-            if ($deployConfig.virtualMachines.Count -gt 3) {
-                $oobeTimeout = $deployConfig.virtualMachines.Count + $oobeTimeout
-            }
+            if (-not $Migrate) {
+                if ($currentItem.role -in ("OSDClient", "Linux")) {
+                    New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
+                    return
+                }
+                Write-Progress2 "Waiting for OOBE" -Status "Starting" -percentcomplete 0 -force
+                start-sleep -seconds 3
+                # Wait for VM to finish OOBE
+                $oobeTimeout = 25
+                if ($deployConfig.virtualMachines.Count -gt 3) {
+                    $oobeTimeout = $deployConfig.virtualMachines.Count + $oobeTimeout
+                }
 
-            $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
-            if (-not $connected) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
-                return
+                $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
+                if (-not $connected) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
+                    return
+                }
             }
         }
         else {
@@ -222,6 +226,51 @@ $global:VM_Create = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
                 return
             }
+        }
+
+        if ($Migrate) {
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Set-Disk -IsOffline 0 }
+            if ($result.ScriptBlockFailed) {
+                start-sleep -seconds 60
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Set-Disk -IsOffline 0 }
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed set-disk to online. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Where-Object { $_.IsReadOnly } | Set-Disk -IsReadOnly 0 }
+            if ($result.ScriptBlockFailed) {
+                start-sleep -seconds 60
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Where-Object { $_.IsReadOnly } | Set-Disk -IsReadOnly 0 }
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed set-disk to read-write. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
+            }
+
+            $remove_old_nics_Scriptblock = {
+                $Devs = Get-PnpDevice -class net | Where-Object Status -eq Unknown | Select-Object FriendlyName, InstanceId
+
+                ForEach ($Dev in $Devs) {
+                    Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
+                    $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
+                    Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Verbose }
+                }
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $remove_old_nics_Scriptblock
+            if ($result.ScriptBlockFailed) {
+                start-sleep -seconds 60
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $remove_old_nics_Scriptblock
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to remove old nics. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
+            }
+
+            Stop-VM2 -Name $currentItem.vmName
+            Start-vm2 -Name $currentItem.vmName
         }
 
         # Set PS Execution Policy (required on client OS)
@@ -303,7 +352,8 @@ $global:VM_Create = {
 
             # Set vm note
             if (-not $skipVersionUpdate) {
-                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
+                $inProgress = (-not $Migrate)
+                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $inProgress
             }
         }
 
@@ -600,8 +650,8 @@ $global:VM_Config = {
                             Remove-DhcpServerv4Reservation -IPAddress $ip | Out-Null
                         }
 
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
 
                         Write-Progress2 $Activity -Status "Adding DHCP Reservations for scope 10.250.250.0 ip: $ip MAC: $MAC" -percentcomplete 11 -force
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $MAC -Description "Reservation for $($currentItem.VMName)" -ErrorAction Stop | out-null
@@ -1302,7 +1352,8 @@ $global:VM_Config = {
                             $dscFails = 0
                         }
                         continue
-                    }else {
+                    }
+                    else {
                         $dscFails = 0
                     }
 
