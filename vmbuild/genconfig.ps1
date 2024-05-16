@@ -860,7 +860,11 @@ function get-CMOptionsSummary {
     if ($Global:Config.cmOptions.EVALVersion -or $Global:Config.cmOptions.version -eq "tech-preview") {
         $license = "[EVAL]"
     }
-    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license"
+    $pki = "[EHTTP]"
+    if ($Global:Config.cmOptions.UsePKI) {
+        $pki = "[PKI]"
+    }
+    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki"
     return $Output
 }
 
@@ -917,8 +921,11 @@ function Get-ExistingVMs {
     $existingMachines = get-list -type vm -domain $config.vmOptions.DomainName | Where-Object { $_.vmName }
 
     foreach ($vm in $config.virtualMachines) {
-        if ($vm.modified -and $vm.vmName -in $existingMachines.vmName) {
-            $existingMachines = @($existingMachines | Where-Object { $_.vmName -ne $vm.vmName })
+        # if ($vm.modified -and $vm.vmName -in $existingMachines.vmName) {
+        $vmName = $config.vmOptions.Prefix + $($vm.vmName)
+        Write-Log -Verbose "Checking if $($vmName) is in ExistingMahcines"
+        if ($vmName -in $existingMachines.vmName) {
+            $existingMachines = @($existingMachines | Where-Object { $_.vmName -ne $vmName })
         }
     }
 
@@ -964,7 +971,7 @@ function Get-ExistingVMs {
 }
 
 function Select-MainMenu {
-    $global:existingMachines = Get-ExistingVMs
+    $global:existingMachines = Get-ExistingVMs -config $global:config
     while ($true) {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
@@ -1693,24 +1700,18 @@ function Select-NewDomainConfig {
             "1" {
                 Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "CAS" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -SiteCode "CS1" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
                 $version = "current-branch"
             }
 
             "2" {
                 Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -SiteCode "PS1" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
                 $version = "current-branch"
 
             }
             "3" {
                 Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -SiteCode "CTP" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
                 $usedPrefixes = Get-List -Type UniquePrefix
                 if ("CTP-" -notin $usedPrefixes) {
                     $prefix = "CTP-"
@@ -1720,8 +1721,6 @@ function Select-NewDomainConfig {
             }
             "4" {
                 Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "DomainMember" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
             }
         }
         $valid = $true
@@ -1757,6 +1756,10 @@ function Select-NewDomainConfig {
                 }
             }
         }
+
+        Add-NewVMForRole -Role "DomainMember" -Domain $domain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
+        Add-NewVMForRole -Role "DomainMember" -Domain $domain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
+
 
         if ($valid) {
             Show-SubnetNote
@@ -2872,6 +2875,7 @@ function Show-GenConfigErrorMessages {
 
     if ((($global:GenConfigErrorMessages | Measure-Object).Count) -gt 0) {
         Write-Host
+        Write-Verbose "Showing Show-GenConfigErrorMessages"
         Write-Host2 ">>>>>>>>>>>>>>  ERROR: Validation Failures were encountered:`r`n" -ForegroundColor Crimson
         foreach ($err in $global:GenConfigErrorMessages) {
             write-redx $err.message
@@ -3571,7 +3575,9 @@ Function Get-SiteCodeMenu {
         [Parameter(Mandatory = $false, HelpMessage = "Current value")]
         [Object] $CurrentValue,
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
-        [Object] $ConfigToCheck = $global:config
+        [Object] $ConfigToCheck = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [bool] $test = $true
     )
 
     if ($property.Role -eq "SiteSystem") {
@@ -3594,7 +3600,7 @@ Function Get-SiteCodeMenu {
         #$property."$name" = $result
     }
     try {
-        if (Get-TestResult -SuccessOnWarning) {
+        if ($test -and (Get-TestResult -config $configToCheck -SuccessOnWarning)) {
             return
         }
         else {
@@ -3634,6 +3640,73 @@ Function Get-SqlVersionMenu {
     }
 }
 
+Function Get-ForestTrustMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+
+
+    $domains = @(Get-List -Type UniqueDomain)
+    $domains += "NONE"
+    $valid = $false
+    while ($valid -eq $false) {
+        $result = Get-Menu "Select Forest to Trust" $($domains) $CurrentValue -Test:$false
+        $property."$name" = $result
+
+        if ($result -ne "NONE") {
+            $remoteCA = (get-list -type vm -DomainName $result | Where-Object { $_.Role -eq "DC" } | Select-Object InstallCA).InstallCA
+            if ($remoteCA) {
+                Write-OrangePoint "Domain $result already has a CA. Disabling CA in this domain"
+                $property.InstallCA = $false
+            }
+            Get-PrimarySitesForDomain $property $result
+        }
+        else {
+            $property.psobject.properties.remove('externalDomainJoinSiteCode')
+            $property.InstallCA = $true
+        }
+        if (Get-TestResult -SuccessOnWarning) {
+            return
+        }
+        else {
+            if ($property."$name" -eq $CurrentValue) {
+                return
+            }
+        }
+    }
+}
+
+Function Get-PrimarySitesForDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To get Primary Sites")]
+        [string] $Domain
+    )
+
+    $targetPrimaries = @((Get-list -type vm -DomainName $Domain | Where-Object { $_.Role -eq "Primary" } ).SiteCode)
+
+    if ($targetPrimaries) {
+        $targetPrimaries += "NONE"
+        $valid = $false
+        while ($valid -eq $false) {
+            #$property.externalDomainJoinSiteCode
+            $result = Get-Menu "Select Primary site code in $Domain to configure to manage clients in this domain" $($targetPrimaries) "NONE" -Test:$false
+            $property | Add-Member -MemberType NoteProperty -Name "externalDomainJoinSiteCode" -Value $result -Force
+
+            if (Get-TestResult -SuccessOnWarning) {
+                return
+            }
+        }
+    }
+}
 
 Function Set-SiteServerLocalSql {
     [CmdletBinding()]
@@ -4034,6 +4107,7 @@ function Add-ErrorMessage {
         Level    = $level
         Message  = $message
     }
+    Write-Verbose "Add-ErrorMessage $message"
 }
 
 
@@ -4354,6 +4428,15 @@ function Get-AdditionalValidations {
                 $property.PsObject.Members.Remove("pullDPSourceDP")
             }
             $newName = Rename-VirtualMachine -vm $property
+        }
+        "installCA" {
+            if ($property.ForestTrust) {
+                $remoteCA = (get-list -type vm -DomainName $property.ForestTrust | Where-Object { $_.Role -eq "DC" } | Select-Object InstallCA).InstallCA
+                if ($remoteCA) {
+                    Add-ErrorMessage -property $name -Warning "Domain $($property.ForestTrust) already has a CA. Disabling CA in this domain"
+                    $property.InstallCA = $false
+                }
+            }
         }
         "installDP" {
 
@@ -4697,6 +4780,13 @@ function Get-AdditionalInformation {
             }
         }
 
+        "domainUser" {
+            $prefixLower = $global:config.vmOptions.Prefix.ToLower()
+            if (-not $data.StartsWith($prefixLower)) {
+                $data = $data.PadRight(21) + "($($prefixLower+$data))"
+            }
+        }
+
         "memory" {
             #add Available memory
         }
@@ -5036,6 +5126,14 @@ function Select-Options {
                     Set-ParentSiteCodeMenu -property $property -name $name -CurrentValue $value
                     continue MainLoop
                 }
+                "ForestTrust" {
+                    Get-ForestTrustMenu -property $property -name $name -CurrentValue $value
+                    continue MainLoop
+                }
+                "externalDomainJoinSiteCode" {
+                    Get-PrimarySitesForDomain -property $property -domain $property.ForestTrust
+                    continue MainLoop
+                }
                 "sqlVersion" {
                     Get-SqlVersionMenu -property $property -name $name -CurrentValue $value
                     continue MainLoop
@@ -5200,6 +5298,7 @@ Function Get-TestResult {
                     Level    = "ERROR"
                     Message  = $msg
                 }
+                Write-Verbose "GenConfig Get-TestResult $msg"
             }
             #Write-ValidationMessages -TestObject $c
             #$MyInvocation | Out-Host
@@ -5358,6 +5457,19 @@ function get-VMString {
             $name += " [RP]"
         }
     }
+
+    if ($virtualMachine.InstallCA) {
+        $name += " [CA]"
+    }
+
+    if ($virtualMachine.ForestTrust) {
+        $name += " Trust [$($virtualMachine.ForestTrust)"
+        if ($virtualMachine.externalDomainJoinSiteCode) {
+            $name += "-->$($virtualMachine.externalDomainJoinSiteCode)"
+        }
+        $name += "]"
+    }
+
     write-log "Name is $name" -verbose
 
     $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen", "%MediumSeaGreen", "%SpringGreen", "%Lime", "%LimeGreen")
@@ -5624,6 +5736,8 @@ function Add-NewVMForRole {
             }
         }
     }
+
+
     $actualRoleName = ($Role -split " ")[0]
 
     if ($role -eq "SqlServer") {
@@ -5669,6 +5783,11 @@ function Add-NewVMForRole {
     }
     if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC", "Linux")) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
+    }
+
+    #Match Windows 10 or 11
+    if ($operatingSystem.Contains("Windows 1")) {
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false
     }
 
     $existingDPMP = $null
@@ -5830,25 +5949,27 @@ function Add-NewVMForRole {
             if ($OperatingSystem -notlike "*Server*") {
                 $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 [int]$i = 1
-                $userPrefix = "user"
+                $userPrefix = $oldConfig.vmOptions.prefix.toLower() + "user"
+                $userNoPrefix = "user"
                 while ($true) {
                     $preferredUserName = $userPrefix + $i
-                    if ($users -contains $preferredUserName) {
-                        write-log -verbose "$preferredUserName already existsTrying next"
+                    $noPrefixUserName = $userNoPrefix + $i
+                    if ($users -contains $preferredUserName -or $users -contains $noPrefixUserName) {
+                        write-log -verbose "$preferredUserName already exists Trying next"
                         $i++
                     }
                     else {
-                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $preferredUserName
+                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $noPrefixUserName
                         break
                     }
-
                 }
             }
         }
-        "DomainMember (Server)" { }
+        "DomainMember (Server)" {}
         "DomainMember (Client)" {
             if ($OperatingSystem -like "*Server*") {
                 $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false
             }
             else {
                 $virtualMachine.operatingSystem = $OperatingSystem
@@ -5857,14 +5978,16 @@ function Add-NewVMForRole {
             $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
             [int]$i = 1
             $userPrefix = $oldConfig.vmOptions.prefix.toLower() + "user"
+            $userNoPrefix = "user"
             while ($true) {
                 $preferredUserName = $userPrefix + $i
-                if ($users -contains $preferredUserName) {
-                    write-log -verbose "$preferredUserName already existsTrying next"
+                $noPrefixUserName = $userNoPrefix + $i
+                if ($users -contains $preferredUserName -or $users -contains $noPrefixUserName) {
+                    write-log -verbose "$preferredUserName already exists Trying next"
                     $i++
                 }
                 else {
-                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $preferredUserName
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $noPrefixUserName
                     break
                 }
 
@@ -5874,7 +5997,6 @@ function Add-NewVMForRole {
             if ($virtualMachine.operatingSystem.Contains("Windows 11") ) {
                 $virtualMachine.Memory = "4GB"
             }
-
         }
         "OSDClient" {
             $virtualMachine.memory = "2GB"
@@ -5895,7 +6017,7 @@ function Add-NewVMForRole {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
                 }
                 else {
-                    Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify
+                    Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify -test:$false
                 }
 
                 if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $virtualMachine.siteCode) -eq "CAS") {
@@ -5925,6 +6047,7 @@ function Add-NewVMForRole {
         "DC" {
             $virtualMachine.memory = "4GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ForestTrust' -Value "NONE"
             $virtualMachine.tpmEnabled = $false
         }
         "BDC" {
@@ -5958,7 +6081,8 @@ function Add-NewVMForRole {
                 version                   = "current-branch"
                 install                   = $true
                 pushClientToDomainMembers = $true
-                EVALVersion        = $false
+                EVALVersion               = $false
+                UsePKI                    = $false
             }
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
         }
@@ -6534,7 +6658,7 @@ function Select-VirtualMachines {
                         }
 
                         $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
-                        $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
+                        $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false
                         if (([string]::IsNullOrEmpty($newValue))) {
                             return
                         }
@@ -6920,7 +7044,7 @@ if ($Common.DevBranch) {
         $zipLastWriteTime = (Get-ChildItem ".\DSC\DSC.zip").LastWriteTime + (New-TimeSpan -Minutes 1)
     }
     if (-not $zipLastWriteTime -or ($psdLastWriteTime -gt $zipLastWriteTime) -or ($psmLastWriteTime -gt $zipLastWriteTime)) {
-        & ".\dsc\createGuestDscZip.ps1" | Out-Host
+        powershell .\dsc\createGuestDscZip.ps1 | Out-Host
         Set-Location $PSScriptRoot | Out-Null
     }
 }

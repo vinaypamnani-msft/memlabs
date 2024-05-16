@@ -15,10 +15,15 @@
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
+
     $DCName = $deployConfig.parameters.DCName
 
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+
+    if ($thisVM.Domain) {
+        $DomainName = $thisVM.Domain
+    }
 
     # Log share
     $LogFolder = "DSC"

@@ -1,3 +1,4 @@
+#New-Lab.ps1
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
@@ -35,10 +36,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 8)]
+    [ValidateRange(2, 9)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 8)]
+    [ValidateRange(2, 9)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
@@ -159,6 +160,10 @@ function Write-Phase {
         8 {
             Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
         }
+
+        9 {
+            Write-Log "Phase $Phase - Setup Multi-Forest ConfigMgr" -Activity
+        }
     }
 }
 
@@ -189,7 +194,7 @@ try {
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
     ### Run maintenance
-    if (!$Configuration) {
+    if (-not $Configuration) {
         Start-Maintenance
     }
 
@@ -284,7 +289,14 @@ try {
         Write-Host
         return
     }
-
+ #Create VM Mutexes
+ $mtx = New-Object System.Threading.Mutex($false, $mutexName)
+ $global:mutexes = @()
+ foreach ($vm in $deployConfig.virtualMachines) {
+     $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
+     write-log -Verbose "Created Mutex $($vm.vmName)"
+     $global:mutexes += $mtx
+ }
     # Skip if any VM in progress
     if ($runPhase1 -and (Test-InProgress -DeployConfig $deployConfig)) {
         Write-Host
@@ -417,7 +429,7 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 8
+    $maxPhase = 9
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -490,6 +502,17 @@ try {
     }
     else {
         $currentPhase = 9
+        foreach ($mutex in $global:mutexes) {
+            try{
+            [void]$mutex.ReleaseMutex()
+            } catch{}
+            try{
+            [void]$mutex.Dispose()
+            } catch{}
+
+        }
+        $global:mutexes = @()
+
         Start-Maintenance -DeployConfig $deployConfig
 
         $updateExistingRequired = $false
@@ -522,6 +545,16 @@ catch {
 }
 finally {
 
+    foreach ($mutex in $global:mutexes) {
+        try{
+        [void]$mutex.ReleaseMutex()
+        } catch{}
+        try{
+        [void]$mutex.Dispose()
+        } catch{}
+
+    }
+    $global:mutexes = @()
 
     if ($enableDebug) {
         Write-Host 'Config Stored in $global:DebugConfig'

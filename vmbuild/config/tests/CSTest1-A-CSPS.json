@@ -2,7 +2,9 @@
   "cmOptions": {
     "version": "2309",
     "install": true,
-    "pushClientToDomainMembers": false
+    "pushClientToDomainMembers": false,
+    "EVALVersion": false,
+    "UsePKI": true
   },
   "vmOptions": {
     "prefix": "CT1-",

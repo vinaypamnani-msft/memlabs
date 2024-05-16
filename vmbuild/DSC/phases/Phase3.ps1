@@ -12,6 +12,7 @@ configuration Phase3
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc'
     Import-DscResource -ModuleName 'LanguageDsc'
+    Import-DscResource -ModuleName 'CertificateDsc'
 
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -27,39 +28,63 @@ configuration Phase3
         # Install Language Packs
         if ($l -and $l.LanguageTag -and $l.LanguageTag -ne "en-US") {
             LanguagePack InstallLanguagePack {
-                LanguagePackName = $l.LanguageTag
+                LanguagePackName     = $l.LanguageTag
                 LanguagePackLocation = "C:\LanguagePacks"
             }
 
             Language ConfigureLanguage {
-                IsSingleInstance = "Yes"
-                LocationID = $l.LocationID
-                MUILanguage = $l.MUILanguage
-                MUIFallbackLanguage = $l.MUIFallbackLanguage
-                SystemLocale = $l.SystemLocale
-                AddInputLanguages = $l.AddInputLanguages
+                IsSingleInstance     = "Yes"
+                LocationID           = $l.LocationID
+                MUILanguage          = $l.MUILanguage
+                MUIFallbackLanguage  = $l.MUIFallbackLanguage
+                SystemLocale         = $l.SystemLocale
+                AddInputLanguages    = $l.AddInputLanguages
                 RemoveInputLanguages = $l.RemoveInputLanguages
-                UserLocale = $l.UserLocale
-                CopySystem = $true
-                CopyNewUser = $true
-                Dependson = "[LanguagePack]InstallLanguagePack"
+                UserLocale           = $l.UserLocale
+                CopySystem           = $true
+                CopyNewUser          = $true
+                Dependson            = "[LanguagePack]InstallLanguagePack"
             }
 
             LocalConfigurationManager {
                 RebootNodeIfNeeded = $true
-                ActionAfterReboot = "ContinueConfiguration"
-                ConfigurationMode = "ApplyAndAutoCorrect"
+                ActionAfterReboot  = "ContinueConfiguration"
+                ConfigurationMode  = "ApplyAndAutoCorrect"
             }
         }
 
+        $AddIISCert = $false
         # Install feature roles
         $featureRoles = @($ThisVM.role)
         if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") {
             $featureRoles += "Site Server"
+            $AddIISCert = $true
         }
 
         if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") {
-           $featureRoles += "WSUS"
+            $featureRoles += "WSUS"
+            $AddIISCert = $true
+        }
+
+        if ($ThisVM.installRP -eq $true) {
+            $AddIISCert = $true
+        }
+
+        if ($ThisVM.installMP -eq $true) {
+            $AddIISCert = $true
+        }
+
+        if ($ThisVM.installDP -eq $true) {
+            $AddIISCert = $true
+        }
+
+        $DCVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
+        if (-not $DCVM.InstallCA) {
+            $AddIISCert = $false
+        }
+
+        if (-not $deployConfig.cmOptions.UsePKI) {
+            $AddIISCert = $false
         }
 
         WriteStatus AddLocalAdmin {
@@ -125,6 +150,12 @@ configuration Phase3
             $nextDepend = "[InstallSSMS]SSMS"
         }
 
+        GpUpdate GpUpdate {
+            Run = "True"
+            DependsOn = $nextDepend
+        }
+        $nextDepend = "[GpUpdate]GpUpdate"
+
         if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "PassiveSite") {
 
             $prevDepend = $nextDepend
@@ -173,42 +204,126 @@ configuration Phase3
         }
 
         #add depend stuff
-     #   if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "Secondary") {
-            WriteStatus VCInstall {
+        #   if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "Secondary") {
+        WriteStatus VCInstall {
+            DependsOn = $nextDepend
+            Status    = "Downloading and installing VC redist"
+        }
+
+        InstallVCRedist VCInstall {
+            DependsOn = "[WriteStatus]VCInstall"
+            Path      = "C:\temp\vc_redist.x64.exe"
+            Ensure    = "Present"
+        }
+
+        WriteStatus SQLClientInstall {
+            DependsOn = "[InstallVCRedist]VCInstall"
+            Status    = "Downloading and installing SQL Client"
+        }
+
+        InstallSQLClient SQLClientInstall {
+            DependsOn = "[WriteStatus]SQLClientInstall"
+            Path      = "C:\temp\sqlncli.msi"
+            Ensure    = "Present"
+        }
+
+        WriteStatus ODBCDriverInstall {
+            DependsOn = "[InstallSQLClient]SQLClientInstall"
+            Status    = "Downloading and installing ODBC driver"
+        }
+
+        InstallODBCDriver ODBCDriverInstall {
+            DependsOn = "[WriteStatus]ODBCDriverInstall"
+            ODBCPath  = "C:\temp\msodbcsql.msi"
+            Ensure    = "Present"
+        }
+
+        $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
+
+        if ($AddIISCert) {
+
+
+            WriteStatus RebootNow {
+                Status    = "Rebooting to get Group Membership"
                 DependsOn = $nextDepend
-                Status = "Downloading and installing VC redist"
             }
 
-            InstallVCRedist VCInstall {
-                DependsOn = "[WriteStatus]VCInstall"
-                Path = "C:\temp\vc_redist.x64.exe"
-                Ensure   = "Present"
+            RebootNow RebootNow {
+                FileName  = 'C:\Temp\IISGroupReboot.txt'
+                DependsOn = $nextDepend
             }
+            $nextDepend = "[RebootNow]RebootNow"
 
-            WriteStatus SQLClientInstall {
-                DependsOn = "[InstallVCRedist]VCInstall"
-                Status = "Downloading and installing SQL Client"
+            WriteStatus RequestIISCerts {
+                Status    = "Requesting IIS Certificate for PKI"
+                DependsOn = $nextDepend
             }
-
-            InstallSQLClient SQLClientInstall {
-                DependsOn = "[WriteStatus]SQLClientInstall"
-                Path = "C:\temp\sqlncli.msi"
-                Ensure   = "Present"
+            $subject = $ThisVM.vmName + "." + $DomainName
+            $friendlyName = 'ConfigMgr WebServer Certificate'
+            CertReq SSLCert {
+                Subject             = $subject
+                SubjectAltName      = "DNS=" + $subject + "&DNS=" + $($ThisVM.VmName)
+                KeyLength           = '2048'
+                Exportable          = $false
+                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                #OID                 = '1.3.6.1.5.5.7.3.1'
+                #KeyUsage            = '0xa0'
+                CertificateTemplate = 'ConfigMgrWebServerCertificate'
+                AutoRenew           = $true
+                FriendlyName        = $friendlyName
+                #Credential          = $Credential
+                #UseMachineContext   = $true
+                KeyType             = 'RSA'
+                RequestType         = 'CMC'
+                DependsOn           = $nextDepend
             }
+            $nextDepend = "[CertReq]SSLCert"
 
-            WriteStatus ODBCDriverInstall {
-                DependsOn = "[InstallSQLClient]SQLClientInstall"
-                Status = "Downloading and installing ODBC driver"
+            WriteStatus AddIISCerts {
+                Status    = "Adding IIS Certificate for PKI"
+                DependsOn = $nextDepend
             }
-
-            InstallODBCDriver ODBCDriverInstall {
-                DependsOn = "[WriteStatus]ODBCDriverInstall"
-                ODBCPath = "C:\temp\msodbcsql.msi"
-                Ensure   = "Present"
+            AddCertificateToIIS AddCert {
+                FriendlyName = $friendlyName
+                DependsOn    = $nextDepend
             }
+            $nextDepend = "[AddCertificateToIIS]AddCert"
 
-            $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
-      #  }
+            if ($ThisVM.role -eq "Primary") {
+
+                $friendlyName = 'ConfigMgr Client DistributionPoint Certificate'
+                CertReq SSLCert2 {
+                    Subject             = "Client DistributionPoint Cert"
+                    #SubjectAltName      = "DNS=" + $subject
+                    KeyLength           = '2048'
+                    Exportable          = $true
+                    ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                    #OID                 = '1.3.6.1.5.5.7.3.1'
+                    #KeyUsage            = '0xa0'
+                    CertificateTemplate = 'ConfigMgrClientDistributionPointCertificate'
+                    AutoRenew           = $true
+                    FriendlyName        = $friendlyName
+                    #Credential          = $Credential
+                    #UseMachineContext   = $true
+                    KeyType             = 'RSA'
+                    RequestType         = 'CMC'
+                    DependsOn           = $nextDepend
+                }
+                $nextDepend = "[CertReq]SSLCert2"
+
+                CertificateExport SSLCert {
+                    Type         = 'PFX'
+                    FriendlyName = $friendlyName
+                    Path         = 'c:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
+                    Password     = $Admincreds
+                    DependsOn    = $nextDepend
+                }
+                $nextDepend = "[CertificateExport]SSLCert"
+            }
+        }
+
+
+        #  }
 
         WriteStatus Complete {
             DependsOn = $nextDepend

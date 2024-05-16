@@ -32,9 +32,9 @@ Function Write-ProgressElapsed {
         $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
         $msg = ""
         if ($showTimeout) {
-            $msg = "Waiting $TimeSpan minutes. "
+            $msg = "Waiting $TimeSpan  "
         }
-        $msg = $msg + "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))"
+        $msg = $msg + "Elapsed: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))"
         if ($FailCount) {
             $msg = $msg + " Failed $FailCount / $FailCountMax"
         }
@@ -2544,6 +2544,9 @@ function Get-VmSession {
         [switch]$ShowVMSessionError
     )
 
+
+    $VmName = $VmName.Split(".")[0]
+
     $ps = $null
 
     # Cache key
@@ -2607,13 +2610,23 @@ function Get-VmSession {
                 $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
                     try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-                    if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
+                    $VM = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
+                    if ($VM) {
+
+                        $username3 = "$($VM.Domain)\$($Common.LocalAdmin.UserName)"
+                        $creds = New-Object System.Management.Automation.PSCredential ($username3, $Common.LocalAdmin.Password)
+                        $cacheKey = $VmName + "-$($VM.Domain)"
+                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                     }
-                    else {
-                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
+                    if (-not $ps) {
+                        if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
+                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning
+                        }
+                        else {
+                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning -Verbose
+                        }
+                        continue
                     }
-                    continue
                 }
             }
             else {
@@ -2988,22 +3001,24 @@ function Install-Tools {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
             continue
         }
+        $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
+        if ($out.ScriptBlockOutput -ne $true) {
+            foreach ($tool in $Common.AzureFileList.Tools) {
 
-        foreach ($tool in $Common.AzureFileList.Tools) {
+                if ($tool.NoUpdate) { continue }
 
-            if ($tool.NoUpdate) { continue }
+                if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-            if ($ToolName -and $tool.Name -ne $ToolName) { continue }
+                if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { continue }
 
-            if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { continue }
+                if ($ShowProgress) {
+                    Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
+                }
 
-            if ($ShowProgress) {
-                Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
-            }
-
-            $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
-            if (-not $worked) {
-                $success = $false
+                $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
+                if (-not $worked) {
+                    $success = $false
+                }
             }
         }
     }

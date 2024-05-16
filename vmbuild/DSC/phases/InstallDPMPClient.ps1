@@ -1,3 +1,4 @@
+#InstallDPMPClient.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -19,7 +20,10 @@ $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMach
 $ClientNames = $thisVM.thisParams.ClientPush
 $cm_svc = "$NetbiosDomainName\cm_svc"
 $pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
-
+$usePKI = $deployConfig.cmOptions.UsePKI
+if (-not $usePKI) {
+    $usePKI = $false
+}
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -57,7 +61,7 @@ if (Test-Path $cm_svc_file) {
     $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
     Write-DscStatus "Adding cm_svc domain account as CM account"
     Start-Sleep -Seconds 5
-    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode | Out-File $global:StatusLog -Append
+    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
     Remove-Item -Path $cm_svc_file -Force -Confirm:$false
 
     # Set client push account
@@ -127,7 +131,7 @@ foreach ($DP in $DPs) {
     }
 
     $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
-    Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode
+    Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode -usePKI:$usePKI
 }
 
 foreach ($MP in $MPs) {
@@ -138,7 +142,7 @@ foreach ($MP in $MPs) {
     }
 
     $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
-    Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode
+    Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode -usePKI:$usePKI
 }
 
 
@@ -156,7 +160,7 @@ foreach ($PDP in $PullDPs) {
 
     $DPFQDN = $PDP.ServerName.Trim() + "." + $DomainFullName
     $SourceDPFQDN = $PDP.SourceDP.Trim() + "." + $DomainFullName
-    Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN
+    Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI
 }
 
 # Force install DP/MP on PS Site Server if none present
@@ -165,12 +169,12 @@ $mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
 
 if ($dpCount -eq 0) {
     Write-DscStatus "No DP's were found in this site. Forcing DP install on Site Server $ThisMachineName"
-    Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
+    Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
 }
 
 if ($mpCount -eq 0) {
     Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName"
-    Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode
+    Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
 }
 
 # Create Boundary groups
@@ -278,7 +282,17 @@ if (-not $pushClients) {
 
 # Wait for collection to populate
 $CollectionName = "All Systems"
-Write-DscStatus "Waiting for clients to appear in '$CollectionName'"
+if ($ClientNames) {
+    Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
+}
+else {
+    Write-DscStatus "Skipping Client Push. No Clients to push."
+    $Configuration.InstallClient.Status = 'Completed'
+    $Configuration.InstallClient.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
+
 $ClientNameList = $ClientNames.split(",")
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 Start-Sleep -Seconds 5
@@ -313,7 +327,7 @@ foreach ($client in $ClientNameList) {
     }
     if ($success) {
         Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true | Out-File $global:StatusLog -Append
+        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
         Start-Sleep -Seconds 5
     }
 }
