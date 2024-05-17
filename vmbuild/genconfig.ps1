@@ -963,6 +963,9 @@ function Get-ExistingVMs {
         if ($null -ne $evm.DiskUsedGB) {
             $evm.PsObject.Members.Remove("DiskUsedGB")
         }
+        if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName){
+            $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
+        }
     }
 
 
