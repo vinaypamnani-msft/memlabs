@@ -1762,7 +1762,7 @@ function New-VirtualMachine {
         Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
         # Create new VM
         try {
-            $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
+            $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop 
         }
         catch {
             Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
@@ -1846,7 +1846,11 @@ function New-VirtualMachine {
             }
         }
 
-        Write-Progress2 $Activity -Status "Setting Processors" -percentcomplete 60 -force
+        Write-Progress2 $Activity -Status "Setting VM to shutdown on stop" -percentcomplete 60 -force
+        Write-Log "$VmName`: Setting VM to shutdown on stop"
+        Set-VM -Name $vmName -AutomaticStopAction ShutDown | out-null
+
+        Write-Progress2 $Activity -Status "Setting Processors" -percentcomplete 62 -force
         Write-Log "$VmName`: Setting Processor count to $Processors"
         Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
