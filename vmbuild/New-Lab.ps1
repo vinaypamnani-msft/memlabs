@@ -114,6 +114,8 @@ if (-not $Common.PS7) {
     return
 }
 
+New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "WinREVersion" -PropertyType String -Value "10.0.20348.2201" -Force | Out-Null
+
 if (-not $Common.DevBranch) {
     Clear-Host
 }
