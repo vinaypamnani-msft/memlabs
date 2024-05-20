@@ -609,7 +609,7 @@ finally {
         Write-Host
 
         foreach ($vmname in $global:vm_remove_list) {
-            Remove-VirtualMachine -VmName $vmname -Force
+            Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force
         }
 
         Get-Job | Stop-Job

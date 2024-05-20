@@ -241,9 +241,9 @@ function Start-PhaseJobs {
             else {
                 if ($Phase -eq 1) {
                     # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
-                    if (-not $Migrate) {
+                    #if (-not $Migrate) {
                         $global:vm_remove_list += ($jobName -split " ")[0]
-                    }
+                    #}
                 }
             }
         }

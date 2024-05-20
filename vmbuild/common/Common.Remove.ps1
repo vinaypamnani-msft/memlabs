@@ -9,7 +9,9 @@ function Remove-VirtualMachine {
         [Parameter()]
         [switch] $WhatIf,
         [Parameter()]
-        [switch] $Force
+        [switch] $Force,
+        [Parameter()]
+        [switch] $Migrate
     )
     #{ "network": "10.0.1.0", "ClusterIPAddress": "10.250.250.135", "AGIPAddress": "10.250.250.136",
     $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
@@ -63,14 +65,15 @@ function Remove-VirtualMachine {
         if (Test-Path $cachenetFile) { Remove-Item -path $cachenetFile -Force -WhatIf:$WhatIf | Out-Null }
 
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf
+        if (-not $Migrate) {
+            Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
+            Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
 
-        Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
-        Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
 
-
-        $count = (Get-ChildItem $parent | Measure-Object).Count
-        if ($count -eq 0) {
-            Remove-Item -Path $parent
+            $count = (Get-ChildItem $parent | Measure-Object).Count
+            if ($count -eq 0) {
+                Remove-Item -Path $parent
+            }
         }
     }
     else {
@@ -200,14 +203,14 @@ function Remove-Domain {
 
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
     $vmsToDelete = Get-List -Type VM -DomainName $DomainName
-    $DC = $vmsToDelete | Where-Object {$_.Role -eq "DC"}
+    $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
 
     $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
 
     if ($DC) {
         if ($DC.ForestTrust) {
             $forestDomain = $DC.ForestTrust
-            $RemoteDC = Get-List -Type Vm -DomainName $forestDomain | Where-Object {$_.Role -eq "DC"}
+            $RemoteDC = Get-List -Type Vm -DomainName $forestDomain | Where-Object { $_.Role -eq "DC" }
             if ($RemoteDC) {
                 Write-Log "Removing Trust on $forestDomain for '$DomainName'" -Activity
 

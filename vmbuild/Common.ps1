@@ -1759,32 +1759,7 @@ function New-VirtualMachine {
             }
         }
 
-        # Copy sysprepped image to VM location
-        $osDiskName = "$($VmName)_OS.vhdx"
-        $osDiskPath = Join-Path $vm.Path $osDiskName
-        
-        if (-not $Migrate) {
-            if (-not $OSDClient.IsPresent) {
-                $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
-                if (-not $worked) {
-                    Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
-                    return $false
-                }
-            }
-            else {
-                Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
-                $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
-                if (-not $worked) {
-                    Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
-                    return $false
-                }
-            }
-        }
-        
-        if (-not (Test-Path $osDiskPath)) {
-            Write-Log "Could not find file $osDiskPath" -Failure
-            return
-        }
+       
 
         Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
         # Create new VM
@@ -1802,6 +1777,34 @@ function New-VirtualMachine {
         if ($DeployConfig) {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
+
+         # Copy sysprepped image to VM location
+         $osDiskName = "$($VmName)_OS.vhdx"
+         $osDiskPath = Join-Path $vm.Path $osDiskName
+         
+         if (-not $Migrate) {
+             if (-not $OSDClient.IsPresent) {
+                 $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
+                 if (-not $worked) {
+                     Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+                     return $false
+                 }
+             }
+             else {
+                 Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
+                 $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
+                 if (-not $worked) {
+                     Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+                     return $false
+                 }
+             }
+         }
+         
+         if (-not (Test-Path $osDiskPath)) {
+             Write-Log "Could not find file $osDiskPath" -Failure
+             return
+         }
+
 
         Write-Log "$VmName`: Enabling Hyper-V Guest Services"
         Write-Progress2 $Activity -Status "Enabling Hyper-V Guest Services" -percentcomplete 35 -force
