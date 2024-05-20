@@ -1759,27 +1759,10 @@ function New-VirtualMachine {
             }
         }
 
-        Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
-        # Create new VM
-        try {
-            $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop 
-        }
-        catch {
-            Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
-            Write-Log "$($_.ScriptStackTrace)" -LogOnly
-            return $false
-        }
-
-        Write-Progress2 $Activity -Status "Hyper-V VM Object created. Waiting for Disk Creation" -percentcomplete 30 -force
-        # Add VMNote as soon as VM is created
-        if ($DeployConfig) {
-            New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
-        }
-
         # Copy sysprepped image to VM location
         $osDiskName = "$($VmName)_OS.vhdx"
         $osDiskPath = Join-Path $vm.Path $osDiskName
-
+        
         if (-not $Migrate) {
             if (-not $OSDClient.IsPresent) {
                 $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
@@ -1797,11 +1780,29 @@ function New-VirtualMachine {
                 }
             }
         }
-
+        
         if (-not (Test-Path $osDiskPath)) {
             Write-Log "Could not find file $osDiskPath" -Failure
             return
         }
+
+        Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
+        # Create new VM
+        try {
+            $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop 
+        }
+        catch {
+            Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
+            Write-Log "$($_.ScriptStackTrace)" -LogOnly
+            return $false
+        }
+
+        Write-Progress2 $Activity -Status "Hyper-V VM Object created. Waiting for Disk Creation" -percentcomplete 30 -force
+        # Add VMNote as soon as VM is created
+        if ($DeployConfig) {
+            New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+        }
+
         Write-Log "$VmName`: Enabling Hyper-V Guest Services"
         Write-Progress2 $Activity -Status "Enabling Hyper-V Guest Services" -percentcomplete 35 -force
         Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | out-null
@@ -2430,7 +2431,7 @@ function Invoke-VmCommand {
             $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
         }
 
-        if (-not $ps -and $VmDomainName -eq "WORKGROUP")  {
+        if (-not $ps -and $VmDomainName -eq "WORKGROUP") {
             $domain2 = (Get-VMNote -VMName $vmName).domain
             $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount "admin" -ShowVMSessionError:$ShowVMSessionError
         }
