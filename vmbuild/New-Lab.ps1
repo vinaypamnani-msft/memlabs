@@ -57,7 +57,6 @@ if ($Common.Initialized) {
 
 if ($Migrate) {
     $StopPhase = 2
-    $SkipPhase = 2
 }
 
 $NewLabsuccess = $false
