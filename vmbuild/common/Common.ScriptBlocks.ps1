@@ -272,6 +272,27 @@ $global:VM_Create = {
                 }
             }
 
+            if ($currentItem.role -eq "WorkgroupMember" -or $currentItem.role -eq "InternetClient" -or $currentItem.role -eq "AADClient") {
+                $netProfile = 1
+            }
+            else {
+                $netProfile = 2
+            } # 1 = Private, 2 = Domain
+
+            $Trust_Ethernet = {
+                param ($netProfile)
+                Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse `
+                | ForEach-Object { $_.PSChildName } `
+                | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value $netProfile }
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -ArgumentList $netProfile -DisplayName "Set Ethernet as Trusted"
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
+            }
+            
+
+
             Stop-VM2 -Name $currentItem.vmName
             Start-vm2 -Name $currentItem.vmName
         }
