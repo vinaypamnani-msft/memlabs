@@ -126,6 +126,14 @@
             AddressFamily  = 'IPv4'
         }
 
+        DnsServerAddress SetDNS {
+            Address        = $DHCP_DNSAddress
+            InterfaceAlias = $alias
+            AddressFamily  = 'IPv4'
+            Validate       = $false
+            DependsOn      = "[DefaultGatewayAddress]SetDefaultGateway"
+        }
+
         WriteStatus InstallFeature {
             DependsOn = "[DefaultGatewayAddress]SetDefaultGateway"
             Status    = "Installing required windows features"

@@ -1007,13 +1007,13 @@ class DelegateControl {
             if ($this.IsGroup) {
                 Write-Verbose "Testing for *$($DomainName)\$($_machinename)* IsGroup: $($this.IsGroup)"
                 if (($permissioninfo | Where-Object { $_ -like "*$($DomainName)\$($_machinename)*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                   break
+                    break
                 }
             }
             else {
                 Write-Verbose "Testing for *$($_machinename)$* IsGroup: $($this.IsGroup)"
                 if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                   break
+                    break
                 }
             }
 
@@ -3207,8 +3207,12 @@ class ModuleAdd {
         $_moduleName = $this.CheckModuleName
         $_userScope = $this.UserScope
 
-        $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
-
+        $Nuget = $null
+        try {
+            $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
+        }
+        catch { }
+        
         IF ($null -eq $NuGet) {
             #Install-PackageProvider Nuget -force -Confirm:$false
             Find-PackageProvider -Name NuGet -Force | Install-PackageProvider -Force -Scope AllUsers -Confirm:$false
