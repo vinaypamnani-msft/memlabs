@@ -11,7 +11,7 @@ function Remove-VirtualMachine {
         [Parameter()]
         [switch] $Force,
         [Parameter()]
-        [switch] $Migrate
+        [bool] $Migrate = $false
     )
     #{ "network": "10.0.1.0", "ClusterIPAddress": "10.250.250.135", "AGIPAddress": "10.250.250.136",
     $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
