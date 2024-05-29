@@ -2624,19 +2624,27 @@ function Get-VmSession {
 function Get-StorageConfig {
 
 
-    $storageConfigName = "_storageConfig2022.json"
+    $newStorageConfigName = "_storageConfig2024.json"
+    $newconfigPath = Join-Path $Common.ConfigPath $newStorageConfigName
+    $StorageConfigName = "_storageConfig2024.json"
+    $configPath = Join-Path $Common.ConfigPath $newStorageConfigName
 
-    $configPath = Join-Path $Common.ConfigPath $storageConfigName
-
-    if (-not (Test-Path $configPath)) {
-        $configPath = Join-Path $Common.ConfigPath "_storageConfig.json"
+    if (-not (Test-Path $newconfigPath)) {
         $GetNewStorageConfig = $true
+        $storageConfigName = "_storageConfig2022.json"
+
+        $configPath = Join-Path $Common.ConfigPath $storageConfigName
+    
+        if (-not (Test-Path $configPath)) {            
+            Write-Log "Could not find $newconfigPath. Exiting."    
+            $Common.FatalError = "Storage Config path '$newconfigPath' not found. Refer to internal documentation."
+            Write-Log "File $newconfigPath does not exist."
+            return       
+        }
     }
-
-
-
+    
     if (-not (Test-Path $configPath)) {
-        $Common.FatalError = "Storage Config path '$configPath' not found. Refer internal documentation."
+        $Common.FatalError = "Storage Config path '$configPath' not found. Refer to internal documentation."
         Write-Log "File $configPath does not exist."
         return
     }
@@ -2685,8 +2693,8 @@ function Get-StorageConfig {
         if (-not $InJob.IsPresent) {
 
             if ($GetNewStorageConfig) {
-                $storageConfigLocation = "$($StorageConfig.StorageLocation)/$storageConfigName"
-                Write-Log "Updating $($storageConfigNam) from azure storage" -LogOnly
+                $storageConfigLocation = "$($StorageConfig.StorageLocation)/$newStorageConfigName"
+                Write-Log "Updating $($newStorageConfigName) from azure storage" -LogOnly
                 $storageConfigURL = $storageConfigLocation + "?$($StorageConfig.StorageToken)"
                 try {
                     $response = Invoke-WebRequest -Uri $storageConfigURL -UseBasicParsing -ErrorAction Stop
@@ -2699,7 +2707,7 @@ function Get-StorageConfig {
                     Write-Log "Failed to download updated storage config"
                 }
                 else {
-                    $response.Content.Trim() | Out-File -FilePath $storageConfigPath -Force -ErrorAction SilentlyContinue
+                    $response.Content.Trim() | Out-File -FilePath $newconfigPath -Force -ErrorAction SilentlyContinue
                 }
 
             }
