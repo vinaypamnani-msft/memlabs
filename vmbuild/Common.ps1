@@ -1182,11 +1182,11 @@ function Test-NetworkNat {
 
     try {
         Write-Log "'$NetworkSubnet' not found in NAT. Adding it."
-        New-NetNat –Name $NetworkSubnet –InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
+        New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
         return $true
     }
     catch {
-        Write-Log "New-NetNat for '$NetworkSubnet' failed with error: $_" -Failure
+        Write-Log "New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix `"$($NetworkSubnet)/24`" failed with error: $_" -Failure
         return $false
     }
 
