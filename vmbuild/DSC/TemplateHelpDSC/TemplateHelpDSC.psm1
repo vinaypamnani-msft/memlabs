@@ -2163,7 +2163,7 @@ class OpenFirewallPortForSCCM {
 
             #THAgent
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
-            Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
+            Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28502"
         }
 
         if ($_Role -contains "Site Server") {
@@ -2361,7 +2361,7 @@ class OpenFirewallPortForSCCM {
         }
         if ($_Role -contains "DomainMember" -or $_Role -contains "WorkgroupMember") {
             #Client Push Installation
-            Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
+            Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28502"
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
 
             #Remote Assistance and Remote Desktop
