@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "virtualMachineName": {
+      "value": "VM-NAME"
+    },
+    "adminUsername": {
+      "value": "GEN-UNIQUE"
+    },
+    "adminPassword": {
+      "value": "GEN-PASSWORD"
+    },
+    "windowsOSVersion": {
+      "value": "2022-datacenter-g2"
+    },
+    "timeZone": {
+     "value": "Eastern Standard Time"
+    },
+    "branchName": {
+      "value": "main"
+    }
+  }
+}
