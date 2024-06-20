@@ -63,7 +63,10 @@
         "Standard_E8-4ds_v4",
         "Standard_E16-4ds_v4",
         "Standard_E16-4ds_v5",
-        "Standard_E16s_v3"
+        "Standard_E16s_v3",
+        "Standard_D16ds_v4",
+        "Standard_D16ds_v5",
+        "Standard_E20ds_v5"
       ],
       "metadata": {
         "description": "ARM Template Version. Use main unless otherwise instructed."
