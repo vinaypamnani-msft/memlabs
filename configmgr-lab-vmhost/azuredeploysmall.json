@@ -52,6 +52,22 @@
       "metadata": {
         "description": "ARM Template Version. Use main unless otherwise instructed."
       }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_E16ds_v5",
+      "allowedValues": [
+        "Standard_E16ds_v5",
+        "Standard_E16ds_v4",
+        "Standard_E8-4ds_v5",
+        "Standard_E8-4ds_v4",
+        "Standard_E16-4ds_v4",
+        "Standard_E16-4ds_v5",
+        "Standard_E16s_v3"
+      ],
+      "metadata": {
+        "description": "ARM Template Version. Use main unless otherwise instructed."
+      }
     }
   },
   "variables": {
@@ -64,7 +80,7 @@
     "nsgId": "[resourceId(resourceGroup().name, 'Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]",
     "vnetId": "[resourceId(resourceGroup().name,'Microsoft.Network/virtualNetworks', variables('virtualNetworkName'))]",
     "subnetRef": "[concat(variables('vnetId'), '/subnets/', variables('subnetName'))]",
-    "vmSize": "Standard_E16ds_v5",
+    "vmSize": "[parameters('vmSize')]",
     "addressPrefix": "10.1.0.0/24",
     "subnetPrefix": "10.1.0.0/24",
     "dataDisksCount": 24,
