@@ -64,7 +64,7 @@
     "nsgId": "[resourceId(resourceGroup().name, 'Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]",
     "vnetId": "[resourceId(resourceGroup().name,'Microsoft.Network/virtualNetworks', variables('virtualNetworkName'))]",
     "subnetRef": "[concat(variables('vnetId'), '/subnets/', variables('subnetName'))]",
-    "vmSize": "Standard_E16ds_v4",
+    "vmSize": "Standard_E16ds_v5",
     "addressPrefix": "10.1.0.0/24",
     "subnetPrefix": "10.1.0.0/24",
     "dataDisksCount": 24,
