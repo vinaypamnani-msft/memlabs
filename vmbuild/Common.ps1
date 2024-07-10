@@ -3743,7 +3743,7 @@ if (-not $Common.Initialized) {
 
     $global:Common = [PSCustomObject]@{
         MemLabsVersion        = "240205"
-        LatestHotfixVersion   = "240205"
+        LatestHotfixVersion   = "240710"
         PS7                   = $PS7
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files

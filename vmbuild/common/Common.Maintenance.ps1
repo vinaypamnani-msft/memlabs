@@ -906,7 +906,7 @@ function Get-VMFixes {
         }
         
         if ($key) {
-            cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms azkms.core.windows.net:1688        
+            cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms $atkms       
             Start-Sleep -Seconds 5        
             cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $key
             Start-Sleep -Seconds 5
