@@ -881,7 +881,7 @@ function Get-VMFixes {
 
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_LocalAdminAccount"
-        FixVersion        = "230927"
+        FixVersion        = "240710"
         AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
@@ -908,7 +908,7 @@ function Get-VMFixes {
         if ($key) {
             cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms azkms.core.windows.net:1688        
             Start-Sleep -Seconds 5        
-            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $wine
+            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $key
             Start-Sleep -Seconds 5
             cscript //NoLogo C:\Windows\system32\slmgr.vbs /ato
         }
