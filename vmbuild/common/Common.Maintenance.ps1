@@ -917,7 +917,7 @@ function Get-VMFixes {
         
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_ActivateWindows"
-        FixVersion        = "240710"
+        FixVersion        = "240711"
         AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
