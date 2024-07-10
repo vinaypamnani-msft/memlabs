@@ -906,22 +906,22 @@ function Get-VMFixes {
         }
         
         if ($key) {
-            cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms $atkms       
+            cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms $atkms > $null    
             Start-Sleep -Seconds 5        
-            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $key
+            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $key > $null
             Start-Sleep -Seconds 5
-            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ato
+            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ato > $null
         }
         return $true
     }
         
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_ActivateWindows"
-        FixVersion        = "240712"
+        FixVersion        = "240713"
         AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
-        AppliesToRoles    = @('DomainMember', 'WorkgroupMember')
+        AppliesToRoles    = @('DomainMember', 'WorkgroupMember', "InternetClient")
         NotAppliesToRoles = @()
         DependentVMs      = @()
         ScriptBlock       = $Fix_ActivateWindows
