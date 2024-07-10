@@ -898,10 +898,10 @@ function Get-VMFixes {
         $wine = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
         $cosname = (Get-WmiObject -Class Win32_OperatingSystem).Name
         
-        if ($cosname -like "Pro") {
+        if ($cosname -like "*Pro*") {
             $key = $winp
         }
-        if ($cosname -like "Enterprise") {
+        if ($cosname -like "*Enterprise*") {
             $key = $wine
         }
         
@@ -917,7 +917,7 @@ function Get-VMFixes {
         
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_ActivateWindows"
-        FixVersion        = "240711"
+        FixVersion        = "240712"
         AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
