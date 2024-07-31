@@ -315,14 +315,14 @@ try {
 
     Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
 
-    if ($StartPhase -and $StartPhase -le 2) {
+    if (-not $StartPhase -or ($StartPhase -and $StartPhase -le 2)) {
         # Download tools
         $success = Get-Tools -WhatIf:$WhatIf
         if (-not $success) {
             Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
         }
     }
-
+ 
     if ($runPhase1) {
         # Download required files
         $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles

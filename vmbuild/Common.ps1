@@ -2681,14 +2681,14 @@ function Get-StorageConfig {
             Write-Log "Could not find $newconfigPath. Exiting."    
             $Common.FatalError = "Storage Config path '$newconfigPath' not found. Refer to internal documentation."
             Write-Log "File $newconfigPath does not exist."
-            return       
+            return $false       
         }
     }
     
     if (-not (Test-Path $configPath)) {
         $Common.FatalError = "Storage Config path '$configPath' not found. Refer to internal documentation."
         Write-Log "File $configPath does not exist."
-        return
+        return $false
     }
 
     try {
@@ -2826,7 +2826,7 @@ function Get-StorageConfig {
                 $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
                 if (-not $response) {
                     $Common.FatalError = "Could not download default credentials from azure. Please check your token"
-                    return
+                    return $false
                 }
                 $response.Content.Trim() | Out-file $filePath -Force
             }
@@ -2841,11 +2841,20 @@ function Get-StorageConfig {
             $Common.FatalError = "Admin file from azure is empty"
         }
 
+        if ([string]::IsNullOrWhiteSpace($common.FatalError) ) {
+        
+            return $true
+        }
+        else {
+            return $false 
+        }
+
     }
     catch {
         $Common.FatalError = "Storage Access failed. $_"
         Write-Exception -ExceptionInfo $_
         Write-Host $_.ScriptStackTrace | Out-Host
+        return $false
     }
     finally {
         $ProgressPreference = $pp
@@ -3785,7 +3794,12 @@ if (-not $Common.Initialized) {
 
     ### Test Storage config and access
     Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
-    Get-StorageConfig
+    $getresults = Get-StorageConfig 
+    if ($getresults -eq $false){
+        Write-Log "failed to get the storage JSON file" -Failure
+        return 
+    }
+
 
 
     Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
