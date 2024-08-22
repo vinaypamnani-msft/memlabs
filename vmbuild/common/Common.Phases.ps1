@@ -249,6 +249,7 @@ function Start-PhaseJobs {
         }
         else {
             $reservation = $null
+            #Phase 5 is for SQL Always on.. So if we are in this phase, it is a SQLAO node, create Cluster IP reservation
             if ($Phase -eq 5) {
                 $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
                 $reservation = $reservation -replace "-", ""

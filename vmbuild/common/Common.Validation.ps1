@@ -198,7 +198,7 @@ function Test-ValidMachineName {
     }
 
     write-log "Testing $name" -Verbose
-    $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
+    $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>_') + '\]' + '\"'+'\s')]"
 
     if ($name.Length -gt 15) {
         Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. Windows computer name cannot be more than 15 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Warning
@@ -208,6 +208,11 @@ function Test-ValidMachineName {
         Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters in $name." -ReturnObject $ReturnObject -Failure
     }
 
+    if ($name.EndsWith("."))
+    {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] can not end with '.'." -ReturnObject $ReturnObject -Failure
+    }
+    
     if ($name -eq $env:COMPUTERNAME) {
         Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Can not be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Warning
     }

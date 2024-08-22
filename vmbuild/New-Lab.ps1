@@ -14,6 +14,7 @@ param (
             $ConfigNames = ForEach ($Path in $ConfigPaths) {
                 if ($Path.Name -eq "_storageConfig.json") { continue }
                 if ($Path.Name -eq "_storageConfig2022.json") { continue }
+                if ($Path.Name -eq "_storageConfig2024.json") { continue }
                 If (Test-Path $Path) {
                     (Get-ChildItem $Path).BaseName
                 }
@@ -99,8 +100,6 @@ if (-not $NoWindowResize.IsPresent) {
     }
 }
 
-Set-PS7ProgressWidth
-
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
@@ -112,6 +111,8 @@ if (-not $Common.PS7) {
     Write-Log "You must use PowerShell version 7.1 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
     return
 }
+
+Set-PS7ProgressWidth
 
 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "WinREVersion" -PropertyType String -Value "10.0.20348.2201" -Force | Out-Null
 

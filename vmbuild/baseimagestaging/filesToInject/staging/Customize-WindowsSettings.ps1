@@ -1,4 +1,4 @@
-﻿#
+﻿# Customize-WindowsSettings.ps1
 # Customize Windows Settings optimal for the VM
 #
 
