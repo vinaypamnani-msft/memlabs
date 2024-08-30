@@ -285,6 +285,7 @@ if ($containsPassive) {
     . $ScriptFile $ConfigFilePath $LogPath
 }
 
+
 Write-DscStatus "Finished setting up ConfigMgr."
 
 # Mark ScriptWorkflow completed for DSC to move on.

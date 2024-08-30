@@ -42,7 +42,6 @@ configuration Phase6
                 else {
                     if ( $thisVM.thisParams.WSUSSqlServer) {
                         $sqlServer = $thisVM.thisParams.WSUSSqlServer
-
                     }
                 }
 
@@ -112,7 +111,7 @@ configuration Phase6
             $SSLTemplate = $null
         }
 
-        if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM) {
+        if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM -or $thisVM.thisParams.WSUSSqlServer) {
             ConfigureWSUS UpdateServices {
                 DependsOn            = @('[WindowsFeatureSet]UpdateServices')
                 ContentPath          = $contentDir
