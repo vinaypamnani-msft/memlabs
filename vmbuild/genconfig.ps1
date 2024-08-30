@@ -3735,16 +3735,16 @@ Function Set-SiteServerLocalSql {
 
 
     if ($null -eq $virtualMachine.additionalDisks) {
-        $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "100GB" }
+        $disk = [PSCustomObject]@{"E" = "600GB"; "F" = "100GB" }
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
     }
     else {
 
         if ($null -eq $virtualMachine.additionalDisks.E) {
-            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "250GB"
+            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "600GB"
         }
         if ($null -eq $virtualMachine.additionalDisks.F) {
-            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "F" -Value "100GB"
+            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "F" -Value "200GB"
         }
     }
 
@@ -4369,13 +4369,13 @@ function Get-AdditionalValidations {
                 if ($property.Role -ne "WSUS") {
                     $property | Add-Member -MemberType NoteProperty -Name "wsusContentDir" -Value "E:\WSUS" -Force
                     if ($null -eq $property.additionalDisks) {
-                        $disk = [PSCustomObject]@{"E" = "250GB" }
+                        $disk = [PSCustomObject]@{"E" = "600GB" }
                         $property | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
                     }
                     else {
 
                         if ($null -eq $property.additionalDisks.E) {
-                            $property.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "250GB"
+                            $property.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "600GB"
                         }
                     }
                 }
@@ -5891,7 +5891,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
-            $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "250GB" }
+            $disk = [PSCustomObject]@{"E" = "600GB"; "F" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
@@ -6043,7 +6043,7 @@ function Add-NewVMForRole {
         }
         "FileServer" {
             $virtualMachine.memory = "3GB"
-            $disk = [PSCustomObject]@{"E" = "500GB"; "F" = "200GB" }
+            $disk = [PSCustomObject]@{"E" = "600GB"; "F" = "200GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
             $virtualMachine.tpmEnabled = $false
         }
@@ -6748,7 +6748,7 @@ function Select-VirtualMachines {
                         }
                         if ($newValue -eq "A") {
                             if ($null -eq $virtualMachine.additionalDisks) {
-                                $disk = [PSCustomObject]@{"E" = "250GB" }
+                                $disk = [PSCustomObject]@{"E" = "400GB" }
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
                             }
                             else {
