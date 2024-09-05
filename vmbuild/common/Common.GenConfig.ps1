@@ -732,9 +732,9 @@ function ConvertTo-DeployConfigEx {
             }
 
             "OtherDC" {
-                $ODC = Get-list -Type VM | Where-Object {$_.vmName -eq $thisVm.VmName }
+                $ODC = Get-list -Type VM | Where-Object { $_.vmName -eq $thisVm.VmName }
                 $thisParams | Add-Member -MemberType NoteProperty -Name "Domain" -Value $ODC.domain
-                $ODCIP = $ODC.network -replace "\d{1,3}$","1"
+                $ODCIP = $ODC.network -replace "\d{1,3}$", "1"
 
                 $thisParams | Add-Member -MemberType NoteProperty -Name "IPAddr" -Value $ODCIP
             }
@@ -777,7 +777,7 @@ function ConvertTo-DeployConfigEx {
 
                 if ($thisVM.externalDomainJoinSiteCode) {
 
-                    $OtherDC = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object {$_.Role -eq "DC"})
+                    $OtherDC = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.Role -eq "DC" })
                     if ($OtherDC.InstallCA) {
                         #ADA-DC1.adatum.com\adatum-ADA-DC1-CA
                         $OtherDomainShort = $($ThisVM.ForestTrust).Split(".")[0]
@@ -853,7 +853,7 @@ function ConvertTo-DeployConfigEx {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "ActiveNode" -Value $ActiveVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $ActiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                     if ($ActiveVM.Role -eq "CAS") {
-                        $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $ActiveVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName)}
+                        $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $ActiveVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName) }
                         if ($primaryVM) {
                             Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                             $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
@@ -874,8 +874,14 @@ function ConvertTo-DeployConfigEx {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
                     }
 
-                    $sql = Get-SqlServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type Name
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "WSUSSqlServer" -Value $sql  -Force
+                    $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
+
+                    $sql = Get-SqlServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                    if (-not $ActiveVM.InstallSUP) {
+                        if (-not $sql.InstallSUP) {
+                            $thisParams | Add-Member -MemberType NoteProperty -Name "WSUSSqlServer" -Value $($sql.vmName)  -Force
+                        }
+                    }
                 }
             }
             "WSUS" {
@@ -890,7 +896,7 @@ function ConvertTo-DeployConfigEx {
                 }
             }
             "CAS" {
-                $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $thisVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName)}
+                $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $thisVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName) }
                 if ($primaryVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
@@ -929,7 +935,7 @@ function ConvertTo-DeployConfigEx {
                     Add-VMToAccountLists -thisVM $thisVM -VM $SecondaryVM  -accountLists $accountLists -deployConfig $deployconfig -WaitOnDomainJoin
                 }
                 # If we are deploying a new CAS at the same time, record it for the DSC
-                $CASVM = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and $thisVM.ParentSiteCode -eq $_.SiteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName)}
+                $CASVM = $deployConfig.virtualMachines | Where-Object { $_.role -in "CAS" -and $thisVM.ParentSiteCode -eq $_.SiteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName) }
                 if ($CASVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CASVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $CASVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
@@ -1005,6 +1011,7 @@ function ConvertTo-DeployConfigEx {
         #}
 
         #Get the CU URL, and SQL permissions
+
         if ($thisVM.sqlVersion) {
             $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $thisVM.sqlVersion }
             $sqlCUUrl = $sqlFile.cuURL
@@ -1055,11 +1062,21 @@ function ConvertTo-DeployConfigEx {
                 }
 
             }
+
             if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
                 $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
             }
             if (-not $SiteServerVM -and $thisVM.Role -in "Primary", "CAS") {
                 $SiteServerVM = $thisVM
+            }
+
+            $sitecode = $SiteServerVM.SiteCode
+
+            if ($siteCode) {
+                $SiteSystems = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SiteSystem" -and $_.SiteCode -eq $siteCode }
+                foreach ($SiteSys in $SiteSystems) {
+                    Add-VMToAccountLists -thisVM $thisVM -VM $SiteSys -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
+                }
             }
 
             foreach ($SSVM in $SiteServerVM) {
@@ -1071,7 +1088,7 @@ function ConvertTo-DeployConfigEx {
                     }
 
                     if ($SSVM.Role -eq "Primary") {
-                        $CASVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "CAS" -and $_.SiteCode -eq $SSVM.ParentSiteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName)}
+                        $CASVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "CAS" -and $_.SiteCode -eq $SSVM.ParentSiteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName) }
                         if ($CASVM) {
                             $thisParams | Add-Member -MemberType NoteProperty -Name "CAS" -Value $CASVM.vmName -Force
                             Add-VMToAccountLists -thisVM $thisVM -VM $CASVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
@@ -1083,7 +1100,7 @@ function ConvertTo-DeployConfigEx {
                     }
 
                     if ($SSVM.Role -eq "CAS") {
-                        $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $SSVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName)}
+                        $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $SSVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName) }
                         if ($primaryVM) {
                             $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
                             Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
@@ -1136,7 +1153,7 @@ function ConvertTo-DeployConfigEx {
 
         #If we have a passive server for a site server, record it here, only check config, as it couldnt already exist
         if ($thisVM.role -in "CAS", "Primary") {
-            $passiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" -and $_.SiteCode -eq $thisVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName)}
+            $passiveVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" -and $_.SiteCode -eq $thisVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName) }
             if ($passiveVM) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "PassiveNode" -Value $passiveVM.vmName -Force
                 Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin

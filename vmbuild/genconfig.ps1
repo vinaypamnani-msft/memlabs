@@ -963,7 +963,7 @@ function Get-ExistingVMs {
         if ($null -ne $evm.DiskUsedGB) {
             $evm.PsObject.Members.Remove("DiskUsedGB")
         }
-        if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName){
+        if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName) {
             $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
         }
     }
@@ -5429,10 +5429,14 @@ function get-VMString {
             }
         }
         if ($virtualMachine.installSUP) {
-            $temp += " [SUP]"
+            if (-not ($name.Contains("[SUP]"))) {
+                $temp += " [SUP]"
+            }
         }
         if ($virtualMachine.installRP) {
-            $temp += " [RP]"
+            if (-not ($name.Contains("[RP]"))) {
+                $temp += " [RP]"
+            }
         }
         $name += $temp.PadRight(39, " ")
     }
@@ -5454,10 +5458,14 @@ function get-VMString {
 
     if ($virtualMachine.sqlVersion) {
         if ($virtualMachine.installSUP) {
-            $name += " [SUP]"
+            if (-not ($name.Contains("[SUP]"))) {
+                $name += " [SUP]"
+            }
         }
         if ($virtualMachine.installRP) {
-            $name += " [RP]"
+            if (-not ($name.Contains("[RP]"))) {
+                $name += " [RP]"
+            }
         }
     }
 

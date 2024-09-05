@@ -3648,6 +3648,7 @@ class ConfigureWSUS {
 
         $_HTTPSurl = $this.HTTPSUrl
         $_FriendlyName = $this.TemplateName
+        $postinstallOutput = ""
         try {
             write-verbose ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
@@ -3659,16 +3660,16 @@ class ConfigureWSUS {
 
             if ($this.SqlServer) {
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
-                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)
+                $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
             }
             else {
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)")
-                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)
+                $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
             }
         }
         catch {
             Write-Verbose "Failed to Configure WSUS"
-            Write-Verbose "$_"
+            Write-Verbose "$_ $postinstallOutput"
         }
         try {
             $wsus = get-WsusServer

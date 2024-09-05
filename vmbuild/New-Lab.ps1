@@ -226,8 +226,8 @@ try {
     Write-Log "### VALIDATE" -Activity
 
     # Load config
-    if ($Configuration) {
-
+    if ($Configuration) {       
+        $ConfigurationShort = Split-Path $Configuration -LeafBase
         Write-Log "Validating specified configuration: $Configuration"
         $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
@@ -497,7 +497,7 @@ try {
             if ($currentPhase -eq 8) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
             }
         }
         Write-Host
@@ -574,7 +574,7 @@ finally {
             if ($currentPhase -eq 8) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
             }
         }
         Write-Host
