@@ -803,7 +803,7 @@ function ConvertTo-DeployConfigEx {
                 $ServersToWaitOn = @()
                 $thisPSName = $null
                 $thisCSName = $null
-                foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary", "CAS", "PassiveSite", "SQLAO" -and -not $_.hidden }) {
+                foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -in "Primary", "Secondary", "CAS", "PassiveSite", "SQLAO", "SiteSystem" -and -not $_.hidden }) {
                     $ServersToWaitOn += $vm.vmName
                     if ($vm.Role -eq "Primary") {
                         $thisPSName = $vm.vmName
