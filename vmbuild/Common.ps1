@@ -2171,15 +2171,15 @@ function Wait-ForVm {
             # Check OOBE complete registry key
 
             try {
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State"
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State\ImageState = IMAGE_STATE_COMPLETE"
             }
             catch {}
 
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
-
+            Write-Log "$VmName`: $out" -Verbose
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
                 try {
                     if ($failures -gt ([int]$TimeoutMinutes * 2)) {
