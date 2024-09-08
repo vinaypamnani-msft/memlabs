@@ -160,9 +160,9 @@ class InstallSSMS {
         # Install SSMS
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
+        $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE"
 
-
-        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2)) {
+        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2) -or (Test-Path $smssinstallpath3)) {
             Write-Verbose "SSMS Installed Successfully! (Tested Out)"
             return
         }

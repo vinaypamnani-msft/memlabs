@@ -171,6 +171,7 @@ configuration Phase3
                 Ensure       = "Present"
                 DependsOn    = "[WriteStatus]ADKInstall"
             }
+            
 
             $nextDepend = "[InstallADK]ADKInstall"
             if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite" -and -not $ThisVM.hidden) {
