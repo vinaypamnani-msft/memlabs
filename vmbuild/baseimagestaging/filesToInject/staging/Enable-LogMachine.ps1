@@ -75,6 +75,14 @@ if (-not (Test-Path $flagPath)) {
     # Check if the new path exists
     if (Test-Path $CMlogs) {
         # Create the new shortcut if the path exists
+
+        # Create the MECM Control Panel Applet shortcut
+        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\SCCM Control Panel Applet.lnk")
+        $shortcut.TargetPath = $sccmAppletPath
+        $shortcut.Arguments = "smscfgrc"
+        $shortcut.IconLocation = $iconPath
+        $shortcut.Save()
+
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr MP Logs.lnk")
         $shortcut.TargetPath = $CMlogs
         $shortcut.Save()
