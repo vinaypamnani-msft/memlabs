@@ -15,3 +15,58 @@ if (-not (Test-Path $flagPath)) {
     & cmd /c "assoc $ext=LogMachine.LOG"
     "LogMachine Enabled" | Out-File $flagPath -Force
 }
+
+$fixFlag = "ClientShortcuts.done"
+$flagPath = Join-Path $env:USERPROFILE $fixFlag
+if (-not (Test-Path $flagPath)) {
+    # Define the paths
+    $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
+    $ClientlogsPath = "c:\windows\ccm\logs"
+    $sccmAppletPath = "C:\Windows\System32\control.exe"
+    $iconPath = "C:\Windows\CCM\SMSCFGRC.cpl"
+    $CMlogs = "E:\ConfigMgr\Logs"
+
+    if ((Test-Path $ClientlogsPath)) {
+    
+        # Create the MECM Control Panel Applet shortcut
+        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\SCCM Control Panel Applet.lnk")
+        $shortcut.TargetPath = $sccmAppletPath
+        $shortcut.Arguments = "smscfgrc"
+        $shortcut.IconLocation = $iconPath
+        $shortcut.Save()
+
+        # Create the Logs shortcut
+        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\Client Logs.lnk")
+        $shortcut.TargetPath = $ClientlogsPath
+        $shortcut.Save()
+        "Shortcuts Enabled" | Out-File $flagPath -Force
+
+        # Check if the new path exists
+        if (Test-Path $CMlogs) {
+            # Create the new shortcut if the path exists
+            $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Logs.lnk")
+            $shortcut.TargetPath = $CMlogs
+            $shortcut.Save()
+            "Shortcuts Enabled" | Out-File $flagPath -Force
+        }
+    }
+}
+
+$fixFlag = "ServerShortcuts.done"
+$flagPath = Join-Path $env:USERPROFILE $fixFlag
+if (-not (Test-Path $flagPath)) {
+    # Define the paths
+    $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
+    $ClientlogsPath = "c:\windows\ccm\logs"
+    $sccmAppletPath = "C:\Windows\System32\control.exe"
+    $iconPath = "C:\Windows\CCM\SMSCFGRC.cpl"
+    $CMlogs = "E:\ConfigMgr\Logs"
+    # Check if the new path exists
+    if (Test-Path $CMlogs) {
+        # Create the new shortcut if the path exists
+        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Logs.lnk")
+        $shortcut.TargetPath = $CMlogs
+        $shortcut.Save()
+        "Shortcuts Enabled" | Out-File $flagPath -Force
+    }
+}
