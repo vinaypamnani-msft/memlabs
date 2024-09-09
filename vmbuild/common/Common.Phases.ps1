@@ -578,7 +578,7 @@ function Get-Phase3ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux", "OtherDC") {
+        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux", "OtherDC", "AADClient") {
             continue
         }
 
