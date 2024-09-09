@@ -70,7 +70,7 @@ if (-not (Test-Path $flagPath)) {
     $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
     $ClientlogsPath = "c:\windows\ccm\logs"
     $sccmAppletPath = "C:\Windows\System32\control.exe"
-    $iconPath = "C:\Windows\CCM\SMSCFGRC.cpl"
+    $iconPath = "E:\SMS_CCM\SMSCFGRC.cpl"
     $CMlogs = "E:\SMS_CCM\Logs"
     # Check if the new path exists
     if (Test-Path $CMlogs) {
