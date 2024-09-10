@@ -16,11 +16,13 @@ if (-not (Test-Path $flagPath)) {
     "LogMachine Enabled" | Out-File $flagPath -Force
 }
 
+
+$desktopPath = [Environment]::GetFolderPath("CommonDesktop")
+
 $fixFlag = "ClientShortcuts.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
     # Define the paths
-    $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
     $ClientlogsPath = "c:\windows\ccm\logs"
     $sccmAppletPath = "C:\Windows\System32\control.exe"
     $iconPath = "C:\Windows\CCM\SMSCFGRC.cpl"
@@ -48,10 +50,6 @@ $fixFlag = "ServerShortcuts.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
     # Define the paths
-    $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
-    $ClientlogsPath = "c:\windows\ccm\logs"
-    $sccmAppletPath = "C:\Windows\System32\control.exe"
-    $iconPath = "C:\Windows\CCM\SMSCFGRC.cpl"
     $CMlogs = "E:\ConfigMgr\Logs"
     # Check if the new path exists
     if (Test-Path $CMlogs) {
@@ -67,8 +65,6 @@ $fixFlag = "MPShortcuts.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
     # Define the paths
-    $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
-    $ClientlogsPath = "c:\windows\ccm\logs"
     $sccmAppletPath = "C:\Windows\System32\control.exe"
     $iconPath = "E:\SMS_CCM\SMSCFGRC.cpl"
     $CMlogs = "E:\SMS_CCM\Logs"
@@ -94,16 +90,10 @@ $fixFlag = "IISShortcuts.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
     # Define the paths
-    $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
-    $ClientlogsPath = "c:\windows\ccm\logs"
-    $sccmAppletPath = "C:\Windows\System32\control.exe"
-    $iconPath = "E:\SMS_CCM\SMSCFGRC.cpl"
-    $CMlogs = "E:\SMS_CCM\Logs"
     $IISLogs = "C:\inetpub\logs"
     # Check if the new path exists
     if (Test-Path $IISLogs) {
         # Create the new shortcut if the path exists
-
 
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\IIS Logs.lnk")
         $shortcut.TargetPath = $IISLogs
@@ -116,11 +106,6 @@ $fixFlag = "WSUSShortcuts.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
     # Define the paths
-    $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
-    $ClientlogsPath = "c:\windows\ccm\logs"
-    $sccmAppletPath = "C:\Windows\System32\control.exe"
-    $iconPath = "E:\SMS_CCM\SMSCFGRC.cpl"
-    $CMlogs = "E:\SMS_CCM\Logs"
     $WSUSLogs = "C:\Program Files\Update Services\LogFiles"
     # Check if the new path exists
     if (Test-Path $WSUSLogs) {
