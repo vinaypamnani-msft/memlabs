@@ -1,0 +1,159 @@
+{
+  "vmOptions": {
+    "prefix": "CST-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "cstest8.com",
+    "domainNetBiosName": "cstest8",
+    "adminName": "admin",
+    "network": "10.9.9.0",
+    "timeZone": "Eastern Standard Time",
+    "locale": "en-US"
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "DC1",
+      "role": "DC",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 3,
+      "tpmEnabled": true,
+      "InstallCA": true,
+      "ForestTrust": "NONE"
+    },
+    {
+      "vmName": "CASSITE",
+      "role": "CAS",
+      "operatingSystem": "Server 2022",
+      "memory": "10GB",
+      "virtualProcs": 7,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "F:\\SQL",
+      "sqlPort": "1433",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB",
+        "F": "250GB"
+      },
+      "siteCode": "CAS",
+      "installSUP": false,
+      "installRP": false,
+      "siteName": "Custom CAS"
+    },
+    {
+      "vmName": "FS1",
+      "role": "FileServer",
+      "operatingSystem": "Server 2022 21H2 February 2024",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "600GB",
+        "F": "200GB"
+      }
+    },
+    {
+      "vmName": "PRIDPMP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "PRI"
+    },
+    {
+      "vmName": "PRISITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "parentSiteCode": "CAS",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "600GB"
+      },
+      "siteCode": "PRI",
+      "installSUP": false,
+      "installRP": true,
+      "siteName": "Custom PRI Site",
+      "wsusContentDir": "E:\\WSUS",
+      "remoteSQLVM": "PRISQL"
+    },
+    {
+      "vmName": "PRISITE-P",
+      "role": "PassiveSite",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "siteCode": "PRI",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "remoteContentLibVM": "FS1"
+    },
+    {
+      "vmName": "PRISQL",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2022",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "LocalSystem",
+      "SqlAgentAccount": "LocalSystem",
+      "installRP": false
+    },
+    {
+      "vmName": "W10CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 Latest (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user1"
+    },
+    {
+      "vmName": "W11CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 Latest",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user2"
+    }
+  ],
+  "cmOptions": {
+    "version": "current-branch",
+    "install": true,
+    "pushClientToDomainMembers": true,
+    "EVALVersion": false,
+    "UsePKI": true
+  }
+}
