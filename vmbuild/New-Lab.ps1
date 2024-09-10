@@ -53,10 +53,11 @@ param (
 
 
 $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
-$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\VMBuild.lnk")
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\MEMLABS - VMBuild.lnk")
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 $shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
+$shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
 $shortcut.Save()
 # Tell common to re-init
 if ($Common.Initialized) {
