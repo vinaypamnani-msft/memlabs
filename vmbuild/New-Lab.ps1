@@ -53,12 +53,19 @@ param (
 
 
 $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
-$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\MEMLABS - VMBuild.lnk")
+$shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutLocation)
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 $shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
 $shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
 $shortcut.Save()
+
+$bytes = [System.IO.File]::ReadAllBytes($shortcutLocation)
+# Set byte 21 (0x15) bit 6 (0x20) ON
+$bytes[0x15] = $bytes[0x15] -bor 0x20
+[System.IO.File]::WriteAllBytes($shortcutLocation, $bytes)
+
 # Tell common to re-init
 if ($Common.Initialized) {
     $Common.Initialized = $false
