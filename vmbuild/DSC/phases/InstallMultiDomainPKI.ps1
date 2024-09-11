@@ -114,7 +114,7 @@ if (Test-Path $cm_svc_file) {
     foreach ($network in $networks) {
         Write-DscStatus "New Boundary $DomainFullName - $network"
         New-CMBoundary -DisplayName "$DomainFullName - $network" -BoundaryType IPSubNet -Value "$network/24" *>&1 | Out-File $global:StatusLog -Append
-        New-CMBoundaryGroup -Name '192.168.2.0' -DefaultSiteCode $sitecode *>&1 | Out-File $global:StatusLog -Append
+        New-CMBoundaryGroup -Name $network -DefaultSiteCode $sitecode *>&1 | Out-File $global:StatusLog -Append
         Add-CMBoundaryToGroup -BoundaryName "$DomainFullName - $network" -BoundaryGroupName $network *>&1 | Out-File $global:StatusLog -Append
     }
     Write-DscStatus "Set-CMClientPushInstallation $cm_svc"
