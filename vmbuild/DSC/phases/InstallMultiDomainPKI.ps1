@@ -76,11 +76,10 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Creating New-CMActiveDirectoryForest"
     New-CMActiveDirectoryForest -Description "Multi Forest $DomainFullName" -EnableDiscovery $true -UserName $ForestDiscoveryAccount -Password $secure -ForestFqdn $DomainFullName *>&1 | Out-File $global:StatusLog -Append
 
-
     $sitedef = Get-CMSiteDefinition -SiteCode $SiteCode
 
     Write-DscStatus "Enable Discovery Set-CMActiveDirectoryForest"
-    Set-CMActiveDirectoryForest -EnableDiscovery $true -Id 2 -AddPublishingSite $sitedef *>&1 | Out-File $global:StatusLog -Append
+    Set-CMActiveDirectoryForest -EnableDiscovery $true -ForestFQDN $DomainFullName -AddPublishingSite $sitedef *>&1 | Out-File $global:StatusLog -Append
 
     Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery"
     Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery -SiteCode $SiteCode -Enabled $true -Verbose | Out-File $global:StatusLog -Append
