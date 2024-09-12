@@ -3234,7 +3234,6 @@ class ModuleAdd {
             ELSE {
                 Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope
             }
-
         }
     }
 
