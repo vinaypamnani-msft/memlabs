@@ -112,7 +112,17 @@ if (Test-Path $cm_svc_file) {
 
     foreach ($network in $networks) {
         Write-DscStatus "New Boundary $DomainFullName - $network"
-        New-CMBoundary -DisplayName "$DomainFullName - $network" -BoundaryType IPSubNet -Value "$network/24" *>&1 | Out-File $global:StatusLog -Append
+        #New-CMBoundary -DisplayName "$DomainFullName - $network" -BoundaryType IPSubNet -Value "$network/24" *>&1 | Out-File $global:StatusLog -Append
+        $IP = $network
+        $mask = '255.255.255.0'
+        $IPBits = [int[]]$IP.Split('.')
+        $MaskBits = [int[]]$Mask.Split('.')
+        $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
+        $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+        $NetworkID = $NetworkIDBits -join '.'
+        $Broadcast = $BroadcastBits -join '.'
+        New-CMBoundary -Type IPRange -Name "$DomainFullName - $network" -Value "$($NetworkID)-$($Broadcast)" *>&1 | Out-File $global:StatusLog -Append
+
         New-CMBoundaryGroup -Name $network -DefaultSiteCode $sitecode *>&1 | Out-File $global:StatusLog -Append
         Add-CMBoundaryToGroup -BoundaryName "$DomainFullName - $network" -BoundaryGroupName $network *>&1 | Out-File $global:StatusLog -Append
     }

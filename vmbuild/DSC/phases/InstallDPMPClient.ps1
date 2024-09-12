@@ -226,7 +226,16 @@ foreach ($bg in $bgs) {
     else {
         try {
             Write-DscStatus "Creating Boundary $($bg.SiteCode) with subnet $($bg.Subnet)"
-            New-CMBoundary -Type IPSubnet -Name $bg.Subnet -Value "$($bg.Subnet)/24"
+            #New-CMBoundary -Type IPSubnet -Name $bg.Subnet -Value "$($bg.Subnet)/24"
+            $IP = $bg.Subnet
+            $mask = '255.255.255.0'
+            $IPBits = [int[]]$IP.Split('.')
+            $MaskBits = [int[]]$Mask.Split('.')
+            $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
+            $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+            $NetworkID = $NetworkIDBits -join '.'
+            $Broadcast = $BroadcastBits -join '.'
+            New-CMBoundary -Type IPRange -Name $bg.Subnet -Value "$($NetworkID)-$($Broadcast)"
             try {
                 Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
                 Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
