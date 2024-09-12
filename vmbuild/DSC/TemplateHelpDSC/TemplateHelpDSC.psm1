@@ -3219,20 +3219,38 @@ class ModuleAdd {
             Register-PackageSource -Name nuget.org -Location https://www.nuget.org/api/v2 -ProviderName NuGet -Force -Trusted
         }
 
-        $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue 
 
         IF ($null -eq $module) {
-            Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope
+            try { 
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
+            }
+            catch {
+                Start-Sleep -Seconds 120
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+            }
         }
 
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
         IF ($null -eq $module) {
             IF ($this.Clobber -eq 'Yes') {
-                Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber
+                try {
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop
+                }
+                catch {
+                    Start-Sleep -Seconds 120
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
             }
             ELSE {
-                Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope
+                try {
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
+                }
+                catch {
+                    Start-Sleep -Seconds 120
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
             }
         }
     }
