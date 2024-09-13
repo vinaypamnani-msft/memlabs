@@ -2594,7 +2594,7 @@ class InstallFeatureForSCCM {
                 Install-WindowsFeature NET-Framework-45-Core
                 Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
                 Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
-                Install-WindowsFeature BITS, BITS-IIS-Ext
+                #Install-WindowsFeature BITS, BITS-IIS-Ext
                 Install-WindowsFeature -Name "Rdc"
                 Install-WindowsFeature -Name UpdateServices-UI
                 Install-WindowsFeature -Name WDS

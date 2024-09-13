@@ -4352,16 +4352,18 @@ function Get-AdditionalValidations {
                     if (-not $sitecode) {
                         $sitecode = $property.SiteCode
                     }
-                    $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
+                    if ($sitecode) {
+                        $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
 
-                    if ($Parent.ParentSiteCode) {
-                        $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $Parent.ParentSiteCode -type VM -SmartUpdate:$false
-                    }
-                    $list2 = Get-List2 -deployConfig $Global:Config
-                    $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
-                    if (-not $existingSUP) {
-                        $property.installSUP = $false
-                        Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the top level site ($($Parent.SiteCode)) has a SUP"
+                        if ($Parent.ParentSiteCode) {
+                            $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $Parent.ParentSiteCode -type VM -SmartUpdate:$false
+                        }
+                        $list2 = Get-List2 -deployConfig $Global:Config
+                        $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
+                        if (-not $existingSUP) {
+                            $property.installSUP = $false
+                            Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the top level site ($($Parent.SiteCode)) has a SUP"
+                        }
                     }
 
                 }
@@ -5156,6 +5158,10 @@ function Select-Options {
                     }
                     if ($property.role -in ("SiteSystem", "WSUS")) {
                         Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
+                        if (-not $($property.SiteCode)) {
+                            Write-RedX "Could not determine sitecode for $($property.VmName)"
+                            continue MainLoop
+                        }
                         $SiteType = get-RoleForSitecode -siteCode $Property.SiteCode -config $Global:Config
                         if ($SiteType -eq "CAS") {
                             if ($property.InstallMP) {
@@ -6029,6 +6035,11 @@ function Add-NewVMForRole {
                 }
                 else {
                     Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify -test:$false
+                }
+
+                if (-not $($virtualMachine.SiteCode)) {
+                    Write-RedX "Could not add SiteCode to SiteSystem $($virtualMachine.vmName). Cancelling"
+                    return
                 }
 
                 if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $virtualMachine.siteCode) -eq "CAS") {
