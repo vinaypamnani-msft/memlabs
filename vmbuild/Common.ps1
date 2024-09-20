@@ -32,9 +32,9 @@ Function Write-ProgressElapsed {
         $percent = [Math]::Min(($stopWatch.ElapsedMilliseconds / $timespan.TotalMilliseconds * 100), 100)
         $msg = ""
         if ($showTimeout) {
-            $msg = "Waiting $TimeSpan minutes. "
+            $msg = "Waiting $TimeSpan  "
         }
-        $msg = $msg + "Elapsed time: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))"
+        $msg = $msg + "Elapsed: $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))"
         if ($FailCount) {
             $msg = $msg + " Failed $FailCount / $FailCountMax"
         }
@@ -1182,11 +1182,11 @@ function Test-NetworkNat {
 
     try {
         Write-Log "'$NetworkSubnet' not found in NAT. Adding it."
-        New-NetNat –Name $NetworkSubnet –InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
+        New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
         return $true
     }
     catch {
-        Write-Log "New-NetNat for '$NetworkSubnet' failed with error: $_" -Failure
+        Write-Log "New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix `"$($NetworkSubnet)/24`" failed with error: $_" -Failure
         return $false
     }
 
@@ -1691,6 +1691,8 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $false)]
         [switch]$tpmEnabled,
         [Parameter(Mandatory = $false)]
+        [switch]$Migrate,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -1733,32 +1735,36 @@ function New-VirtualMachine {
             return $false
         }
 
-        # Make sure Existing VM Path is gone!
-        $VmSubPath = Join-Path $VmPath $VmName
-        if (Test-Path -Path $VmSubPath) {
-            Write-Log "$VmName`: Found existing directory for $VmName. Purging $VmSubPath folder..."
-            Remove-Item -Path $VmSubPath -Force -Recurse | out-null
-            Write-Log "$VmName`: Purge complete."
+        if (-not $Migrate) {
+            # Make sure Existing VM Path is gone!
+            $VmSubPath = Join-Path $VmPath $VmName
+            if (Test-Path -Path $VmSubPath) {
+                Write-Log "$VmName`: Found existing directory for $VmName. Purging $VmSubPath folder..."
+                Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+                Write-Log "$VmName`: Purge complete."
+            }
+
+            # Retry if its not gone.
+            if (Test-Path -Path $VmSubPath) {
+                Start-Sleep -Seconds 30
+                Write-Log "$VmName`: (Retry) Found existing directory for $VmName. Purging $VmSubPath folder..."
+                Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+                Write-Log "$VmName`: Purge complete."
+            }
+
+            #Fail if its not gone.
+            if (Test-Path -Path $VmSubPath) {
+                Write-Log "$VmName`: Could not delete $VmSubPath folder... Exit."
+                return $false
+            }
         }
 
-        # Retry if its not gone.
-        if (Test-Path -Path $VmSubPath) {
-            Start-Sleep -Seconds 30
-            Write-Log "$VmName`: (Retry) Found existing directory for $VmName. Purging $VmSubPath folder..."
-            Remove-Item -Path $VmSubPath -Force -Recurse | out-null
-            Write-Log "$VmName`: Purge complete."
-        }
-
-        #Fail if its not gone.
-        if (Test-Path -Path $VmSubPath) {
-            Write-Log "$VmName`: Could not delete $VmSubPath folder... Exit."
-            return $false
-        }
+       
 
         Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
         # Create new VM
         try {
-            $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
+            $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop 
         }
         catch {
             Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
@@ -1772,25 +1778,33 @@ function New-VirtualMachine {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
 
-        # Copy sysprepped image to VM location
-        $osDiskName = "$($VmName)_OS.vhdx"
-        $osDiskPath = Join-Path $vm.Path $osDiskName
+         # Copy sysprepped image to VM location
+         $osDiskName = "$($VmName)_OS.vhdx"
+         $osDiskPath = Join-Path $vm.Path $osDiskName
+         
+         if (-not $Migrate) {
+             if (-not $OSDClient.IsPresent) {
+                 $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
+                 if (-not $worked) {
+                     Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+                     return $false
+                 }
+             }
+             else {
+                 Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
+                 $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
+                 if (-not $worked) {
+                     Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+                     return $false
+                 }
+             }
+         }
+         
+         if (-not (Test-Path $osDiskPath)) {
+             Write-Log "Could not find file $osDiskPath" -Failure
+             return
+         }
 
-        if (-not $OSDClient.IsPresent) {
-            $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
-            if (-not $worked) {
-                Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
-                return $false
-            }
-        }
-        else {
-            Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
-            $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
-            if (-not $worked) {
-                Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
-                return $false
-            }
-        }
 
         Write-Log "$VmName`: Enabling Hyper-V Guest Services"
         Write-Progress2 $Activity -Status "Enabling Hyper-V Guest Services" -percentcomplete 35 -force
@@ -1836,7 +1850,11 @@ function New-VirtualMachine {
             }
         }
 
-        Write-Progress2 $Activity -Status "Setting Processors" -percentcomplete 60 -force
+        Write-Progress2 $Activity -Status "Setting VM to shutdown on stop" -percentcomplete 60 -force
+        Write-Log "$VmName`: Setting VM to shutdown on stop"
+        Set-VM -Name $vmName -AutomaticStopAction ShutDown | out-null
+
+        Write-Progress2 $Activity -Status "Setting Processors" -percentcomplete 62 -force
         Write-Log "$VmName`: Setting Processor count to $Processors"
         Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
@@ -1865,7 +1883,13 @@ function New-VirtualMachine {
                 $newDiskName = "$VmName`_$label`_$count.vhdx"
                 $newDiskPath = Join-Path $vm.Path $newDiskName
                 Write-Log "$VmName`: Adding $newDiskPath"
-                New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic | out-null
+                if (-not $Migrate) {
+                    New-VHD -Path $newDiskPath -SizeBytes ($disk.Value / 1) -Dynamic | out-null
+                }
+                if (-not (Test-Path $newDiskPath)) {
+                    Write-Log "Failed to find $newDiskPath" -Failure
+                    return
+                }
                 Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath | out-null
                 $count++
             }
@@ -1949,8 +1973,8 @@ function New-VirtualMachine {
                         Remove-DhcpServerv4Reservation -IPAddress $ip
                     }
 
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
 
 
                     Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
@@ -1976,8 +2000,8 @@ function New-VirtualMachine {
                         if ($ipa) {
                             Remove-DhcpServerv4Reservation -IPAddress $ip
                         }
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
 
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
@@ -2099,7 +2123,7 @@ function Wait-ForVm {
     $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
     $timeSpan = New-TimeSpan -Minutes $TimeoutMinutes
     $stopWatch.Start()
-
+    $vmTest = Get-VM2 -Name $VmName
     if ($VmState) {
         Write-Log "$VmName`: Waiting for VM to go in $VmState state..."
         do {
@@ -2147,7 +2171,7 @@ function Wait-ForVm {
             # Check OOBE complete registry key
 
             try {
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State"
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State\ImageState = IMAGE_STATE_COMPLETE"
             }
             catch {}
 
@@ -2155,7 +2179,7 @@ function Wait-ForVm {
             $stopwatch2.Start()
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
-
+            Write-Log "$VmName`: $out" -Verbose
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
                 try {
                     if ($failures -gt ([int]$TimeoutMinutes * 2)) {
@@ -2410,6 +2434,11 @@ function Invoke-VmCommand {
             $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
         }
 
+        if (-not $ps -and $VmDomainName -eq "WORKGROUP") {
+            $domain2 = (Get-VMNote -VMName $vmName).domain
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount "admin" -ShowVMSessionError:$ShowVMSessionError
+        }
+
         $failed = $null -eq $ps
 
         # Run script block inside VM
@@ -2523,6 +2552,9 @@ function Get-VmSession {
         [switch]$ShowVMSessionError
     )
 
+
+    $VmName = $VmName.Split(".")[0]
+
     $ps = $null
 
     # Cache key
@@ -2586,13 +2618,23 @@ function Get-VmSession {
                 $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
                     try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-                    if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning
+                    $VM = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
+                    if ($VM) {
+
+                        $username3 = "$($VM.Domain)\$($Common.LocalAdmin.UserName)"
+                        $creds = New-Object System.Management.Automation.PSCredential ($username3, $Common.LocalAdmin.Password)
+                        $cacheKey = $VmName + "-$($VM.Domain)"
+                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                     }
-                    else {
-                        Write-Log "$VmName`: Failed to establish a session using $username and $username2. Error: $Err1" -Warning -Verbose
+                    if (-not $ps) {
+                        if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
+                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning
+                        }
+                        else {
+                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning -Verbose
+                        }
+                        continue
                     }
-                    continue
                 }
             }
             else {
@@ -2639,14 +2681,14 @@ function Get-StorageConfig {
             Write-Log "Could not find $newconfigPath. Exiting."    
             $Common.FatalError = "Storage Config path '$newconfigPath' not found. Refer to internal documentation."
             Write-Log "File $newconfigPath does not exist."
-            return       
+            return $false       
         }
     }
     
     if (-not (Test-Path $configPath)) {
         $Common.FatalError = "Storage Config path '$configPath' not found. Refer to internal documentation."
         Write-Log "File $configPath does not exist."
-        return
+        return $false
     }
 
     try {
@@ -2784,7 +2826,7 @@ function Get-StorageConfig {
                 $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
                 if (-not $response) {
                     $Common.FatalError = "Could not download default credentials from azure. Please check your token"
-                    return
+                    return $false
                 }
                 $response.Content.Trim() | Out-file $filePath -Force
             }
@@ -2799,11 +2841,20 @@ function Get-StorageConfig {
             $Common.FatalError = "Admin file from azure is empty"
         }
 
+        if ([string]::IsNullOrWhiteSpace($common.FatalError) ) {
+        
+            return $true
+        }
+        else {
+            return $false 
+        }
+
     }
     catch {
         $Common.FatalError = "Storage Access failed. $_"
         Write-Exception -ExceptionInfo $_
         Write-Host $_.ScriptStackTrace | Out-Host
+        return $false
     }
     finally {
         $ProgressPreference = $pp
@@ -2975,22 +3026,24 @@ function Install-Tools {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
             continue
         }
+        $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
+        if ($out.ScriptBlockOutput -ne $true) {
+            foreach ($tool in $Common.AzureFileList.Tools) {
 
-        foreach ($tool in $Common.AzureFileList.Tools) {
+                if ($tool.NoUpdate) { continue }
 
-            if ($tool.NoUpdate) { continue }
+                if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-            if ($ToolName -and $tool.Name -ne $ToolName) { continue }
+                if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { continue }
 
-            if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { continue }
+                if ($ShowProgress) {
+                    Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
+                }
 
-            if ($ShowProgress) {
-                Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
-            }
-
-            $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
-            if (-not $worked) {
-                $success = $false
+                $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
+                if (-not $worked) {
+                    $success = $false
+                }
             }
         }
     }
@@ -3699,7 +3752,7 @@ if (-not $Common.Initialized) {
 
     $global:Common = [PSCustomObject]@{
         MemLabsVersion        = "240205"
-        LatestHotfixVersion   = "240205"
+        LatestHotfixVersion   = "240710"
         PS7                   = $PS7
         Initialized           = $true
         TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
@@ -3741,7 +3794,12 @@ if (-not $Common.Initialized) {
 
     ### Test Storage config and access
     Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
-    Get-StorageConfig
+    $getresults = Get-StorageConfig 
+    if ($getresults -eq $false){
+        Write-Log "failed to get the storage JSON file" -Failure
+        return 
+    }
+
 
 
     Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11

@@ -54,6 +54,11 @@ configuration Phase4
 
         $nextDepend = '[WriteStatus]SQLInstallStarted'
         if (-not ($ThisVM.Hidden)) {
+            RebootNow RebootNow {
+                FileName  = 'C:\Temp\PreSqlReboot.txt'
+                DependsOn = $nextDepend
+            }
+            $nextDepend = '[RebootNow]RebootNow'
             if ($sqlUpdateEnabled) {
 
                 WriteStatus DownloadSQLCU {

@@ -4,7 +4,7 @@
     "basePath": "E:\\VirtualMachines",
     "domainName": "cstest2.com",
     "adminName": "admin",
-    "network": "192.168.1.0",
+    "network": "172.16.1.0",
     "timeZone": "Eastern Standard Time",
     "domainNetBiosName": "cstest2",
     "locale": "en-US"
@@ -33,6 +33,8 @@
   "cmOptions": {
     "version": "current-branch",
     "install": true,
-    "pushClientToDomainMembers": true
+    "pushClientToDomainMembers": true,
+    "EVALVersion": false,
+    "UsePKI": false
   }
 }

@@ -61,6 +61,8 @@
   "cmOptions": {
     "version": "current-branch",
     "install": true,
-    "pushClientToDomainMembers": true
+    "pushClientToDomainMembers": true,
+    "EVALVersion": false,
+    "UsePKI": false
   }
 }

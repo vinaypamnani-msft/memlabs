@@ -17,20 +17,24 @@ function Get-UserConfiguration {
 
     # Add extension
     if (-not $Configuration.ToLowerInvariant().EndsWith(".json")) {
-        $Configuration = "$Configuration.json"
-    }
-
-    # Get deployment configuration
-    $configPath = Join-Path $Common.ConfigPath $Configuration
-    if (-not (Test-Path $configPath)) {
-        $testConfigPath = Join-Path $Common.ConfigPath "tests\$Configuration"
-        if (-not (Test-Path $testConfigPath)) {
-            $return.Message = "Get-UserConfiguration: $Configuration not found in $configPath or $testConfigPath. Please create the config manually or use genconfig.ps1, and try again."
-            return $return
+        if (-not $Configuration.ToLowerInvariant().EndsWith(".memlabs")) {
+            $Configuration = "$Configuration.json"
         }
-        $configPath = $testConfigPath
     }
 
+    $configPath = $Configuration
+    if (-not (Test-Path $configPath)) {
+        # Get deployment configuration
+        $configPath = Join-Path $Common.ConfigPath $Configuration
+        if (-not (Test-Path $configPath)) {
+            $testConfigPath = Join-Path $Common.ConfigPath "tests\$Configuration"
+            if (-not (Test-Path $testConfigPath)) {
+                $return.Message = "Get-UserConfiguration: $Configuration not found in $configPath or $testConfigPath. Please create the config manually or use genconfig.ps1, and try again."
+                return $return
+            }
+            $configPath = $testConfigPath
+        }
+    }
     try {
         Write-Log "Loading $configPath." -LogOnly
         $return.ConfigPath = $configPath
@@ -39,9 +43,11 @@ function Get-UserConfiguration {
         #Apply Fixes to Config
 
         if ($config.cmOptions) {
-            if ($null -eq ($config.cmOptions.EVALVersion))
-            {
+            if ($null -eq ($config.cmOptions.EVALVersion)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EVALVersion" -Value $false
+            }
+            if ($null -eq ($config.cmOptions.UsePKI)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UsePKI" -Value $false
             }
         }
         if ($null -ne $config.vmOptions.domainAdminName) {
@@ -239,13 +245,15 @@ function New-DeployConfig {
         foreach ($item in $virtualMachines | Where-Object { -not $_.Hidden -and $_.vmName } ) {
             $item.vmName = $configObject.vmOptions.prefix + $item.vmName
             if ($item.pullDPSourceDP -and -not $item.pullDPSourceDP.StartsWith($configObject.vmOptions.prefix)) {
-
                 $item.pullDPSourceDP = $configObject.vmOptions.prefix + $item.pullDPSourceDP
             }
 
             if ($item.remoteSQLVM -and -not $item.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-
                 $item.remoteSQLVM = $configObject.vmOptions.prefix + $item.remoteSQLVM
+            }
+
+            if ($item.domainUser) {
+                $item.domainUser = $configObject.vmOptions.prefix + $item.domainUser
             }
         }
 
@@ -362,21 +370,45 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
-    # Add Primary to list, when adding SiteSystem
-    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+    # Add DCs from other domains, if needed
+    $dc = $config.virtualMachines | Where-Object { $_.role -eq "DC" }
+
+    if ($dc) {
+        if ($null -ne $dc.ForestTrust -and $dc.ForestTrust -ne "NONE") {
+            $OtherDC = get-list -Type vm -DomainName $dc.ForestTrust | Where-Object { $_.Role -eq "DC" }
+            Add-ExistingVMToDeployConfig -vmName $OtherDC.vmName -configToModify $config -OtherDC:$true
+            if ($null -ne $dc.externalDomainJoinSiteCode -and $dc.externalDomainJoinSiteCode -ne "NONE") {
+                $RemoteSiteServer = Get-SiteServerForSiteCode -deployConfig $config -SiteCode $dc.externalDomainJoinSiteCode -DomainName $dc.ForestTrust -type VM
+                Add-ExistingVMToDeployConfig -vmName $RemoteSiteServer.vmName -configToModify $config
+            }
+
+        }
+    }
+
+    # Add Primary to list, when adding SiteSystem, also add the current site server to the list.
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
     foreach ($system in $systems) {
         $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
+            if ($systemSite.RemoteSQLVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config
+            }
         }
-
+        $systemSite = Get-SiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
+        if ($systemSite) {
+            Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
+            if ($systemSite.RemoteSQLVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config
+            }
+        }
         if ($systemSite.pullDPSourceDP) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.pullDPSourceDP -configToModify $config
         }
     }
 
     # Add Primary to list, when adding Secondary
-    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+    $Secondaries = $config.virtualMachines | Where-Object { $_.role -eq "Secondary" -and -not $_.Hidden }
     foreach ($Secondary in $Secondaries) {
         $primary = Get-SiteServerForSiteCode -deployConfig $config -sitecode $Secondary.parentSiteCode -type VM -SmartUpdate:$false
         if ($primary) {
@@ -388,7 +420,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding Passive
-    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" }
+    $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and -not $_.Hidden }
     foreach ($PassiveVM in $PassiveVMs) {
         $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
         if ($ActiveNode) {
@@ -403,7 +435,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add CAS to list, when adding primary
-    $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" }
+    $PriVMS = $config.virtualMachines | Where-Object { $_.role -eq "Primary" -and -not $_.Hidden }
     foreach ($PriVM in $PriVMS) {
         if ($PriVM.parentSiteCode) {
             $CAS = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PriVM.parentSiteCode -type VM -SmartUpdate:$false
@@ -427,7 +459,7 @@ function Add-ExistingVMsToDeployConfig {
 
 
     # Add FS to list, when adding SQLAO
-    $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
+    $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not $_.Hidden }
     foreach ($SQLAOVM in $SQLAOVMs) {
         if ($SQLAOVM.FileServerVM) {
             Add-ExistingVMToDeployConfig -vmName $SQLAOVM.FileServerVM -configToModify $config
@@ -442,7 +474,7 @@ function Add-ExistingVMsToDeployConfig {
 
 
 
-    $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" }
+    $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" -and -not $_.Hidden }
     foreach ($sup in $wsus) {
         if ($sup.InstallSUP) {
             $ss = Get-SiteServerForSiteCode -deployConfig $config -sitecode $sup.siteCode -type VM -SmartUpdate:$false
@@ -543,7 +575,9 @@ function Add-ExistingVMToDeployConfig {
         [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
         [object] $configToModify,
         [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
-        [bool] $hidden = $true
+        [bool] $hidden = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Is This a DC from another domain?")]
+        [bool] $OtherDC = $false
     )
 
     Write-Log -verbose "Adding $vmName to Deploy config"
@@ -573,7 +607,7 @@ function Add-ExistingVMToDeployConfig {
         "inProgress",
         "success",
         "deployedOS",
-        "domain",
+        #"domain",
         "network",
         "prefix",
         "memLabsDeployVersion",
@@ -590,6 +624,9 @@ function Add-ExistingVMToDeployConfig {
 
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
+    }
+    if ($OtherDC) {
+        $newVMObject.role = "OtherDC"
     }
     if ($null -eq $configToModify.virtualMachines) {
         $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
@@ -933,13 +970,31 @@ function Get-SiteServerForSiteCode {
         [ValidateSet("Name", "VM")]
         [string] $type = "Name",
         [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
-        [bool] $SmartUpdate = $true
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
+        [string] $DomainName
+
     )
     if (-not $SiteCode) {
         throw "SiteCode is NULL"
         return $null
     }
+
     $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    if ($DomainName) {
+        $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) })
+        if ($vmList) {
+            if ($type -eq "Name") {
+                return ($vmList | Select-Object -First 1).vmName
+            }
+            else {
+                return $vmList | Select-Object -First 1
+            }
+        }
+        return
+    }
+
+
     $configVMs = @()
     $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
     if ($configVMs) {
@@ -960,8 +1015,65 @@ function Get-SiteServerForSiteCode {
             return $existingVMs | Select-Object -First 1
         }
     }
-    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode"
+    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $DomainName"
     return $null
+}
+
+
+function Get-SqlServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
+        [object] $SiteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
+        [ValidateSet("Name", "VM")]
+        [string] $type = "Name",
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
+        [string] $DomainName
+
+    )
+    if (-not $SiteCode) {
+        throw "SiteCode is NULL"
+        return $null
+    }
+
+
+    if ($DomainName) {
+        $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode -DomainName $DomainName -type VM
+    }
+    else {
+        $SiteServer = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SiteCode -type VM
+    }
+    if ($SiteServer.RemoteSQLVM) {
+        if ($type -eq "Name") {
+            Return $SiteServer.RemoteSQLVM
+        }
+        else {
+            if ($DomainName) {
+                $remoteSQL = get-list -type VM -domain $DomainName | Where-Object { $_.VmName -eq $SiteServer.RemoteSQLVM }
+            }
+            else {
+                $remoteSQL = $deployConfig.virtualMachines | Where-Object { $_.VmName -eq $SiteServer.RemoteSQLVM }
+            }
+            if ($type -eq "Name") {
+                return $remoteSQL.vmName
+            }
+            else {
+                return $remoteSQL
+            }
+        }
+    }
+
+    if ($type -eq "Name") {
+        return $SiteServer.vmName
+    }
+    else {
+        return $SiteServer
+    }
 }
 
 function get-RoleForSitecode {
@@ -2056,6 +2168,8 @@ Function Show-Summary {
     )
 
     $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
+    $DC = $deployConfig.virtualMachines  | Where-Object { $_.role -eq "DC" }
+
     #$CHECKMARK = ([char]8730)
     $containsPS = $fixedConfig.role -contains "Primary"
     $containsSecondary = $fixedConfig.role -contains "Secondary"
@@ -2064,6 +2178,18 @@ Function Show-Summary {
     $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
     Write-Verbose "ContainsPS: $containsPS ContainsSiteSystem: $containsSiteSystem ContainsMember: $containsMember ContainsPassive: $containsPassive"
+    if ($DC.ForestTrust) {
+        Write-GreenCheck "Forest Trust: This domain will join a Forest Trust with $($DC.ForestTrust)"
+        $remoteDC = Get-List -type VM -DomainName $DC.ForestTrust | Where-Object { $_.Role -eq "DC" }
+        if ($remoteDC -and $remoteDC.InstallCA) {
+            Write-GreenCheck "Forest Trust: This domain be configured to use the Certificate Authority in $($DC.ForestTrust)"
+        }
+
+        if ($DC.externalDomainJoinSiteCode) {
+            Write-GreenCheck "Forest Trust: Site code $($DC.externalDomainJoinSiteCode) in domain $($DC.ForestTrust) will be configured to manage client machines in this domain"
+        }
+    }
+
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
 
         if ($containsPS -or $containsSecondary) {
@@ -2103,6 +2229,13 @@ Function Show-Summary {
         }
         else {
             Write-RedX "ConfigMgr will not be installed."
+        }
+
+        if ($deployConfig.cmOptions.usePKI) {
+            Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and reporting roles"
+        }
+        else {
+            Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }

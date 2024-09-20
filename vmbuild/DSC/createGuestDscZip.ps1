@@ -1,3 +1,4 @@
+#CreateGuestDscZip.ps1
 param(
     $configName,
     $vmName,
@@ -41,7 +42,9 @@ try {
         'xFailOverCluster',
         'AccessControlDsc',
         'UpdateServicesDsc',
-        'LanguageDsc'
+        'LanguageDsc',
+        'GroupPolicyDsc',
+        'CertificateDsc'
     )
 
     foreach ($module in $modules) {

@@ -88,13 +88,23 @@ configuration Phase7
             DependsOn = "[ModuleAdd]SQLServerModule"
         }
 
+        $usePKI = $deployConfig.cmOptions.UsePKI
+        if ($usePKI) {
+            $templateName = 'ConfigMgr WebServer Certificate'
+            $dnsName = $thisVm.vmName + "." + $DomainName
+        }else {
+            $templateName = $null
+            $dnsName = $null
+        }
         InstallPBIRS InstallPBIRS {
             InstallPath          = "C:\PBIRS"
             SQLServer            = $SqlServerInstance
-            DownloadUrl          = "https://download.microsoft.com/download/7/0/A/70AD68EF-5085-4DF2-A3AB-D091244DDDBF/PowerBIReportServer.exe"
+            DownloadUrl          = "https://download.microsoft.com/download/3/7/5/3754bf6e-e422-46ec-b9f8-fb3dc3993cab/PowerBIReportServer.exe"
             RSInstance           = "PBIRS"
             DBcredentials          = $Admincreds
             IsRemoteDatabaseServer = $IsRemoteDatabaseServer
+            TemplateName         = $templateName
+            DNSName              = $dnsName
             PsDscRunAsCredential = $Admincreds
             DependsOn = "[ModuleAdd]SQLServerModule"
         }

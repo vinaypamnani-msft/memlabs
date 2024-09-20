@@ -10,6 +10,7 @@
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
+    Import-DscResource -ModuleName 'GroupPolicyDsc'
 
     # Define log share
     $LogFolder = "DSC"
@@ -39,6 +40,33 @@
     # Wait on machines to join domain
     $waitOnDomainJoin = $ThisVM.thisParams.ServersToWaitOn
 
+    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
+    $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+
+    $OtherDC = $false
+
+    $OtherDCVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "OtherDC" }
+    if ($OtherDCVM) {
+        $OtherDC = $true
+    }
+
+    $iiscount = 0
+    [System.Collections.ArrayList]$groupMembers = @()
+    $GroupMembersList = @()
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.Hidden}
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP -and -not $_.Hidden }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP -and -not $_.Hidden }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and -not $_.Hidden}
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and -not $_.Hidden}
+    [System.Collections.ArrayList]$iisgroupMembers = @()
+    foreach ($member in $GroupMembersList) {
+        $memberName = $member.vmName + "$"
+        if (-not $iisgroupMembers.Contains($memberName)) {
+            $iiscount = $iisgroupMembers.Add($memberName)
+            $iiscount++
+        }
+    }
+
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
@@ -56,6 +84,7 @@
         Computer NewName {
             Name = $ThisMachineName
         }
+
 
         WriteStatus InitDisks {
             DependsOn = "[Computer]NewName"
@@ -81,8 +110,8 @@
         }
 
 
-        $alias =(Get-NetAdapter).Name | Select-Object -First 1
-
+        $alias = (Get-NetAdapter).Name | Select-Object -First 1
+    
         IPAddress DCIPAddress {
             DependsOn      = "[WriteStatus]SetIPDG"
             IPAddress      = "$DHCP_DNSAddress/24"
@@ -95,6 +124,14 @@
             Address        = $DHCP_DefaultGateway
             InterfaceAlias = $alias
             AddressFamily  = 'IPv4'
+        }
+
+        DnsServerAddress SetDNS {
+            Address        = $DHCP_DNSAddress
+            InterfaceAlias = $alias
+            AddressFamily  = 'IPv4'
+            Validate       = $false
+            DependsOn      = "[DefaultGatewayAddress]SetDefaultGateway"
         }
 
         WriteStatus InstallFeature {
@@ -181,16 +218,23 @@
             $adObjectDependency += "[ADComputer]Computer$($i)"
         }
 
-        ADGroup AddToAdmin {
-            GroupName        = "Administrators"
-            MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-            DependsOn        = $adObjectDependency
+
+        #ADGroup AddToAdmin {
+        #    GroupName        = "Administrators"
+        #    MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
+        #    DependsOn        = $adObjectDependency
+        #}
+        AddToAdminGroup AddLocalAdmins {
+            DomainName   = "NONE"
+            AccountNames = @($DomainAdminName, $Admincreds.UserName)
+            TargetGroup  = "Administrators"
+            DependsOn    = $adObjectDependency
         }
 
         ADGroup AddToDomainAdmin {
             GroupName        = "Domain Admins"
             MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-            DependsOn        = "[ADGroup]AddToAdmin"
+            DependsOn        = $adObjectDependency
         }
 
         ADGroup AddToSchemaAdmin {
@@ -198,8 +242,10 @@
             MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
             DependsOn        = "[ADGroup]AddToDomainAdmin"
         }
-
         $nextDepend = "[ADGroup]AddToSchemaAdmin"
+
+
+
         $adSiteDependency = @($nextDepend)
         $i = 0
         foreach ($site in $adsites) {
@@ -257,6 +303,35 @@
         }
 
         $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
+        $waitOnDependency = "[DnsServerForwarder]DnsServerForwarder"
+
+        if ($OtherDC) {
+            DnsServerConditionalForwarder 'Forwarder1' {
+                Name             = $($OtherDCVM.thisParams.Domain)
+                MasterServers    = @($($OtherDCVM.thisParams.IPAddr))
+                ReplicationScope = 'Forest'
+                Ensure           = 'Present'
+                DependsOn        = $nextDepend
+            }
+
+            $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"
+            $waitOnDependency = "[DnsServerConditionalForwarder]Forwarder1"
+
+            ADDomainTrust 'Trust' {
+                Ensure               = 'Present'
+                SourceDomainName     = $DomainName
+                TargetDomainName     = $($OtherDCVM.thisParams.Domain)
+                TargetCredential     = $Admincreds
+                TrustDirection       = 'Bidirectional'
+                TrustType            = 'Forest'
+                AllowTrustRecreation = $true
+                DependsOn            = $nextDepend
+            }
+
+            $nextDepend = "[ADDomainTrust]Trust"
+            $waitOnDependency = "[ADDomainTrust]Trust"
+        }
+
         if ($ThisVM.InstallCA) {
 
             WriteStatus ADCS {
@@ -264,16 +339,54 @@
                 Status    = "Installing Certificate Authority"
             }
 
-            InstallCA InstallCA {
-                DependsOn     = $nextDepend
-                HashAlgorithm = "SHA256"
+            if ($ThisVM.ThisParams.RootCA) {
+                InstallCA InstallCA {
+                    DependsOn     = $nextDepend
+                    HashAlgorithm = "SHA256"
+                    #RootCa        = $ThisVM.ThisParams.RootCA
+                }
+            }
+            else {
+                InstallCA InstallCA {
+                    DependsOn     = $nextDepend
+                    HashAlgorithm = "SHA256"
+                }
+            }
+            $nextDepend = "[InstallCA]InstallCA"
+
+            WriteStatus ImportCertifcateTemplate {
+                DependsOn = $nextDepend
+                Status    = "Importing Template to Domain"
             }
 
-            $nextDepend = "[InstallCA]InstallCA"
+            $waitOnDependency = @($nextDepend)
+
+            if ($iisCount) {
+                ImportCertifcateTemplate ConfigMgrClientDistributionPointCertificate {
+                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                    DNPath       = $DNName
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientDistributionPointCertificate"
+
+                ImportCertifcateTemplate ConfigMgrWebServerCertificate {
+                    TemplateName = "ConfigMgrWebServerCertificate"
+                    DNPath       = $DNName
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrWebServerCertificate"
+            }
+            ImportCertifcateTemplate ConfigMgrClientCertificate {
+                TemplateName = "ConfigMgrClientCertificate"
+                DNPath       = $DNName
+                DependsOn    = $nextDepend
+            }
+            $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
+
         }
 
         WriteStatus InstallDotNet {
-            DependsOn = $nextDepend
+            DependsOn = $waitOnDependency
             Status    = "Installing .NET 4.8"
         }
 
@@ -323,6 +436,200 @@
             $waitOnDependency += "[DelegateControl]Add$server"
         }
 
+
+
+        $sitecount = 0
+        [System.Collections.ArrayList]$groupMembers = @()
+        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.hidden }
+        foreach ($member in $GroupMembersList) {
+            $sitecount = $groupMembers.Add($member.vmName + "$")
+            $sitecount++
+        }
+
+        if ($sitecount) {
+
+            ADGroup ConfigMgrSiteServers {
+                Ensure           = 'Present'
+                GroupName        = 'ConfigMgr Site Servers'
+                GroupScope       = "Global"
+                Category         = "Security"
+                Description      = 'ConfigMgr Site Servers'
+                MembersToInclude = $groupMembers
+                DependsOn        = $waitOnDependency
+            }
+            $waitOnDependency = "[ADGroup]ConfigMgrSiteServers"
+        }
+
+        if ($iiscount) {
+
+            ADGroup ConfigMgrIISServers {
+                Ensure           = 'Present'
+                GroupName        = 'ConfigMgr IIS Servers'
+                GroupScope       = "Global"
+                Category         = "Security"
+                Description      = 'ConfigMgr IIS Servers'
+                MembersToInclude = $iisgroupMembers
+                DependsOn        = $waitOnDependency
+            }
+            $waitOnDependency = "[ADGroup]ConfigMgrIISServers"
+        }
+
+
+        WriteStatus GroupPolicyStatus {
+            DependsOn = $waitOnDependency
+            Status    = "Installing Auto Enrollment Group Policy"
+        }
+
+        $GPOName = "Certificate AutoEnrollment"
+
+        GroupPolicy GroupPolicyConfig {
+            Name      = $GPOName
+            DependsOn = $waitOnDependency
+        }
+
+        GPLink GPLinkConfig {
+            Path      = $DNName
+            GPOName   = $GPOName
+            DependsOn = "[GroupPolicy]GroupPolicyConfig"
+        }
+
+        GPRegistryValue GPRegistryValueConfig1 {
+            Name      = $GPOName
+            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+            ValueName = "AEPolicy"
+            ValueType = "DWord"
+            Value     = "7"
+            DependsOn = "[GPLink]GPLinkConfig"
+        }
+
+        GPRegistryValue GPRegistryValueConfig2 {
+            Name      = $GPOName
+            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+            ValueName = "OfflineExpirationPercent"
+            ValueType = "DWord"
+            Value     = "10"
+            DependsOn = "[GPLink]GPLinkConfig"
+        }
+
+        GPRegistryValue GPRegistryValueConfig3 {
+            Name      = $GPOName
+            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+            ValueName = "OfflineExpirationStoreNames"
+            ValueType = "String"
+            Value     = "MY"
+            DependsOn = "[GPLink]GPLinkConfig"
+        }
+        $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
+        $waitOnDependency = $nextDepend
+
+        if ($ThisVM.InstallCA) {
+
+
+            WriteStatus CertTemplates {
+                DependsOn = $waitOnDependency
+                Status    = "Installing Certificate Templates"
+            }
+
+            ModuleAdd PSPKI {
+                Key             = 'Always'
+                CheckModuleName = 'PSPKI'
+                DependsOn       = $nextDepend
+            }
+            $nextDepend = "[ModuleAdd]PSPKI"
+            $waitOnDependency = @("[ModuleAdd]PSPKI")
+            if ($iisCount) {
+                AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
+                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                    GroupName    = 'ConfigMgr IIS Servers'
+                    Permissions  = 'Read, Enroll'
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
+
+                AddCertificateTemplate ConfigMgrWebServerCertificate {
+                    TemplateName = "ConfigMgrWebServerCertificate"
+                    GroupName    = 'ConfigMgr IIS Servers'
+                    Permissions  = 'Read, Enroll'
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+            }
+            AddCertificateTemplate ConfigMgrClientCertificate {
+                TemplateName = "ConfigMgrClientCertificate"
+                GroupName    = 'Domain Computers'
+                Permissions  = 'Read, Enroll, AutoEnroll'
+                DependsOn    = $nextDepend
+            }
+            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
+        }
+
+        if ($ThisVM.externalDomainJoinSiteCode) {
+            [System.Management.Automation.PSCredential]$groupCreds = New-Object System.Management.Automation.PSCredential ("$($ThisVM.ForestTrust)\Admin", $Admincreds.Password)
+
+            WriteStatus WaitExtSchema {
+                DependsOn = $waitOnDependency
+                Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
+            }
+
+            WaitForExtendSchemaFile WaitForExtendSchemaFile {
+                MachineName = $ThisVM.ThisParams.ExternalTopLevelSiteServer
+                ExtFolder   = "CMCB"
+                Ensure      = "Present"
+                DependsOn   = $waitOnDependency
+                AdminCreds  = $groupCreds
+            }
+            $waitOnDependency = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
+
+            WriteStatus WaitIISGroup {
+                DependsOn = $waitOnDependency
+                Status    = "Waiting for $($ThisVM.ForestTrust)\'ConfigMgr IIS Servers' to be a member on System Management Container"
+            }
+
+            DelegateControl "AddremoteIISGroup" {
+                Machine        = 'ConfigMgr IIS Servers'
+                DomainFullName = $ThisVM.ForestTrust
+                Ensure         = "Present"
+                DependsOn      = $waitOnDependency
+                IsGroup        = $true
+            }
+
+            $waitOnDependency = "[DelegateControl]AddremoteIISGroup"
+            if ($ThisVM.ForestTrust) {
+                AddToAdminGroup AddRemoteAdmins {
+                    DomainName   = $ThisVM.ForestTrust
+                    AccountNames = @($DomainAdminName, $Admincreds.UserName)
+                    RemoteCreds  = $groupCreds
+                    TargetGroup  = "Administrators"
+                    DependsOn    = $waitOnDependency
+                }
+                $waitOnDependency = "[AddToAdminGroup]AddRemoteAdmins"
+
+                AddToAdminGroup AddCertPublisher {
+                    DomainName   = $ThisVM.ForestTrust
+                    AccountNames = "$($OtherDCVM.VmName)$"
+                    RemoteCreds  = $groupCreds
+                    TargetGroup  = "Cert Publishers"
+                    DependsOn    = $waitOnDependency
+                }
+                $waitOnDependency = "[AddToAdminGroup]AddCertPublisher"
+
+                InstallRootCertificate InstallRootCertificate {
+                    CAName    = $ThisVM.ThisParams.RootCA
+                    DependsOn = $waitOnDependency
+                }
+                $waitOnDependency = "[InstallRootCertificate]InstallRootCertificate"
+
+                RunPkiSync RunPkiSync {
+                    SourceForest = $ThisVM.ForestTrust
+                    TargetForest = $DomainName
+                    DependsOn    = $waitOnDependency
+                }
+                $waitOnDependency = "[RunPkiSync]RunPkiSync"
+            }
+
+
+
+        }
         RemoteDesktopAdmin RemoteDesktopSettings {
             IsSingleInstance   = 'yes'
             Ensure             = 'Present'

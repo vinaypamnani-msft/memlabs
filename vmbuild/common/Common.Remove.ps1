@@ -9,7 +9,9 @@ function Remove-VirtualMachine {
         [Parameter()]
         [switch] $WhatIf,
         [Parameter()]
-        [switch] $Force
+        [switch] $Force,
+        [Parameter()]
+        [bool] $Migrate = $false
     )
     #{ "network": "10.0.1.0", "ClusterIPAddress": "10.250.250.135", "AGIPAddress": "10.250.250.136",
     $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
@@ -23,6 +25,7 @@ function Remove-VirtualMachine {
     $vmTest = Get-VM2 -Name $VmName -Fallback
 
     if ($vmTest) {
+        $parent = (get-item $($vmTest.Path)).Parent
         Write-Log "VM '$VmName' exists. Removing." -SubActivity
 
         if ($vmFromList.ClusterIPAddress) {
@@ -62,9 +65,16 @@ function Remove-VirtualMachine {
         if (Test-Path $cachenetFile) { Remove-Item -path $cachenetFile -Force -WhatIf:$WhatIf | Out-Null }
 
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf
+        if (-not $Migrate) {
+            Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
+            Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
 
-        Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
-        Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
+
+            $count = (Get-ChildItem $parent | Measure-Object).Count
+            if ($count -eq 0) {
+                Remove-Item -Path $parent
+            }
+        }
     }
     else {
         Write-Log "VM '$VmName' does not exist in Hyper-V." -Warning
@@ -193,13 +203,40 @@ function Remove-Domain {
 
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
     $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+    $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
+
     $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
+
+    if ($DC) {
+        if ($DC.ForestTrust) {
+            $forestDomain = $DC.ForestTrust
+            $RemoteDC = Get-List -Type Vm -DomainName $forestDomain | Where-Object { $_.Role -eq "DC" }
+            if ($RemoteDC) {
+                Write-Log "Removing Trust on $forestDomain for '$DomainName'" -Activity
+
+                start-vm2 -Name $RemoteDC.VmName
+                $scriptBlock1 = {
+                    param(
+                        [String]$forestDomain,
+                        [String]$DomainName
+                    )
+                    write-host "Running on $env:ComputerName as $env:Username"
+                    write-host "Netdom trust $forestDomain /Domain:$DomainName /Remove /Force"
+                    Netdom trust $forestDomain /Domain:$DomainName /Remove /Force
+                }
+                $result = Invoke-VmCommand -VmName $RemoteDC.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($forestDomain, $domainName) -SuppressLog
+                write-log $result.ScriptBlockOutput
+            }
+        }
+    }
 
     if ($vmsToDelete) {
         foreach ($vm in $vmsToDelete) {
             Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
         }
     }
+
+
 
     if ($scopesToDelete) {
         Write-Log "Removing ALL DHCP Scopes for '$DomainName'" -Activity

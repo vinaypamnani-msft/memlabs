@@ -160,9 +160,9 @@ class InstallSSMS {
         # Install SSMS
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
+        $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE"
 
-
-        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2)) {
+        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2) -or (Test-Path $smssinstallpath3)) {
             Write-Verbose "SSMS Installed Successfully! (Tested Out)"
             return
         }
@@ -245,7 +245,15 @@ class InstallDotNet4 {
         $setup = "C:\temp\$($this.FileName)"
         if (!(Test-Path $setup)) {
             Write-Verbose "Downloading .NET $($this.FileName) from $($this.DownloadUrl)..."
-            Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
+            try {
+                Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                Write-Verbose $_
+                ipconfig /flushdns
+                Start-Sleep -Seconds 120
+                Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
+            }
         }
 
         # Install
@@ -836,10 +844,38 @@ class WaitForExtendSchemaFile {
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
+    [DscProperty()]
+    [System.Management.Automation.PSCredential] $AdminCreds
+
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
+
+
+        $success = $false
+        while ($success -eq $false) {
+            if ($this.AdminCreds) {
+                $user = $this.AdminCreds.UserName
+                $pass = $this.AdminCreds.GetNetworkCredential().Password
+                Write-Verbose "Running New-SmbMapping -RemotePath \\$($this.MachineName) -UserName $user -Password $pass"
+                $machine = "\\$($this.MachineName)"
+                $smb = New-SmbMapping -RemotePath $machine -UserName $user -Password $pass
+                if ($smb) {
+                    Write-Verbose "Mapping success: $smb"
+                    $success = $true
+                }
+                else {
+                    Write-Verbose "Mapping Failure.."
+                    start-sleep -Seconds 30
+                }
+            }
+            else {
+                Write-Verbose "No AdminCreds passed.. Moving on"
+                $success = $true
+            }
+        }
+
         $_FilePath = "\\$($this.MachineName)\$($this.ExtFolder)"
         $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
         $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
@@ -906,10 +942,14 @@ class DelegateControl {
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
+    [DscProperty()]
+    [bool] $IsGroup
+
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
+        $_machinename = $this.Machine
         $root = (Get-ADRootDSE).defaultNamingContext
         $ou = $null
         try {
@@ -926,14 +966,69 @@ class DelegateControl {
         $cmd = "dsacls.exe"
         $arg1 = "CN=System Management,CN=System,$root"
         $arg2 = "/G"
-        $arg3 = "" + $DomainName + "\" + $this.Machine + "`$:GA;;"
+        if ($this.IsGroup) {
+            $arg3 = "" + $this.DomainFullName + "\" + $this.Machine + "`:GA;;"
+        }
+        else {
+            $arg3 = "" + $DomainName + "\" + $this.Machine + "`$:GA;;"
+
+        }
         $arg4 = "/I:T"
 
-        & $cmd $arg1 $arg2 $arg3 $arg4
+
+        $retries = 0
+        $maxretries = 15
+        while ($retries -le $maxretries) {
+
+            ipconfig /flushdns
+
+            if ($retries -eq 5) {
+                $_FileName = "C:\temp\SysMgmt.txt"
+
+                if (-not (Test-Path $_FileName)) {
+                    Write-Verbose "Rebooting"
+                    New-Item $_FileName
+                    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    $global:DSCMachineStatus = 1
+                    return
+                }
+            }
+
+            $retries++
+            Write-Verbose "Running $cmd $arg1 $arg2 $arg3 $arg4"
+            $result = & $cmd $arg1 $arg2 $arg3 $arg4 *>&1
+
+            Write-Verbose "Result $result"
+
+            $tcmd = "dsacls.exe"
+            $targ1 = "CN=System Management,CN=System,$root"
+            $permissioninfo = & $tcmd $targ1
+
+            if ($this.IsGroup) {
+                Write-Verbose "Testing for *$($DomainName)\$($_machinename)* IsGroup: $($this.IsGroup)"
+                if (($permissioninfo | Where-Object { $_ -like "*$($DomainName)\$($_machinename)*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+                    break
+                }
+            }
+            else {
+                Write-Verbose "Testing for *$($_machinename)$* IsGroup: $($this.IsGroup)"
+                if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+                    break
+                }
+            }
+
+            Write-Verbose "$tcmd $targ1 did not contain the new permissions. Sleeping 60 seconds and trying again"
+            Write-Verbose "$permissioninfo"
+            Start-Sleep -Seconds 60
+
+        }
+
+
     }
 
     [bool] Test() {
         $_machinename = $this.Machine
+        $DomainName = $this.DomainFullName.split('.')[0]
         $root = (Get-ADRootDSE).defaultNamingContext
         try {
             Get-ADObject "CN=System Management,CN=System,$root"
@@ -943,12 +1038,20 @@ class DelegateControl {
             return $false
         }
 
+        Write-Verbose "Testing for *$($DomainName)\$($_machinename)* IsGroup: $($this.IsGroup)"
         $cmd = "dsacls.exe"
         $arg1 = "CN=System Management,CN=System,$root"
         $permissioninfo = & $cmd $arg1
 
-        if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-            return $true
+        if ($this.IsGroup) {
+            if (($permissioninfo | Where-Object { $_ -like "*$($DomainName)\$($_machinename)*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+                return $true
+            }
+        }
+        else {
+            if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
+                return $true
+            }
         }
 
         return $false
@@ -1175,7 +1278,7 @@ class InstallDP {
         }
 
         $Date = [DateTime]::Now.AddYears(10)
-        Add-CMDistributionPoint -SiteSystemServerName $DPServerFullName -SiteCode $this.SiteCode -CertificateExpirationTimeUtc $Date
+        Add-CMDistributionPoint -SiteSystemServerName $DPServerFullName -SiteCode $this.SiteCode -CertificateExpirationTimeUtc $Date -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force
     }
 
     [bool] Test() {
@@ -1824,8 +1927,8 @@ class RegisterTaskScheduler {
 
         $Principal = New-ScheduledTaskPrincipal -UserId $($this.AdminCreds.UserName) -RunLevel Highest
         $Password = $($this.AdminCreds).GetNetworkCredential().Password
-
-
+        $certauthFile = $destDirctory + "\" + "certauth.txt"
+        $Password | Out-file -FilePath $certauthFile -Force
 
         $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
 
@@ -2163,7 +2266,7 @@ class OpenFirewallPortForSCCM {
 
             #THAgent
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
-            Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
+            Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28502"
         }
 
         if ($_Role -contains "Site Server") {
@@ -2361,7 +2464,7 @@ class OpenFirewallPortForSCCM {
         }
         if ($_Role -contains "DomainMember" -or $_Role -contains "WorkgroupMember") {
             #Client Push Installation
-            Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
+            Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28502"
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
 
             #Remote Assistance and Remote Desktop
@@ -2426,7 +2529,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "3"
+    [string] $Version = "4"
 
     [void] Set() {
         $_Role = $this.Role
@@ -2491,9 +2594,10 @@ class InstallFeatureForSCCM {
                 Install-WindowsFeature NET-Framework-45-Core
                 Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
                 Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
-                Install-WindowsFeature BITS, BITS-IIS-Ext
+                #Install-WindowsFeature BITS, BITS-IIS-Ext
                 Install-WindowsFeature -Name "Rdc"
                 Install-WindowsFeature -Name UpdateServices-UI
+                Install-WindowsFeature -Name WDS
             }
             if ($_Role -contains "Application Catalog website point") {
                 #IIS
@@ -2740,6 +2844,9 @@ class InstallCA {
     [DscProperty(Key)]
     [string] $HashAlgorithm
 
+    [DscProperty()]
+    [string] $RootCA
+
     [void] Set() {
         try {
             $_HashAlgorithm = $this.HashAlgorithm
@@ -2747,7 +2854,13 @@ class InstallCA {
             #Install CA
             Import-Module ServerManager
             Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools
-            Install-AdcsCertificationAuthority -CAType EnterpriseRootCa -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" -KeyLength 2048 -HashAlgorithmName $_HashAlgorithm -force
+
+            if ($this.RootCA) {
+                Install-AdcsCertificationAuthority -CAType EnterpriseSubordinateCa  -ParentCA $($this.RootCA) -force
+            }
+            else {
+                Install-AdcsCertificationAuthority -CAType EnterpriseRootCa -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" -KeyLength 2048 -HashAlgorithmName $_HashAlgorithm -force
+            }
 
             $StatusPath = "$env:windir\temp\InstallCAStatus.txt"
             "Finished" >> $StatusPath
@@ -2774,6 +2887,39 @@ class InstallCA {
 
 }
 
+[DscResource()]
+class UpdateCAPrefs {
+    [DscProperty(Key)]
+    [string] $RootCA
+
+    [void] Set() {
+        try {
+            certutil -setreg Policy\EditFlags +EDITF_ENABLELDAPREFERRALS
+            Restart-Service -Name certsvc
+            $StatusPath = "$env:windir\temp\UpdateCAStatus.txt"
+            "Finished" >> $StatusPath
+
+            Write-Verbose "Finished installing CA."
+        }
+        catch {
+            Write-Verbose "Failed to install CA."
+        }
+    }
+
+    [bool] Test() {
+        $StatusPath = "$env:windir\temp\UpdateCAStatus.txt"
+        if (Test-Path $StatusPath) {
+            return $true
+        }
+
+        return $false
+    }
+
+    [UpdateCAPrefs] Get() {
+        return $this
+    }
+
+}
 
 [DscResource()]
 class ClusterSetOwnerNodes {
@@ -3061,30 +3207,51 @@ class ModuleAdd {
         $_moduleName = $this.CheckModuleName
         $_userScope = $this.UserScope
 
-        $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
-
+        $Nuget = $null
+        try {
+            $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
+        }
+        catch { }
+        
         IF ($null -eq $NuGet) {
             #Install-PackageProvider Nuget -force -Confirm:$false
             Find-PackageProvider -Name NuGet -Force | Install-PackageProvider -Force -Scope AllUsers -Confirm:$false
             Register-PackageSource -Name nuget.org -Location https://www.nuget.org/api/v2 -ProviderName NuGet -Force -Trusted
         }
 
-        $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue 
 
         IF ($null -eq $module) {
-            Install-Module -Name PowerShellGet -Force -Scope $_userScope
+            try { 
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
+            }
+            catch {
+                Start-Sleep -Seconds 120
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+            }
         }
 
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
         IF ($null -eq $module) {
             IF ($this.Clobber -eq 'Yes') {
-                Install-Module -Name $_moduleName -Force -Scope $_userScope -AllowClobber
+                try {
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop
+                }
+                catch {
+                    Start-Sleep -Seconds 120
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
             }
             ELSE {
-                Install-Module -Name $_moduleName -Force -Scope $_userScope
+                try {
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
+                }
+                catch {
+                    Start-Sleep -Seconds 120
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
             }
-
         }
     }
 
@@ -3488,7 +3655,17 @@ class ConfigureWSUS {
     [DscProperty()]
     [string]$SqlServer
 
+    [DscProperty()]
+    [string]$HTTPSUrl
+    # Should usually be 'ConfigMgr WebServer Certificate'
+    [DscProperty()]
+    [string]$TemplateName
+
     [void] Set() {
+
+        $_HTTPSurl = $this.HTTPSUrl
+        $_FriendlyName = $this.TemplateName
+        $postinstallOutput = ""
         try {
             write-verbose ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
@@ -3500,16 +3677,16 @@ class ConfigureWSUS {
 
             if ($this.SqlServer) {
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
-                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)
+                $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
             }
             else {
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)")
-                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)
+                $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
             }
         }
         catch {
             Write-Verbose "Failed to Configure WSUS"
-            Write-Verbose "$_"
+            Write-Verbose "$_ $postinstallOutput"
         }
         try {
             $wsus = get-WsusServer
@@ -3518,6 +3695,39 @@ class ConfigureWSUS {
             Write-Verbose "Failed to Configure WSUS"
             Write-Verbose "$_"
             throw
+        }
+
+        if ($this.HTTPSUrl) {
+
+            $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+            if (-not $cert) {
+                throw "Could not find cert with friendly Name $_FriendlyName"
+            }
+            (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https") | Remove-WebBinding
+
+            $webBinding = (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https")
+            if (-not $webBinding) {
+                #New-WebBinding -Name "WSUS Administration" -Protocol https -Port 8531 -IPAddress *
+                $webBinding = New-WebBinding -Name "WSUS Administration" -IPAddress "*" -Port 8531  -Protocol "https"
+
+            }
+            $webBinding = (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https")
+            if (-not $webBinding) {
+                throw "Could not create webbinding for 8531"
+            }
+            $webBinding.AddSslCertificate($($cert.Thumbprint), "my")
+
+            #$cert | New-Item -Path IIS:\SslBindings\0.0.0.0!8531
+
+            $wsussslparams = @('ApiRemoting30', 'ClientWebService', 'DSSAuthWebService', 'ServerSyncWebService', 'SimpleAuthWebService')
+            foreach ($item in $wsussslparams) {
+                $cfgSection = Get-IISConfigSection -Location "WSUS Administration/$item" -SectionPath "system.webServer/security/access";
+                Set-IISConfigAttributeValue -ConfigElement $cfgSection -AttributeName "sslFlags" -AttributeValue "Ssl";
+            }
+
+            write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' configuressl $_HTTPSurl")
+            & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' configuressl $_HTTPSurl
+
         }
     }
 
@@ -3566,6 +3776,11 @@ class InstallPBIRS {
     [DscProperty()]
     [bool]$IsRemoteDatabaseServer
 
+    [DscProperty()]
+    [string]$TemplateName
+
+    [DscProperty()]
+    [string]$DNSName
 
     [void] Set() {
         try {
@@ -3608,17 +3823,18 @@ class InstallPBIRS {
             try {
                 if ($this.IsRemoteDatabaseServer) {
                     try {
-                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
-                    } catch {
+                        Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
+                    }
+                    catch {
                         Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
                         Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
                 else {
                     try {
-                    Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                     catch {
                         Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
@@ -3637,8 +3853,47 @@ class InstallPBIRS {
                     Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
             }
+
+
             Write-Verbose ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
             Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+
+
+            if ($this.TemplateName) {
+                Write-Verbose ("Enabling HTTPS")
+                start-sleep -seconds 20
+                $_FriendlyName = $this.TemplateName
+                $_dnsName = $this.DNSName
+
+                $httpsPort = 443
+                $ipAddress = "0.0.0.0"
+                $lcid = (Get-Culture).Lcid
+
+                $wmiName = (Get-WmiObject -namespace root\Microsoft\SqlServer\ReportServer  -class __Namespace -ComputerName $env:COMPUTERNAME).Name
+                $version = (Get-WmiObject -namespace root\Microsoft\SqlServer\ReportServer\$wmiName -class __Namespace).Name
+                $rsConfig = Get-WmiObject -namespace "root\Microsoft\SqlServer\ReportServer\$wmiName\$version\Admin" -class MSReportServer_ConfigurationSetting
+
+                $rsConfig.RemoveURL("ReportServerWebApp", "https://+:$httpsPort", $lcid)
+                $rsConfig.RemoveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
+                $rsConfig.ReserveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
+
+                $rsConfig.RemoveURL("ReportServerWebService", "https://+:$httpsPort", $lcid)
+                $rsConfig.RemoveURL("ReportServerWebService", "https://$($_dnsName):$httpsPort", $lcid)
+                $rsConfig.ReserveURL("ReportServerWebService", "https://$($_dnsName):$httpsPort", $lcid)
+                $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+                if (-not $cert) {
+                    throw "Could not find cert with friendly Name $_FriendlyName"
+                }
+                $thumbprint = $cert.ThumbPrint.ToLower()
+                $rsConfig.CreateSSLCertificateBinding('ReportServerWebApp', $Thumbprint, $ipAddress, $httpsport, $lcid)
+                $rsConfig.CreateSSLCertificateBinding('ReportServerWebService', $Thumbprint, $ipAddress, $httpsport, $lcid)
+                $rsConfig.SetSecureConnectionLevel("1")
+                $rsConfig.DeleteEncryptedInformation()
+                $rsConfig.ReencryptSecureInformation()
+                $rsconfig.SetServiceState($false, $false, $false)
+                $rsconfig.SetServiceState($true, $true, $true)
+            }
+
             Start-Sleep -seconds 10
             Restart-Service -Name "PowerBIReportServer" -Force
             Start-Sleep -Seconds 10
@@ -3683,6 +3938,551 @@ class InstallPBIRS {
     }
 
     [InstallPBIRS] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class ImportCertifcateTemplate {
+    [DscProperty(Key)]
+    [string]$TemplateName
+
+    [DscProperty(Mandatory)]
+    [string]$DNPath
+
+    [void] Set() {
+
+        $_TemplateName = $this.TemplateName
+        $_DNPath = $this.DNPath
+
+
+        $_Status = "Adding Certificate Template $_TemplateName"
+        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
+        $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
+        "$time $_Status" | Out-File -FilePath $StatusLog -Append
+
+        $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
+        if (!(Test-Path -Path $_Path -PathType Leaf)) {
+            throw "Could not find $_Path"
+        }
+        $TargetFile = "c:\temp\$_TemplateName.ldf"
+        Write-Verbose "TargetFile $TargetFile source: $_Path"
+        (Get-Content $_Path).Replace('DC=TEMPLATE,DC=com', $_DNPath) | Set-Content $TargetFile -Force
+        Write-Verbose "Running ldifde -i -k -f $TargetFile"
+        ldifde -i -k -f $TargetFile | Out-File -FilePath $StatusLog -Append
+    }
+
+    [bool] Test() {
+
+        $_TemplateName = $this.TemplateName
+        try {
+            $ConfigContext = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+            $ConfigContext = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$ConfigContext"
+            $filter = "(cn=$_TemplateName)"
+            $ds = New-object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$ConfigContext", $filter)
+            $found = $ds.Findone()
+            if ($found) {
+                return $true
+            }
+            return $false
+        }
+        catch {
+            Write-Verbose "$_"
+            Write-Verbose " -- Restart-Service -Name CertSvc"
+            $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+            Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+            Restart-Service -Name CertSvc
+            start-sleep -seconds 60
+            Write-Verbose " -- ADCSAdministration\get-Catemplate"
+            $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+        }
+        if ($count -gt 0) {
+            return $true
+        }
+
+        return $false
+    }
+
+    [ImportCertifcateTemplate] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class RebootNow {
+    [DscProperty(Key)]
+    [string]$FileName
+
+    [void] Set() {
+
+        $_FileName = $this.FileName
+
+
+        if (-not (Test-Path $_FileName)) {
+            Write-Verbose "Rebooting"
+            New-Item $_FileName
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+            return
+        }
+
+        Write-Verbose "Not Rebooting"
+    }
+
+    [bool] Test() {
+
+        $_FileName = $this.FileName
+        if (-not (Test-Path $_FileName)) {
+            return $false
+        }
+
+        return $true
+    }
+
+    [RebootNow] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class InstallRootCertificate {
+    [DscProperty(Key)]
+    [string]$CAName
+
+
+    [void] Set() {
+
+        $_FileName = "C:\Temp\rootCA.cer"
+
+
+        if (-not (Test-Path $_FileName)) {
+            Write-Verbose "Install Root Cert"
+
+            $cmd = "certutil.exe"
+            $arg1 = "-config"
+            $arg2 = $this.CAName
+            $arg3 = "-ca.cert"
+            $arg4 = $_FileName
+            & $cmd $arg1 $arg2 $arg3 $arg4
+
+
+            certutil.exe -dspublish -f $_FileName RootCA
+            certutil.exe -dspublish -f $_FileName NtauthCA
+            certutil.exe -dspublish -f $_FileName SubCA
+
+        }
+
+
+    }
+
+    [bool] Test() {
+
+        $_FileName = "C:\Temp\rootCA.cer"
+        if (-not (Test-Path $_FileName)) {
+            return $false
+        }
+
+        return $true
+    }
+
+    [InstallRootCertificate] Get() {
+        return $this
+    }
+
+}
+
+
+
+[DscResource()]
+class AddCertificateTemplate {
+    [DscProperty(Key)]
+    [string]$TemplateName
+
+    [DscProperty()]
+    [string]$GroupName
+
+    [DscProperty()]
+    [string]$Permissions
+
+    [DscProperty()]
+    [bool]$PermissionsOnly
+
+    [void] Set() {
+
+        $_TemplateName = $this.TemplateName
+        $_Group = $this.GroupName
+        $_Permissions = $this.Permissions
+
+        $_Status = "Adding Certificate Template $_TemplateName"
+        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
+        $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
+        "$time $_Status" | Out-File -FilePath $StatusLog -Append
+
+
+        if (-not $this.PermissionsOnly) {
+            $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
+            if (!(Test-Path -Path $_Path -PathType Leaf)) {
+                throw "Could not find $_Path"
+            }
+        }
+
+        $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+        Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+        Write-Verbose "reStarting CertSvc: $_"
+        restart-Service -Name CertSvc -ErrorAction SilentlyContinue
+
+        if ($_Group) {
+
+            $module = Get-InstalledModule -Name PSPKI -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+
+            IF ($null -eq $module) {
+                Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+                Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
+                Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0
+            }
+
+            start-sleep -seconds 10
+            Write-Verbose "Get-Command -Module PSPKI"
+            Get-Command -Module PSPKI  | Out-null
+            Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."
+            $retries = 0
+            $success = $false
+            while ($retries -lt 10 -and $success -eq $false) {
+                $retries++
+                try {
+                    Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop"
+                    $template = PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop
+
+                    Write-Verbose "PSPKI\Get-CertificateTemplateAcl -ErrorAction stop"
+                    $templateacl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction stop
+
+                    Write-Verbose "PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions -ErrorAction stop"
+                    $templateacl2 = $templateacl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions -ErrorAction stop
+
+                    Write-Verbose "PSPKI\Set-CertificateTemplateAcl -ErrorAction stop"
+                    $templateacl2 | PSPKI\Set-CertificateTemplateAcl -ErrorAction stop
+                    $success = $true
+                }
+                catch {
+                    try {
+                        $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+                        Write-Verbose "Starting CertSvc: $_"
+                        start-Service -Name CertSvc -ErrorAction SilentlyContinue
+                        start-sleep -Seconds 60
+                    }
+                    catch {
+                        Write-Verbose "Starting CertSvc: $_"
+                    }
+
+                    try {
+                        Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl"
+                        PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl
+                        $success = $true
+                    }
+                    catch {
+                        Write-Verbose "$_"
+                        if (-not (Test-Path "C:\temp\certreboot2.txt")) {
+                            Write-Verbose "Rebooting $_"
+                            New-Item "C:\temp\certreboot2.txt"
+                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                            $global:DSCMachineStatus = 1
+                            return
+                        }
+                    }
+                }
+            }
+        }
+
+        try {
+            $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+            Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
+            start-sleep -seconds 60
+        }
+        catch {}
+        if (-not $this.PermissionsOnly) {
+            $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+            while ($count -eq 0) {
+                try {
+                    Write-Verbose "ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop"
+                    ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop
+                }
+                catch {
+                    try {
+                        Start-Service -Name CertSvc
+                        Start-Sleep -Seconds 10
+                        Write-Verbose "$_"
+                        Write-Verbose "PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName"
+                        PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName
+                    }
+                    catch {
+                        # Reboot
+                        Write-Verbose "$_"
+                        if (-not (Test-Path "C:\temp\certreboot.txt")) {
+                            Write-Verbose "Rebooting $_"
+                            New-Item "C:\temp\certreboot.txt"
+                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                            $global:DSCMachineStatus = 1
+                            return
+                        }
+                        throw
+                    }
+                }
+                $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+            }
+        }
+    }
+
+    [bool] Test() {
+
+
+        if ($this.PermissionsOnly) {
+            return $false
+        }
+        $_TemplateName = $this.TemplateName
+        try {
+            Write-Verbose " -- ADCSAdministration\get-Catemplate"
+            $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+        }
+        catch {
+            Write-Verbose "$_"
+            Write-Verbose " -- Restart-Service -Name CertSvc"
+            $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+            Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+            Restart-Service -Name CertSvc
+            start-sleep -seconds 60
+            Write-Verbose " -- ADCSAdministration\get-Catemplate"
+            $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+        }
+        if ($count -gt 0) {
+            return $true
+        }
+
+        return $false
+    }
+
+    [AddCertificateTemplate] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class AddCertificateToIIS {
+    [DscProperty(Key)]
+    [string]$FriendlyName
+
+    [void] Set() {
+
+        $_FriendlyName = $this.FriendlyName
+
+
+        $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+        if (-not $cert) {
+            throw "Could not find cert with friendly Name $_FriendlyName"
+        }
+        try {
+            netsh http delete sslcert ipport=0.0.0.0:443
+        }
+        catch {}
+
+
+        #netsh http add sslcert ipport=0.0.0.0:443 certhash=$($cert.Thumbprint) appid='{4dc3e181-e14b-4a21-b022-59fc669b0914}' certstorename=My verifyclientcertrevocation=enable
+        #New-WebBinding -Name "Default Web Site" -Protocol https -Port 443 -IPAddress *
+
+
+        $webBinding = (Get-WebBinding -Name "Default Web Site" -Port 443 -Protocol "https")
+        if (-not $webBinding) {
+            New-WebBinding -Name "Default Web Site" -IPAddress "*" -Port 443  -Protocol "https"
+        }
+        $webBinding = (Get-WebBinding -Name "Default Web Site" -Port 443 -Protocol "https")
+        if (-not $webBinding) {
+            throw "Could not create webbinding for 443"
+        }
+        $webBinding.AddSslCertificate($($cert.Thumbprint), "my")
+
+    }
+
+    [bool] Test() {
+
+        try {
+            $_FriendlyName = $this.FriendlyName
+            $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+            $certdata = netsh http show sslcert ipport=0.0.0.0:443
+            $thumprint = $($cert.Thumbprint).ToLower()
+            if ($certdata.ToLower() -match $thumprint ) {
+                return $true
+            }
+        }
+        catch {
+            Write-Verbose "$_"
+            return $false
+        }
+
+        return $false
+    }
+
+    [AddCertificateToIIS] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class AddToAdminGroup {
+    [DscProperty(Key)]
+    [string]$DomainName
+
+    [DscProperty()]
+    [System.Management.Automation.PSCredential] $RemoteCreds
+
+    [DscProperty(Mandatory)]
+    [string[]] $AccountNames
+
+    [DscProperty(Key)]
+    [string] $TargetGroup
+    [void] Set() {
+
+
+        $retries = 30
+        $tryno = 0
+        while ($tryno -le $retries) {
+            $tryno++
+            try {
+                if ($this.DomainName -ne "NONE") {
+                    foreach ($AccountName in $this.AccountNames) {
+
+                        if ($AccountName.EndsWith("$")) {
+                            Write-Verbose "Adding Computer $($this.DomainName)\$AccountName"
+                            $user1 = Get-ADComputer -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
+                        }
+                        else {
+                            Write-Verbose "Adding User  $($this.DomainName)\$AccountName"
+                            $user1 = Get-ADuser -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
+                        }
+                        Add-ADGroupMember -Identity $this.TargetGroup -Members $user1
+                    }
+                }
+                else {
+                    foreach ($AccountName in $this.AccountNames) {
+
+                        if ($AccountName.EndsWith("$")) {
+                            Write-Verbose "Adding Computer $AccountName"
+                            $user2 = Get-ADComputer -Identity $AccountName
+                        }
+                        else {
+                            Write-Verbose "Adding User $AccountName"
+                            $user2 = Get-ADuser -Identity $AccountName
+                        }
+                        Add-ADGroupMember -Identity $this.TargetGroup -Members $user2
+                    }
+                }
+            }
+            catch {
+                Write-Verbose $_
+                start-sleep -seconds 60
+                continue
+            }
+            Write-Verbose "Done."
+            return
+        }
+
+    }
+
+    [bool] Test() {
+
+        return $false
+    }
+
+    [AddToAdminGroup] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class RunPkiSync {
+    [DscProperty(Key)]
+    [string]$SourceForest
+
+    [DscProperty(Key)]
+    [string]$TargetForest
+    [void] Set() {
+
+
+        while ($true) {
+
+            try {
+                Write-Verbose "Attempting to connect to $($this.TargetForest)"
+                $TargetForestContext = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext Forest, $this.TargetForest
+                $TargetForObj = [System.DirectoryServices.ActiveDirectory.Forest]::GetForest($TargetForestContext)
+                if (-not $TargetForObj) {
+                    throw "Could not connect to $($this.TargetForest)"
+                }
+
+            }
+            catch {
+                ipconfig /flushdns
+                gpupdate.exe /force
+                Write-Verbose $_
+                Start-Sleep -Seconds 30
+                continue
+            }
+            try {
+                Write-Verbose "Attempting to connect to $($this.SourceForest)"
+                $SourceForestContext = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext Forest, $this.SourceForest
+                $SourceForObj = [System.DirectoryServices.ActiveDirectory.Forest]::GetForest($SourceForestContext)
+                if (-not $SourceForObj) {
+                    throw "Could not connect to $($this.SourceForest)"
+                }
+            }
+            catch {
+                ipconfig /flushdns
+                gpupdate.exe /force
+                Write-Verbose $_
+                Start-Sleep -Seconds 30
+                continue
+            }
+
+            break
+        }
+
+
+        C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest -targetforest $this.TargetForest -f
+    }
+
+    [bool] Test() {
+
+        return $false
+    }
+
+    [RunPkiSync] Get() {
+        return $this
+    }
+
+}
+
+[DscResource()]
+class GpUpdate {
+    [DscProperty(Key)]
+    [string]$Run
+
+    [void] Set() {
+
+        gpupdate.exe /force
+    }
+
+    [bool] Test() {
+
+        return $false
+    }
+
+    [GpUpdate] Get() {
         return $this
     }
 

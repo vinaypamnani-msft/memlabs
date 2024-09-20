@@ -1,3 +1,4 @@
+#Remove-lab.ps1
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true, ParameterSetName = "Domain")]

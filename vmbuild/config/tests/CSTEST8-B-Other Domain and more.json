@@ -1,0 +1,105 @@
+{
+  "vmOptions": {
+    "prefix": "CSB-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "cstest8b.com",
+    "domainNetBiosName": "cstest8b",
+    "adminName": "admin",
+    "network": "10.8.8.0",
+    "timeZone": "UTC",
+    "locale": "en-US"
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "DC1",
+      "role": "DC",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": false,
+      "InstallCA": false,
+      "ForestTrust": "cstest8.com",
+      "externalDomainJoinSiteCode": "PRI"
+    },
+    {
+      "vmName": "W10CLIENT2",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 Latest (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user1"
+    },
+    {
+      "vmName": "W11CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 22H2",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user3"
+    },
+    {
+      "vmName": "W11CLIENT2",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 Latest",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user2"
+    },
+    {
+      "vmName": "W11CLIENT3",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 RTM",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "useFakeWSUSServer": true,
+      "domainUser": "user4"
+    },
+    {
+      "vmName": "W19SERVER1",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2019",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true
+    },
+    {
+      "vmName": "W22SERVER1",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true
+    },
+    {
+      "vmName": "WSUS1",
+      "role": "WSUS",
+      "operatingSystem": "Server 2022 21H2 February 2024",
+      "memory": "6GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "wsusContentDir": "E:\\WSUS",
+      "additionalDisks": {
+        "E": "250GB",
+        "F": "200GB"
+      },
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "F:\\SQL",
+      "sqlPort": "1433"
+    }
+  ]
+}

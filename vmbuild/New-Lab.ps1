@@ -1,3 +1,4 @@
+#New-Lab.ps1
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
@@ -13,6 +14,7 @@ param (
             $ConfigNames = ForEach ($Path in $ConfigPaths) {
                 if ($Path.Name -eq "_storageConfig.json") { continue }
                 if ($Path.Name -eq "_storageConfig2022.json") { continue }
+                if ($Path.Name -eq "_storageConfig2024.json") { continue }
                 If (Test-Path $Path) {
                     (Get-ChildItem $Path).BaseName
                 }
@@ -35,21 +37,42 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 8)]
+    [ValidateRange(2, 9)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 8)]
+    [ValidateRange(2, 9)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
     [Parameter(Mandatory = $false, HelpMessage = "Best not to use this. Skips configuration validation.")]
-    [switch]$SkipValidation
+    [switch]$SkipValidation,
+    [Parameter(Mandatory = $false, HelpMessage = "Migrate old VMs")]
+    [switch]$Migrate
 
 )
+
+
+$desktopPath = [Environment]::GetFolderPath("CommonDesktop")
+$shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutLocation)
+$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+
+$shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
+$shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
+$shortcut.Save()
+
+$bytes = [System.IO.File]::ReadAllBytes($shortcutLocation)
+# Set byte 21 (0x15) bit 6 (0x20) ON
+$bytes[0x15] = $bytes[0x15] -bor 0x20
+[System.IO.File]::WriteAllBytes($shortcutLocation, $bytes)
 
 # Tell common to re-init
 if ($Common.Initialized) {
     $Common.Initialized = $false
+}
+
+if ($Migrate) {
+    $StopPhase = 2
 }
 
 $NewLabsuccess = $false
@@ -92,8 +115,6 @@ if (-not $NoWindowResize.IsPresent) {
     }
 }
 
-Set-PS7ProgressWidth
-
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
@@ -105,6 +126,10 @@ if (-not $Common.PS7) {
     Write-Log "You must use PowerShell version 7.1 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
     return
 }
+
+Set-PS7ProgressWidth
+
+New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "WinREVersion" -PropertyType String -Value "10.0.20348.2201" -Force | Out-Null
 
 if (-not $Common.DevBranch) {
     Clear-Host
@@ -152,6 +177,10 @@ function Write-Phase {
         8 {
             Write-Log "Phase $Phase - Setup ConfigMgr" -Activity
         }
+
+        9 {
+            Write-Log "Phase $Phase - Setup Multi-Forest ConfigMgr" -Activity
+        }
     }
 }
 
@@ -182,7 +211,7 @@ try {
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
     ### Run maintenance
-    if (!$Configuration) {
+    if (-not $Configuration) {
         Start-Maintenance
     }
 
@@ -212,8 +241,8 @@ try {
     Write-Log "### VALIDATE" -Activity
 
     # Load config
-    if ($Configuration) {
-
+    if ($Configuration) {       
+        $ConfigurationShort = Split-Path $Configuration -LeafBase
         Write-Log "Validating specified configuration: $Configuration"
         $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
@@ -277,7 +306,14 @@ try {
         Write-Host
         return
     }
-
+ #Create VM Mutexes
+ $mtx = New-Object System.Threading.Mutex($false, $mutexName)
+ $global:mutexes = @()
+ foreach ($vm in $deployConfig.virtualMachines) {
+     $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
+     write-log -Verbose "Created Mutex $($vm.vmName)"
+     $global:mutexes += $mtx
+ }
     # Skip if any VM in progress
     if ($runPhase1 -and (Test-InProgress -DeployConfig $deployConfig)) {
         Write-Host
@@ -295,14 +331,14 @@ try {
 
     Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
 
-    if ($StartPhase -and $StartPhase -le 2) {
+    if (-not $StartPhase -or ($StartPhase -and $StartPhase -le 2)) {
         # Download tools
         $success = Get-Tools -WhatIf:$WhatIf
         if (-not $success) {
             Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
         }
     }
-
+ 
     if ($runPhase1) {
         # Download required files
         $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
@@ -410,7 +446,7 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 8
+    $maxPhase = 9
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -476,13 +512,24 @@ try {
             if ($currentPhase -eq 8) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
             }
         }
         Write-Host
     }
     else {
         $currentPhase = 9
+        foreach ($mutex in $global:mutexes) {
+            try{
+            [void]$mutex.ReleaseMutex()
+            } catch{}
+            try{
+            [void]$mutex.Dispose()
+            } catch{}
+
+        }
+        $global:mutexes = @()
+
         Start-Maintenance -DeployConfig $deployConfig
 
         $updateExistingRequired = $false
@@ -515,6 +562,16 @@ catch {
 }
 finally {
 
+    foreach ($mutex in $global:mutexes) {
+        try{
+        [void]$mutex.ReleaseMutex()
+        } catch{}
+        try{
+        [void]$mutex.Dispose()
+        } catch{}
+
+    }
+    $global:mutexes = @()
 
     if ($enableDebug) {
         Write-Host 'Config Stored in $global:DebugConfig'
@@ -532,7 +589,7 @@ finally {
             if ($currentPhase -eq 8) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
             }
         }
         Write-Host
@@ -568,7 +625,7 @@ finally {
         Write-Host
 
         foreach ($vmname in $global:vm_remove_list) {
-            Remove-VirtualMachine -VmName $vmname -Force
+            Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force
         }
 
         Get-Job | Stop-Job

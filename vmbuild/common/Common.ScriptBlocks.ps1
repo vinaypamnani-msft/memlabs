@@ -15,6 +15,7 @@ $global:VM_Create = {
         $currentItem = $using:currentItem
         $azureFileList = $using:Common.AzureFileList
         $Phase = $using:Phase
+        $Migrate = $using:Migrate
 
         if (-not ($Common.LogPath)) {
             Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
@@ -52,6 +53,9 @@ $global:VM_Create = {
         # Set domain name, depending on whether we need to create new VM or use existing one
         if (-not $createVM -or ($currentItem.role -in ("DC", "BDC")) ) {
             $domainName = $deployConfig.parameters.DomainName
+            if ($currentItem.domain) {
+                $domainName = $currentItem.domain
+            }
         }
         else {
             $domainName = "WORKGROUP"
@@ -109,6 +113,7 @@ $global:VM_Create = {
                 SwitchName      = $vmSwitch.Name
                 tpmEnabled      = $tpmEnabled
                 DeployConfig    = $deployConfig
+                Migrate         = $Migrate
             }
 
             if ($currentItem.role -eq "OSDClient") {
@@ -133,23 +138,25 @@ $global:VM_Create = {
                 return
             }
 
-            if ($currentItem.role -in ("OSDClient", "Linux")) {
-                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
-                return
-            }
-            Write-Progress2 "Waiting for OOBE" -Status "Starting" -percentcomplete 0 -force
-            start-sleep -seconds 3
-            # Wait for VM to finish OOBE
-            $oobeTimeout = 25
-            if ($deployConfig.virtualMachines.Count -gt 3) {
-                $oobeTimeout = $deployConfig.virtualMachines.Count + $oobeTimeout
-            }
+            if (-not $Migrate) {
+                if ($currentItem.role -in ("OSDClient", "Linux")) {
+                    New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
+                    return
+                }
+                Write-Progress2 "Waiting for OOBE" -Status "Starting" -percentcomplete 0 -force
+                start-sleep -seconds 3
+                # Wait for VM to finish OOBE
+                $oobeTimeout = 25
+                if ($deployConfig.virtualMachines.Count -gt 3) {
+                    $oobeTimeout = $deployConfig.virtualMachines.Count + $oobeTimeout
+                }
 
-            $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
-            if (-not $connected) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
-                return
+                $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
+                if (-not $connected) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
+                    return
+                }
             }
         }
         else {
@@ -224,6 +231,73 @@ $global:VM_Create = {
             }
         }
 
+        if ($Migrate) {
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Set-Disk -IsOffline 0 }
+            if ($result.ScriptBlockFailed) {
+                start-sleep -seconds 60
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Set-Disk -IsOffline 0 }
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed set-disk to online. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Where-Object { $_.IsReadOnly } | Set-Disk -IsReadOnly 0 }
+            if ($result.ScriptBlockFailed) {
+                start-sleep -seconds 60
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Where-Object { $_.IsReadOnly } | Set-Disk -IsReadOnly 0 }
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed set-disk to read-write. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
+            }
+
+            $remove_old_nics_Scriptblock = {
+                $Devs = Get-PnpDevice -class net | Where-Object Status -eq Unknown | Select-Object FriendlyName, InstanceId
+
+                ForEach ($Dev in $Devs) {
+                    if ($Dev.InstanceId -ne $null) {
+                        Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
+                        $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
+                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force}
+                    }
+                }
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $remove_old_nics_Scriptblock
+            if ($result.ScriptBlockFailed) {
+                start-sleep -seconds 10
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $remove_old_nics_Scriptblock
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to remove old nics. $($result.ScriptBlockOutput)" -Warning -OutputStream                    
+                }
+            }
+
+            if ($currentItem.role -eq "WorkgroupMember" -or $currentItem.role -eq "InternetClient" -or $currentItem.role -eq "AADClient") {
+                $netProfile = 1
+            }
+            else {
+                $netProfile = 2
+            } # 1 = Private, 2 = Domain
+
+            $Trust_Ethernet = {
+                param ($netProfile)
+                Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse `
+                | ForEach-Object { $_.PSChildName } `
+                | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value $netProfile }
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Trust_Ethernet -ArgumentList $netProfile -DisplayName "Set Ethernet as Trusted"
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set Ethernet as Trusted. $($result.ScriptBlockOutput)" -Warning
+            }
+            
+
+
+            Stop-VM2 -Name $currentItem.vmName
+            Start-vm2 -Name $currentItem.vmName
+        }
+
         # Set PS Execution Policy (required on client OS)
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
         if ($result.ScriptBlockFailed) {
@@ -251,8 +325,12 @@ $global:VM_Create = {
             Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
         }
 
+        $Fix_WorkGroupMachines = {
+            New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "LocalAccountTokenFilterPolicy" -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+        }
         # Add TLS keys, without these upgradeToLatest can fail when accessing the new endpoints that require TLS 1.2
         $Set_TLS12Keys = {
+            param([String]$domainName)
 
             $netRegKey = "HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319"
             if (Test-Path $netRegKey) {
@@ -267,6 +345,21 @@ $global:VM_Create = {
                 New-ItemProperty -Path $netRegKey32 -Name "SchUseStrongCrypto" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
                 New-ItemProperty -Path $netRegKey32 -Name "MemLabsComment" -Value "SystemDefaultTlsVersions and SchUseStrongCrypto set by MemLabs" -PropertyType STRING -Force -ErrorAction SilentlyContinue | Out-Null
             }
+
+            # Set the domain to be included in intranet sites for IE/Edge for kerberos to work
+            try {
+                if ($domainName -and ($domainName -ne "WORKGROUP")) {
+                    New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains" -Force
+                    New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\$domainName" -Force
+                    Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains" -Name "@" -Value "" -Force
+                    New-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\$domainName" -Name "*" -Value 1 -PropertyType DWORD -Force
+                }
+                New-Item -Path "HKLM:\Software\Policies\Microsoft\Edge" -Force
+                New-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Edge" -Name "HideFirstRunExperience" -Value 1 -PropertyType DWORD -Force
+                New-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Edge" -Name "AutoImportAtFirstRun " -Value 4 -PropertyType DWORD -Force
+            }
+            catch {}
+
         }
 
         if ($createVM) {
@@ -296,14 +389,22 @@ $global:VM_Create = {
             }
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting TLS 1.2 registry keys."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Set_TLS12Keys -DisplayName "Setting TLS 1.2 Registry Keys"
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Set_TLS12Keys -DisplayName "Setting TLS 1.2 Registry Keys" -ArgumentList $domainNameForLogging
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set TLS 1.2 Registry Keys." -Warning -OutputStream
             }
 
+            if ($currentItem.role -in "WorkgroupMember", "InternetClient") {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Fix_WorkGroupMachines"
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_WorkGroupMachines -DisplayName "Fix_WorkGroupMachines"
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed Fix_WorkGroupMachines" -Warning -OutputStream
+                }
+            }
             # Set vm note
             if (-not $skipVersionUpdate) {
-                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
+                $inProgress = (-not $Migrate)
+                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $inProgress
             }
         }
 
@@ -406,6 +507,9 @@ $global:VM_Config = {
         # Set domain name, depending on whether we need to create new VM or use existing one
         if ($currentItem.hidden -or ($currentItem.role -in ("DC", "BDC")) -or $Phase -gt 2) {
             $domainName = $deployConfig.parameters.DomainName
+            if ($currentItem.domain) {
+                $domainName = $currentItem.domain
+            }
         }
         else {
             $domainName = "WORKGROUP"
@@ -466,11 +570,21 @@ $global:VM_Config = {
 
         Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+        $result = Invoke-VmCommand -AsJob -TimeoutSeconds 60 -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
         if ($result.ScriptBlockFailed) {
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+            Write-Progress2 $Activity -Status "Retry Stopping DSCs" -percentcomplete 5 -force
+            $result = Invoke-VmCommand -AsJob -TimeoutSeconds 60 -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
             if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
+                Write-Progress2 $Activity -Status "Restarting VM then Stopping DSCs" -percentcomplete 5 -force
+                Stop-vm2 -name $currentItem.vmName -force
+                Start-Sleep -Seconds 10
+                start-vm2 -name  $currentItem.vmName
+                Write-Progress2 $Activity -Status "Restarting VM then Stopping DSCs" -percentcomplete 5 -force
+                start-sleep -seconds 30
+                $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
+                }
             }
         }
 
@@ -787,8 +901,12 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -DisplayName "Expand_Archive ScriptBlock"
             if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
+                start-sleep -Seconds 60
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -DisplayName "Expand_Archive ScriptBlock"
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
             }
             Write-Progress2 $Activity -Status "Installing Modules" -percentcomplete 55 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Installing DSC Modules."
@@ -932,6 +1050,7 @@ $global:VM_Config = {
                 # Set current role
                 switch (($currentItem.role)) {
                     "DC" { $dscRole += "DC" }
+                    "OtherDC" { $dscRole += "OtherDC" }
                     "BDC" { $dscRole += "BDC" }
                     "WorkgroupMember" { $dscRole += "WorkgroupMember" }
                     "AADClient" { $dscRole += "WorkgroupMember" }
@@ -1009,6 +1128,11 @@ $global:VM_Config = {
                 $adminCreds = $using:Common.LocalAdmin
                 $Phase = $using:Phase
                 $dscRole = "Phase$Phase"
+
+
+                switch (($currentItem.role)) {
+                    "OtherDC" { return }
+                }
 
                 # Define DSC variables
                 $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole).ps1"
@@ -1102,6 +1226,7 @@ $global:VM_Config = {
                 }
 
                 # Compile config, to create MOF
+                $cd
                 "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
                 & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $credsForDSC -ConfigurationData $cd -OutputPath $dscConfigPath
             }
@@ -1143,10 +1268,38 @@ $global:VM_Config = {
                     # Use domainCreds instead of local Creds for multi-node DSC
                     #$userdomain = $deployConfig.vmOptions.domainName.Split(".")[0]
                     $userdomain = $deployConfig.vmOptions.domainNetBiosName
+
+                    if ($phase -eq 9) {
+                        $RemoteSiteServer = $deployConfig.VirtualMachines | Where-Object { $_.Hidden -and $_.Role -eq "Primary" -and $_.Domain }
+                        "Phase 9 Remote Site Server $($RemoteSiteServer.vmName) $($RemoteSiteServer.Domain)" | Out-File $log -Append
+                        if ($RemoteSiteServer) {
+                            $userdomain = $RemoteSiteServer.Domain
+                        }
+                    }
                     $user = "$userdomain\$($using:Common.LocalAdmin.UserName)"
                     $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
+                    get-job  | Stop-Job | out-null
+                    get-job  | Remove-Job | out-null
+
                     "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
                     Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
+
+                    $wait = Wait-Job -Timeout 30 -name $currentItem.vmName
+                    $job = get-job -name $currentItem.vmName
+                    "Job.State $($job.State)" | Out-File $log -Append
+                    if ($job.State -ne "Running") {
+                        $job | Out-File $log -Append
+                        $data = Receive-Job -name $currentItem.vmName
+                        if ($wait.State -eq "Completed") {
+                            $data | Out-File $log -Append
+                        }
+                        else {
+                            $data | Out-File $log -Append
+                            Write-Error $data
+                            return $data
+                        }
+                    }
+
                 }
             }
             catch {
@@ -1302,7 +1455,8 @@ $global:VM_Config = {
                             $dscFails = 0
                         }
                         continue
-                    }else {
+                    }
+                    else {
                         $dscFails = 0
                     }
 
@@ -1372,13 +1526,24 @@ $global:VM_Config = {
                                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: ADServerDownException from VM. Restarting the VM" -Warning
                                         Stop-VM2 -name $currentItem.vmName
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Stopped"
-
+                                        Start-Sleep -Seconds 20
                                         Start-VM2 -Name $currentItem.vmName
-                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 60 seconds to check status."
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 300 seconds to check status."
 
-                                        Start-Sleep -Seconds 300
+                                        Start-Sleep -Seconds 100
+
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 200 seconds to check status."
+
+                                        Start-Sleep -Seconds 100
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 100 seconds to check status."
+
+                                        Start-Sleep -Seconds 90
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 10 seconds to check status."
+
+                                        Start-Sleep -Seconds 10
                                         $state = Get-VM2 -Name $currentItem.vmName
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Current State: $($state.state)"
+                                        Continue
                                     }
                                     if (-not $failure) {
                                         continue
@@ -1542,6 +1707,12 @@ $global:VM_Config = {
 
                     # Check if complete
                     $complete = $status.ScriptBlockOutput -eq "Complete!"
+                    if (-not $complete) {
+                        $complete = $status.ScriptBlockOutput -eq "Setting up ConfigMgr. Status: Complete!"
+                    }
+                    if (-not $complete) {
+                        #$complete = ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -eq "Success")
+                    }
 
                     $bailEarly = $false
                     if ($complete) {
@@ -1631,6 +1802,20 @@ $global:VM_Config = {
             }
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
+
+            $disable_AutomaticUpdatesFakeWSUS = {
+                New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "WUServer" -Type String -Value "http://localhost" -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "WUStatusServer" -Type String -Value "http://localhost" -Force
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "UseWUServer" -Type Dword -Value 1 -Force
+            }
+
+            if ($currentItem.useFakeWSUSServer) {
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdatesFakeWSUS -DisplayName "Use Fake WSUS Server"
+            }
+            else {
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
+            }
         }
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed

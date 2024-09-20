@@ -20,7 +20,28 @@ function Start-Maintenance {
 
     # Filter in-progress
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
-    $vmCount = ($vmsNeedingMaintenance | Measure-Object).Count
+    $newVmsNeedingMaintenance = @()
+    foreach ($vm in $vmsNeedingMaintenance) {
+        $mutexName = $vm.vmName
+
+        try {
+            $Mutex = [System.Threading.Mutex]::OpenExisting($MutexName)
+        }
+        catch {
+            Write-Log -Verbose "Mutex $mutexName does not exist.. VM not in use."
+            #Mutex does not exist.
+            $newVmsNeedingMaintenance = $newVmsNeedingMaintenance + $vm
+            continue
+        }
+        if ($Mutex) {
+            Write-Log -Verbose "Mutex $mutexName exists.. VM in use."
+            try {
+                [void]$Mutex.ReleaseMutex()
+            }
+            catch {}
+        }
+    }
+    $vmCount = ($newVmsNeedingMaintenance | Measure-Object).Count
     $countNotNeeded = $allVMs.Count - $vmCount
 
     $text = "Performing maintenance"
@@ -29,7 +50,7 @@ function Start-Maintenance {
 
     if ($applyNewOnly -eq $false) {
         if ($vmCount -gt 0) {
-            $response = Read-YesorNoWithTimeout -Prompt "$($vmsNeedingMaintenance.Count) VM(s) [$($vmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
+            $response = Read-YesorNoWithTimeout -Prompt "$($newVmsNeedingMaintenance.Count) VM(s) [$($newVmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
             if ($response -eq "n") {
                 return
             }
@@ -57,7 +78,7 @@ function Start-Maintenance {
 
     # Perform maintenance... run it on DC's first, rest after.
     $failedDomains = @()
-    foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
+    foreach ($vm in $newVmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
         $i++
         Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
         $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
@@ -78,7 +99,7 @@ function Start-Maintenance {
     }
 
     # Perform maintenance on other VM's
-    foreach ($vm in $vmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
+    foreach ($vm in $newVmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
         $i++
         if ($maintenanceDoNotStart) {
             if ($vm.State -ne "Running") {
@@ -740,8 +761,8 @@ function Get-VMFixes {
         }
 
         # Action
-        $taskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-        $taskArgs = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
+        $taskCommand = "cmd"
+        $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
         $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
 
         # Trigger
@@ -751,7 +772,7 @@ function Get-VMFixes {
         $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
 
         # Task
-        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Disable IE Ehannced Security"
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Disable IE Enhanced Security"
 
         Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -778,6 +799,55 @@ function Get-VMFixes {
         InjectFiles       = @("Disable-IEESC.ps1") # must exist in filesToInject\staging dir
     }
 
+
+    $Fix_EnableLogMachine = {
+
+        $taskName = "EnableLogMachine"
+        $filePath = "$env:systemdrive\staging\Enable-LogMachine.ps1"
+
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
+        }
+
+        # Action
+        $taskCommand = "cmd"
+        $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
+        $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
+
+        # Trigger
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+
+        # Principal
+        $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
+
+        # Task
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Enable Log Machine"
+
+        Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+        if ($null -ne $task) {
+            return $true
+        }
+        else {
+            return $false
+        }
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-EnableLogMachine"
+        FixVersion        = "240307"
+        AppliesToThisVM   = $false
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_EnableLogMachine
+        RunAsAccount      = $vmNote.adminName
+        InjectFiles       = @("Enable-LogMachine.ps1") # must exist in filesToInject\staging dir
+    }
 
     $Fix_AccountExpiry = {
 
@@ -811,7 +881,7 @@ function Get-VMFixes {
 
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_LocalAdminAccount"
-        FixVersion        = "230927"
+        FixVersion        = "240710"
         AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
@@ -821,7 +891,42 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_LocalAdminAccount
         ArgumentList      = @($Common.LocalAdmin.GetNetworkCredential().Password)
     }
+    $Fix_ActivateWindows = {
 
+        $atkms = "azkms.core.windows.net:1688"
+        $winp = "W269N-WFGWX-YVC9B-4J6C9-T83GX"
+        $wine = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
+        $cosname = (Get-WmiObject -Class Win32_OperatingSystem).Name
+        
+        if ($cosname -like "*Pro*") {
+            $key = $winp
+        }
+        if ($cosname -like "*Enterprise*") {
+            $key = $wine
+        }
+        
+        if ($key) {
+            cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms $atkms > $null    
+            Start-Sleep -Seconds 5        
+            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $key > $null
+            Start-Sleep -Seconds 5
+            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ato > $null
+        }
+        return $true
+    }
+        
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix_ActivateWindows"
+        FixVersion        = "240713"
+        AppliesToThisVM   = $false
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @('DomainMember', 'WorkgroupMember', "InternetClient")
+        NotAppliesToRoles = @()
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_ActivateWindows
+        RunAsAccount      = $vmNote.adminName
+    }
     # ========================
     # Determine applicability
     # ========================

@@ -146,7 +146,9 @@ function Install-DP {
         [string]
         $ServerFQDN,
         [string]
-        $ServerSiteCode
+        $ServerSiteCode,
+        [bool]
+        $usePKI = $false
     )
 
     $i = 0
@@ -162,7 +164,7 @@ function Install-DP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
-            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode *>&1 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         }
@@ -173,13 +175,33 @@ function Install-DP {
         if (-not $dpinstalled) {
             Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role."
             $Date = [DateTime]::Now.AddYears(30)
-            #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
-            Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date | Out-File $global:StatusLog -Append
+            #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date *>&1 | Out-File $global:StatusLog -Append
+            if ($usePKI) {
+                $CertPath = "C:\temp\ConfigMgrClientDistributionPointCertificate.pfx"
+                if (Test-Path $CertPath) {
+                    $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
+                    if (Test-Path $CertAuth) {
+                        $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
+                        "Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force" *>&1 | Out-File $global:StatusLog -Append
+                        Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force *>&1 | Out-File $global:StatusLog -Append
+                    }
+                    else {
+                        "Could Not find $CertAuth" *>&1 | Out-File $global:StatusLog -Append
+                    }
+                }
+                else {
+                    "Could Not find $CertPath" *>&1 | Out-File $global:StatusLog -Append
+                }
+            }
+            else {
+                Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force *>&1 | Out-File $global:StatusLog -Append
+            }
             Start-Sleep -Seconds 60
         }
         else {
             Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
             $dpinstalled = $true
+
         }
 
         if ($i -gt 10) {
@@ -200,7 +222,9 @@ function Install-PullDP {
         [string]
         $ServerSiteCode,
         [string]
-        $SourceDPFQDN
+        $SourceDPFQDN,
+        [bool]
+        $usePKI = $false
     )
 
     $i = 0
@@ -216,7 +240,7 @@ function Install-PullDP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
-            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode *>&1 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         }
@@ -227,7 +251,26 @@ function Install-PullDP {
         if (-not $dpinstalled) {
             Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role as a Pull DP, with Source DP $SourceDPFQDN."
             $Date = [DateTime]::Now.AddYears(30)
-            Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN
+            if ($usePKI) {
+                $CertPath = "C:\temp\ConfigMgrClientDistributionPointCertificate.pfx"
+                if (Test-Path $CertPath) {
+                    $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
+                    if (Test-Path $CertAuth) {
+                        $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
+                        Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificatePath $CertPath -CertificatePassword $certPass -EnablePullDP -SourceDistributionPoint $SourceDPFQDN -Force *>&1 | Out-File $global:StatusLog -Append
+                    }
+                    else {
+                        "Could Not find $CertAuth" *>&1 | Out-File $global:StatusLog -Append
+                    }
+                }
+                else {
+                    "Could Not find $CertPath" *>&1 | Out-File $global:StatusLog -Append
+                }
+            }
+            else {
+                Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN -Force *>&1 | Out-File $global:StatusLog -Append
+
+            }
             Start-Sleep -Seconds 60
         }
         else {
@@ -250,7 +293,9 @@ function Install-MP {
         [string]
         $ServerFQDN,
         [string]
-        $ServerSiteCode
+        $ServerSiteCode,
+        [bool]
+        $UsePKI = $false
     )
 
     $i = 0
@@ -263,7 +308,7 @@ function Install-MP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $MPFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode *>&1 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
         }
@@ -271,7 +316,12 @@ function Install-MP {
         $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
         if (-not $mpinstalled) {
             Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
-            Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http | Out-File $global:StatusLog -Append
+            if ($UsePKI) {
+                Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Https -EnableSSL *>&1 | Out-File $global:StatusLog -Append
+            }
+            else {
+                Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http *>&1 | Out-File $global:StatusLog -Append
+            }
             Start-Sleep -Seconds 60
         }
         else {
@@ -294,7 +344,9 @@ function Install-SUP {
         [string]
         $ServerFQDN,
         [string]
-        $ServerSiteCode
+        $ServerSiteCode,
+        [bool]
+        $usePKI = $false
     )
 
     $i = 0
@@ -306,7 +358,7 @@ function Install-SUP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode *>&1 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         }
@@ -314,7 +366,7 @@ function Install-SUP {
         $installed = Get-CMSoftwareUpdatePoint -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
             Write-DscStatus "SUP Role not detected on $ServerFQDN. Adding Software Update Point role."
-            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531 | Out-File $global:StatusLog -Append
+            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531 -WsusSSL:$usePKI *>&1 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 60
         }
         else {
@@ -391,7 +443,7 @@ function Install-SRP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode 2>&1 | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode  *>&1 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         }
@@ -399,7 +451,7 @@ function Install-SRP {
         $installed = Get-CMReportingServicePoint -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
             Write-DscStatus "Reporting Point Role not detected on $ServerFQDN. Adding Reporting Point Point role using DB Server [$SqlServerName], DB Name [$DatabaseName], UserName [$UserName]"
-            Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" 2>&1 | Out-File $global:StatusLog -Append
+            Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" *>&1 | Out-File $global:StatusLog -Append
             Start-Sleep -Seconds 30
         }
         else {
@@ -469,7 +521,7 @@ function Get-UpdatePack {
         Write-DscStatus "No update found. Running Invoke-CMSiteUpdateCheck and waiting for 2 mins..." -NoStatus
         $getupdateretrycount++
 
-        Invoke-CMSiteUpdateCheck -ErrorAction Ignore
+        Invoke-CMSiteUpdateCheck -ErrorAction Ignore *>&1 | Out-File $global:StatusLog -Append
         Start-Sleep 120
 
         $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" } # filter hotfixes

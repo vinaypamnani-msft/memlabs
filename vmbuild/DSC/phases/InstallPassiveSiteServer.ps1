@@ -156,12 +156,12 @@ foreach ($server in $siteSystems) {
 
 if ((Get-CMDistributionPoint -SiteSystemServerName $localSiteServer).count -eq 1) {
     Write-DscStatus "Removing DP Role from $localSiteServer before moving Content Library."
-    Remove-CMDistributionPoint -SiteSystemServerName $localSiteServer -Force | Out-File $global:StatusLog -Append
+    Remove-CMDistributionPoint -SiteSystemServerName $localSiteServer -Force *>&1 | Out-File $global:StatusLog -Append
 }
 
 
 Write-DscStatus "Moving Content Library to $contentLibShare for site $SiteCode"
-Move-CMContentLibrary -NewLocation $contentLibShare -SiteCode $SiteCode | Out-File $global:StatusLog -Append
+Move-CMContentLibrary -NewLocation $contentLibShare -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
 
 $i = 0
 $lastMoveProgress = 0
@@ -187,7 +187,7 @@ do {
 
     if ($moveStatus.ContentLibraryStatus -eq 3) {
         Write-DscStatus "Content Library Location empty after move. Retrying Content Library Move"
-        Move-CMContentLibrary -NewLocation $contentLibShare -SiteCode $SiteCode | Out-File $global:StatusLog -Append
+        Move-CMContentLibrary -NewLocation $contentLibShare -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
     }
 
     $lastMoveProgress = $moveStatus.ContentLibraryMoveProgress
@@ -208,8 +208,8 @@ if ($SSVM.cmInstallDir) {
 }
 Write-DscStatus "Adding passive site server on $passiveFQDN"
 try {
-    New-CMSiteSystemServer -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN | Out-File $global:StatusLog -Append
-    Add-CMPassiveSite -InstallDirectory $SMSInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite | Out-File $global:StatusLog -Append
+    New-CMSiteSystemServer -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN *>&1 | Out-File $global:StatusLog -Append
+    Add-CMPassiveSite -InstallDirectory $SMSInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite *>&1 | Out-File $global:StatusLog -Append
 }
 catch {
     Write-DscStatus "Failed to add passive site on $passiveFQDN. Error: $_" -Failure
