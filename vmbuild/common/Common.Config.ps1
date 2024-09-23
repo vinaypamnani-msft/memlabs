@@ -342,8 +342,10 @@ function Add-RemoteSQLVMToDeployConfig {
         [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
         [bool] $hidden = $true
     )
+    Write-Log -Verbose "Adding Hidden SQL to config $vmName"
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
     $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$false
+    Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.VmName -configToModify $configToModify -hidden:$hidden
     if ($remoteSQLVM.OtherNode) {
         Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.OtherNode -configToModify $configToModify -hidden:$hidden
     }
@@ -386,7 +388,8 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding SiteSystem, also add the current site server to the list.
-    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+    #$systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
     foreach ($system in $systems) {
         $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
