@@ -344,7 +344,11 @@ function Add-RemoteSQLVMToDeployConfig {
     )
     Write-Log -Verbose "Adding Hidden SQL to config $vmName"
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
-    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$false
+    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true
+    if (-not $remoteSQLVM) {
+        Write-Log "Could not get $vmName from List2" -Failure
+        return
+    }
     Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.VmName -configToModify $configToModify -hidden:$hidden
     if ($remoteSQLVM.OtherNode) {
         Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.OtherNode -configToModify $configToModify -hidden:$hidden
