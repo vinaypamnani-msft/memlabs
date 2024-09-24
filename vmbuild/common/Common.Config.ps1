@@ -346,7 +346,7 @@ function Add-RemoteSQLVMToDeployConfig {
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
     $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true
     if (-not $remoteSQLVM) {
-        Write-Log "Could not get $vmName from List2" -Failure
+        Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it doesnt, please modify the hyper-v config to reflect the new name" -Failure
         return
     }
     Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.VmName -configToModify $configToModify -hidden:$hidden
