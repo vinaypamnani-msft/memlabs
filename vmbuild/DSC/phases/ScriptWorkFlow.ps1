@@ -19,7 +19,7 @@ if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy"
 $containsPassive = $false
 $containsSecondary = $false
 
-if ($CurrentRole -eq "Primary" -and $ThisVM.hidden -and $ThisVM.domain) {
+if ($CurrentRole -eq "Primary" -and $ThisVM.hidden -and ($ThisVM.domain) -and ($ThisVm.domain -ne $deployConfig.vmOptions.DomainName)) {
     $scenario = "MultiDomain"
     Write-DscStatus "Multi Domain Scenerio"
 }

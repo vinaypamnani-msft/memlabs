@@ -970,17 +970,20 @@ function Get-Phase9ConfigurationData {
                 Role     = $vm.Role
             }
         }
-        else {
-            $newItem = @{
-                NodeName = $vm.vmName
-                Role     = $vm.Role
-            }
-        }
+        #else {
+        #    $newItem = @{
+        #        NodeName = $vm.vmName
+        #        Role     = $vm.Role
+        #    }
+        #}
         $cd.AllNodes += $newItem
         $NumberOfNodesAdded = $NumberOfNodesAdded + 1
 
     }
 
+    if (-not $MultiDomain) {
+        return
+    }
     $all = @{
         NodeName                    = "*"
         PSDscAllowDomainUser        = $true
