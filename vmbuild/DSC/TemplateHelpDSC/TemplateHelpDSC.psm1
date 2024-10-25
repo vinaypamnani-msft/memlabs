@@ -18,6 +18,12 @@ class InstallADK {
     [string] $ADKWinPEPath
 
     [DscProperty(Mandatory)]
+    [string] $ADKDownloadPath #  "https://go.microsoft.com/fwlink/?linkid=2271337"
+
+    [DscProperty(Mandatory)]
+    [string] $ADKWinPEDownloadPath #  "https://go.microsoft.com/fwlink/?linkid=2271338"
+
+    [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
     [DscProperty(NotConfigurable)]
@@ -25,19 +31,20 @@ class InstallADK {
 
     [void] Set() {
         $_adkpath = $this.ADKPath
+        $_adkWinPEpath = $this.ADKWinPEPath
+
+        $_ADKDownloadPath = $this.ADKDownloadPath
+        $_ADKWinPEDownloadPath = $this.ADKWinPEDownloadPath
+
+
+        # Use this block to download the FULL ADK, Filename: adksetup.exe
         if (!(Test-Path $_adkpath)) {
-            # $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120254" # ADK 2004 (19041)
-            $adkurl = "https://go.microsoft.com/fwlink/?linkid=2165884"   # ADK Win11
-            Start-BitsTransfer -Source $adkurl -Destination $_adkpath -Priority Foreground -ErrorAction Stop
+            Start-BitsTransfer -Source $_ADKDownloadPath -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
-
-
-        $_adkWinPEpath = $this.ADKWinPEPath
+         # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
         if (!(Test-Path $_adkWinPEpath)) {
-            # $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"  # ADK add-on (19041)
-            $adkurl = "https://go.microsoft.com/fwlink/?linkid=2166133"  # ADK Win11
-            Start-BitsTransfer -Source $adkurl -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
+            Start-BitsTransfer -Source $_ADKWinPEDownloadPath -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
         }
 
         #Install DeploymentTools
