@@ -344,7 +344,7 @@ function Add-RemoteSQLVMToDeployConfig {
     )
     Write-Log -Verbose "Adding Hidden SQL to config $vmName"
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
-    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true
+    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true
     if (-not $remoteSQLVM) {
         Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it doesnt, please modify the hyper-v config to reflect the new name" -Failure
         return
@@ -1114,12 +1114,21 @@ function Get-VMFromList2 {
         [Parameter(Mandatory = $true, HelpMessage = "vmName")]
         [object] $vmName,
         [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
-        [bool] $SmartUpdate = $true
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Get VMs from all domains")]
+        [bool] $Global = $false
     )
 
     $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate:$SmartUpdate | Where-Object { $_.vmName -eq $vmName }
     if ($vm) {
         return $vm
+    }else {
+        if ($Global) {
+            $vm = Get-List -Type VM | Where-Object {$_.vmName -eq $vmName}
+            if ($vm) {
+                return $vm
+            }
+        }
     }
 }
 

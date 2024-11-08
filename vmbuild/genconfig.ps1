@@ -1014,13 +1014,19 @@ function Select-MainMenu {
         }
         $customOptions += [ordered]@{"*V2" = "" }
         $customOptions += [ordered]@{"*VV" = "---  New Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
-        if ($global:Config.virtualMachines) {
-            $virtualMachines = @($global:config.virtualMachines | Where-Object { $_.role -in "DC", "BDC" })
-            $virtualMachines += @($global:config.virtualMachines | Where-Object { $_.role -notin "DC", "BDC" } | Sort-Object { $_.vmName })
+        try {
+            if ($global:Config.virtualMachines) {
+                $virtualMachines = @($global:Config.virtualMachines | Where-Object { $_.role -in "DC", "BDC" })
+                $virtualMachines += @($global:Config.virtualMachines | Where-Object { $_.role -notin "DC", "BDC" } | Sort-Object { $_.vmName })
 
-            if ($virtualMachines -and $global:Config.virtualMachines) {
-                $global:Config.virtualMachines = $virtualMachines
+                if ($virtualMachines -and $global:Config.virtualMachines) {
+                    $global:Config.virtualMachines = $virtualMachines
+                }
             }
+        }
+        catch {
+            write-Verbose "Exception from global:Config.virtualMachines: $($global.Config)"
+            $global:Config.virtualMachines = @()
         }
         if ($global:config.virtualMachines) {
             foreach ($virtualMachine in $global:config.virtualMachines | Where-Object { -not $_.Hidden }) {

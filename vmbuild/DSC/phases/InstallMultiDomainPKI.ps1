@@ -121,9 +121,16 @@ if (Test-Path $cm_svc_file) {
         $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
         $NetworkID = $NetworkIDBits -join '.'
         $Broadcast = $BroadcastBits -join '.'
-        New-CMBoundary -Type IPRange -Name "$DomainFullName - $network" -Value "$($NetworkID)-$($Broadcast)" *>&1 | Out-File $global:StatusLog -Append
 
-        New-CMBoundaryGroup -Name $network -DefaultSiteCode $sitecode *>&1 | Out-File $global:StatusLog -Append
+        $sitesystems = @()
+        $sitesystems += (Get-CMDistributionPoint -SiteCode $sitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems += (Get-CMManagementPoint -SiteCode $sitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $sitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+
+        New-CMBoundary -Type IPRange -Name "$DomainFullName - $network" -Value "$($NetworkID)-$($Broadcast)" *>&1 | Out-File $global:StatusLog -Append
+        "New-CMBoundaryGroup -Name $network -DefaultSiteCode $sitecode -AddSiteSystemServerName $sitesystems" | Out-File $global:StatusLog -Append
+        New-CMBoundaryGroup -Name $network -DefaultSiteCode $sitecode -AddSiteSystemServerName $sitesystems *>&1 | Out-File $global:StatusLog -Append
         Add-CMBoundaryToGroup -BoundaryName "$DomainFullName - $network" -BoundaryGroupName $network *>&1 | Out-File $global:StatusLog -Append
     }
     Write-DscStatus "Set-CMClientPushInstallation $cm_svc"

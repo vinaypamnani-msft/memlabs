@@ -1287,6 +1287,8 @@ $global:VM_Config = {
                     $wait = Wait-Job -Timeout 30 -name $currentItem.vmName
                     $job = get-job -name $currentItem.vmName
                     "Job.State $($job.State)" | Out-File $log -Append
+                    
+                    # Wait 30 seconds for job to start. If the job has not been started, or has not completed, then log an error
                     if ($job.State -ne "Running") {
                         $job | Out-File $log -Append
                         $data = Receive-Job -name $currentItem.vmName
