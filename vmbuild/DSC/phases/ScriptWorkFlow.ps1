@@ -249,7 +249,7 @@ if ($scenario -eq "Hierarchy") {
     elseif ($CurrentRole -eq "Primary") {
 
         #Install CM and Config
-        if (-not [string]::IsNullOrWhiteSpace($ThisVM.thisParams.ParentSiteServer)) {
+        if ([string]::IsNullOrWhiteSpace($ThisVM.thisParams.ParentSiteServer)) {
             Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
             Set-Location $LogPath
