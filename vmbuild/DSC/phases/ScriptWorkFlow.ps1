@@ -249,10 +249,12 @@ if ($scenario -eq "Hierarchy") {
     elseif ($CurrentRole -eq "Primary") {
 
         #Install CM and Config
-        Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
-        Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        if (-not [string]::IsNullOrWhiteSpace($ThisVM.thisParams.ParentSiteServer)) {
+            Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
 
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
