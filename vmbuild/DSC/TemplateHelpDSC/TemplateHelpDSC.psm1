@@ -1878,8 +1878,10 @@ class RegisterTaskScheduler {
         $exists = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
         if ($exists) {
             if ($exists.state -eq "Running") {
-                return $true
+                Stop-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue                                
             }
+            Unregister-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+            return $false
         }
         return $false
     }

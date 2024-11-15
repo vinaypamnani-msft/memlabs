@@ -2457,11 +2457,17 @@ function Invoke-VmCommand {
                     else {
                         $failed = $true
                         $return.ScriptBlockFailed = $true
+                        if ($Err2.Count -ne 0) {
+                            $OutErr = "$($Err2[0].ToString().Trim())"
+                        }
+                        else {
+                            $OutErr = "Unknown Error"
+                        }
                         if (-not $SuppressLog) {
-                            Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                            Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $OutErr." -Failure
                         }
                         if ($job.State -eq "Running") {
-                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
                         }
                         Stop-Job $job | Out-Null
                         Remove-Job $job
