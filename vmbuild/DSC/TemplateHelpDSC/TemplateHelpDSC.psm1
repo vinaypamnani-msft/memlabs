@@ -326,8 +326,8 @@ class InstallODBCDriver {
     [void] Set() {
         $_odbcpath = $this.ODBCPath
         if (!(Test-Path $_odbcpath)) {
-            $odbcurl = "https://go.microsoft.com/fwlink/?linkid=2220989"
-
+            #$odbcurl = "https://go.microsoft.com/fwlink/?linkid=2220989"
+            $odbcurl = "https://go.microsoft.com/fwlink/?linkid=2280794"
             Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server from $($odbcurl)..."
 
             try {
@@ -2606,7 +2606,7 @@ class InstallFeatureForSCCM {
                 #Install-WindowsFeature BITS, BITS-IIS-Ext
                 Install-WindowsFeature -Name "Rdc"
                 Install-WindowsFeature -Name UpdateServices-UI
-                Install-WindowsFeature -Name WDS
+                #Install-WindowsFeature -Name WDS
             }
             if ($_Role -contains "Application Catalog website point") {
                 #IIS
