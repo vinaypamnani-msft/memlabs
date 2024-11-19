@@ -6110,6 +6110,7 @@ function Add-NewVMForRole {
                 install                   = $true
                 pushClientToDomainMembers = $true
                 EVALVersion               = $false
+                InstallSCP                = $true
                 UsePKI                    = $false
             }
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions

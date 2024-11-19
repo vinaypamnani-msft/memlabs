@@ -189,6 +189,10 @@ CurrentBranch=1
     # $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CM%', $CM)
 
+    if ($($deployConfig.cmOptions.InstallSCP) -eq $false) {
+        $cmini = $cmini.Replace('CloudConnector=1', "CloudConnector=0")
+    }
+
     if ($installToAO) {
         $cmini = $cmini.Replace('AGBackupShare=', "AGBackupShare=$agBackupShare")
     }
