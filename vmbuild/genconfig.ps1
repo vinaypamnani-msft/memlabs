@@ -6111,6 +6111,7 @@ function Add-NewVMForRole {
                 pushClientToDomainMembers = $true
                 EVALVersion               = $false
                 InstallSCP                = $true
+                OfflineSCP                = $false
                 UsePKI                    = $false
             }
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
