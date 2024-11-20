@@ -1807,7 +1807,7 @@ class RegisterTaskScheduler {
 
 
         $RegisterTime = [datetime]::Now
-        $waitTime = 15
+        $waitTime = 30
 
         $success = $this.RegisterTask()
         $lastRunTime = $this.GetLastRunTime()
@@ -1826,7 +1826,7 @@ class RegisterTaskScheduler {
             }
 
             if ($failCount -eq 5) {
-                Write-Verbose "Task has not ran yet after 5 Cyles. Re-Registering Task"
+                Write-Verbose "Task has not ran yet after 5 Cycles. Re-Registering Task"
                 #Unregister existing task
                 $success = $this.RegisterTask()
 
@@ -1972,8 +1972,8 @@ class RegisterTaskScheduler {
             Write-Verbose "Last Run Time is $($Lastevent.TimeCreated)"
             return $Lastevent.TimeCreated
         }
-        Write-Verbose "No Last Run Time found returning $([datetime]::Min)"
-        return [datetime]::Min
+        Write-Verbose "No Last Run Time found returning $([datetime]::MinValue)"
+        return [datetime]::MinValue
 
     }
 }
