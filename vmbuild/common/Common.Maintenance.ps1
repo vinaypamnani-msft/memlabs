@@ -829,10 +829,10 @@ function Get-VMFixes {
         $trigger = New-ScheduledTaskTrigger -Daily -At 3am
 
         # Principal
-        #$principal = New-ScheduledTaskPrincipal -UserId "LOCALSERVICE" -LogonType ServiceAccount
+        $principal = New-ScheduledTaskPrincipal -UserId "System"
 
         # Task
-        $definition = New-ScheduledTask -Action $action -Principal "System" -Trigger $trigger -Description "Enable Log Machine"
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Cleanup SQL"
 
         Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
