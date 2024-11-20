@@ -6110,7 +6110,7 @@ function Add-NewVMForRole {
                 install                   = $true
                 pushClientToDomainMembers = $true
                 EVALVersion               = $false
-                InstallSCP                = $true
+                #InstallSCP                = $true
                 OfflineSCP                = $false
                 UsePKI                    = $false
             }
