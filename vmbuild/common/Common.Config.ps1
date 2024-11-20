@@ -2253,7 +2253,10 @@ Function Show-Summary {
         else {
             Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
         }
-
+        if ($deployConfig.cmOptions.OfflineSCP) {
+            Write-OrangePoint "SCP: Will be installed in OFFLINE mode"
+        }
+       
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
             Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"

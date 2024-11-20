@@ -864,7 +864,13 @@ function get-CMOptionsSummary {
     if ($Global:Config.cmOptions.UsePKI) {
         $pki = "[PKI]"
     }
-    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki"
+    if ($Global:Config.cmOptions.OfflineSCP) {
+        $scp = "Offline"
+    }
+    else {
+        $scp = "Online"
+    }
+    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki [SCP: $scp]"
     return $Output
 }
 
