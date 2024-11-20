@@ -98,7 +98,7 @@ foreach ($client in $ClientNameList) {
     $failCount = 0
     $success = $true
     while ($machinelist -notcontains $client) {
-        if ($failCount -gt 30) {
+        if ($failCount -gt 3) {
             $success = $false
             break
         }
@@ -106,7 +106,7 @@ foreach ($client in $ClientNameList) {
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
         Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
-        Start-Sleep -Seconds 30
+        Start-Sleep -Seconds 600
         $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
         $failCount++
     }
@@ -118,7 +118,7 @@ foreach ($client in $ClientNameList) {
 
 }
 
-while ($failcount -le 30) {
+while ($failcount -le 3) {
     $failCount++
     foreach ($client in $ClientNameList) {
         $device = Get-CMDevice -Name $client
@@ -136,7 +136,7 @@ while ($failcount -le 30) {
             Write-DscStatus "$client Successfully installed"
         }
     }
-    Start-Sleep -Seconds 60
+    Start-Sleep -Seconds 600
 }
 
 # Update actions file

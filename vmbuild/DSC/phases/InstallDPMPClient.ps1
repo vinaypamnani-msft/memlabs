@@ -62,7 +62,7 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Adding cm_svc domain account as CM account"
     Start-Sleep -Seconds 5
     New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
-    Remove-Item -Path $cm_svc_file -Force -Confirm:$false
+   # Remove-Item -Path $cm_svc_file -Force -Confirm:$false
 
     # Set client push account
     Write-DscStatus "Setting the Client Push Account"
@@ -322,7 +322,7 @@ foreach ($client in $ClientNameList) {
     $failCount = 0
     $success = $true
     while ($machinelist -notcontains $client) {
-        if ($failCount -gt 30) {
+        if ($failCount -gt 3) {
             $success = $false
             break
         }
@@ -330,7 +330,7 @@ foreach ($client in $ClientNameList) {
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
         Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
-        Start-Sleep -Seconds 30
+        Start-Sleep -Seconds 600
         $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
         $failCount++
     }

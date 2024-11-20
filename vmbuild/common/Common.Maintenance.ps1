@@ -799,68 +799,19 @@ function Get-VMFixes {
         InjectFiles       = @("Disable-IEESC.ps1") # must exist in filesToInject\staging dir
     }
 
- # Disable IE Enhanced Security for all usres via Scheduled task
- $Fix_CleanupSQL = {
+    $Fix_CleanupSQL = {
 
-    $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-    if ($os) {
-        if ($os.Producttype -eq 1) {
-            return $true # workstation OS, fix not applicable
+
+        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) {
+            if ($os.Producttype -eq 1) {
+                return $true # workstation OS, fix not applicable
+            }
         }
-    }
-    else {
-        return $false # failed to determine OS type, fail
-    }
-
-    $taskName = "Disable-IEESC"
-    $filePath = "$env:systemdrive\staging\Disable-IEESC.ps1"
-
-    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($task) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
-    }
-
-    # Action
-    $taskCommand = "cmd"
-    $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
-    $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
-
-    # Trigger
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-
-    # Principal
-    $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
-
-    # Task
-    $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Disable IE Enhanced Security"
-
-    Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
-    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-
-    if ($null -ne $task) {
-        return $true
-    }
-    else {
-        return $false
-    }
-}
-
-$fixesToPerform += [PSCustomObject]@{
-    FixName           = "Fix-CleanupSQL"
-    FixVersion        = "241124"
-    AppliesToThisVM   = $false
-    AppliesToNew      = $true
-    AppliesToExisting = $true
-    AppliesToRoles    = @()
-    NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
-    DependentVMs      = @()
-    ScriptBlock       = $Fix_DisableIEESC
-    RunAsAccount      = $vmNote.adminName
-    InjectFiles       = @("Cleanup-SQL.ps1") # must exist in filesToInject\staging dir
-}
-
-    $Fix_EnableLogMachine = {
-
+        else {
+            return $false # failed to determine OS type, fail
+        }
+        
         $taskName = "MemLabs Cleanup SQL"
         $filePath = "$env:systemdrive\staging\Cleanup-SQL.ps1"
 
@@ -894,6 +845,54 @@ $fixesToPerform += [PSCustomObject]@{
         }
     }
 
+$fixesToPerform += [PSCustomObject]@{
+    FixName           = "Fix-CleanupSQL"
+    FixVersion        = "241124"
+    AppliesToThisVM   = $false
+    AppliesToNew      = $true
+    AppliesToExisting = $true
+    AppliesToRoles    = @()
+    NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
+    DependentVMs      = @()
+    ScriptBlock       = $Fix_CleanupSQL
+    RunAsAccount      = $vmNote.adminName
+    InjectFiles       = @("Cleanup-SQL.ps1") # must exist in filesToInject\staging dir
+}
+
+$Fix_EnableLogMachine = {
+
+    $taskName = "EnableLogMachine"
+    $filePath = "$env:systemdrive\staging\Enable-LogMachine.ps1"
+
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($task) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
+    }
+
+    # Action
+    $taskCommand = "cmd"
+    $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
+    $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
+
+    # Trigger
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+
+    # Principal
+    $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
+
+    # Task
+    $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Enable Log Machine"
+
+    Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+    if ($null -ne $task) {
+        return $true
+    }
+    else {
+        return $false
+    }
+}
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-EnableLogMachine"
         FixVersion        = "240307"

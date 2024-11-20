@@ -2475,6 +2475,9 @@ class OpenFirewallPortForSCCM {
             #Client Push Installation
             Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28502"
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
+            New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM Client"
+            New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM Client"
+
 
             #Remote Assistance and Remote Desktop
             New-NetFirewallRule -Program "C:\Windows\PCHealth\HelpCtr\Binaries\helpsvc.exe" -DisplayName "Remote Assistance - Helpsvc.exe" -Enabled True -Direction Outbound -Group "For SCCM Client"

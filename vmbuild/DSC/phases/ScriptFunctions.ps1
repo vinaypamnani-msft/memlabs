@@ -121,7 +121,7 @@ function Get-SMSProvider {
         $providers = Get-WmiObject -class "SMS_ProviderLocation" -Namespace "root\SMS"
         foreach ($provider in $providers) {
 
-            # Test provider
+            # Test provider Fix me \\server
             Get-WmiObject -Namespace $provider.NamespacePath -Class SMS_Site -ErrorVariable WmiErr | Out-Null
             if ($WmiErr.Count -gt 0) {
                 continue
@@ -459,7 +459,7 @@ function Install-SRP {
             $installed = $true
         }
 
-        ig ($i -eq 5) {
+        if ($i -eq 5) {
             try {
                 Get-Service -Name SMS_EXECUTIVE | Restart-Service
             }
