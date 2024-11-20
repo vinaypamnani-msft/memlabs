@@ -83,6 +83,8 @@ $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 Start-Sleep -Seconds 5
 Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
 Start-Sleep -Seconds 30
+Invoke-CMSystemDiscovery
+Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 foreach ($client in $ClientNameList) {
     Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
 }
