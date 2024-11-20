@@ -413,7 +413,8 @@ if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and
 
 if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
     $UpdateRequired = $false
-    Add-CMServiceConnectionPoint -SiteSystemServerName "$($env:computername.$DomainFullName)" -SiteCode $SiteCode -Mode Offline
+    Write-DscStatus "Installing Offline SCP"
+    Add-CMServiceConnectionPoint -SiteSystemServerName "$env:computername.$DomainFullName" -SiteCode $SiteCode -Mode Offline
 }
 
 
