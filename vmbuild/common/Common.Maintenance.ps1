@@ -811,7 +811,7 @@ function Get-VMFixes {
         else {
             return $false # failed to determine OS type, fail
         }
-        
+
         $taskName = "MemLabs Cleanup SQL"
         $filePath = "$env:systemdrive\staging\Cleanup-SQL.ps1"
 
@@ -832,7 +832,7 @@ function Get-VMFixes {
         #$principal = New-ScheduledTaskPrincipal -UserId "LOCALSERVICE" -LogonType ServiceAccount
 
         # Task
-        $definition = New-ScheduledTask -Action $action -User "System" -Trigger $trigger -Description "Enable Log Machine"
+        $definition = New-ScheduledTask -Action $action -Principal "System" -Trigger $trigger -Description "Enable Log Machine"
 
         Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
