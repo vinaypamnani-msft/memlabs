@@ -322,7 +322,12 @@ foreach ($client in $ClientNameList) {
     $failCount = 0
     $success = $true
     while ($machinelist -notcontains $client) {
-        if ($failCount -gt 3) {
+
+        if ($failCount -eq 1) {
+            Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+        }
+
+        if ($failCount -ge 2) {
             $success = $false
             break
         }
