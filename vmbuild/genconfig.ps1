@@ -3976,6 +3976,10 @@ Function Get-CMVersionMenu {
     )
 
     $valid = $false
+    $noteColor = $Global:Common.Colors.GenConfigTip
+    write-host2 -ForegroundColor $noteColor "Note: "-NoNewLine
+    write-host2 "SCP is in OFFLINE mode. Only baseline versions will be shown"
+
 
     $cmVersions = @()
     foreach ($cmVersion in $($Common.Supported.CmVersions)) {
@@ -3990,7 +3994,20 @@ Function Get-CMVersionMenu {
             }
 
             default {
-                $cmVersions += $cmVersion
+                $baselineVersion = (Get-CMBaselineVersion -CMVersion $cmVersion).baselineVersion
+                if ($Global:Config.cmOptions.OfflineSCP) {                    
+                    if ($baselineVersion -eq $cmVersion) {
+                        $cmVersions += "$cmVersion (baseline)"
+                    }
+                }
+                else {
+                    if ($baselineVersion -eq $cmVersion) {
+                    $cmVersions += "$cmVersion (baseline)"
+                    }
+                    else {
+                        $cmVersions += "$cmVersion (Upgrade from $baselineVersion)"
+                    }
+                }
             }
         }
 
