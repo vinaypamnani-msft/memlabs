@@ -4736,6 +4736,28 @@ function Get-SortedProperties {
         $sorted += "installSUP"
     }
 
+    if ($members.Name -contains "Version") {
+        $sorted += "Version"
+    }
+     if ($members.Name -contains "Install") {
+        $sorted += "Install"
+    }
+    if ($members.Name -contains "EVALVersion") {
+        $sorted += "EVALVersion"
+    }
+    if ($members.Name -contains "UsePKI") {
+        $sorted += "UsePKI"
+    }
+    if ($members.Name -contains "OfflineSCP") {
+        $sorted += "OfflineSCP"
+    }
+    if ($members.Name -contains "OfflineSUP") {
+        $sorted += "OfflineSUP"
+    }
+    if ($members.Name -contains "PushClientToDomainMembers") {
+        $sorted += "PushClientToDomainMembers"
+    }
+  
     switch ($members.Name) {
         "vmName" {  }
         "role" {  }
@@ -4767,6 +4789,14 @@ function Get-SortedProperties {
         "installDP" {}
         "installMP" {}
         "installRP" {}
+        "version" {}
+        "install" {}
+        "EVALVersion" {}
+        "UsePKI" {}
+        "OfflineSCP" {}
+        "OfflineSUP" {}
+        "pushClientToDomainMembers" {}
+
 
         Default { $sorted += $_ }
     }
@@ -6131,9 +6161,9 @@ function Add-NewVMForRole {
     if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "SiteSystem" -or $role -eq "Secondary") {
         if ($null -eq $ConfigToModify.cmOptions) {
             $newCmOptions = [PSCustomObject]@{
-                version                   = "current-branch"
-                install                   = $true
-                pushClientToDomainMembers = $true
+                Version                   = "current-branch"
+                Install                   = $true
+                PushClientToDomainMembers = $true
                 EVALVersion               = $false
                 #InstallSCP                = $true
                 OfflineSCP                = $false
