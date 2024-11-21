@@ -1122,9 +1122,10 @@ function Get-VMFromList2 {
     $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate:$SmartUpdate | Where-Object { $_.vmName -eq $vmName }
     if ($vm) {
         return $vm
-    }else {
+    }
+    else {
         if ($Global) {
-            $vm = Get-List -Type VM | Where-Object {$_.vmName -eq $vmName}
+            $vm = Get-List -Type VM | Where-Object { $_.vmName -eq $vmName }
             if ($vm) {
                 return $vm
             }
@@ -2209,7 +2210,25 @@ Function Show-Summary {
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
 
         if ($containsPS -or $containsSecondary) {
-            Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+            $versionInfoPrinted = $false
+            $baselineVersion = (Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version).baselineVersion
+            if ($deployConfig.cmOptions.OfflineSCP) {
+                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
+                    Write-RedX "ConfigMgr $($deployConfig.cmOptions.version) selected, but due to Offline SCP $baselineVersion will be installed."
+                    $versionInfoPrinted = $true
+                }
+            }
+           
+            if (-not $versionInfoPrinted) {
+                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
+                    Write-OrangePoint "ConfigMgr $baselineVersion will be installed and upgraded to $($deployConfig.cmOptions.version)"
+                }
+                else {
+                    Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+                }
+
+            }
+           
 
             $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PS) {

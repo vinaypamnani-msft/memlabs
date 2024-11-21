@@ -857,15 +857,17 @@ function get-CMOptionsSummary {
     $options = $Global:Config.cmOptions
     $ver = "[$($options.version)]".PadRight(21)
     $license = "[Licensed]"
-    if ($Global:Config.cmOptions.EVALVersion -or $Global:Config.cmOptions.version -eq "tech-preview") {
+    if ($options.EVALVersion -or $options.version -eq "tech-preview") {
         $license = "[EVAL]"
     }
     $pki = "[EHTTP]"
-    if ($Global:Config.cmOptions.UsePKI) {
+    if ($options.UsePKI) {
         $pki = "[PKI]"
     }
-    if ($Global:Config.cmOptions.OfflineSCP) {
+    if ($options.OfflineSCP) {
         $scp = "Offline"
+        $baselineVersion = (Get-CMBaselineVersion -CMVersion $options.version).baselineVersion
+        $ver = "[$($baselineVersion )]".PadRight(21)
     }
     else {
         $scp = "Online"
