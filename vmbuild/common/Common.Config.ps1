@@ -2275,6 +2275,7 @@ Function Show-Summary {
         if ($deployConfig.cmOptions.OfflineSCP) {
             Write-OrangePoint "SCP: Will be installed in OFFLINE mode"
         }
+ 
        
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
@@ -2289,6 +2290,9 @@ Function Show-Summary {
         $testSystem = $fixedConfig | Where-Object { $_.installSUP }
         if ($testSystem) {
             Write-GreenCheck "SUP role will be installed on $($testSystem.vmName -Join ",")"
+            if ($deployConfig.cmOptions.OfflineSUP) {
+                Write-OrangePoint "SUP: Will be installed in OFFLINE mode for the top-level site"
+            }
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.installRP }
