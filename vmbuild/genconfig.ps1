@@ -3977,8 +3977,11 @@ Function Get-CMVersionMenu {
 
     $valid = $false
     $noteColor = $Global:Common.Colors.GenConfigTip
-    write-host2 -ForegroundColor $noteColor "Note: "-NoNewLine
-    write-host2 "SCP is in OFFLINE mode. Only baseline versions will be shown"
+    
+    if ($Global:Config.cmOptions.OfflineSCP) {   
+        write-host2 -ForegroundColor $noteColor "Note: "-NoNewLine
+        write-host2 "SCP is in OFFLINE mode. Only baseline versions will be shown"
+    }
 
 
     $cmVersions = @()
@@ -4002,7 +4005,7 @@ Function Get-CMVersionMenu {
                 }
                 else {
                     if ($baselineVersion -eq $cmVersion) {
-                    $cmVersions += "$cmVersion (baseline)"
+                        $cmVersions += "$cmVersion (baseline)"
                     }
                     else {
                         $cmVersions += "$cmVersion (Upgrade from $baselineVersion)"
@@ -4739,7 +4742,7 @@ function Get-SortedProperties {
     if ($members.Name -contains "Version") {
         $sorted += "Version"
     }
-     if ($members.Name -contains "Install") {
+    if ($members.Name -contains "Install") {
         $sorted += "Install"
     }
     if ($members.Name -contains "EVALVersion") {
