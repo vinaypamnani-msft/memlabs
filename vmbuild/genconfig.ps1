@@ -853,7 +853,7 @@ function get-VMOptionsSummary {
 }
 
 function get-CMOptionsSummary {
-
+    $fixedConfig = $Global:Config.virtualMachines | Where-Object { -not $_.hidden }
     $options = $Global:Config.cmOptions
     $ver = "[$($options.version)]".PadRight(21)
     $license = "[Licensed]"
@@ -872,7 +872,12 @@ function get-CMOptionsSummary {
     else {
         $scp = "Online"
     }
-    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki [SCP: $scp]"
+    $offlineSUP = ""
+    $testSystem = $fixedConfig | Where-Object { $_.installSUP }
+    if ($testSystem) {
+        $offlineSUP = "[SUP: Offline]"
+    }
+    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki [SCP: $scp] $offlineSUP"
     return $Output
 }
 
@@ -3977,7 +3982,7 @@ Function Get-CMVersionMenu {
 
     $valid = $false
     $noteColor = $Global:Common.Colors.GenConfigTip
-    
+
     if ($Global:Config.cmOptions.OfflineSCP) {   
         write-host2 -ForegroundColor $noteColor "Note: "-NoNewLine
         write-host2 "SCP is in OFFLINE mode. Only baseline versions will be shown"
