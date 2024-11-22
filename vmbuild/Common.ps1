@@ -3398,8 +3398,8 @@ function Get-FileWithHash {
             }
             else {
                 Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
-                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-                Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
                 $return.download = $true
             }
         }
