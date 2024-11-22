@@ -42,7 +42,7 @@ class InstallADK {
             Start-BitsTransfer -Source $_ADKDownloadPath -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
-         # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
+        # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
         if (!(Test-Path $_adkWinPEpath)) {
             Start-BitsTransfer -Source $_ADKWinPEDownloadPath -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
         }
@@ -3765,6 +3765,53 @@ class ConfigureWSUS {
     }
 
 }
+
+[DscResource()]
+class WSUSSync {
+    [DscProperty(Key)]
+    [string] $ServerName
+
+    [void] Set() {
+       
+        $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530 #-UseSsl
+ 
+        Get-WsusProduct | Set-WsusProduct -disable
+        Get-WsusProduct | Where-Object { $_.Product.Title -eq "SQL Server 2005" } | Set-WsusProduct
+         
+        Get-WsusClassification | Set-WsusClassification -disable
+        Get-WsusClassification | Where-Object { $_.Classification.Title -eq "Tools" } | Set-WsusClassification
+         
+        $sub = $WSUS.GetSubscription()
+        $sub.StartSynchronization()
+       
+    }
+
+    [bool] Test() {
+
+        try {
+            $wsus = get-WsusServer
+            $sub = $WSUS.GetSubscription()
+            if ($wsus) {
+                if (($sub.GetUpdateCategories() | where-object { $_.Title -eq "SQL Server 2005" }).Count -ge 1) {
+                    return $true
+                }
+            }
+
+            return $false
+        }
+        catch {
+            Write-Verbose "Failed to Find WSUS Server"
+            Write-Verbose "$_"
+            return $false
+        }
+    }
+
+    [WSUSSync] Get() {
+        return $this
+    }
+
+}
+
 
 #InstallPBIRS
 [DscResource()]

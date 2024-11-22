@@ -27,6 +27,7 @@ configuration Phase6
     Node $AllNodes.Where{ $_.Role -eq 'WSUS' }.NodeName
     {
         $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
+        $standalone = ($thisVM.Role -eq "WSUS")
         $wsusFeatures = @("UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI")
         $sqlServer = "WID"
         if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM -or $thisVM.thisParams.WSUSSqlServer) {
@@ -102,6 +103,10 @@ configuration Phase6
 
         $usePKI = $deployConfig.cmOptions.UsePKI
 
+        if ($standalone) {
+            $usePKI = $false
+        }
+
         if ($usePKI) {
             $SSLHost = $thisVM.vmName + "." + $DomainName
             $SSLTemplate = 'ConfigMgr WebServer Certificate'
@@ -111,6 +116,7 @@ configuration Phase6
             $SSLTemplate = $null
         }
 
+        $nextDepend = "[ConfigureWSUS]UpdateServices"
         if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM -or $thisVM.thisParams.WSUSSqlServer) {
             ConfigureWSUS UpdateServices {
                 DependsOn            = @('[WindowsFeatureSet]UpdateServices')
@@ -131,9 +137,17 @@ configuration Phase6
             }
         }
 
+        if ($standalone) {            
+            WSUSSync WSUSSync {
+                DependsOn    = $nextDepend
+                ServerName   = $thisVM.vmName + "." + $DomainName
+            }
+            $nextDepend = "[WSUSSync]WSUSSync"
+        }
+
         WriteStatus Complete {
             Status    = "Complete!"
-            DependsOn = "[ConfigureWSUS]UpdateServices"
+            DependsOn = $nextDepend
         }
     }
 

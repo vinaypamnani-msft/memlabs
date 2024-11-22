@@ -50,6 +50,7 @@ DscResourcesToExport = @(
     'ClusterSetOwnerNodes',
     'ADServicePrincipalName2',
     'ConfigureWSUS',
+    'WSUSSync',
     'InstallPBIRS',
     'AddCertificateTemplate',
     'ImportCertifcateTemplate',

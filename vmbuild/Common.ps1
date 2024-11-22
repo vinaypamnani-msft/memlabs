@@ -679,17 +679,26 @@ function Get-File {
 
         if ($Action -eq "Downloading") {
             if ($UseBITS.IsPresent) {
+                try {
                 Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    Write-log "Start-BitsTransfer $_" -LogOnly
+                    if ($_ -Match "the module could not be loaded" ) {
+                    Write-Log -Failure "Could not invoke Start-BitsTransfer due to load failure.  Please close all powershell windows and retry."
+                    }
+                }
             }
             else {
                 $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
                 if (-not $worked) {
-                    Write-Log "Failed to download file. using curl"
+                    Write-Log "Failed to download file using curl"
                     return $false
                 }
             }
         }
         else {
+
             Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
         }
 
@@ -1079,7 +1088,15 @@ function Test-NetworkSwitch {
         return $false
     }
 
+    try {
     $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
+    }
+    catch {
+        Write-log "Get-NetAdapter $_" -LogOnly
+        if ($_ -Match "the module could not be loaded" ) {
+        Write-Log -Failure "Could not invoke Get-NetAdapter due to load failure.  Please close all powershell windows and retry."
+        }
+    }
 
     if (-not $adapter) {
         Write-Log "Network adapter for '$NetworkName' switch was not found."
