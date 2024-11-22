@@ -82,6 +82,22 @@ $ClientNameList = $ClientNames.split(",")
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 Start-Sleep -Seconds 5
 Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+$failCount = 0
+$success = $false
+while (-not $success) {
+   
+    $failCount++
+    Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
+    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+    Start-Sleep -Seconds 20
+    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+    $success = $PackageSuccess -ge 1
+
+    if ($failCount -ge 30) {
+        $success = $true   
+    }
+    
+}
 Start-Sleep -Seconds 30
 Invoke-CMSystemDiscovery
 Invoke-CMDeviceCollectionUpdate -Name $CollectionName

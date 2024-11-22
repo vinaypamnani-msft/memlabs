@@ -62,7 +62,7 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Adding cm_svc domain account as CM account"
     Start-Sleep -Seconds 5
     New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
-   # Remove-Item -Path $cm_svc_file -Force -Confirm:$false
+    # Remove-Item -Path $cm_svc_file -Force -Confirm:$false
 
     # Set client push account
     Write-DscStatus "Setting the Client Push Account"
@@ -289,8 +289,32 @@ if (-not $pushClients) {
     return
 }
 
-# Wait for collection to populate
+
+Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+Invoke-CMSystemDiscovery
+Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+
 $CollectionName = "All Systems"
+
+$failCount = 0
+$success = $false
+while (-not $success) {
+   
+    $failCount++
+    Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
+    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+    Start-Sleep -Seconds 20
+    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+    $success = $PackageSuccess -ge 1
+
+    if ($failCount -ge 30) {
+        $success = $true   
+    }
+    
+}
+
+# Wait for collection to populate
+
 if ($ClientNames) {
     Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
 }
@@ -322,11 +346,7 @@ foreach ($client in $ClientNameList) {
     $failCount = 0
     $success = $true
     while ($machinelist -notcontains $client) {
-
-        if ($failCount -eq 1) {
-            Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
-        }
-
+       
         if ($failCount -ge 2) {
             $success = $false
             break
