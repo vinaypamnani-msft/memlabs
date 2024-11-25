@@ -6591,6 +6591,8 @@ function Select-VirtualMachines {
             foreach ($virtualMachine in $global:existingMachines) {
                 $i = $i + 1
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
+                    $machineName = $virtualMachine.vmName
+                    $response = $null
                     $existingVM = $true
                     $customOptions = [ordered] @{}
                     $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
@@ -6689,6 +6691,7 @@ function Select-VirtualMachines {
                 $ii++
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                     $newValue = "Start"
+                    $machineName =  $virtualMachine.vmName
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
                         $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%$($Global:Common.Colors.GenConfigHeader)"; "A" = "Add Additional Disk" }
@@ -6775,7 +6778,13 @@ function Select-VirtualMachines {
                             if ($PassiveNode) {
                                 $FSVM = $global:config.virtualMachines | Where-Object { $_.vmName -eq $PassiveNode.remoteContentLibVM }
                                 if ($FSVM) {
-                                    Remove-VMFromConfig -vmName $FSVM.vmName -ConfigToModify $global:config
+                                    $OtherVMs = $global:config.virtualMachines | Where-Object { $_.fileServerVM -eq $FSVM.vmName } 
+                                    $OtherVMs2 = $global:config.virtualMachines | Where-Object { $_.remoteContentLibVM -eq $FSVM.vmName -and $_.vmname -ne $PassiveNode.vmName} 
+                                    if (-not $OtherVMs -and -not $OtherVMs2) {
+                                        write-host
+                                        Write-OrangePoint "$($FSVM.vmName) is not in use by any other vm's.  Removing from config"
+                                        Remove-VMFromConfig -vmName $FSVM.vmName -ConfigToModify $global:config
+                                    }
                                 }
                                 #$virtualMachine.psobject.properties.remove('remoteContentLibVM')
                                 Remove-VMFromConfig -vmName $PassiveNode.vmName -ConfigToModify $global:config
