@@ -290,32 +290,33 @@ if (-not $pushClients) {
 }
 
 
-Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
-Invoke-CMSystemDiscovery
-Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
-$CollectionName = "All Systems"
-
-$failCount = 0
-$success = $false
-while (-not $success) {
-   
-    $failCount++
-    Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
-    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-    Start-Sleep -Seconds 20
-    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
-    $success = $PackageSuccess -ge 1
-
-    if ($failCount -ge 30) {
-        $success = $true   
-    }
-    
-}
 
 # Wait for collection to populate
 
 if ($ClientNames) {
+    Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+    Invoke-CMSystemDiscovery
+    Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+
+    $CollectionName = "All Systems"
+
+    $failCount = 0
+    $success = $false
+    while (-not $success) {
+   
+        $failCount++
+        Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
+        $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+        Start-Sleep -Seconds 20
+        $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+        $success = $PackageSuccess -ge 1
+
+        if ($failCount -ge 20) {
+            $success = $true   
+        }
+    
+    }
     Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
 }
 else {

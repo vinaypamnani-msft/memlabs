@@ -93,7 +93,7 @@ while (-not $success) {
     $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
     $success = $PackageSuccess -ge 1
 
-    if ($failCount -ge 30) {
+    if ($failCount -ge 20) {
         $success = $true   
     }
     
