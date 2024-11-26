@@ -189,6 +189,14 @@ CurrentBranch=1
     # $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CM%', $CM)
 
+    if ($($deployConfig.cmOptions.InstallSCP) -eq $false) {
+        $cmini = $cmini.Replace('CloudConnector=1', "CloudConnector=0")
+    }
+
+    if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+        $cmini = $cmini.Replace('CloudConnector=1', "CloudConnector=0")
+    }
+
     if ($installToAO) {
         $cmini = $cmini.Replace('AGBackupShare=', "AGBackupShare=$agBackupShare")
     }
@@ -392,7 +400,23 @@ if (-not $exists) {
 $UpdateRequired = $false
 if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and $deployConfig.cmOptions.version -ne $ThisVM.thisParams.cmDownloadVersion.baselineVersion) {
     $UpdateRequired = $true
+
+    if ($($deployConfig.cmOptions.InstallSCP) -eq $false) {
+        $UpdateRequired = $false
+    }
+
+    if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+        $UpdateRequired = $false        
+    }
+
 }
+
+if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+    $UpdateRequired = $false
+    Write-DscStatus "Installing Offline SCP"
+    Add-CMServiceConnectionPoint -SiteSystemServerName "$env:computername.$DomainFullName" -SiteCode $SiteCode -Mode Offline
+}
+
 
 if ($UpdateRequired) {
 

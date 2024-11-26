@@ -18,6 +18,12 @@ class InstallADK {
     [string] $ADKWinPEPath
 
     [DscProperty(Mandatory)]
+    [string] $ADKDownloadPath #  "https://go.microsoft.com/fwlink/?linkid=2271337"
+
+    [DscProperty(Mandatory)]
+    [string] $ADKWinPEDownloadPath #  "https://go.microsoft.com/fwlink/?linkid=2271338"
+
+    [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
     [DscProperty(NotConfigurable)]
@@ -25,19 +31,20 @@ class InstallADK {
 
     [void] Set() {
         $_adkpath = $this.ADKPath
+        $_adkWinPEpath = $this.ADKWinPEPath
+
+        $_ADKDownloadPath = $this.ADKDownloadPath
+        $_ADKWinPEDownloadPath = $this.ADKWinPEDownloadPath
+
+
+        # Use this block to download the FULL ADK, Filename: adksetup.exe
         if (!(Test-Path $_adkpath)) {
-            # $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120254" # ADK 2004 (19041)
-            $adkurl = "https://go.microsoft.com/fwlink/?linkid=2165884"   # ADK Win11
-            Start-BitsTransfer -Source $adkurl -Destination $_adkpath -Priority Foreground -ErrorAction Stop
+            Start-BitsTransfer -Source $_ADKDownloadPath -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
-
-
-        $_adkWinPEpath = $this.ADKWinPEPath
+        # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
         if (!(Test-Path $_adkWinPEpath)) {
-            # $adkurl = "https://go.microsoft.com/fwlink/?linkid=2120253"  # ADK add-on (19041)
-            $adkurl = "https://go.microsoft.com/fwlink/?linkid=2166133"  # ADK Win11
-            Start-BitsTransfer -Source $adkurl -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
+            Start-BitsTransfer -Source $_ADKWinPEDownloadPath -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
         }
 
         #Install DeploymentTools
@@ -160,9 +167,9 @@ class InstallSSMS {
         # Install SSMS
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
+        $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE"
 
-
-        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2)) {
+        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2) -or (Test-Path $smssinstallpath3)) {
             Write-Verbose "SSMS Installed Successfully! (Tested Out)"
             return
         }
@@ -319,8 +326,8 @@ class InstallODBCDriver {
     [void] Set() {
         $_odbcpath = $this.ODBCPath
         if (!(Test-Path $_odbcpath)) {
-            $odbcurl = "https://go.microsoft.com/fwlink/?linkid=2220989"
-
+            #$odbcurl = "https://go.microsoft.com/fwlink/?linkid=2220989"
+            $odbcurl = "https://go.microsoft.com/fwlink/?linkid=2280794"
             Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server from $($odbcurl)..."
 
             try {
@@ -1800,7 +1807,7 @@ class RegisterTaskScheduler {
 
 
         $RegisterTime = [datetime]::Now
-        $waitTime = 15
+        $waitTime = 30
 
         $success = $this.RegisterTask()
         $lastRunTime = $this.GetLastRunTime()
@@ -1819,7 +1826,7 @@ class RegisterTaskScheduler {
             }
 
             if ($failCount -eq 5) {
-                Write-Verbose "Task has not ran yet after 5 Cyles. Re-Registering Task"
+                Write-Verbose "Task has not ran yet after 5 Cycles. Re-Registering Task"
                 #Unregister existing task
                 $success = $this.RegisterTask()
 
@@ -1871,8 +1878,10 @@ class RegisterTaskScheduler {
         $exists = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
         if ($exists) {
             if ($exists.state -eq "Running") {
-                return $true
+                Stop-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue                                
             }
+            Unregister-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+            return $false
         }
         return $false
     }
@@ -1963,8 +1972,8 @@ class RegisterTaskScheduler {
             Write-Verbose "Last Run Time is $($Lastevent.TimeCreated)"
             return $Lastevent.TimeCreated
         }
-        Write-Verbose "No Last Run Time found returning $([datetime]::Min)"
-        return [datetime]::Min
+        Write-Verbose "No Last Run Time found returning $([datetime]::MinValue)"
+        return [datetime]::MinValue
 
     }
 }
@@ -2266,7 +2275,7 @@ class OpenFirewallPortForSCCM {
 
             #THAgent
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
-            Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
+            Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28502"
         }
 
         if ($_Role -contains "Site Server") {
@@ -2464,8 +2473,11 @@ class OpenFirewallPortForSCCM {
         }
         if ($_Role -contains "DomainMember" -or $_Role -contains "WorkgroupMember") {
             #Client Push Installation
-            Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
+            Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28502"
             Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)" -Direction Inbound
+            New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM Client"
+            New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM Client"
+
 
             #Remote Assistance and Remote Desktop
             New-NetFirewallRule -Program "C:\Windows\PCHealth\HelpCtr\Binaries\helpsvc.exe" -DisplayName "Remote Assistance - Helpsvc.exe" -Enabled True -Direction Outbound -Group "For SCCM Client"
@@ -2594,10 +2606,10 @@ class InstallFeatureForSCCM {
                 Install-WindowsFeature NET-Framework-45-Core
                 Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
                 Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
-                Install-WindowsFeature BITS, BITS-IIS-Ext
+                #Install-WindowsFeature BITS, BITS-IIS-Ext
                 Install-WindowsFeature -Name "Rdc"
                 Install-WindowsFeature -Name UpdateServices-UI
-                Install-WindowsFeature -Name WDS
+                #Install-WindowsFeature -Name WDS
             }
             if ($_Role -contains "Application Catalog website point") {
                 #IIS
@@ -3219,22 +3231,39 @@ class ModuleAdd {
             Register-PackageSource -Name nuget.org -Location https://www.nuget.org/api/v2 -ProviderName NuGet -Force -Trusted
         }
 
-        $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue 
 
         IF ($null -eq $module) {
-            Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope
+            try { 
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
+            }
+            catch {
+                Start-Sleep -Seconds 120
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+            }
         }
 
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
         IF ($null -eq $module) {
             IF ($this.Clobber -eq 'Yes') {
-                Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber
+                try {
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop
+                }
+                catch {
+                    Start-Sleep -Seconds 120
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
             }
             ELSE {
-                Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope
+                try {
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
+                }
+                catch {
+                    Start-Sleep -Seconds 120
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
             }
-
         }
     }
 
@@ -3648,6 +3677,7 @@ class ConfigureWSUS {
 
         $_HTTPSurl = $this.HTTPSUrl
         $_FriendlyName = $this.TemplateName
+        $postinstallOutput = ""
         try {
             write-verbose ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
@@ -3659,16 +3689,16 @@ class ConfigureWSUS {
 
             if ($this.SqlServer) {
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
-                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)
+                $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
             }
             else {
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)")
-                & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)
+                $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
             }
         }
         catch {
             Write-Verbose "Failed to Configure WSUS"
-            Write-Verbose "$_"
+            Write-Verbose "$_ $postinstallOutput"
         }
         try {
             $wsus = get-WsusServer
@@ -3735,6 +3765,53 @@ class ConfigureWSUS {
     }
 
 }
+
+[DscResource()]
+class WSUSSync {
+    [DscProperty(Key)]
+    [string] $ServerName
+
+    [void] Set() {
+       
+        $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530 #-UseSsl
+ 
+        Get-WsusProduct | Set-WsusProduct -disable
+        Get-WsusProduct | Where-Object { $_.Product.Title -eq "SQL Server 2005" } | Set-WsusProduct
+         
+        Get-WsusClassification | Set-WsusClassification -disable
+        Get-WsusClassification | Where-Object { $_.Classification.Title -eq "Tools" } | Set-WsusClassification
+         
+        $sub = $WSUS.GetSubscription()
+        $sub.StartSynchronization()
+       
+    }
+
+    [bool] Test() {
+
+        try {
+            $wsus = get-WsusServer
+            $sub = $WSUS.GetSubscription()
+            if ($wsus) {
+                if (($sub.GetUpdateCategories() | where-object { $_.Title -eq "SQL Server 2005" }).Count -ge 1) {
+                    return $true
+                }
+            }
+
+            return $false
+        }
+        catch {
+            Write-Verbose "Failed to Find WSUS Server"
+            Write-Verbose "$_"
+            return $false
+        }
+    }
+
+    [WSUSSync] Get() {
+        return $this
+    }
+
+}
+
 
 #InstallPBIRS
 [DscResource()]

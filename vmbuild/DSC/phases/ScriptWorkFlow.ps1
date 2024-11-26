@@ -19,7 +19,7 @@ if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy"
 $containsPassive = $false
 $containsSecondary = $false
 
-if ($CurrentRole -eq "Primary" -and $ThisVM.hidden -and $ThisVM.domain) {
+if ($CurrentRole -eq "Primary" -and $ThisVM.hidden -and ($ThisVM.domain) -and ($ThisVm.domain -ne $deployConfig.vmOptions.DomainName)) {
     $scenario = "MultiDomain"
     Write-DscStatus "Multi Domain Scenerio"
 }
@@ -249,10 +249,12 @@ if ($scenario -eq "Hierarchy") {
     elseif ($CurrentRole -eq "Primary") {
 
         #Install CM and Config
-        Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
-        Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        if (-not [string]::IsNullOrWhiteSpace($($ThisVM.thisParams.ParentSiteServer))) {
+            Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
 
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs

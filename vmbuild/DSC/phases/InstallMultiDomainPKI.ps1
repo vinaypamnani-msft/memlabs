@@ -76,11 +76,10 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Creating New-CMActiveDirectoryForest"
     New-CMActiveDirectoryForest -Description "Multi Forest $DomainFullName" -EnableDiscovery $true -UserName $ForestDiscoveryAccount -Password $secure -ForestFqdn $DomainFullName *>&1 | Out-File $global:StatusLog -Append
 
-
     $sitedef = Get-CMSiteDefinition -SiteCode $SiteCode
 
     Write-DscStatus "Enable Discovery Set-CMActiveDirectoryForest"
-    Set-CMActiveDirectoryForest -EnableDiscovery $true -Id 2 -AddPublishingSite $sitedef *>&1 | Out-File $global:StatusLog -Append
+    Set-CMActiveDirectoryForest -EnableDiscovery $true -ForestFQDN $DomainFullName -AddPublishingSite $sitedef *>&1 | Out-File $global:StatusLog -Append
 
     Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery"
     Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery -SiteCode $SiteCode -Enabled $true -Verbose | Out-File $global:StatusLog -Append
@@ -113,8 +112,25 @@ if (Test-Path $cm_svc_file) {
 
     foreach ($network in $networks) {
         Write-DscStatus "New Boundary $DomainFullName - $network"
-        New-CMBoundary -DisplayName "$DomainFullName - $network" -BoundaryType IPSubNet -Value "$network/24" *>&1 | Out-File $global:StatusLog -Append
-        New-CMBoundaryGroup -Name '192.168.2.0' -DefaultSiteCode $sitecode *>&1 | Out-File $global:StatusLog -Append
+        #New-CMBoundary -DisplayName "$DomainFullName - $network" -BoundaryType IPSubNet -Value "$network/24" *>&1 | Out-File $global:StatusLog -Append
+        $IP = $network
+        $mask = '255.255.255.0'
+        $IPBits = [int[]]$IP.Split('.')
+        $MaskBits = [int[]]$Mask.Split('.')
+        $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
+        $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+        $NetworkID = $NetworkIDBits -join '.'
+        $Broadcast = $BroadcastBits -join '.'
+
+        $sitesystems = @()
+        $sitesystems += (Get-CMDistributionPoint -SiteCode $sitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems += (Get-CMManagementPoint -SiteCode $sitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $sitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+
+        New-CMBoundary -Type IPRange -Name "$DomainFullName - $network" -Value "$($NetworkID)-$($Broadcast)" *>&1 | Out-File $global:StatusLog -Append
+        "New-CMBoundaryGroup -Name $network -DefaultSiteCode $sitecode -AddSiteSystemServerName $sitesystems" | Out-File $global:StatusLog -Append
+        New-CMBoundaryGroup -Name $network -DefaultSiteCode $sitecode -AddSiteSystemServerName $sitesystems *>&1 | Out-File $global:StatusLog -Append
         Add-CMBoundaryToGroup -BoundaryName "$DomainFullName - $network" -BoundaryGroupName $network *>&1 | Out-File $global:StatusLog -Append
     }
     Write-DscStatus "Set-CMClientPushInstallation $cm_svc"

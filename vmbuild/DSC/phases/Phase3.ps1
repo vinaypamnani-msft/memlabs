@@ -168,9 +168,12 @@ configuration Phase3
             InstallADK ADKInstall {
                 ADKPath      = "C:\temp\adksetup.exe"
                 ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
+                ADKDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2271337"
+                ADKWinPEDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2271338"                
                 Ensure       = "Present"
                 DependsOn    = "[WriteStatus]ADKInstall"
             }
+            
 
             $nextDepend = "[InstallADK]ADKInstall"
             if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite" -and -not $ThisVM.hidden) {

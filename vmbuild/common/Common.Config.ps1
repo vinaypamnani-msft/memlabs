@@ -342,8 +342,14 @@ function Add-RemoteSQLVMToDeployConfig {
         [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
         [bool] $hidden = $true
     )
+    Write-Log -Verbose "Adding Hidden SQL to config $vmName"
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
-    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$false
+    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true
+    if (-not $remoteSQLVM) {
+        Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it doesnt, please modify the hyper-v config to reflect the new name" -Failure
+        return
+    }
+    Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.VmName -configToModify $configToModify -hidden:$hidden
     if ($remoteSQLVM.OtherNode) {
         Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.OtherNode -configToModify $configToModify -hidden:$hidden
     }
@@ -386,7 +392,8 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding SiteSystem, also add the current site server to the list.
-    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+    #$systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
     foreach ($system in $systems) {
         $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
@@ -1107,12 +1114,22 @@ function Get-VMFromList2 {
         [Parameter(Mandatory = $true, HelpMessage = "vmName")]
         [object] $vmName,
         [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
-        [bool] $SmartUpdate = $true
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Get VMs from all domains")]
+        [bool] $Global = $false
     )
 
     $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate:$SmartUpdate | Where-Object { $_.vmName -eq $vmName }
     if ($vm) {
         return $vm
+    }
+    else {
+        if ($Global) {
+            $vm = Get-List -Type VM | Where-Object { $_.vmName -eq $vmName }
+            if ($vm) {
+                return $vm
+            }
+        }
     }
 }
 
@@ -2193,7 +2210,25 @@ Function Show-Summary {
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
 
         if ($containsPS -or $containsSecondary) {
-            Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+            $versionInfoPrinted = $false
+            $baselineVersion = (Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version).baselineVersion
+            if ($deployConfig.cmOptions.OfflineSCP) {
+                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
+                    Write-RedX "ConfigMgr $($deployConfig.cmOptions.version) selected, but due to Offline SCP $baselineVersion will be installed."
+                    $versionInfoPrinted = $true
+                }
+            }
+           
+            if (-not $versionInfoPrinted) {
+                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
+                    Write-OrangePoint "ConfigMgr $baselineVersion will be installed and upgraded to $($deployConfig.cmOptions.version)"
+                }
+                else {
+                    Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+                }
+
+            }
+           
 
             $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PS) {
@@ -2237,7 +2272,11 @@ Function Show-Summary {
         else {
             Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
         }
-
+        if ($deployConfig.cmOptions.OfflineSCP) {
+            Write-OrangePoint "SCP: Will be installed in OFFLINE mode"
+        }
+ 
+       
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
             Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"
@@ -2251,6 +2290,9 @@ Function Show-Summary {
         $testSystem = $fixedConfig | Where-Object { $_.installSUP }
         if ($testSystem) {
             Write-GreenCheck "SUP role will be installed on $($testSystem.vmName -Join ",")"
+            if ($deployConfig.cmOptions.OfflineSUP) {
+                Write-OrangePoint "SUP: Will be installed in OFFLINE mode for the top-level site"
+            }
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.installRP }

@@ -447,7 +447,7 @@ function Get-ConfigurationData {
         "8" {
             $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
             if ($cd) {
-                $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $Configuration
+                $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $ConfigurationShort
                 $snapshot = $null
                 $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
                 if ($dc) {
@@ -578,7 +578,7 @@ function Get-Phase3ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux", "OtherDC") {
+        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux", "OtherDC", "AADClient") {
             continue
         }
 
@@ -970,17 +970,20 @@ function Get-Phase9ConfigurationData {
                 Role     = $vm.Role
             }
         }
-        else {
-            $newItem = @{
-                NodeName = $vm.vmName
-                Role     = $vm.Role
-            }
-        }
+        #else {
+        #    $newItem = @{
+        #        NodeName = $vm.vmName
+        #        Role     = $vm.Role
+        #    }
+        #}
         $cd.AllNodes += $newItem
         $NumberOfNodesAdded = $NumberOfNodesAdded + 1
 
     }
 
+    if (-not $MultiDomain) {
+        return
+    }
     $all = @{
         NodeName                    = "*"
         PSDscAllowDomainUser        = $true

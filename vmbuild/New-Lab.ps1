@@ -51,6 +51,21 @@ param (
 
 )
 
+
+$desktopPath = [Environment]::GetFolderPath("CommonDesktop")
+$shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutLocation)
+$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+
+$shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
+$shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
+$shortcut.Save()
+
+$bytes = [System.IO.File]::ReadAllBytes($shortcutLocation)
+# Set byte 21 (0x15) bit 6 (0x20) ON
+$bytes[0x15] = $bytes[0x15] -bor 0x20
+[System.IO.File]::WriteAllBytes($shortcutLocation, $bytes)
+
 # Tell common to re-init
 if ($Common.Initialized) {
     $Common.Initialized = $false
@@ -226,8 +241,8 @@ try {
     Write-Log "### VALIDATE" -Activity
 
     # Load config
-    if ($Configuration) {
-
+    if ($Configuration) {       
+        $ConfigurationShort = Split-Path $Configuration -LeafBase
         Write-Log "Validating specified configuration: $Configuration"
         $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
@@ -497,7 +512,7 @@ try {
             if ($currentPhase -eq 8) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
             }
         }
         Write-Host
@@ -574,7 +589,7 @@ finally {
             if ($currentPhase -eq 8) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $Configuration'" -NoIndent
+                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
             }
         }
         Write-Host

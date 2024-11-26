@@ -679,17 +679,26 @@ function Get-File {
 
         if ($Action -eq "Downloading") {
             if ($UseBITS.IsPresent) {
+                try {
                 Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    Write-log "Start-BitsTransfer $_" -LogOnly
+                    if ($_ -Match "the module could not be loaded" ) {
+                    Write-Log -Failure "Could not invoke Start-BitsTransfer due to load failure.  Please close all powershell windows and retry."
+                    }
+                }
             }
             else {
                 $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
                 if (-not $worked) {
-                    Write-Log "Failed to download file. using curl"
+                    Write-Log "Failed to download file using curl"
                     return $false
                 }
             }
         }
         else {
+
             Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
         }
 
@@ -1079,7 +1088,15 @@ function Test-NetworkSwitch {
         return $false
     }
 
+    try {
     $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
+    }
+    catch {
+        Write-log "Get-NetAdapter $_" -LogOnly
+        if ($_ -Match "the module could not be loaded" ) {
+        Write-Log -Failure "Could not invoke Get-NetAdapter due to load failure.  Please close all powershell windows and retry."
+        }
+    }
 
     if (-not $adapter) {
         Write-Log "Network adapter for '$NetworkName' switch was not found."
@@ -2171,15 +2188,15 @@ function Wait-ForVm {
             # Check OOBE complete registry key
 
             try {
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State"
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State\ImageState = IMAGE_STATE_COMPLETE"
             }
             catch {}
 
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
-
+            Write-Log "$VmName`: $out" -Verbose
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
                 try {
                     if ($failures -gt ([int]$TimeoutMinutes * 2)) {
@@ -2457,11 +2474,17 @@ function Invoke-VmCommand {
                     else {
                         $failed = $true
                         $return.ScriptBlockFailed = $true
+                        if ($Err2.Count -ne 0) {
+                            $OutErr = "$($Err2[0].ToString().Trim())"
+                        }
+                        else {
+                            $OutErr = "Unknown Error"
+                        }
                         if (-not $SuppressLog) {
-                            Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                            Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $OutErr." -Failure
                         }
                         if ($job.State -eq "Running") {
-                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
                         }
                         Stop-Job $job | Out-Null
                         Remove-Job $job
@@ -3392,8 +3415,8 @@ function Get-FileWithHash {
             }
             else {
                 Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
-                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-                Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
                 $return.download = $true
             }
         }
@@ -3751,7 +3774,7 @@ if (-not $Common.Initialized) {
     $colors = Get-Colors
 
     $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "240205"
+        MemLabsVersion        = "240920"
         LatestHotfixVersion   = "240710"
         PS7                   = $PS7
         Initialized           = $true

@@ -81,7 +81,31 @@ else {
 $ClientNameList = $ClientNames.split(",")
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 Start-Sleep -Seconds 5
+Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+$failCount = 0
+$success = $false
+while (-not $success) {
+   
+    $failCount++
+    Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
+    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+    Start-Sleep -Seconds 20
+    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+    $success = $PackageSuccess -ge 1
 
+    if ($failCount -ge 20) {
+        $success = $true   
+    }
+    
+}
+Start-Sleep -Seconds 30
+Invoke-CMSystemDiscovery
+Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+foreach ($client in $ClientNameList) {
+    Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
+}
+
+$machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 foreach ($client in $ClientNameList) {
 
     if ([string]::IsNullOrWhiteSpace($client)) {
@@ -98,7 +122,7 @@ foreach ($client in $ClientNameList) {
     $failCount = 0
     $success = $true
     while ($machinelist -notcontains $client) {
-        if ($failCount -gt 30) {
+        if ($failCount -ge 2) {
             $success = $false
             break
         }
@@ -106,7 +130,7 @@ foreach ($client in $ClientNameList) {
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
         Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
-        Start-Sleep -Seconds 30
+        Start-Sleep -Seconds 600
         $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
         $failCount++
     }
@@ -116,27 +140,6 @@ foreach ($client in $ClientNameList) {
         Start-Sleep -Seconds 5
     }
 
-}
-
-while ($failcount -le 30) {
-    $failCount++
-    foreach ($client in $ClientNameList) {
-        $device = Get-CMDevice -Name $client
-        $status = $device.ClientActiveStatus
-        if ($status -eq 1) {
-            continue
-        }
-        Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
-
-        $device = Get-CMDevice -Name $client
-        $status = $device.ClientActiveStatus
-
-        if ($status -eq 1) {
-            Write-DscStatus "$client Successfully installed"
-        }
-    }
-    Start-Sleep -Seconds 60
 }
 
 # Update actions file

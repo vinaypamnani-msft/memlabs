@@ -853,18 +853,31 @@ function get-VMOptionsSummary {
 }
 
 function get-CMOptionsSummary {
-
+    $fixedConfig = $Global:Config.virtualMachines | Where-Object { -not $_.hidden }
     $options = $Global:Config.cmOptions
     $ver = "[$($options.version)]".PadRight(21)
     $license = "[Licensed]"
-    if ($Global:Config.cmOptions.EVALVersion -or $Global:Config.cmOptions.version -eq "tech-preview") {
+    if ($options.EVALVersion -or $options.version -eq "tech-preview") {
         $license = "[EVAL]"
     }
     $pki = "[EHTTP]"
-    if ($Global:Config.cmOptions.UsePKI) {
+    if ($options.UsePKI) {
         $pki = "[PKI]"
     }
-    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki"
+    if ($options.OfflineSCP) {
+        $scp = "Offline"
+        $baselineVersion = (Get-CMBaselineVersion -CMVersion $options.version).baselineVersion
+        $ver = "[$($baselineVersion )]".PadRight(21)
+    }
+    else {
+        $scp = "Online"
+    }
+    $offlineSUP = ""
+    $testSystem = $fixedConfig | Where-Object { $_.installSUP }
+    if ($testSystem) {
+        $offlineSUP = "[SUP: Offline]"
+    }
+    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki [SCP: $scp] $offlineSUP"
     return $Output
 }
 
@@ -963,7 +976,7 @@ function Get-ExistingVMs {
         if ($null -ne $evm.DiskUsedGB) {
             $evm.PsObject.Members.Remove("DiskUsedGB")
         }
-        if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName){
+        if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName) {
             $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
         }
     }
@@ -1014,13 +1027,19 @@ function Select-MainMenu {
         }
         $customOptions += [ordered]@{"*V2" = "" }
         $customOptions += [ordered]@{"*VV" = "---  New Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
-        if ($global:Config.virtualMachines) {
-            $virtualMachines = @($global:config.virtualMachines | Where-Object { $_.role -in "DC", "BDC" })
-            $virtualMachines += @($global:config.virtualMachines | Where-Object { $_.role -notin "DC", "BDC" } | Sort-Object { $_.vmName })
+        try {
+            if ($global:Config.virtualMachines) {
+                $virtualMachines = @($global:Config.virtualMachines | Where-Object { $_.role -in "DC", "BDC" })
+                $virtualMachines += @($global:Config.virtualMachines | Where-Object { $_.role -notin "DC", "BDC" } | Sort-Object { $_.vmName })
 
-            if ($virtualMachines -and $global:Config.virtualMachines) {
-                $global:Config.virtualMachines = $virtualMachines
+                if ($virtualMachines -and $global:Config.virtualMachines) {
+                    $global:Config.virtualMachines = $virtualMachines
+                }
             }
+        }
+        catch {
+            write-Verbose "Exception from global:Config.virtualMachines: $($global.Config)"
+            $global:Config.virtualMachines = @()
         }
         if ($global:config.virtualMachines) {
             foreach ($virtualMachine in $global:config.virtualMachines | Where-Object { -not $_.Hidden }) {
@@ -3962,6 +3981,13 @@ Function Get-CMVersionMenu {
     )
 
     $valid = $false
+    $noteColor = $Global:Common.Colors.GenConfigTip
+
+    if ($Global:Config.cmOptions.OfflineSCP) {   
+        write-host2 -ForegroundColor $noteColor "Note: "-NoNewLine
+        write-host2 "SCP is in OFFLINE mode. Only baseline versions will be shown"
+    }
+
 
     $cmVersions = @()
     foreach ($cmVersion in $($Common.Supported.CmVersions)) {
@@ -3976,7 +4002,20 @@ Function Get-CMVersionMenu {
             }
 
             default {
-                $cmVersions += $cmVersion
+                $baselineVersion = (Get-CMBaselineVersion -CMVersion $cmVersion).baselineVersion
+                if ($Global:Config.cmOptions.OfflineSCP) {                    
+                    if ($baselineVersion -eq $cmVersion) {
+                        $cmVersions += "$cmVersion (baseline)"
+                    }
+                }
+                else {
+                    if ($baselineVersion -eq $cmVersion) {
+                        $cmVersions += "$cmVersion (baseline)"
+                    }
+                    else {
+                        $cmVersions += "$cmVersion (Upgrade from $baselineVersion)"
+                    }
+                }
             }
         }
 
@@ -4352,16 +4391,18 @@ function Get-AdditionalValidations {
                     if (-not $sitecode) {
                         $sitecode = $property.SiteCode
                     }
-                    $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
+                    if ($sitecode) {
+                        $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
 
-                    if ($Parent.ParentSiteCode) {
-                        $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $Parent.ParentSiteCode -type VM -SmartUpdate:$false
-                    }
-                    $list2 = Get-List2 -deployConfig $Global:Config
-                    $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
-                    if (-not $existingSUP) {
-                        $property.installSUP = $false
-                        Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the top level site ($($Parent.SiteCode)) has a SUP"
+                        if ($Parent.ParentSiteCode) {
+                            $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $Parent.ParentSiteCode -type VM -SmartUpdate:$false
+                        }
+                        $list2 = Get-List2 -deployConfig $Global:Config
+                        $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
+                        if (-not $existingSUP) {
+                            $property.installSUP = $false
+                            Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the top level site ($($Parent.SiteCode)) has a SUP"
+                        }
                     }
 
                 }
@@ -4703,6 +4744,28 @@ function Get-SortedProperties {
         $sorted += "installSUP"
     }
 
+    if ($members.Name -contains "Version") {
+        $sorted += "Version"
+    }
+    if ($members.Name -contains "Install") {
+        $sorted += "Install"
+    }
+    if ($members.Name -contains "EVALVersion") {
+        $sorted += "EVALVersion"
+    }
+    if ($members.Name -contains "UsePKI") {
+        $sorted += "UsePKI"
+    }
+    if ($members.Name -contains "OfflineSCP") {
+        $sorted += "OfflineSCP"
+    }
+    if ($members.Name -contains "OfflineSUP") {
+        $sorted += "OfflineSUP"
+    }
+    if ($members.Name -contains "PushClientToDomainMembers") {
+        $sorted += "PushClientToDomainMembers"
+    }
+  
     switch ($members.Name) {
         "vmName" {  }
         "role" {  }
@@ -4734,6 +4797,14 @@ function Get-SortedProperties {
         "installDP" {}
         "installMP" {}
         "installRP" {}
+        "version" {}
+        "install" {}
+        "EVALVersion" {}
+        "UsePKI" {}
+        "OfflineSCP" {}
+        "OfflineSUP" {}
+        "pushClientToDomainMembers" {}
+
 
         Default { $sorted += $_ }
     }
@@ -5156,6 +5227,10 @@ function Select-Options {
                     }
                     if ($property.role -in ("SiteSystem", "WSUS")) {
                         Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
+                        if (-not $($property.SiteCode)) {
+                            Write-RedX "Could not determine sitecode for $($property.VmName)"
+                            continue MainLoop
+                        }
                         $SiteType = get-RoleForSitecode -siteCode $Property.SiteCode -config $Global:Config
                         if ($SiteType -eq "CAS") {
                             if ($property.InstallMP) {
@@ -5429,10 +5504,14 @@ function get-VMString {
             }
         }
         if ($virtualMachine.installSUP) {
-            $temp += " [SUP]"
+            if (-not ($name.Contains("[SUP]"))) {
+                $temp += " [SUP]"
+            }
         }
         if ($virtualMachine.installRP) {
-            $temp += " [RP]"
+            if (-not ($name.Contains("[RP]"))) {
+                $temp += " [RP]"
+            }
         }
         $name += $temp.PadRight(39, " ")
     }
@@ -5454,10 +5533,14 @@ function get-VMString {
 
     if ($virtualMachine.sqlVersion) {
         if ($virtualMachine.installSUP) {
-            $name += " [SUP]"
+            if (-not ($name.Contains("[SUP]"))) {
+                $name += " [SUP]"
+            }
         }
         if ($virtualMachine.installRP) {
-            $name += " [RP]"
+            if (-not ($name.Contains("[RP]"))) {
+                $name += " [RP]"
+            }
         }
     }
 
@@ -6023,6 +6106,11 @@ function Add-NewVMForRole {
                     Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify -test:$false
                 }
 
+                if (-not $($virtualMachine.SiteCode)) {
+                    Write-RedX "Could not add SiteCode to SiteSystem $($virtualMachine.vmName). Cancelling"
+                    return
+                }
+
                 if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $virtualMachine.siteCode) -eq "CAS") {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $false -force
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $false -force
@@ -6081,10 +6169,13 @@ function Add-NewVMForRole {
     if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "SiteSystem" -or $role -eq "Secondary") {
         if ($null -eq $ConfigToModify.cmOptions) {
             $newCmOptions = [PSCustomObject]@{
-                version                   = "current-branch"
-                install                   = $true
-                pushClientToDomainMembers = $true
+                Version                   = "current-branch"
+                Install                   = $true
+                PushClientToDomainMembers = $true
                 EVALVersion               = $false
+                #InstallSCP                = $true
+                OfflineSCP                = $false
+                OfflineSUP                = $false
                 UsePKI                    = $false
             }
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
@@ -6500,6 +6591,8 @@ function Select-VirtualMachines {
             foreach ($virtualMachine in $global:existingMachines) {
                 $i = $i + 1
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
+                    $machineName = $virtualMachine.vmName
+                    $response = $null
                     $existingVM = $true
                     $customOptions = [ordered] @{}
                     $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
@@ -6598,6 +6691,7 @@ function Select-VirtualMachines {
                 $ii++
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                     $newValue = "Start"
+                    $machineName =  $virtualMachine.vmName
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
                         $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%$($Global:Common.Colors.GenConfigHeader)"; "A" = "Add Additional Disk" }
@@ -6684,7 +6778,13 @@ function Select-VirtualMachines {
                             if ($PassiveNode) {
                                 $FSVM = $global:config.virtualMachines | Where-Object { $_.vmName -eq $PassiveNode.remoteContentLibVM }
                                 if ($FSVM) {
-                                    Remove-VMFromConfig -vmName $FSVM.vmName -ConfigToModify $global:config
+                                    $OtherVMs = $global:config.virtualMachines | Where-Object { $_.fileServerVM -eq $FSVM.vmName } 
+                                    $OtherVMs2 = $global:config.virtualMachines | Where-Object { $_.remoteContentLibVM -eq $FSVM.vmName -and $_.vmname -ne $PassiveNode.vmName} 
+                                    if (-not $OtherVMs -and -not $OtherVMs2) {
+                                        write-host
+                                        Write-OrangePoint "$($FSVM.vmName) is not in use by any other vm's.  Removing from config"
+                                        Remove-VMFromConfig -vmName $FSVM.vmName -ConfigToModify $global:config
+                                    }
                                 }
                                 #$virtualMachine.psobject.properties.remove('remoteContentLibVM')
                                 Remove-VMFromConfig -vmName $PassiveNode.vmName -ConfigToModify $global:config

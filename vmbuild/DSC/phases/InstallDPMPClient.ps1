@@ -62,7 +62,7 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Adding cm_svc domain account as CM account"
     Start-Sleep -Seconds 5
     New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
-    Remove-Item -Path $cm_svc_file -Force -Confirm:$false
+    # Remove-Item -Path $cm_svc_file -Force -Confirm:$false
 
     # Set client push account
     Write-DscStatus "Setting the Client Push Account"
@@ -226,7 +226,16 @@ foreach ($bg in $bgs) {
     else {
         try {
             Write-DscStatus "Creating Boundary $($bg.SiteCode) with subnet $($bg.Subnet)"
-            New-CMBoundary -Type IPSubnet -Name $bg.Subnet -Value "$($bg.Subnet)/24"
+            #New-CMBoundary -Type IPSubnet -Name $bg.Subnet -Value "$($bg.Subnet)/24"
+            $IP = $bg.Subnet
+            $mask = '255.255.255.0'
+            $IPBits = [int[]]$IP.Split('.')
+            $MaskBits = [int[]]$Mask.Split('.')
+            $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
+            $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+            $NetworkID = $NetworkIDBits -join '.'
+            $Broadcast = $BroadcastBits -join '.'
+            New-CMBoundary -Type IPRange -Name $bg.Subnet -Value "$($NetworkID)-$($Broadcast)"
             try {
                 Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
                 Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
@@ -295,9 +304,34 @@ if (-not $pushClients) {
     return
 }
 
+
+
+
 # Wait for collection to populate
-$CollectionName = "All Systems"
+
 if ($ClientNames) {
+    Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+    Invoke-CMSystemDiscovery
+    Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+
+    $CollectionName = "All Systems"
+
+    $failCount = 0
+    $success = $false
+    while (-not $success) {
+   
+        $failCount++
+        Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
+        $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+        Start-Sleep -Seconds 20
+        $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+        $success = $PackageSuccess -ge 1
+
+        if ($failCount -ge 20) {
+            $success = $true   
+        }
+    
+    }
     Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
 }
 else {
@@ -328,7 +362,8 @@ foreach ($client in $ClientNameList) {
     $failCount = 0
     $success = $true
     while ($machinelist -notcontains $client) {
-        if ($failCount -gt 30) {
+       
+        if ($failCount -ge 2) {
             $success = $false
             break
         }
@@ -336,7 +371,7 @@ foreach ($client in $ClientNameList) {
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
         Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
-        Start-Sleep -Seconds 30
+        Start-Sleep -Seconds 600
         $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
         $failCount++
     }

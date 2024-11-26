@@ -111,7 +111,7 @@
 
 
         $alias = (Get-NetAdapter).Name | Select-Object -First 1
-
+    
         IPAddress DCIPAddress {
             DependsOn      = "[WriteStatus]SetIPDG"
             IPAddress      = "$DHCP_DNSAddress/24"
