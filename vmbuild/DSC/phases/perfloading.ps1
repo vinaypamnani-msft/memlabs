@@ -7,11 +7,12 @@ param(
 if ( -not $ConfigFilePath) {
     $ConfigFilePath = "C:\staging\DSC\deployConfig.json"
 }
-if ( -not $LogPath) {
-    $LogPath = "C:\staging\DSC\DSC_Log.txt"
-}
+
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
+
+# dot source functions
+. $PSScriptRoot\ScriptFunctions.ps1
 
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
@@ -53,103 +54,6 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 Set-Location "$($SiteCode):\" @initParams
 
 
-#Tim help on copying the msi
-# Sample data 
-$Apps = @(
-    @{
-        AppName         = "MEMLABS-orca"
-        AppMsi          = "Orca.Msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "MS"
-        SoftwareVersion = "1.0"
-    },
-    @{
-        AppName         = "MEMLABS-LibreOffice_24.8.0_Win_x86-64r"
-        AppMsi          = "LibreOffice_24.8.0_Win_x86-64.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "MS"
-        SoftwareVersion = "24.8.0"
-    },
-    @{
-        AppName         = "MEMLABS-googlechromestandaloneenterprise64"
-        AppMsi          = "googlechromestandaloneenterprise64.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "Google"
-        SoftwareVersion = "128.0"
-    },
-    @{
-        AppName         = "MEMLABS-Firefox Setup 129.0.2"
-        AppMsi          = "Firefox Setup 129.0.2.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "Mozilla"
-        SoftwareVersion = "129.0.2"
-    },
-    @{
-        AppName         = "MEMLABS-Wireshark-4.2.6-x64"
-        AppMsi          = "Wireshark-4.2.6-x64.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "Wireshark"
-        SoftwareVersion = "4.2.6"
-    },
-    @{
-        AppName         = "MEMLABS-vlc-3.0.9.2-win64"
-        AppMsi          = "vlc-3.0.9.2-win64.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "VLC"
-        SoftwareVersion = "3.0.9.2"
-    },
-    @{
-        AppName         = "MEMLABS-7zip"
-        AppMsi          = "7zip.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "MS"
-        SoftwareVersion = "1.0"
-    },
-    @{
-        AppName         = "MEMLABS-WinSCP-6.3.4"
-        AppMsi          = "WinSCP-6.3.4.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "WinSCP"
-        SoftwareVersion = "6.3.4"
-    },
-    @{
-        AppName         = "MEMLABS-KeePass-2.57"
-        AppMsi          = "KeePass-2.57.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "KeePass"
-        SoftwareVersion = "2.57"
-    },
-    @{
-        AppName         = "MEMLABS-putty-64bit-0.81-installer"
-        AppMsi          = "putty-64bit-0.81-installer.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "Putty"
-        SoftwareVersion = "0.81"
-    },
-    @{
-        AppName         = "MEMLABS-putty-0.81-installer"
-        AppMsi          = "putty-0.81-installer.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "Putty"
-        SoftwareVersion = "0.81"
-    },
-    @{
-        AppName         = "MEMLABS-7z2408-x64"
-        AppMsi          = "7z2408-x64.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "Igor"
-        SoftwareVersion = "2408"
-    },
-    @{
-        AppName         = "MEMLABS-7z2408"
-        AppMsi          = "7z2408.msi"
-        Description     = "MEMLABS-applications"
-        Publisher       = "Igor"
-        SoftwareVersion = "2408.0"
-    }
-)
-
-
 
 #create all DPs group to distribute the content (its easier to distribute the content to a DP group than enumurating all DPs)
 $DPGroupName = "ALL DPS"
@@ -157,7 +61,7 @@ $checkDP = Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name
 
 if ($DPGroupName -eq $checkDP) {
 
-    Write-Host "DP group: $DPGroupName already exisits"
+    Write-DscStatus "DP group: $DPGroupName already exists"
 
 }
 else { 
@@ -170,49 +74,52 @@ else {
     $DistributionPoints | ForEach-Object {
         $DPPath = $_.NetworkOSPath
         $DPName = ($DPPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
-        Write-Host "Distribution Point Name: $DPName"
+        Write-DscStatus "Distribution Point Name: $DPName"
         try {
             Add-CMDistributionPointToGroup -DistributionPointGroupName "ALL DPS" -DistributionPointName $DPName 
-            Write-Host "Successfully added Distribution Point: $DPName to Group: $($DPGroupName)"
+            Write-DscStatus "Successfully added Distribution Point: $DPName to Group: $($DPGroupName)"
         }
         catch {
-            Write-Host "Failed to add Distribution Point: $DPName to Group: $($DPGroupName). Error: $_"
+            Write-DscStatus "Failed to add Distribution Point: $DPName to Group: $($DPGroupName). Error: $_"
         }
     }
 }
 
 #Applications and packages
 
-##parameters before creating apps, pakcages, scripts and TS 
 
-#create shares 
-
-
-#give permissions
-
-
-#copy the content to the folders
-
-
-
-$Apps | ForEach-Object {
+$apps = $deployconfig.Tools | where-object { $_.Appinstall -eq $True }
+$apps | ForEach-Object {
     
+
+    #create a directory for the application source files
+    new-item -ItemType Directory -Path "c:\Apps\$($_.Name)" -force
+ 
+    #create a hardlink for the source file (this is to save space on the C drive)
+    new-item -ItemType HardLink -Value "c:\tools\$($_.AppMsi)" -Path "C:\Apps\$($_.Name)\$($_.AppMsi)" -force
+
+
     #creating an application
-    New-CMApplication -Name $($_.AppName) -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
+    $appname = "MEMLABS-" + "$($_.Name)" 
+    New-CMApplication -Name $appname -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
+    #remove an application
+    #Remove-CMApplication -Name "MEMLABS-7-Zip 64-bit" -Force
 
     #create a deployment for each application (tim help on pulling the site server name)
-    Add-CMMSiDeploymentType -ApplicationName $($_.AppName) -DeploymentTypeName $($_.AppName) -ContentLocation "\\$ThisMachineName\E$\apps\$($_.AppName)\$($_.AppMsi)" -Comment "$($_.AppName) MSI deployment type" -Force -ErrorAction SilentlyContinue
-
+    Add-CMMSiDeploymentType -ApplicationName $appname -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
+    
     #distribute the content to All DPs
-    Start-CMContentDistribution -ApplicationName $($_.AppName) -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+    Start-CMContentDistribution -ApplicationName $($_.Name) -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
  
     #deploy apps to all systems
-    New-CMApplicationDeployment -ApplicationName $($_.AppName) -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
+    New-CMApplicationDeployment -ApplicationName $($_.Name) -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
 
     # Create the Package
-    $Package = New-CMPackage -Name $($_.AppName) -Path "\\$ThisMachineName\E$\apps\$($_.AppName)\$($_.AppMsi)" -Description "Package for $($_.Description)"
+    $Package = New-CMPackage -Name "MEMLABS-$($_.Name)" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
+    #Remove a package
+    #Remove-CMPackage -Id "CS100023" -Force
 
-    $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn /l*v c:\windows\temp\$($_.AppName).log"
+    $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn /l*v c:\windows\temp\$($_.Name).log"
     # Create a Program for the Package
     New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
 
@@ -224,6 +131,55 @@ $Apps | ForEach-Object {
       
 }
 
+
+## changing the auto approval setting on Heirarchy settings
+
+
+$namespace = "ROOT\SMS\site_$SiteCode"
+$classname = "SMS_SCI_SiteDefinition"
+ 
+# Fetch the instance of the class
+
+$instance = Get-CimInstance -ClassName $className -Namespace $namespace -Filter "SiteCode like 'CS1'"
+ 
+if ($instance -ne $null) {
+
+    # Get the Props array
+
+    $propsArray = $instance.Props
+ 
+    # Locate the TwoKeyApproval property
+
+    for ($i = 0; $i -lt $propsArray.Length; $i++) {
+
+        if ($propsArray[$i].PropertyName -eq "TwoKeyApproval") {
+
+            # Modify the Value field
+
+            $propsArray[$i].Value = 0 # Set your desired value here
+ 
+            # Update the Props array in the instance
+
+            $instance.Props = $propsArray
+ 
+            # Save the modified instance back to the class
+
+            Set-CimInstance -InputObject $instance
+ 
+            Write-DscStatus "TwoKeyApproval Value updated successfully."
+
+            break
+
+        }
+
+    }
+
+}
+else {
+
+    Write-DscStatus "Target instance not found."
+
+}
 
 ## Scripts ( used our scripts from Wiki)
 
@@ -241,21 +197,21 @@ foreach ($ScriptFile in $ScriptFiles) {
         #check if script already exists or else create it
         if (-not (Get-CMScript -ScriptName $ScriptName -Fast)) {
             $script = New-CMScript -ScriptName "$ScriptName" -ScriptText $ScriptContent -Fast
-            Write-Host "Successfully imported: $ScriptName"
+            Write-DscStatus "Successfully imported: $ScriptName"
             # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesnt have that feature yet) Tim help needed here
-            #Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved" 
+            Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved" 
 
             ##for testing if you want to remove all the scripts
             #Remove-CMScript -ForceWildcardHandling -ScriptName * -Force
         }
     }
     catch {
-        Write-Host "Failed to import: $ScriptName. Error: $_"
+        Write-DscStatus "Failed to import: $ScriptName. Error: $_"
     }
 }
 
 
-## Task sequences 
+<## Task sequences 
 
 # Get all boot images
 $BootImages = Get-CMBootImage
@@ -266,10 +222,10 @@ foreach ($BootImage in $BootImages) {
         $packageId = $BootImage.PackageID
         # Distribute the boot image
         Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"        
-        Write-Host "Successfully started distribution for boot image: $($BootImage.Name)"
+        Write-DscStatus "Successfully started distribution for boot image: $($BootImage.Name)"
     }
     catch {
-        Write-Host "Failed to start distribution for boot image: $($BootImage.Name). Error: $_"
+        Write-DscStatus "Failed to start distribution for boot image: $($BootImage.Name). Error: $_"
     }
 }
 
@@ -427,6 +383,8 @@ $ConfigNames | ForEach-Object {
 
 }
 
+#>
+
 # Define device Collection Information
 $Collections = @(
     @{
@@ -475,6 +433,15 @@ WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.20348'
 "@
     },
     @{
+        Name  = "MEMLABS-Windows Server 2025 Devices"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.26100'
+"@
+    },
+    @{
         Name  = "MEMLABS-All Non client Devices"
         Query = @"
 select Name, SMSAssignedSites, IPAddresses, IPSubnets, OperatingSystemNameandVersion, ResourceDomainORWorkgroup, LastLogonUserDomain, LastLogonUserName, SMSUniqueIdentifier, ResourceId, ResourceType, NetbiosName 
@@ -495,10 +462,9 @@ foreach ($Collection in $Collections) {
         # Add a query rule to the collection
         Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule"
     
-        Write-Host "Created collection: $CollectionName"
+        Write-DscStatus "Created collection: $CollectionName"
     }
 }
-
 
 
 
