@@ -91,95 +91,119 @@ else {
 $apps = $deployconfig.Tools | where-object { $_.Appinstall -eq $True }
 $apps | ForEach-Object {
     
-
+    Write-DscStatus "Creating a directory under c:\apps for the application $($_.Name)"
     #create a directory for the application source files
     new-item -ItemType Directory -Path "c:\Apps\$($_.Name)" -force
- 
+    Write-DscStatus "Successfully created directory under c:\apps for the application $($_.Name)"
+
+
+    Write-DscStatus "Creating a Hardlink under c:\apps for the application $($_.Name) "
     #create a hardlink for the source file (this is to save space on the C drive)
     new-item -ItemType HardLink -Value "c:\tools\$($_.AppMsi)" -Path "C:\Apps\$($_.Name)\$($_.AppMsi)" -force
-
+    Write-DscStatus "Successfully created Hardlink under c:\apps for the application $($_.Name)"
 
     #creating an application
     $appname = "MEMLABS-" + "$($_.Name)" 
-    New-CMApplication -Name $appname -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
+    Write-DscStatus "Creating an MEMLBAS application for $($_.Name) as App model"
+    New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
+    Write-DscStatus "Successfully created an MEMLBAS application for $($_.Name) as App model"
     #remove an application
-    #Remove-CMApplication -Name "MEMLABS-7-Zip 64-bit" -Force
+    #Remove-CMApplication -Name "MEMLABS-*" -Force
 
+    Write-DscStatus "Creating an MEMLBAS application deployment for $($_.Name) as App model"
     #create a deployment for each application (tim help on pulling the site server name)
-    Add-CMMSiDeploymentType -ApplicationName $appname -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
-    
-    #distribute the content to All DPs
-    Start-CMContentDistribution -ApplicationName $($_.Name) -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
- 
-    #deploy apps to all systems
-    New-CMApplicationDeployment -ApplicationName $($_.Name) -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
+    Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
+    Write-DscStatus "Sucessfully an MEMLBAS application deployment for $($_.Name) as App model"
 
+    Write-DscStatus "Distributing MEMLBAS application $($_.Name) to all DPs"
+    #distribute the content to All DPs
+    Start-CMContentDistribution -ApplicationName "$appname" -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+    Write-DscStatus "Successfully distributed MEMLBAS application $($_.Name) to all DPs"
+
+    Write-DscStatus "Deploying MEMLBAS application $($_.Name) to all Systems as available deployment"
+    #deploy apps to all systems
+    New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
+    Write-DscStatus "Succesfully deployed MEMLBAS application $($_.Name) to all Systems as available deployment"
+
+    Write-DscStatus "Creating an MEMLBAS application deployment for $($_.Name) as Package model"
     # Create the Package
     $Package = New-CMPackage -Name "MEMLABS-$($_.Name)" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
+    Write-DscStatus "Sucessfully created a MEMLBAS application deployment for $($_.Name) as Package model"
     #Remove a package
     #Remove-CMPackage -Id "CS100023" -Force
 
+    Write-DscStatus "Creating an MEMLBAS pacakage deployment for $($_.Name) as Package model"
     $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn /l*v c:\windows\temp\$($_.Name).log"
     # Create a Program for the Package
     New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
+    Write-DscStatus "Sucessfully created a MEMLBAS pacakage deployment for $($_.Name) as Package model"
 
+    Write-DscStatus "Distributing MEMLBAS pacakage $($_.Name) to all DPs"
     #Distribute all packages to ALL DPs group
     Start-CMContentDistribution -PackageId $Package.PackageID -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+    Write-DscStatus "Successfully distributed MEMLBAS package $($_.Name) to all DPs"
 
+    Write-DscStatus "Deploying MEMLBAS package $($_.Name) to all Systems as available deployment"
     #Deploy all packages to all systems
     New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
-      
+    Write-DscStatus "Succesfully deployed MEMLBAS package $($_.Name) to all Systems as available deployment"
 }
 
 
-## changing the auto approval setting on Heirarchy settings
-
+## Changing the auto-approval setting on Heirarchy settings
 
 $namespace = "ROOT\SMS\site_$SiteCode"
 $classname = "SMS_SCI_SiteDefinition"
- 
-# Fetch the instance of the class
 
-$instance = Get-CimInstance -ClassName $className -Namespace $namespace -Filter "SiteCode like 'CS1'"
- 
+Write-Dscstatus "Current namespace is: $namespace and class name is: $classname"
+
+# Fetch the instance of the class
+$instance = Get-CimInstance -ClassName $className -Namespace $namespace -Filter "SiteCode like '$SiteCode'"
+
 if ($instance -ne $null) {
+    Write-Dscstatus "Instance found: modifying existing instance."
 
     # Get the Props array
-
     $propsArray = $instance.Props
- 
+
     # Locate the TwoKeyApproval property
-
+    $propertyFound = $false
     for ($i = 0; $i -lt $propsArray.Length; $i++) {
-
         if ($propsArray[$i].PropertyName -eq "TwoKeyApproval") {
-
-            # Modify the Value field
-
+            $propertyFound = $true
+            Write-Dscstatus "Current property name is: $propsArray[$i].PropertyName and its value is $propsArray[$i].Value"
+            Write-Dscstatus "Setting the value to 0 to override the self-approval for author."
             $propsArray[$i].Value = 0 # Set your desired value here
- 
+
             # Update the Props array in the instance
-
             $instance.Props = $propsArray
- 
+
             # Save the modified instance back to the class
-
             Set-CimInstance -InputObject $instance
- 
-            Write-DscStatus "TwoKeyApproval Value updated successfully."
 
+            Write-DscStatus "TwoKeyApproval value updated successfully."
             break
-
         }
-
     }
 
+    if (-not $propertyFound) {
+        Write-DscStatus "Property 'TwoKeyApproval' not found in existing instance. Adding it."
+      
+     $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace 'ROOT/SMS/site_PS1'
+     $i = New-CimInstance -CimClass $class -Property @{PropertyName="TwoKeyApproval";Value="0";Value1=$null;Value2=$null}
+     $propsArray += $i
+        $instance.Props = $propsArray
+        Set-CimInstance -InputObject $instance
+        Write-DscStatus "TwoKeyApproval property added and value set successfully."
+
+    }
+        
 }
 else {
-
-    Write-DscStatus "Target instance not found."
-
+    Write-Dscstatus "Instance not found. Manually approve the scripts"
 }
+Write-DscStatus "New instance created with TwoKeyApproval set to 0."
+
 
 ## Scripts ( used our scripts from Wiki)
 
@@ -385,8 +409,223 @@ $ConfigNames | ForEach-Object {
 
 #>
 
-# Define device Collection Information
-$Collections = @(
+# Define additional device collection information
+$Collections += @(
+    @{
+        Name  = "MEMLABS-Windows 7 Devices"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version LIKE '6.1%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 8.1 Devices"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version LIKE '6.3%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Devices Without Antivirus"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_Installed_Software ON SMS_G_System_Installed_Software.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_Installed_Software.ProductName NOT LIKE '%Antivirus%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Laptops Only"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_SYSTEM_ENCLOSURE ON SMS_G_System_SYSTEM_ENCLOSURE.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_SYSTEM_ENCLOSURE.ChassisTypes IN ('8', '9', '10', '14', '18', '21')
+"@
+    },
+    @{
+        Name  = "MEMLABS-Desktop Devices"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_SYSTEM_ENCLOSURE ON SMS_G_System_SYSTEM_ENCLOSURE.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_SYSTEM_ENCLOSURE.ChassisTypes IN ('3', '4', '6', '7', '15')
+"@
+    },
+    @{
+        Name  = "MEMLABS-Virtual Machines"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_SYSTEM_ENCLOSURE ON SMS_G_System_SYSTEM_ENCLOSURE.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_SYSTEM_ENCLOSURE.ChassisTypes = '12'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Devices Without SCCM Client"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+WHERE SMS_R_SYSTEM.Client IS NULL OR SMS_R_SYSTEM.Client = 0
+"@
+    },
+    @{
+        Name  = "MEMLABS-Devices With Less Than 4GB RAM"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_PHYSICAL_MEMORY ON SMS_G_System_PHYSICAL_MEMORY.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_PHYSICAL_MEMORY.Capacity < 4294967296
+"@
+    },
+    @{
+        Name  = "MEMLABS-All MacOS Devices"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+WHERE SMS_R_System.OperatingSystemNameAndVersion LIKE '%MacOS%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Linux Devices"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+WHERE SMS_R_System.OperatingSystemNameAndVersion LIKE '%Linux%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Devices with Office- Microsoft 365 Apps"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_INSTALLED_SOFTWARE ON SMS_G_System_INSTALLED_SOFTWARE.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_INSTALLED_SOFTWARE.ProductName LIKE '%Microsoft 365 Apps%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Devices with Disk Space < 20GB"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_LOGICAL_DISK ON SMS_G_System_LOGICAL_DISK.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_LOGICAL_DISK.FreeSpace < 20000000000
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Devices in Domain XYZ"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+WHERE SMS_R_System.ResourceDomainORWorkgroup = 'XYZ'
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Devices with BitLocker Disabled"
+        Query = @"
+select SMS_R_System.Name, SMS_G_System_ENCRYPTABLE_VOLUME.DriveLetter, SMS_G_System_ENCRYPTABLE_VOLUME.ProtectionStatus 
+from SMS_R_System inner join SMS_G_System_ENCRYPTABLE_VOLUME on SMS_G_System_ENCRYPTABLE_VOLUME.ResourceId = SMS_R_System.ResourceId
+where SMS_G_System_ENCRYPTABLE_VOLUME.DriveLetter = "C:" and SMS_G_System_ENCRYPTABLE_VOLUME.ProtectionStatus = 1 order by SMS_R_System.Name
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Devices with Google Chrome Installed"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_INSTALLED_SOFTWARE ON SMS_G_System_INSTALLED_SOFTWARE.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_INSTALLED_SOFTWARE.ProductName LIKE '%Google Chrome%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Devices with Last Logon Older Than 90 Days"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+WHERE DATEDIFF(day, SMS_R_SYSTEM.LastLogonTimestamp, GETDATE()) > 90
+"@
+    }
+    @{
+        Name  = "MEMLABS-Devices Missing Critical Updates"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_UPDATE_STATUS ON SMS_G_System_UPDATE_STATUS.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_UPDATE_STATUS.Status = 2 AND SMS_G_System_UPDATE_STATUS.UpdateType = 'Critical'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Devices Online Now"
+        Query = @"
+select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,
+SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client from SMS_R_System where SMS_R_System.ResourceId in
+(select resourceid from SMS_CollectionMemberClientBaselineStatus where SMS_CollectionMemberClientBaselineStatus.CNIsOnline = 1)
+"@
+    },
+    @{
+        Name  = "MEMLABS-Devices Offline for Over 30 Days"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+WHERE DATEDIFF(day, SMS_R_SYSTEM.LastLogonTimestamp, GETDATE()) > 30
+"@
+    },
+    @{
+        Name  = "MEMLABS-High CPU Usage Devices"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_PROCESSOR ON SMS_G_System_PROCESSOR.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_PROCESSOR.LoadPercentage > 90
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Workgroup Devices"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+WHERE SMS_R_SYSTEM.ResourceDomainORWorkgroup NOT LIKE '%DOMAIN%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Devices Running SQL Server"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_INSTALLED_SOFTWARE ON SMS_G_System_INSTALLED_SOFTWARE.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_INSTALLED_SOFTWARE.ProductName LIKE '%SQL Server%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Domain Controllers"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+WHERE SMS_R_SYSTEM.Name LIKE '%DC%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Devices in Specific OU"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+WHERE SMS_R_SYSTEM.DistinguishedName LIKE '%OU=MEMLABS,DC=Domain,DC=com%'
+"@
+    },
+    @{
+        Name  = "MEMLABS-All Devices Missing a Default Gateway"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_NETWORK_ADAPTER_CONFIGURATION ON SMS_G_System_NETWORK_ADAPTER_CONFIGURATION.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_NETWORK_ADAPTER_CONFIGURATION.DefaultIPGateway IS NULL
+"@
+    }
+
     @{
         Name  = "MEMLABS-Windows 10 Devices"
         Query = @"
@@ -447,8 +686,9 @@ WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.26100'
 select Name, SMSAssignedSites, IPAddresses, IPSubnets, OperatingSystemNameandVersion, ResourceDomainORWorkgroup, LastLogonUserDomain, LastLogonUserName, SMSUniqueIdentifier, ResourceId, ResourceType, NetbiosName 
 from sms_r_system where Client = 0 or Client is null
 "@
-    }   
+    }
 )
+
 
 # Loop through each collection and create it in SCCM
 foreach ($Collection in $Collections) {
@@ -459,13 +699,16 @@ foreach ($Collection in $Collections) {
         # Create the device collection
         $NewCollection = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
 
-        # Add a query rule to the collection
-        Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule"
-    
         Write-DscStatus "Created collection: $CollectionName"
+
+        # Add a query rule to the collection
+        Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule" -ErrorAction Stop
+    
+        Write-DscStatus "Created collection query: $CollectionName Rule"
     }
 }
 
+Write-DscStatus "Completed the perf loading the environment"
 
 
 

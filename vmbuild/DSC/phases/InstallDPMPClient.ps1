@@ -274,9 +274,11 @@ do {
     $adsgdiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
 
     if ($adsgdiscovery.Value1.ToLower() -ne "active") {
-        #Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
+
+        Write-DscStatus "AD Group Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
         Start-Sleep -Seconds 30
-        Set-CMDiscoveryMethod -ActiveDirectoryGroupDiscovery -AddGroupDiscoveryScope (New-CMADGroupDiscoveryScope -name Allscope -SiteCode $SiteCode -LdapLocation "LDAP://DC=$DomainName,DC=$lastdomainname" -RecursiveSearch $true -Verbose) -Verbose
+        $sgscope = New-CMADGroupDiscoveryScope -name Allscope -SiteCode $SiteCode -LdapLocation "LDAP://DC=$DomainName,DC=$lastdomainname" -RecursiveSearch $true -Verbose
+        Set-CMDiscoveryMethod -ActiveDirectoryGroupDiscovery -AddGroupDiscoveryScope $sgscope -Enabled $true -Verbose
     }
     else {
         Write-DscStatus "AD System Discovery state is: $($adsgdiscovery.Value1)"
