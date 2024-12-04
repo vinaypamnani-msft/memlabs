@@ -38,11 +38,21 @@ class InstallADK {
 
 
         # Use this block to download the FULL ADK, Filename: adksetup.exe
+        if ((Test-Path $_adkpath)) {
+            If (-not (Get-Item $_adkpath).length -gt 0kb) {
+                Remove-Item $_adkpath -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
         if (!(Test-Path $_adkpath)) {
             Start-BitsTransfer -Source $_ADKDownloadPath -Destination $_adkpath -Priority Foreground -ErrorAction Stop
         }
 
         # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
+        if ((Test-Path $_adkWinPEpath)) {
+            If (-not (Get-Item $_adkWinPEpath).length -gt 0kb) {
+                Remove-Item $_adkWinPEpath -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
         if (!(Test-Path $_adkWinPEpath)) {
             Start-BitsTransfer -Source $_ADKWinPEDownloadPath -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
         }
@@ -152,6 +162,13 @@ class InstallSSMS {
         # Download SSMS
 
         $ssmsSetup = "C:\temp\SSMS-Setup-ENU.exe"
+
+        if ((Test-Path $ssmsSetup)) {
+            If (-not (Get-Item $ssmsSetup).length -gt 0kb) {
+                Remove-Item $ssmsSetup -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
+
         if (!(Test-Path $ssmsSetup)) {
             Write-Verbose "Downloading SSMS from $($this.DownloadUrl)..."
             try {
@@ -163,7 +180,7 @@ class InstallSSMS {
                 Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
             }
         }
-
+        
         # Install SSMS
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
@@ -250,6 +267,12 @@ class InstallDotNet4 {
 
         # Download
         $setup = "C:\temp\$($this.FileName)"
+        
+        if ((Test-Path $setup)) {
+            If (-not (Get-Item $setup).length -gt 0kb) {
+                Remove-Item $setup -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
         if (!(Test-Path $setup)) {
             Write-Verbose "Downloading .NET $($this.FileName) from $($this.DownloadUrl)..."
             try {
@@ -330,6 +353,11 @@ class InstallODBCDriver {
             $odbcurl = "https://go.microsoft.com/fwlink/?linkid=2280794"
             Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server from $($odbcurl)..."
 
+            if ((Test-Path $_odbcpath)) {
+                If (-not (Get-Item $_odbcpath).length -gt 0kb) {
+                    Remove-Item $_odbcpath -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+            }
             try {
                 Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
                 Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
@@ -433,6 +461,11 @@ class InstallSqlClient {
 
             Write-Verbose "Downloading Sql Client from $($url)..."
 
+            if ((Test-Path $_path)) {
+                If (-not (Get-Item $_path).length -gt 0kb) {
+                    Remove-Item $_path -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+            }
             try {
                 Write-Verbose "Downloading  Sql Client"
                 Start-BitsTransfer -Source $url -Destination $_path -Priority Foreground -ErrorAction Stop
@@ -537,7 +570,11 @@ class InstallVCRedist {
             $url = "https://aka.ms/vs/15/release/vc_redist.x64.exe"
 
             Write-Verbose "Downloading VC Redist from $($url)..."
-
+            if ((Test-Path $_path)) {
+                If (-not (Get-Item $_path).length -gt 0kb) {
+                    Remove-Item $_path -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+            }
             try {
                 Write-Verbose "Downloading VC Redist"
                 Start-BitsTransfer -Source $url -Destination $_path -Priority Foreground -ErrorAction Stop
@@ -1164,6 +1201,11 @@ class DownloadSCCM {
         $cmsourcepath = "c:\$_CM"
         Write-Verbose "Downloading [$_CMURL] $_CM installation source... to $cmpath"
 
+        if ((Test-Path $cmpath)) {
+            If (-not (Get-Item $cmpath).length -gt 0kb) {
+                Remove-Item $cmpath -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
         Start-BitsTransfer -Source $_CMURL -Destination $cmpath -Priority Foreground -ErrorAction Stop
         if (Test-Path $cmsourcepath) {
             Remove-Item -Path $cmsourcepath -Recurse -Force | Out-Null
@@ -1214,6 +1256,11 @@ class DownloadFile {
     [string] $FilePath
 
     [void] Set() {
+        if ((Test-Path $this.FilePath)) {
+            If (-not (Get-Item $this.FilePath).length -gt 0kb) {
+                Remove-Item $this.FilePath-Force -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
         Write-Verbose "Downloading file from $($this.DownloadUrl)..."
         Start-BitsTransfer -Source $this.DownloadUrl -Destination $this.FilePath -Priority Foreground -ErrorAction Stop
     }
@@ -3848,6 +3895,11 @@ class InstallPBIRS {
 
 
             $pbirsSetup = "C:\temp\PowerBIReportServer.exe"
+            if ((Test-Path $pbirsSetup)) {
+                If (-not (Get-Item $pbirsSetup).length -gt 0kb) {
+                    Remove-Item $pbirsSetup -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+            }
             if (!(Test-Path $pbirsSetup)) {
                 Write-Verbose "Downloading PBIRS from $($this.DownloadUrl)..."
                 try {
