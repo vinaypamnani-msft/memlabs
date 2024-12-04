@@ -1190,8 +1190,8 @@ function ConvertTo-DeployConfigEx {
 
     # Add Apps
 
-    $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools
-    
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
+
     return $deployConfigEx
 }
 
