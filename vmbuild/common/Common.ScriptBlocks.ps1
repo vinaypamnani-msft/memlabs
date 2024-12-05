@@ -199,19 +199,22 @@ $global:VM_Create = {
                         $realnetwork = $currentItem.network
                     }
                     $network = $realnetwork.Substring(0, $realnetwork.LastIndexOf("."))
+
+                    $splitNetwork = ($network.split(".")| Select-Object -First 3) -join "."
                     if ($currentItem.role -eq "CAS") {
                         Write-Log -LogOnly '11Calling Remove-DhcpServerv4Reservation -IPAddress ($network + ".5") -ErrorAction SilentlyContinue'
-                        Remove-DhcpServerv4Reservation -IPAddress ($network + ".5") -ErrorAction SilentlyContinue
+
+                        Get-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".5") -ErrorAction SilentlyContinue | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
                         Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($network + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop
                     }
                     if ($currentItem.role -eq "Primary") {
                         Write-Log -LogOnly '12Calling Remove-DhcpServerv4Reservation -IPAddress ($network + ".10") -ErrorAction SilentlyContinue'
-                        Remove-DhcpServerv4Reservation -IPAddress ($network + ".10") -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".10") -ErrorAction SilentlyContinue | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
                         Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($network + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop
                     }
                     if ($currentItem.role -eq "Secondary") {
                         Write-Log -LogOnly '13Calling Remove-DhcpServerv4Reservation -IPAddress ($network + ".15") -ErrorAction SilentlyContinue'
-                        Remove-DhcpServerv4Reservation -IPAddress ($network + ".15") -ErrorAction SilentlyContinue
+                        Get-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".15") -ErrorAction SilentlyContinue | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
                         Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($network + ".15") -ClientId $vmnet.MacAddress -Description "Reservation for Secondary" -ErrorAction Stop
                     }
                 }
