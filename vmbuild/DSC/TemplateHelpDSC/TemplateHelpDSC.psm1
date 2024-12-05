@@ -18,10 +18,10 @@ class InstallADK {
     [string] $ADKWinPEPath
 
     [DscProperty(Mandatory)]
-    [string] $ADKDownloadPath #  "https://go.microsoft.com/fwlink/?linkid=2271337"
+    [string] $ADKDownloadPath #  "https://go.microsoft.com/fwlink/?linkid=2196127"
 
     [DscProperty(Mandatory)]
-    [string] $ADKWinPEDownloadPath #  "https://go.microsoft.com/fwlink/?linkid=2271338"
+    [string] $ADKWinPEDownloadPath #  "https://go.microsoft.com/fwlink/?linkid=2243391"
 
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
