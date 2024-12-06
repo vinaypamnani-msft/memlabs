@@ -53,11 +53,11 @@
     $iiscount = 0
     [System.Collections.ArrayList]$groupMembers = @()
     $GroupMembersList = @()
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.Hidden}
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.Hidden }
     $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP -and -not $_.Hidden }
     $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP -and -not $_.Hidden }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and -not $_.Hidden}
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and -not $_.Hidden}
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and -not $_.Hidden }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and -not $_.Hidden }
     [System.Collections.ArrayList]$iisgroupMembers = @()
     foreach ($member in $GroupMembersList) {
         $memberName = $member.vmName + "$"
@@ -172,8 +172,17 @@
             Status    = "Creating user accounts and groups"
         }
 
+        ADOrganizationalUnit 'MEMLABS-Users'
+        {
+            Name                            = "MEMLABS-Users"
+            Path                            = $DNName
+            ProtectedFromAccidentalDeletion = $false
+            Description                     = "MEMLABS auto created users"
+            Ensure                          = 'Present'
+            DependsOn                       = "[WriteStatus]CreateAccounts"
+        }
 
-        $nextDepend = "[WriteStatus]CreateAccounts"
+        $nextDepend = "[ADOrganizationalUnit]MEMLABS-Users"
         $adObjectDependency = @($nextDepend)
         $i = 0
         foreach ($user in $DomainAccounts) {
@@ -205,6 +214,69 @@
                 DependsOn            = $nextDepend
             }
             $adObjectDependency += "[ADUser]User$($i)"
+           
+        }
+
+        # Loop to create 50 users
+        for ($i = 1; $i -le 50; $i++) {
+            # Generate a random username
+            $Username = "MEMLABS-User" + ([System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+            
+            
+            # Create the new user
+            ADUser "MEMLABS-User$($i)" {
+                Ensure               = 'Present'
+                UserPrincipalName    = $Username + '@' + $DomainName
+                UserName             = $Username
+                Password             = $DomainCreds
+                PasswordNeverResets  = $true
+                PasswordNeverExpires = $true
+                CannotChangePassword = $true
+                DomainName           = $DomainName
+                DependsOn            = $nextDepend
+                Path                 = "OU=MEMLABS-Users,$DNName"
+            }
+        }
+
+
+        # List of department names
+        $Departments = @(
+            "HR",
+            "Finance",
+            "IT",
+            "Marketing",
+            "Sales",
+            "Operations",
+            "Legal",
+            "Customer Service",
+            "Engineering",
+            "Product Management",
+            "Research and Development",
+            "Quality Assurance",
+            "Supply Chain",
+            "Administration",
+            "Facilities",
+            "Procurement",
+            "Training",
+            "Security",
+            "Public Relations",
+            "Compliance"
+        )
+
+        # Loop to create security groups for each department
+        foreach ($Department in $Departments) {
+            $GroupName = "MEMLABS-$Department-SecurityGroup"
+
+            ADGroup $Department {
+                Ensure           = 'Present'
+                GroupName        = $GroupName
+                GroupScope       = "Global"
+                Category         = "Security"
+                Description      = $GroupName
+                DependsOn        = $nextDepend
+                Path             = "OU=MEMLABS-Users,$DNName"
+            }
+
         }
 
         $i = 0

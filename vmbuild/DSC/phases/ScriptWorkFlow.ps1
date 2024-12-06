@@ -311,8 +311,17 @@ else {
     Write-DscStatus "Complete!"
 }
 
+Write-DScStatus "Loading object pre-population for MEMLABS"
+$ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
+Set-Location $LogPath
+. $ScriptFile $ConfigFilePath $LogPath
+Write-DscStatus "Complete!"
+
+
 Write-DscStatus "Always Running PushClients.ps1"
 $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
 Set-Location $LogPath
 . $ScriptFile $ConfigFilePath $LogPath
 Write-DscStatus "Complete!"
+
+
