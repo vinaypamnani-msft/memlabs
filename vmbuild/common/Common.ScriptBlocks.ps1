@@ -199,16 +199,22 @@ $global:VM_Create = {
                         $realnetwork = $currentItem.network
                     }
                     $network = $realnetwork.Substring(0, $realnetwork.LastIndexOf("."))
+
+                    $splitNetwork = ($network.split(".")| Select-Object -First 3) -join "."
                     if ($currentItem.role -eq "CAS") {
-                        Remove-DhcpServerv4Reservation -IPAddress ($network + ".5") -ErrorAction SilentlyContinue
+                        Write-Log -Verbose '11Calling Get-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".5") -ErrorAction SilentlyContinue | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+
+                        Get-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".5") -ErrorAction SilentlyContinue | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
                         Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($network + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop
                     }
                     if ($currentItem.role -eq "Primary") {
-                        Remove-DhcpServerv4Reservation -IPAddress ($network + ".10") -ErrorAction SilentlyContinue
+                        Write-Log -Verbose '12Calling Get-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".10") -ErrorAction SilentlyContinue | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                        Get-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".10") -ErrorAction SilentlyContinue | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
                         Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($network + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop
                     }
                     if ($currentItem.role -eq "Secondary") {
-                        Remove-DhcpServerv4Reservation -IPAddress ($network + ".15") -ErrorAction SilentlyContinue
+                        Write-Log -Verbose '13Calling Get-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".15") -ErrorAction SilentlyContinue | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                        Get-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".15") -ErrorAction SilentlyContinue | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
                         Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($network + ".15") -ClientId $vmnet.MacAddress -Description "Reservation for Secondary" -ErrorAction Stop
                     }
                 }
@@ -259,7 +265,7 @@ $global:VM_Create = {
                     if ($Dev.InstanceId -ne $null) {
                         Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
                         $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
-                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force}
+                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force }
                     }
                 }
             }
@@ -709,13 +715,15 @@ $global:VM_Config = {
                         else {
                             $ip = $iprange[0]
                         }
-                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" -erroraction SilentlyContinue | Where-Object { $_.IpAddress -eq $ip }
-                        if ($ipa) {
-                            Remove-DhcpServerv4Reservation -IPAddress $ip | Out-Null
+                        if ($ip) {
+                            Write-Log -Verbose '14Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" -erroraction SilentlyContinue | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue  '
+                            $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" -erroraction SilentlyContinue | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue                              
                         }
 
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.ClientId -replace "-","" -eq $($vmnet.MacAddress)} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue -Force
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object {$_.Name -like $($currentItem.vmName)+".*"} | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue -Force
+                        Write-Log -Verbose '15Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue -Force'
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue -Force
+                        Write-Log -Verbose '16Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue -Force'
+                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue -Force
 
                         Write-Progress2 $Activity -Status "Adding DHCP Reservations for scope 10.250.250.0 ip: $ip MAC: $MAC" -percentcomplete 11 -force
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $MAC -Description "Reservation for $($currentItem.VMName)" -ErrorAction Stop | out-null

@@ -168,8 +168,8 @@ configuration Phase3
             InstallADK ADKInstall {
                 ADKPath      = "C:\temp\adksetup.exe"
                 ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-                ADKDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2271337"
-                ADKWinPEDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2271338"                
+                ADKDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2196127"
+                ADKWinPEDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2243391"                
                 Ensure       = "Present"
                 DependsOn    = "[WriteStatus]ADKInstall"
             }

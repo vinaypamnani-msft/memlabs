@@ -508,7 +508,7 @@ try {
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
         if ($currentPhase -ge 2) {
             Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
-            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
+            Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
             if ($currentPhase -eq 8) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
@@ -585,7 +585,7 @@ finally {
 
         if ($currentPhase -ge 2 -and $currentPhase -le 9) {
             Write-Log "To Retry from the current phase, run the following command from the current powershell window: " -Failure -NoIndent
-            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
+            Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
             if ($currentPhase -eq 8) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent

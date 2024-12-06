@@ -42,6 +42,7 @@ function Remove-VirtualMachine {
         foreach ($adapter in $adapters) {
             if ($adapter.SwitchName -eq "cluster") {
                 try {
+                    Write-Log -Verbose '9Calling Remove-DhcpServerv4Reservation  -ScopeId 10.250.250.0 -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf'
                     Remove-DhcpServerv4Reservation  -ScopeId 10.250.250.0 -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
                     Write-Log "$VmName`: Removing $($adapter.MacAddress) Reservation..." -HostOnly
                 }
@@ -49,6 +50,7 @@ function Remove-VirtualMachine {
                 #Write-Log "$VmName`: Removing DHCP Reservation on cluster network..." -HostOnly
             }
             else {
+                Write-Log -Verbose '10Calling Remove-DhcpServerv4Reservation  -ScopeId $vmFromList.Network -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf'
                 Remove-DhcpServerv4Reservation  -ScopeId $vmFromList.Network -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
 
             }

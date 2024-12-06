@@ -255,7 +255,7 @@ function New-VhdxFile {
         return $false
     }
 
-    Write-Log "Creating $vhdxPath"
+    Write-Log "Creating $vhdxPath (Estimated time 20 min)"
 
     # Prepare filesToInject
     $filesToInject = @()

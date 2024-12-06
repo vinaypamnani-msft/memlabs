@@ -680,12 +680,12 @@ function Get-File {
         if ($Action -eq "Downloading") {
             if ($UseBITS.IsPresent) {
                 try {
-                Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+                    Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
                 }
                 catch {
                     Write-log "Start-BitsTransfer $_" -LogOnly
                     if ($_ -Match "the module could not be loaded" ) {
-                    Write-Log -Failure "Could not invoke Start-BitsTransfer due to load failure.  Please close all powershell windows and retry."
+                        Write-Log -Failure "Could not invoke Start-BitsTransfer due to load failure.  Please close all powershell windows and retry."
                     }
                 }
             }
@@ -1089,12 +1089,12 @@ function Test-NetworkSwitch {
     }
 
     try {
-    $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
+        $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
     }
     catch {
         Write-log "Get-NetAdapter $_" -LogOnly
         if ($_ -Match "the module could not be loaded" ) {
-        Write-Log -Failure "Could not invoke Get-NetAdapter due to load failure.  Please close all powershell windows and retry."
+            Write-Log -Failure "Could not invoke Get-NetAdapter due to load failure.  Please close all powershell windows and retry."
         }
     }
 
@@ -1795,32 +1795,32 @@ function New-VirtualMachine {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
 
-         # Copy sysprepped image to VM location
-         $osDiskName = "$($VmName)_OS.vhdx"
-         $osDiskPath = Join-Path $vm.Path $osDiskName
+        # Copy sysprepped image to VM location
+        $osDiskName = "$($VmName)_OS.vhdx"
+        $osDiskPath = Join-Path $vm.Path $osDiskName
          
-         if (-not $Migrate) {
-             if (-not $OSDClient.IsPresent) {
-                 $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
-                 if (-not $worked) {
-                     Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
-                     return $false
-                 }
-             }
-             else {
-                 Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
-                 $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
-                 if (-not $worked) {
-                     Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
-                     return $false
-                 }
-             }
-         }
+        if (-not $Migrate) {
+            if (-not $OSDClient.IsPresent) {
+                $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
+                if (-not $worked) {
+                    Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+                    return $false
+                }
+            }
+            else {
+                Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
+                $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
+                if (-not $worked) {
+                    Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+                    return $false
+                }
+            }
+        }
          
-         if (-not (Test-Path $osDiskPath)) {
-             Write-Log "Could not find file $osDiskPath" -Failure
-             return
-         }
+        if (-not (Test-Path $osDiskPath)) {
+            Write-Log "Could not find file $osDiskPath" -Failure
+            return
+        }
 
 
         Write-Log "$VmName`: Enabling Hyper-V Guest Services"
@@ -1975,6 +1975,7 @@ function New-VirtualMachine {
                 }
 
                 $ip = $null
+                $ipa = $null
                 try {
                     $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
                     if (! $ip) {
@@ -1984,13 +1985,15 @@ function New-VirtualMachine {
                         Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
                         return $false
                     }
-                    Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip }
-                    if ($ipa) {
-                        Remove-DhcpServerv4Reservation -IPAddress $ip
+                    else {     
+                        Write-Log -Verbose '1Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'                              
+                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue                       
                     }
 
+                    Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                    Write-Log -Verbose '2Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
                     Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Write-Log -Verbose '3Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
                     Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
 
 
@@ -2012,12 +2015,14 @@ function New-VirtualMachine {
                             Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
                             return $false
                         }
-                        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip }
-                        if ($ipa) {
-                            Remove-DhcpServerv4Reservation -IPAddress $ip
+                        else {
+                            Write-Log -Verbose '6Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                            $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue                           
                         }
+                        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                        Write-Log -Verbose '7Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
                         Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Write-Log -Verbose '8Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
                         Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
 
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
@@ -2042,13 +2047,13 @@ function New-VirtualMachine {
                     $AGIP = $IPs[1]
 
 
-                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP }
-                    if ($ipa) {
-                        Remove-DhcpServerv4Reservation -IPAddress $clusterIP
+                    if ($clusterIP) { 
+                        Write-Log -Verbose '4Calling  $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue                      
                     }
-                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP }
-                    if ($ipa) {
-                        Remove-DhcpServerv4Reservation -IPAddress $AGIP
+                    if ($AGIP) {
+                        Write-Log -Verbose '5Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue                          
                     }
                     write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
 
@@ -3818,7 +3823,7 @@ if (-not $Common.Initialized) {
     ### Test Storage config and access
     Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
     $getresults = Get-StorageConfig 
-    if ($getresults -eq $false){
+    if ($getresults -eq $false) {
         Write-Log "failed to get the storage JSON file" -Failure
         return 
     }
