@@ -1017,7 +1017,7 @@ function ConvertTo-DeployConfigEx {
             $sqlCUUrl = $sqlFile.cuURL
             $thisParams | Add-Member -MemberType NoteProperty -Name "sqlCUURL" -Value $sqlCUUrl -Force
             #$backupSolutionURL = "https://ola.hallengren.com/scripts/MaintenanceSolution.sql"
-            $backupSolutionURL = "https://raw.githubusercontent.com/olahallengren/sql-server-maintenance-solution/refs/heads/main/MaintenanceSolution.sql"
+            $backupSolutionURL = $($Common.AzureFileList.Urls.hallengren)
             $thisParams | Add-Member -MemberType NoteProperty -Name "backupSolutionURL" -Value $backupSolutionURL -Force
 
             #if ($thisvm.sqlInstanceName -eq "MSSQLSERVER" ) {
@@ -1191,7 +1191,7 @@ function ConvertTo-DeployConfigEx {
     # Add Apps
 
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
-
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
     return $deployConfigEx
 }
 

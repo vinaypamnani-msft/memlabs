@@ -2109,12 +2109,12 @@ Function Get-LinuxImages {
     if (Test-Path $linuxJson -PathType Leaf) {
         #Get a new copy if the existing one is over 5 hours old
         if (Get-Childitem $linuxJson  | Where-Object { $_.LastWriteTime -lt (get-date).AddHours(-5) }) {
-            & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+            & curl -s -L $($Common.AzureFileList.Urls.BgInfo) -o $linuxJson
         }
     }
     else {
         # Get a copy if the file doesnt exist
-        & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+        & curl -s -L $($Common.AzureFileList.Urls.BgInfo) -o $linuxJson
     }
     $linux = Get-Content $linuxJson | convertfrom-json
     return ($linux.images | Where-Object { $_.config.secureboot -ne $true })

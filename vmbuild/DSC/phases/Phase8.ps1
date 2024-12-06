@@ -249,6 +249,7 @@ Configuration Phase8
 
         InstallODBCDriver ODBCDriverInstall {
             ODBCPath  = "C:\temp\msodbcsql.msi"
+            URL       = $deployConfig.URLS.ODBC
             Ensure    = "Present"
             DependsOn = "[WriteStatus]ODBCDriverInstall"
         }
@@ -278,8 +279,8 @@ Configuration Phase8
         InstallADK ADKInstall {
             ADKPath      = "C:\temp\adksetup.exe"
             ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-            ADKDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2196127"
-            ADKWinPEDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2243391"   
+            ADKDownloadPath = $deployConfig.URLS.ADK
+            ADKWinPEDownloadPath = $deployConfig.URLS.ADKPE         
             Ensure       = "Present"
             DependsOn    = "[WriteStatus]ADKInstall"
         }
@@ -293,6 +294,7 @@ Configuration Phase8
 
         InstallODBCDriver ODBCDriverInstall {
             ODBCPath  = "C:\temp\msodbcsql.msi"
+            URL       = $deployConfig.URLS.ODBC
             Ensure    = "Present"
             DependsOn = "[WriteStatus]ODBCDriverInstall"
         }
@@ -383,8 +385,8 @@ Configuration Phase8
         InstallADK ADKInstall {
             ADKPath      = "C:\temp\adksetup.exe"
             ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-            ADKDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2196127"
-            ADKWinPEDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2243391"    
+            ADKDownloadPath = $deployConfig.URLS.ADK
+            ADKWinPEDownloadPath = $deployConfig.URLS.ADKPE           
             Ensure       = "Present"
             DependsOn    = "[WriteStatus]ADKInstall"
         }

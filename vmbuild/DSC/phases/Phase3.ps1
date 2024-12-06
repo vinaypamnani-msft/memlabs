@@ -120,7 +120,7 @@ configuration Phase3
         }
 
         InstallDotNet4 DotNet {
-            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
+            DownloadUrl = $deployConfig.URLS.DotNet
             FileName    = "ndp48-x86-x64-allos-enu.exe"
             NetVersion  = "528040"
             Ensure      = "Present"
@@ -131,7 +131,7 @@ configuration Phase3
         if ($ThisVM.installSSMS -eq $true -or (($null -eq $ThisVM.installSSMS) -and $ThisVM.SQLVersion)) {
             # Check if false, for older configs that didn't have this prop
 
-            $ssmsDownloadUrl = "https://aka.ms/ssmsfullsetup"
+            $ssmsDownloadUrl = $deployConfig.URLS.SSMS
             if ($l.LanguageTag -ne "en-US") {
                 $ssmsDownloadUrl = $ssmsDownloadUrl + "?clcid=" + $l.LanguageID
             }
@@ -168,8 +168,8 @@ configuration Phase3
             InstallADK ADKInstall {
                 ADKPath      = "C:\temp\adksetup.exe"
                 ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-                ADKDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2196127"
-                ADKWinPEDownloadPath = "https://go.microsoft.com/fwlink/?linkid=2243391"                
+                ADKDownloadPath = $deployConfig.URLS.ADK
+                ADKWinPEDownloadPath = $deployConfig.URLS.ADKPE              
                 Ensure       = "Present"
                 DependsOn    = "[WriteStatus]ADKInstall"
             }
@@ -216,6 +216,7 @@ configuration Phase3
         InstallVCRedist VCInstall {
             DependsOn = "[WriteStatus]VCInstall"
             Path      = "C:\temp\vc_redist.x64.exe"
+            URL       = $deployConfig.URLS.VCredist
             Ensure    = "Present"
         }
 
@@ -226,6 +227,7 @@ configuration Phase3
 
         InstallSQLClient SQLClientInstall {
             DependsOn = "[WriteStatus]SQLClientInstall"
+            URL       = $deployConfig.URLS.SQLClient
             Path      = "C:\temp\sqlncli.msi"
             Ensure    = "Present"
         }
@@ -237,6 +239,7 @@ configuration Phase3
 
         InstallODBCDriver ODBCDriverInstall {
             DependsOn = "[WriteStatus]ODBCDriverInstall"
+            URL       = $deployConfig.URLS.ODBC
             ODBCPath  = "C:\temp\msodbcsql.msi"
             Ensure    = "Present"
         }

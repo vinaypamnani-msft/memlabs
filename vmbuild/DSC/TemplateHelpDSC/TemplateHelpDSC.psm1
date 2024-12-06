@@ -343,14 +343,18 @@ class InstallODBCDriver {
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
+    [DscProperty(Mandatory)]
+    [string] $URL
+
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
         $_odbcpath = $this.ODBCPath
+        $_URL = $this.URL
         if (!(Test-Path $_odbcpath)) {
             #$odbcurl = "https://go.microsoft.com/fwlink/?linkid=2220989"
-            $odbcurl = "https://go.microsoft.com/fwlink/?linkid=2280794"
+            $odbcurl = $_URL
             Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server from $($odbcurl)..."
 
             if ((Test-Path $_odbcpath)) {
@@ -451,15 +455,19 @@ class InstallSqlClient {
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
+    [DscProperty(Mandatory)]
+    [string] $URL
+
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
         $_path = $this.Path
+        $_URL = $this.URL
         if (!(Test-Path $_path)) {
-            $url = "https://go.microsoft.com/fwlink/?linkid=2115684"
+            $dlurl = $_URL
 
-            Write-Verbose "Downloading Sql Client from $($url)..."
+            Write-Verbose "Downloading Sql Client from $($dlurl)..."
 
             if ((Test-Path $_path)) {
                 If (-not (Get-Item $_path).length -gt 0kb) {
@@ -468,7 +476,7 @@ class InstallSqlClient {
             }
             try {
                 Write-Verbose "Downloading  Sql Client"
-                Start-BitsTransfer -Source $url -Destination $_path -Priority Foreground -ErrorAction Stop
+                Start-BitsTransfer -Source $dlurl -Destination $_path -Priority Foreground -ErrorAction Stop
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
@@ -477,7 +485,7 @@ class InstallSqlClient {
                 start-sleep -seconds 60
                 Write-Verbose "Downloading Sql Client"
                 try {
-                    Invoke-WebRequest -Uri $url -OutFile $_path -ErrorAction Stop
+                    Invoke-WebRequest -Uri $dlurl -OutFile $_path -ErrorAction Stop
                     #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
                 }
                 catch {
@@ -561,15 +569,19 @@ class InstallVCRedist {
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
+    [DscProperty(Mandatory)]
+    [string] $URL
+
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
         $_path = $this.Path
+        $_URL = $this.URL
         if (!(Test-Path $_path)) {
-            $url = "https://aka.ms/vs/15/release/vc_redist.x64.exe"
+            $dlurl = $_URL
 
-            Write-Verbose "Downloading VC Redist from $($url)..."
+            Write-Verbose "Downloading VC Redist from $($dlurl)..."
             if ((Test-Path $_path)) {
                 If (-not (Get-Item $_path).length -gt 0kb) {
                     Remove-Item $_path -Force -ErrorAction SilentlyContinue | Out-Null
@@ -577,7 +589,7 @@ class InstallVCRedist {
             }
             try {
                 Write-Verbose "Downloading VC Redist"
-                Start-BitsTransfer -Source $url -Destination $_path -Priority Foreground -ErrorAction Stop
+                Start-BitsTransfer -Source $dlurl -Destination $_path -Priority Foreground -ErrorAction Stop
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
@@ -586,7 +598,7 @@ class InstallVCRedist {
                 start-sleep -seconds 60
                 Write-Verbose "Downloading VC Redist"
                 try {
-                    Invoke-WebRequest -Uri $url -OutFile $_path -ErrorAction Stop
+                    Invoke-WebRequest -Uri $dlurl -OutFile $_path -ErrorAction Stop
                     #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
                 }
                 catch {

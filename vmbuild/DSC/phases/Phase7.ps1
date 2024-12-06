@@ -99,7 +99,7 @@ configuration Phase7
         InstallPBIRS InstallPBIRS {
             InstallPath          = "C:\PBIRS"
             SQLServer            = $SqlServerInstance
-            DownloadUrl          = "https://download.microsoft.com/download/3/7/5/3754bf6e-e422-46ec-b9f8-fb3dc3993cab/PowerBIReportServer.exe"
+            DownloadUrl          = $deployConfig.URLS.PBIRS
             RSInstance           = "PBIRS"
             DBcredentials          = $Admincreds
             IsRemoteDatabaseServer = $IsRemoteDatabaseServer
