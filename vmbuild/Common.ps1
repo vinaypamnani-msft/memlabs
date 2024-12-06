@@ -1681,6 +1681,51 @@ function Get-DhcpScopeDescription {
     }
 }
 
+function Remove-DHCPReservation {
+    param(
+        [string] $ip,
+        [string] $mac,
+        [string] $vmName
+    )
+  
+
+    if ($ip) {
+        Write-Log -Verbose ($VmName + " Checking for Reservation for $ip")
+        if (Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue) {
+            Write-Log -Verbose ($VmName + " Removing Reservation for $ip")
+            Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue -AsJob
+        }   
+    }
+
+    if ($mac) {
+        Write-Log -Verbose ($VmName + " Checking for Reservation for $mac")
+        foreach ($scope in Get-DhcpServerv4Scope) { 
+            #write-Host $scope.ScopeId
+            #Get-DhcpServerv4Reservation -scope $scope.ScopeID 
+            $reservation = Get-DhcpServerv4Reservation -scope $scope.ScopeID -ClientId $mac -ErrorAction SilentlyContinue 
+
+            if ($reservation) {
+                Write-Log -Verbose ($VmName + " Removing Reservation for $mac")
+                Remove-DhcpServerv4Reservation -ScopeId $scope.ScopeID -ClientId $mac -AsJob
+            }
+        }
+    }
+
+    if (-not $ip -and -not $mac) {
+        Write-Log -Verbose ($VmName + " Checking for Reservation for $vmName")
+        foreach ($scope in Get-DhcpServerv4Scope) { 
+            #write-Host $scope.ScopeId
+            #Get-DhcpServerv4Reservation -scope $scope.ScopeID 
+            $reservation = Get-DhcpServerv4Reservation -scope $scope.ScopeID -ClientId $mac -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
+
+            if ($reservation) {
+                Write-Log -Verbose ($VmName + " Removing Reservation for $vmName")
+                Remove-DhcpServerv4Reservation -ScopeId $scope.ScopeID -IPAddress $reservation.IpAddress -AsJob
+            }
+        }       
+    }
+}
+
 function New-VirtualMachine {
     param (
         [Parameter(Mandatory = $true)]
@@ -1991,18 +2036,12 @@ function New-VirtualMachine {
                         return $false
                     }
                     else {     
-                        Write-Log -Verbose  ($VmName+ ' 1Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
-                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue          
-                        Write-Log -Verbose  ($VmName+' 1Calling Complete')
+                        Remove-DHCPReservation -ip $ip -vmName $VmName                        
                     }
 
                     Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                    Write-Log -Verbose ($VmName+'  2Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                    Write-Log -Verbose  ($VmName+'  2Calling Complete')
-                    Write-Log -Verbose ($VmName+'  3Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                    Write-Log -Verbose  ($VmName+'  3Calling Complete')
+                    Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $VmName                 
+                    Remove-DHCPReservation -vmName $VmName            
 
 
                     Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
@@ -2024,17 +2063,12 @@ function New-VirtualMachine {
                             return $false
                         }
                         else {
-                            Write-Log -Verbose ($VmName+'6Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
-                            $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue   
-                            Write-Log -Verbose  ($VmName+'  6Calling Complete')
+                            Remove-DHCPReservation -ip $ip -vmName $currentItem.vmName
                         }
                         Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                        Write-Log -Verbose ($VmName+'7Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                        Write-Log -Verbose  ($VmName+'  7Calling Complete')
-                        Write-Log -Verbose ($VmName+'8Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                        Write-Log -Verbose  ($VmName+'  8Calling Complete')
+                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName                        
+                        Remove-DHCPReservation -vmName $currentItem.vmName
+                                            
 
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
@@ -2057,18 +2091,15 @@ function New-VirtualMachine {
                     $clusterIP = $IPs[0]
                     $AGIP = $IPs[1]
 
+                    write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
 
                     if ($clusterIP) { 
-                        Write-Log -Verbose ($VmName +' 4Calling  $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
-                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue           
-                        Write-Log -Verbose ($VmName +' 4Calling Complete')
+                        Remove-DHCPReservation -ip $clusterIP -vmName $VmName                          
                     }
                     if ($AGIP) {
-                        Write-Log -Verbose ($VmName+' 5Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
-                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue    
-                        Write-Log -Verbose ($VmName +' 5Calling Complete')
+                        Remove-DHCPReservation -ip $AGIP -vmName $VmName                           
                     }
-                    write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
+                    
 
                     if (-not $clusterIP -or -not $AGIP) {
                         write-log -failure "$VmName`:Failed to acquire Cluster or AGIP for SQLAO"
