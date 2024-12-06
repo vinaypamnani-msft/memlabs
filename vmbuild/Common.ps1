@@ -2024,14 +2024,17 @@ function New-VirtualMachine {
                             return $false
                         }
                         else {
-                            Write-Log -Verbose '6Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
-                            $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue                           
+                            Write-Log -Verbose $VmName+'6Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                            $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue   
+                            Write-Log -Verbose  $VmName+'  6Calling Complete'                        
                         }
                         Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                        Write-Log -Verbose '7Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                        Write-Log -Verbose $VmName+'7Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
                         Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                        Write-Log -Verbose '8Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                        Write-Log -Verbose  $VmName+'  7Calling Complete'   
+                        Write-Log -Verbose $VmName+'8Calling Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
                         Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Write-Log -Verbose  $VmName+'  8Calling Complete'   
 
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
