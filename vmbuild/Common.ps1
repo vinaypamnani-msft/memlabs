@@ -1693,6 +1693,7 @@ function Remove-DHCPReservation {
         [string] $vmName
     )
   
+    $scopes = (Get-DhcpServerv4Scope).ScopeID
 
     if ($ip) {
         Write-Log -Verbose ($VmName + " Checking for Reservation for $ip")
@@ -1704,28 +1705,28 @@ function Remove-DHCPReservation {
 
     if ($mac) {
         Write-Log -Verbose ($VmName + " Checking for Reservation for $mac")
-        foreach ($scope in Get-DhcpServerv4Scope) { 
+        foreach ($scope in  $scopes) { 
             #write-Host $scope.ScopeId
             #Get-DhcpServerv4Reservation -scope $scope.ScopeID 
-            $reservation = Get-DhcpServerv4Reservation -scope $scope.ScopeID -ClientId $mac -ErrorAction SilentlyContinue 
+            $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue 
 
             if ($reservation) {
                 Write-Log -Verbose ($VmName + " Removing Reservation for $mac")
-                $job = Remove-DhcpServerv4Reservation -ScopeId $scope.ScopeID -ClientId $mac -AsJob
+                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -AsJob
             }
         }
     }
 
     if (-not $ip -and -not $mac) {
         Write-Log -Verbose ($VmName + " Checking for Reservation for $vmName")
-        foreach ($scope in Get-DhcpServerv4Scope) { 
+        foreach ($scope in $scopes) { 
             #write-Host $scope.ScopeId
             #Get-DhcpServerv4Reservation -scope $scope.ScopeID 
-            $reservation = Get-DhcpServerv4Reservation -scope $scope.ScopeID -ClientId $mac -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
+            $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
 
             if ($reservation) {
                 Write-Log -Verbose ($VmName + " Removing Reservation for $vmName")
-                $job=  Remove-DhcpServerv4Reservation -ScopeId $scope.ScopeID -IPAddress $reservation.IpAddress -AsJob
+                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IpAddress -AsJob
             }
         }       
     }
