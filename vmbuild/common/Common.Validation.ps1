@@ -208,8 +208,7 @@ function Test-ValidMachineName {
         Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters in $name." -ReturnObject $ReturnObject -Failure
     }
 
-    if ($name.EndsWith("."))
-    {
+    if ($name.EndsWith(".")) {
         Add-ValidationMessage -Message "VM Validation: [$vmName] can not end with '.'." -ReturnObject $ReturnObject -Failure
     }
     
@@ -1031,7 +1030,7 @@ function Test-Configuration {
                         Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlport: $($vm.sqlport) Out of range" -ReturnObject $return -Warning
                     }
 
-                    if ($vm.sqlport -in 21,80,135,139,443,445,860,1434,2382,2383,2393,2394,2725,3260,3389,4022,5022,7022) {
+                    if ($vm.sqlport -in 21, 80, 135, 139, 443, 445, 860, 1434, 2382, 2383, 2393, 2394, 2725, 3260, 3389, 4022, 5022, 7022) {
                         Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlPort can not use OS reserved port #" -ReturnObject $return -Warning
                     }
                 }
@@ -1252,6 +1251,29 @@ function Test-Configuration {
                     Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB] [8GB buffer]." -ReturnObject $return -Warning
                 }
             }
+        }
+
+
+        # Test URLS
+        # ==========
+
+        if (-not $fast) {
+            Write-Progress2 -Activity "Testing URLS" -Status "Testing URLS" -PercentComplete 77
+
+            $Common.AzureFileList.Urls | ForEach-Object {
+                $_.psobject.properties | ForEach-Object {
+                    if (-not (Test-URL -url $_.value -name $_.name )) {
+                        Add-ValidationMessage -Message "Deployment Validation: URL $($_.value) for $($_.name) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                    }
+                }
+            }
+
+            foreach ($version in $common.AzureFileList.CmVersions) {
+                if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
+                    Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                }
+            }
+
         }
 
         # Unique Names

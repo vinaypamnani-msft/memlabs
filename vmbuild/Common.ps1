@@ -817,9 +817,27 @@ function Copy-ItemSafe {
 function Test-URL {
     [CmdletBinding()]
     param (
-        [string] $url
+        [string] $url,
+        [string] $name
     )
 
+    $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
+    if (-not (Test-Path $curlPath)) {
+        Write-Log "Curl was not found, and could not be installed." -Failure
+        return $false
+    }
+
+    
+    & $curlPath -s -L --head -f --silent $url | out-null
+
+    if ($LASTEXITCODE -eq 0) {        
+        Write-GreenCheck "[$name] $url"
+        return $true       
+    }
+    else {
+        Write-RedX "[$name] $url"
+        return $false
+    }
 
 }
 function Start-CurlTransfer {
