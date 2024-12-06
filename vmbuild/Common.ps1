@@ -1713,6 +1713,7 @@ function Remove-DHCPReservation {
             if ($reservation) {
                 Write-Log -Verbose ($VmName + " Removing Reservation for $mac")
                 $job = Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -AsJob
+                break;
             }
         }
     }
@@ -1727,6 +1728,7 @@ function Remove-DHCPReservation {
             if ($reservation) {
                 Write-Log -Verbose ($VmName + " Removing Reservation for $vmName")
                 $job = Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IpAddress -AsJob
+                break;
             }
         }       
     }
