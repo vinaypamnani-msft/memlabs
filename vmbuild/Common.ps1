@@ -815,6 +815,11 @@ function Copy-ItemSafe {
 }
 
 function Test-URL {
+    [CmdletBinding()]
+    param (
+        [string] $url
+    )
+
 
 }
 function Start-CurlTransfer {
@@ -1693,7 +1698,7 @@ function Remove-DHCPReservation {
         Write-Log -Verbose ($VmName + " Checking for Reservation for $ip")
         if (Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue) {
             Write-Log -Verbose ($VmName + " Removing Reservation for $ip")
-            Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue -AsJob
+            $job = Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue -AsJob
         }   
     }
 
@@ -1706,7 +1711,7 @@ function Remove-DHCPReservation {
 
             if ($reservation) {
                 Write-Log -Verbose ($VmName + " Removing Reservation for $mac")
-                Remove-DhcpServerv4Reservation -ScopeId $scope.ScopeID -ClientId $mac -AsJob
+                $job = Remove-DhcpServerv4Reservation -ScopeId $scope.ScopeID -ClientId $mac -AsJob
             }
         }
     }
@@ -1720,9 +1725,30 @@ function Remove-DHCPReservation {
 
             if ($reservation) {
                 Write-Log -Verbose ($VmName + " Removing Reservation for $vmName")
-                Remove-DhcpServerv4Reservation -ScopeId $scope.ScopeID -IPAddress $reservation.IpAddress -AsJob
+                $job=  Remove-DhcpServerv4Reservation -ScopeId $scope.ScopeID -IPAddress $reservation.IpAddress -AsJob
             }
         }       
+    }
+
+    if ($job) {
+        $wait = Wait-Job -Timeout 60 -Job $job        
+        if ($wait.State -eq "Running") {
+            Stop-Job $job
+            remove-job -job $job
+        }
+        else {
+            if ($wait.State -eq "Completed") {
+                $result = Receive-Job $job
+                write-log "[DHCP] returned: $result"
+                remove-job $job
+                return $true
+            }
+            else {
+                write-log "[DHCP] State = $($wait.State)" -logonly
+                Stop-Job $job
+                remove-job $job               
+            }
+        }
     }
 }
 
