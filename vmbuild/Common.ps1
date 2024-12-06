@@ -2059,14 +2059,14 @@ function New-VirtualMachine {
 
 
                     if ($clusterIP) { 
-                        Write-Log -Verbose $VmName +' 4Calling  $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                        Write-Log -Verbose ($VmName +' 4Calling  $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
                         $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue           
-                        Write-Log -Verbose $VmName +' 4Calling Complete'           
+                        Write-Log -Verbose ($VmName +' 4Calling Complete')
                     }
                     if ($AGIP) {
-                        Write-Log -Verbose $VmName+' 5Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue'
+                        Write-Log -Verbose ($VmName+' 5Calling $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue')
                         $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue    
-                        Write-Log -Verbose $VmName +' 5Calling Complete'                      
+                        Write-Log -Verbose ($VmName +' 5Calling Complete')
                     }
                     write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
 
