@@ -1270,10 +1270,12 @@ class DownloadFile {
     [void] Set() {
         if ((Test-Path $this.FilePath)) {
             If (-not (Get-Item $this.FilePath).length -gt 0kb) {
-                Remove-Item $this.FilePath-Force -ErrorAction SilentlyContinue | Out-Null
+                Remove-Item $this.FilePath -Force -ErrorAction SilentlyContinue | Out-Null
             }
         }
-        Write-Verbose "Downloading file from $($this.DownloadUrl)..."
+        $dirname = Split-Path $this.FilePath -Parent
+        New-Item -ItemType Directory -Force -Path $dirname
+        Write-Verbose "Downloading file from $($this.DownloadUrl) to $($this.FilePath)..."
         Start-BitsTransfer -Source $this.DownloadUrl -Destination $this.FilePath -Priority Foreground -ErrorAction Stop
     }
 

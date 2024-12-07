@@ -1745,7 +1745,7 @@ function Remove-DHCPReservation {
 
             if ($reservation) {
                 Write-Log -Verbose ($VmName + " Removing Reservation for $vmName")
-                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IpAddress -AsJob
+                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IpAddress -AsJob 
                 break;
             }
         }       
@@ -1754,20 +1754,19 @@ function Remove-DHCPReservation {
     if ($job) {
         $wait = Wait-Job -Timeout 60 -Job $job        
         if ($wait.State -eq "Running") {
-            Stop-Job $job
-            remove-job -job $job
+            Stop-Job $job | out-null
+            remove-job -job $job | out-null
         }
         else {
             if ($wait.State -eq "Completed") {
                 $result = Receive-Job $job
-                write-log "[DHCP] returned: $result"
-                remove-job $job
-                return $true
+                write-log -logonly "[DHCP] returned: $result"
+                remove-job $job | out-null
             }
             else {
-                write-log "[DHCP] State = $($wait.State)" -logonly
-                Stop-Job $job
-                remove-job $job               
+                write-log -logonly "[DHCP] State = $($wait.State)" -logonly
+                Stop-Job $job | out-null
+                remove-job $job | out-null           
             }
         }
     }

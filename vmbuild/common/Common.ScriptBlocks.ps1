@@ -437,6 +437,18 @@ $global:VM_Create = {
                 return
             }
 
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL_CU" }
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
+
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL\setup.exe" }
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
+
             # Eject ISO from guest
             Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
         }

@@ -1274,6 +1274,12 @@ function Test-Configuration {
                 }
             }
 
+            foreach ($sql in $common.AzureFileList.ISO) {
+                if (-not (Test-URL -url $sql.cuUrl -name $sql.id )) {
+                    Add-ValidationMessage -Message "Deployment Validation: CU URL $($sql.cuUrl) for SQL Version $($sql.id) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                }
+            }
+
         }
 
         # Unique Names

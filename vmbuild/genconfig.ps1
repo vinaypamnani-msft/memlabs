@@ -4474,7 +4474,7 @@ function Get-AdditionalValidations {
             $newName = Rename-VirtualMachine -vm $property
         }
         "installCA" {
-            if ($property.ForestTrust) {
+            if ($property.ForestTrust -and $property.ForestTrust -ne "NONE") {
                 $remoteCA = (get-list -type vm -DomainName $property.ForestTrust | Where-Object { $_.Role -eq "DC" } | Select-Object InstallCA).InstallCA
                 if ($remoteCA) {
                     Add-ErrorMessage -property $name -Warning "Domain $($property.ForestTrust) already has a CA. Disabling CA in this domain"
@@ -5548,7 +5548,7 @@ function get-VMString {
         $name += " [CA]"
     }
 
-    if ($virtualMachine.ForestTrust) {
+    if ($virtualMachine.ForestTrust -and $virtualMachine.ForestTrust -ne "NONE") {
         $name += " Trust [$($virtualMachine.ForestTrust)"
         if ($virtualMachine.externalDomainJoinSiteCode) {
             $name += "-->$($virtualMachine.externalDomainJoinSiteCode)"

@@ -2195,7 +2195,7 @@ Function Show-Summary {
     $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
     Write-Verbose "ContainsPS: $containsPS ContainsSiteSystem: $containsSiteSystem ContainsMember: $containsMember ContainsPassive: $containsPassive"
-    if ($DC.ForestTrust) {
+    if ($DC.ForestTrust -and $DC.ForestTrust -ne "NONE") {
         Write-GreenCheck "Forest Trust: This domain will join a Forest Trust with $($DC.ForestTrust)"
         $remoteDC = Get-List -type VM -DomainName $DC.ForestTrust | Where-Object { $_.Role -eq "DC" }
         if ($remoteDC -and $remoteDC.InstallCA) {
