@@ -47,7 +47,9 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Best not to use this. Skips configuration validation.")]
     [switch]$SkipValidation,
     [Parameter(Mandatory = $false, HelpMessage = "Migrate old VMs")]
-    [switch]$Migrate
+    [switch]$Migrate,
+    [Parameter(Mandatory = $false, HelpMessage = "Activate restore menu before deployment")]
+    [switch]$Restore
 
 )
 
@@ -306,14 +308,14 @@ try {
         Write-Host
         return
     }
- #Create VM Mutexes
- $mtx = New-Object System.Threading.Mutex($false, $mutexName)
- $global:mutexes = @()
- foreach ($vm in $deployConfig.virtualMachines) {
-     $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
-     write-log -Verbose "Created Mutex $($vm.vmName)"
-     $global:mutexes += $mtx
- }
+    #Create VM Mutexes
+    $mtx = New-Object System.Threading.Mutex($false, $mutexName)
+    $global:mutexes = @()
+    foreach ($vm in $deployConfig.virtualMachines) {
+        $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
+        write-log -Verbose "Created Mutex $($vm.vmName)"
+        $global:mutexes += $mtx
+    }
     # Skip if any VM in progress
     if ($runPhase1 -and (Test-InProgress -DeployConfig $deployConfig)) {
         Write-Host
@@ -328,6 +330,12 @@ try {
     $domainName = $deployConfig.vmOptions.domainName
     Write-Log "Starting deployment. Review VMBuild.$domainName.log"
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
+
+
+    if ($Restore) {
+        Write-Log "### RESTORE SNAPSHOT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
+        select-RestoreSnapshotDomain -domain $domainName
+    }
 
     Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
 
@@ -507,25 +515,31 @@ try {
         Set-TitleBar "SCRIPT FINISHED WITH FAILURES"
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
         if ($currentPhase -ge 2) {
-            Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
-            Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
             if ($currentPhase -eq 8) {
                 write-host
-                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
+                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
+                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+            }else {
+                Write-Host
+                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
+                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
             }
+
+
         }
         Write-Host
     }
     else {
         $currentPhase = 9
         foreach ($mutex in $global:mutexes) {
-            try{
-            [void]$mutex.ReleaseMutex()
-            } catch{}
-            try{
-            [void]$mutex.Dispose()
-            } catch{}
+            try {
+                [void]$mutex.ReleaseMutex()
+            }
+            catch {}
+            try {
+                [void]$mutex.Dispose()
+            }
+            catch {}
 
         }
         $global:mutexes = @()
@@ -563,12 +577,14 @@ catch {
 finally {
 
     foreach ($mutex in $global:mutexes) {
-        try{
-        [void]$mutex.ReleaseMutex()
-        } catch{}
-        try{
-        [void]$mutex.Dispose()
-        } catch{}
+        try {
+            [void]$mutex.ReleaseMutex()
+        }
+        catch {}
+        try {
+            [void]$mutex.Dispose()
+        }
+        catch {}
 
     }
     $global:mutexes = @()
@@ -584,12 +600,14 @@ finally {
         Write-Log "### $Configuration Terminated $currentPhase" -HostOnly
 
         if ($currentPhase -ge 2 -and $currentPhase -le 9) {
-            Write-Log "To Retry from the current phase, run the following command from the current powershell window: " -Failure -NoIndent
-            Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
             if ($currentPhase -eq 8) {
                 write-host
-                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
+                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
+                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+            }else {
+                write-host
+                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
+                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
             }
         }
         Write-Host

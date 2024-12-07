@@ -3810,6 +3810,8 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
 . $PSScriptRoot\common\Common.GenConfig.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
+. $PSScriptRoot\common\Common.snapshots.ps1
+. $PSScriptRoot\common\Common.menu.ps1
 
 ############################
 ### Common Object        ###
