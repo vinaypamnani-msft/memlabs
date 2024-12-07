@@ -15,6 +15,10 @@ $CurrentRole = $ThisVM.role
 $scenario = "Standalone"
 if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
 
+$TopLevelSiteServer = $true
+if ($ThisVM.parentSiteCode) {
+    $TopLevelSiteServer = $false
+}
 # contains passive?
 $containsPassive = $false
 $containsSecondary = $false
@@ -311,17 +315,20 @@ else {
     Write-DscStatus "Complete!"
 }
 
-Write-DScStatus "Loading object pre-population for MEMLABS"
-$ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
-Set-Location $LogPath
-. $ScriptFile $ConfigFilePath $LogPath
-Write-DscStatus "Complete!"
+if ($TopLevelSiteServer) {
+    Write-DScStatus "Loading object pre-population for MEMLABS"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+    Write-DscStatus "Complete!"
+}
 
-
-Write-DscStatus "Always Running PushClients.ps1"
-$ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
-Set-Location $LogPath
-. $ScriptFile $ConfigFilePath $LogPath
-Write-DscStatus "Complete!"
+if ($ThisVM.role -ne "CAS") {
+    Write-DscStatus "Always Running PushClients.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+    Write-DscStatus "Complete!"
+}
 
 
