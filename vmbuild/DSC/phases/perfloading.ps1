@@ -189,7 +189,7 @@ if ($instance -ne $null) {
     if (-not $propertyFound) {
         Write-DscStatus "Property 'TwoKeyApproval' not found in existing instance. Adding it."
       
-     $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace 'ROOT/SMS/site_PS1'
+     $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace $namespace
      $i = New-CimInstance -CimClass $class -Property @{PropertyName="TwoKeyApproval";Value="0";Value1=$null;Value2=$null}
      $propsArray += $i
         $instance.Props = $propsArray
