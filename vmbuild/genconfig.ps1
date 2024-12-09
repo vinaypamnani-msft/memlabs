@@ -5026,6 +5026,7 @@ function Add-NewVMForRole {
     }
     if ($OperatingSystem.Contains("Windows 11") -and ($role -notin ("DC", "BDC"))) {
         $memory = "4GB"
+        $installSSMS = $false
     }
 
     if ($role -eq "Linux") {
