@@ -11,6 +11,11 @@ if ( -not $ConfigFilePath) {
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
+
+if ($deployConfig.cmOptions.PrePopulateObjects -eq $false) {
+    return
+}
+
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 

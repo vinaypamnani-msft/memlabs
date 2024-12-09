@@ -3964,27 +3964,6 @@ if (-not $Common.Initialized) {
             Update-VMInformation -vm $vm2
         }
 
-
-        $i++
-        Write-Progress2 "Loading required modules." -Status "Moving Logs" -PercentComplete $i
-
-        # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
-        Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
-        $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
-        if (Test-Path $oldCrashPath) {
-            Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
-            Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
-        }
-
-        # Starting 3/11/2022, we changed the log format, remove older format logs
-        $logPath = Join-Path $PSScriptRoot "logs"
-        foreach ($log in (Get-ChildItem $logPath -Filter *.log )) {
-            $logLine = Get-Content $log.FullName -TotalCount 1
-            if ($logLine -and -not $logLine.StartsWith("<![LOG[")) {
-                Remove-Item -Path $log.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue
-            }
-        }
-
         $i++
         Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
 

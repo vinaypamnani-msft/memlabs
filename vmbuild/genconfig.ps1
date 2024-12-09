@@ -3946,6 +3946,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "PushClientToDomainMembers") {
         $sorted += "PushClientToDomainMembers"
     }
+    if ($members.Name -contains "PrePopulateObjects") {
+        $sorted += "PrePopulateObjects"
+    }
   
     switch ($members.Name) {
         "vmName" {  }
@@ -3985,6 +3988,7 @@ function Get-SortedProperties {
         "OfflineSCP" {}
         "OfflineSUP" {}
         "pushClientToDomainMembers" {}
+        "PrePopulateObjects" {}
 
 
         Default { $sorted += $_ }
@@ -5353,6 +5357,7 @@ function Add-NewVMForRole {
                 Version                   = "current-branch"
                 Install                   = $true
                 PushClientToDomainMembers = $true
+                PrePopulateObjects        = $true
                 EVALVersion               = $false
                 #InstallSCP                = $true
                 OfflineSCP                = $false
