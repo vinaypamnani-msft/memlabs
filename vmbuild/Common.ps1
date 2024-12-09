@@ -828,9 +828,12 @@ function Test-URL {
     }
 
     
-    & $curlPath -s -L --head -f --silent $url | out-null
-
+    $output = & $curlPath -s -L --head -f $url
     if ($LASTEXITCODE -eq 0) {        
+        if ($output -match 'Location: https://www.bing.com') {
+            Write-RedX "[$name] $url (Redirects to bing)"
+            return $false
+        }
         Write-GreenCheck "[$name] $url"
         return $true       
     }
