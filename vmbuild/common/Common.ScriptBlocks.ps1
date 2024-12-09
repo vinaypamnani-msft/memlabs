@@ -200,7 +200,7 @@ $global:VM_Create = {
                     }
                     $network = $realnetwork.Substring(0, $realnetwork.LastIndexOf("."))
 
-                    $splitNetwork = ($network.split(".")| Select-Object -First 3) -join "."
+                    $splitNetwork = ($network.split(".") | Select-Object -First 3) -join "."
                     if ($currentItem.role -eq "CAS") {
                         Remove-DHCPReservation -ip ($splitNetwork + ".5") -vmName $currentItem.vmName
                         Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop
@@ -654,7 +654,13 @@ $global:VM_Config = {
         if ($Phase -eq 2) {
 
             Write-Progress2 $Activity -Status "Injecting Tools" -percentcomplete 10 -force
-            $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress
+            $SkipAutoDeploy = $false
+            if ($deployConfig.cmOptions.PrePopulateObjects) {
+                if ($deployConfig.cmOptions.Install) {
+                    $SkipAutoDeploy = $true
+                }
+            }
+            $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress -SkipAutoDeploy:$SkipAutoDeploy
             if (-not $injected) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning
             }

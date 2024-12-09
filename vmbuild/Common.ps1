@@ -3112,6 +3112,8 @@ function Install-Tools {
         [switch]$IncludeOptional,
         [Parameter(Mandatory = $false)]
         [switch]$ShowProgress,
+        [Parameter(Mandatory = $false)]
+        [boolean]$SkipAutoDeploy = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
     )
@@ -3147,6 +3149,21 @@ function Install-Tools {
         $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
         if ($out.ScriptBlockOutput -ne $true) {
             foreach ($tool in $Common.AzureFileList.Tools) {
+
+
+                #SkipAutoDeploy is set when cmoptions.PrePopulateObjects is true
+                if ($SkipAutoDeploy) {
+                    if ($tool.Appinstall -eq $true) {
+                        if ($vm.operatingSystem.Contains("Windows 1")) {
+                            if ($vm.Role -eq "DomainMember") {
+                                #If this is a Domain Member, windows 10 or 11, and the app is auto deployed.. dont add it to tools
+                                Write-Progress2 "Injecting tools" -Status "Skipping $($tool.Name) on $VmName, should be deployed via CM"
+                                continue
+                                
+                            }
+                        }
+                    }
+                }
 
                 if ($tool.NoUpdate) { continue }
 

@@ -135,7 +135,9 @@ function Test-ValidVmOptions {
                 $existingCASorPRIorSEC = @()
                 $existingCASorPRIorSEC += Get-List -Type VM -SmartUpdate | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
                 if ($existingCASorPRIorSEC.Count -gt 0) {
-                    Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                    if ($ConfigObject.vmOptions.domainName -ne $existingSubnet.Domain) {
+                        Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                    }
                 }
 
             }
@@ -1242,7 +1244,18 @@ function Test-Configuration {
         # =============
         if (-not $fast) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
-            $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
+
+            $vms = $deployConfig.virtualMachines
+            $runningVMs = (get-vm | Where-Object {$_.State -eq "Running" }).Name
+            $newvms = @()
+            foreach ($vm in $vms) {
+                if ($vm.vmName -in $runningVMs) {
+                    continue;
+                }
+
+                $newvms += $vm
+            }
+            $totalMemory = $newvms.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
             $totalMemory = $totalMemory.Sum / 1GB
             $availableMemory = Get-AvailableMemoryGB
 
