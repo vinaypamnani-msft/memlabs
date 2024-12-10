@@ -819,7 +819,7 @@ $global:VM_Config = {
             $global:ScriptBlockName = "Expand_Archive"
             try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
             # Create init log
-            $log = "C:\staging\DSC\DSC_Init.txt"
+            $log = "C:\staging\DSC\DSC_Init.log"
             $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
 
             $zipPath = "C:\staging\DSC\DSC.zip"
@@ -862,7 +862,7 @@ $global:VM_Config = {
                 $Phase = $using:Phase
 
                 # Create init log
-                $log = "C:\staging\DSC\DSC_Init.txt"
+                $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
                 "`r`n=====`r`nDSC_InstallModules: Started at $time`r`n=====" | Out-File $log -Force
 
@@ -953,7 +953,7 @@ $global:VM_Config = {
                 $currentItem = $using:currentItem
                 $Phase = $using:Phase
 
-                $log = "C:\staging\DSC\DSC_Init.txt"
+                $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
                 "`r`n=====`r`nDSC_ClearStatus: Started at $time`r`n=====" | Out-File $log -Append
 
@@ -981,9 +981,9 @@ $global:VM_Config = {
                 }
 
                 # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
-                $dscLog = "C:\staging\DSC\DSC_Log.txt"
+                $dscLog = "C:\staging\DSC\DSC_Log.log"
                 if (Test-Path $dscLog) {
-                    $newName = $dscLog -replace ".txt", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".txt")
+                    $newName = $dscLog -replace ".log", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".log")
                     "Renaming $dscLog to $newName" | Out-File $log -Append
                     Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
                 }
@@ -1084,7 +1084,7 @@ $global:VM_Config = {
                 $deployConfigPath = "C:\staging\DSC\deployConfig.json"
 
                 # Update init log
-                $log = "C:\staging\DSC\DSC_Init.txt"
+                $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
                 "`r`n=====`r`nDSC_CreateConfig: Started at $time`r`n=====" | Out-File $log -Append
                 "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
@@ -1160,7 +1160,7 @@ $global:VM_Config = {
                 $deployConfigPath = "C:\staging\DSC\deployConfig.json"
 
                 # Update init log
-                $log = "C:\staging\DSC\DSC_Init.txt"
+                $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
                 "`r`n=====`r`nDSC_CreateConfig: Started at $time`r`n=====" | Out-File $log -Append
                 "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
@@ -1272,7 +1272,7 @@ $global:VM_Config = {
                 $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
 
                 # Update init log
-                $log = "C:\staging\DSC\DSC_Init.txt"
+                $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
                 "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n=====" | Out-File $log -Append
 

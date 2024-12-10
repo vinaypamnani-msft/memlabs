@@ -1461,7 +1461,7 @@ function Write-Status {
     $StatusFile = "C:\staging\DSC\DSC_Status.txt"
     $_Status | Out-File -FilePath $StatusFile -Force
 
-    $StatusLog = "C:\staging\DSC\DSC_Log.txt"
+    $StatusLog = "C:\staging\DSC\DSC_Log.log"
     $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
     "$time $_Status" | Out-File -FilePath $StatusLog -Append
 
@@ -1482,7 +1482,7 @@ class WriteStatus {
 
     [bool] Test() {
         $_Status = $this.Status
-        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
+        $StatusLog = "C:\staging\DSC\DSC_Log.log"
 
         if (Test-Path $StatusLog) {
             Write-Verbose "Testing if $StatusLog contains: $_Status"
@@ -3917,7 +3917,7 @@ class ImportCertifcateTemplate {
 
         Write-Status "Adding Certificate Template $_TemplateName"
 
-        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
+        $StatusLog = "C:\staging\DSC\DSC_Log.log"
 
         $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
         if (!(Test-Path -Path $_Path -PathType Leaf)) {

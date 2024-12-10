@@ -507,6 +507,8 @@ function Get-VMFixes {
     $fixesToPerform = @()
     ### Domain account password expiration
 
+#region Fix-DomainAccounts
+
     $Fix_DomainAccount = {
         param ($accountName)
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
@@ -549,9 +551,10 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_DomainAccount
         ArgumentList      = @($vmNote.adminName)
     }
-
+#endregion
     ### Local account password expiration
 
+#region Fix-LocalAccount
     $Fix_LocalAccount = {
         Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true -ErrorAction SilentlyContinue -ErrorVariable AccountError
         if ($AccountError.Count -eq 0) {
@@ -573,9 +576,10 @@ function Get-VMFixes {
         DependentVMs      = @()
         ScriptBlock       = $Fix_LocalAccount
     }
-
+#endregion
     # Default user profile
 
+#region Fix-DefaultUserProfile
     $Fix_DefaultProfile = {
         $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
         $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
@@ -597,7 +601,9 @@ function Get-VMFixes {
         DependentVMs      = @()
         ScriptBlock       = $Fix_DefaultProfile
     }
+#endregion
 
+#region Fix-CMFullAdmin
     # Full Admin in CM
 
     $Fix_CMFullAdmin = {
@@ -751,7 +757,9 @@ function Get-VMFixes {
         DependentVMs      = @($dc.vmName, $vmNote.remoteSQLVM)
         ScriptBlock       = $Fix_CMFullAdmin
     }
+#endregion
 
+#region Fix-DisableIEESC
     # Disable IE Enhanced Security for all usres via Scheduled task
     $Fix_DisableIEESC = {
 
@@ -811,6 +819,10 @@ function Get-VMFixes {
         RunAsAccount      = $vmNote.adminName
         InjectFiles       = @("Disable-IEESC.ps1") # must exist in filesToInject\staging dir
     }
+
+#endregion
+
+#region Fix-CleanupSQL
 
     $Fix_CleanupSQL = {
 
@@ -872,6 +884,10 @@ function Get-VMFixes {
         InjectFiles       = @("Cleanup-SQL.ps1") # must exist in filesToInject\staging dir
     }
 
+#endregion
+
+#region Fix-EnableLogMachine
+
     $Fix_EnableLogMachine = {
 
         $taskName = "EnableLogMachine"
@@ -920,6 +936,10 @@ function Get-VMFixes {
         InjectFiles       = @("Enable-LogMachine.ps1") # must exist in filesToInject\staging dir
     }
 
+#endregion
+
+#region Fix-AccountExpiry
+
     $Fix_AccountExpiry = {
 
         $RegistryPath = 'HKLM:\\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'
@@ -941,7 +961,9 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_AccountExpiry
 
     }
+#endregion
 
+#region Fix_LocalAdminAccount
     $Fix_LocalAdminAccount = {
         param ($password)
         $p = ConvertTo-SecureString $password -AsPlainText -Force
@@ -962,6 +984,9 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_LocalAdminAccount
         ArgumentList      = @($Common.LocalAdmin.GetNetworkCredential().Password)
     }
+#endregion
+
+#region Fix_ActivateWindows
     $Fix_ActivateWindows = {
 
         $atkms = "azkms.core.windows.net:1688"
@@ -998,6 +1023,8 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_ActivateWindows
         RunAsAccount      = $vmNote.adminName
     }
+#endregion
+
     # ========================
     # Determine applicability
     # ========================
