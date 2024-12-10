@@ -182,7 +182,7 @@ function Remove-InProgress {
     Write-Host
 }
 
-function Remove-Domain {
+function Remove-ForestTrust {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
@@ -190,14 +190,7 @@ function Remove-Domain {
         [switch] $WhatIf
     )
 
-    Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
-    $vmsToDelete = Get-List -Type VM -DomainName $DomainName
-    $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
-
-    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
-
     $TrustedForests = Get-List -Type ForestTrust | Where-Object { $_.ForestTrust -eq $DomainName -or $_Domain -eq $DomainName }
-
     
     if ($TrustedForests) {
 
@@ -248,9 +241,24 @@ function Remove-Domain {
 
         }
     }
-     if ($true) {
-        return
-     }
+}
+
+function Remove-Domain {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [string]$DomainName,
+        [Parameter()]
+        [switch] $WhatIf
+    )
+
+    Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
+    $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+    $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
+
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
+
+    Remove-ForestTrust -DomainName $DomainName
+    
     if ($vmsToDelete) {
         foreach ($vm in $vmsToDelete) {
             Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf

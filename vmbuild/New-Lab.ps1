@@ -357,10 +357,10 @@ try {
 
     #Rename the old log.
     try {
-        Get-ChildItem $Common.LogPath | Rename-Item -NewName { $_.BaseName + (Get-Date -Format "yyyyMMdd-HHmmss") + $_.Extension }
+        Get-ChildItem $Common.LogPath -ErrorAction SilentlyContinue | Rename-Item -NewName { $_.BaseName + (Get-Date -Format "yyyyMMdd-HHmmss") + $_.Extension }
     }
     catch {
-        Write-Log "Could not rename existing $($Common.LogPath)"
+        Write-Log -verbose "Could not rename existing $($Common.LogPath)"
     }
 
 
