@@ -529,8 +529,14 @@ function Test-ValidRoleDC {
 
     if ($containsDC) {
 
+        if ($DCVM.Count -gt 1) {
+            Add-ValidationMessage -Message "$vmRole Validation: Multiple DC roles found in this domain [$domain]. Adding a DC to existing environment is not supported. (Use the BDC role instead)" -ReturnObject $ReturnObject -Warning
+        }
+
         if ($existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported. (Use the BDC role instead)" -ReturnObject $ReturnObject -Warning
+            if ($DCVM.VmName -ne $existingDC) {
+                Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported. (Use the BDC role instead)" -ReturnObject $ReturnObject -Warning
+            }
         }
 
         # $MyInvocation.BoundParameters.ConfigObject.VirtualMachines | Out-Host
@@ -1248,7 +1254,7 @@ function Test-Configuration {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
 
             $vms = $deployConfig.virtualMachines
-            $runningVMs = (get-vm | Where-Object {$_.State -eq "Running" }).Name
+            $runningVMs = (get-vm | Where-Object { $_.State -eq "Running" }).Name
             $newvms = @()
             foreach ($vm in $vms) {
                 if ($vm.vmName -in $runningVMs) {
