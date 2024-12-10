@@ -293,8 +293,9 @@ try {
                 Write-Host
                 Write-ValidationMessages -TestObject $testConfigResult
 
-                if ($runPhase1 -eq $false -and -not $SkipValidation.IsPresent) {                
-                    $response = Read-YesorNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway?" -HideHelp -Default "y"
+                if ($runPhase1 -eq $false -and -not $SkipValidation.IsPresent) {         
+                    Write-Host       
+                    $response = Read-YesorNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (Y/n)" -HideHelp -Default "y" -timeout 15
                     if (-not [String]::IsNullOrWhiteSpace($response)) {
                         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {                           
                             write-host
