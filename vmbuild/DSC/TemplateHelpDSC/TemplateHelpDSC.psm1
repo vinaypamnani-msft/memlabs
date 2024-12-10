@@ -9,6 +9,53 @@ enum StartupType {
     demand
 }
 
+function Download-File {
+    param(
+        [string] $url,
+        [string] $dest
+    )
+
+    if ((Test-Path $dest)) {
+        If (-not (Get-Item $dest).length -gt 0kb) {
+            Remove-Item $dest -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+
+    if (!(Test-Path $dest)) {
+        Write-Status "Downloading $url to $dest"
+        $dirname = Split-Path $dest -Parent
+        New-Item -ItemType Directory -Force -Path $dirname
+        try {
+            Start-BitsTransfer -Source $url -Destination $dest -Priority Foreground -ErrorAction Stop
+        }
+        catch {
+            Write-Status "Failed Downloading $url to $dest. Retrying"
+            ipconfig /flushdns
+            start-sleep -seconds 60
+            try {
+                Start-BitsTransfer -Source $url -Destination $dest -Priority Foreground -ErrorAction Stop
+            }
+            catch {
+                try {
+                    Write-Status "Failed Downloading $url to $dest. Retrying with Invoke-WebRequest"
+                    Invoke-WebRequest -Uri $url -OutFile $dest -ErrorAction Stop
+                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    # Force reboot
+                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    #$global:DSCMachineStatus = 1
+                    write-status "Failed to Download $url with error: $ErrorMessage"
+                    throw "Failed to Download $url with error: $ErrorMessage"
+                    return
+                }
+            }
+        }        
+    }
+
+}
+
 [DscResource()]
 class InstallADK {
     [DscProperty(Key)]
@@ -38,27 +85,14 @@ class InstallADK {
 
 
         # Use this block to download the FULL ADK, Filename: adksetup.exe
-        if ((Test-Path $_adkpath)) {
-            If (-not (Get-Item $_adkpath).length -gt 0kb) {
-                Remove-Item $_adkpath -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-        }
-        if (!(Test-Path $_adkpath)) {
-            Start-BitsTransfer -Source $_ADKDownloadPath -Destination $_adkpath -Priority Foreground -ErrorAction Stop
-        }
-
+        Download-File $_ADKDownloadPath $_adkpath
+        
         # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
-        if ((Test-Path $_adkWinPEpath)) {
-            If (-not (Get-Item $_adkWinPEpath).length -gt 0kb) {
-                Remove-Item $_adkWinPEpath -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-        }
-        if (!(Test-Path $_adkWinPEpath)) {
-            Start-BitsTransfer -Source $_ADKWinPEDownloadPath -Destination $_adkWinPEpath -Priority Foreground -ErrorAction Stop
-        }
+        Download-File $_ADKWinPEDownloadPath $_adkWinPEpath        
 
         #Install DeploymentTools
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
+        Write-Status "Installing ADK to $adkinstallpath"
         while (!(Test-Path $adkinstallpath)) {
             $cmd = $_adkpath
             $arg1 = "/Features"
@@ -66,12 +100,13 @@ class InstallADK {
             $arg3 = "/q"
 
             try {
-                Write-Verbose "Installing ADK DeploymentTools..."
+                Write-Status "Installing ADK DeploymentTools..."
                 & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Verbose "ADK DeploymentTools Installed Successfully!"
+                Write-Status "ADK DeploymentTools Installed Successfully!"
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
+                Write-Status "Failed to install ADK DeploymentTools with below error: $ErrorMessage"
                 throw "Failed to install ADK DeploymentTools with below error: $ErrorMessage"
             }
 
@@ -87,12 +122,13 @@ class InstallADK {
             $arg3 = "/q"
 
             try {
-                Write-Verbose "Installing ADK UserStateMigrationTool..."
+                Write-Status "Installing ADK UserStateMigrationTool..."
                 & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Verbose "ADK UserStateMigrationTool Installed Successfully!"
+                Write-Status "ADK UserStateMigrationTool Installed Successfully!"
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
+                Write-Status "Failed to install ADK UserStateMigrationTool with below error: $ErrorMessage"
                 throw "Failed to install ADK UserStateMigrationTool with below error: $ErrorMessage"
             }
 
@@ -108,12 +144,13 @@ class InstallADK {
             $arg3 = "/q"
 
             try {
-                Write-Verbose "Installing WindowsPreinstallationEnvironment for ADK..."
+                Write-Status "Installing WindowsPreinstallationEnvironment for ADK..."
                 & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Verbose "WindowsPreinstallationEnvironment for ADK Installed Successfully!"
+                Write-Status "WindowsPreinstallationEnvironment for ADK Installed Successfully!"
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
+                Write-Status "Failed to install WindowsPreinstallationEnvironment for ADK with below error: $ErrorMessage"
                 throw "Failed to install WindowsPreinstallationEnvironment for ADK with below error: $ErrorMessage"
             }
 
@@ -163,31 +200,15 @@ class InstallSSMS {
 
         $ssmsSetup = "C:\temp\SSMS-Setup-ENU.exe"
 
-        if ((Test-Path $ssmsSetup)) {
-            If (-not (Get-Item $ssmsSetup).length -gt 0kb) {
-                Remove-Item $ssmsSetup -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-        }
-
-        if (!(Test-Path $ssmsSetup)) {
-            Write-Verbose "Downloading SSMS from $($this.DownloadUrl)..."
-            try {
-                Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
-            }
-            catch {
-                ipconfig /flushdns
-                start-sleep -seconds 60
-                Start-BitsTransfer -Source $this.DownloadUrl -Destination $ssmsSetup -Priority Foreground -ErrorAction Stop
-            }
-        }
-        
+        Download-File $this.DownloadUrl $ssmsSetup
+                
         # Install SSMS
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
         $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE"
 
         if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2) -or (Test-Path $smssinstallpath3)) {
-            Write-Verbose "SSMS Installed Successfully! (Tested Out)"
+            Write-Status "SSMS Installed Successfully! (Tested Out)"
             return
         }
         else {
@@ -198,9 +219,9 @@ class InstallSSMS {
             $arg3 = "/norestart"
 
             try {
-                Write-Verbose "Installing SSMS..."
+                Write-Status "Installing SSMS..."
                 & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Verbose "SSMS Installed Successfully!"
+                Write-Status "SSMS Installed Successfully!"
 
                 start-sleep -Seconds 60
                 # Reboot
@@ -209,6 +230,7 @@ class InstallSSMS {
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
+                Write-Status "Failed to install SSMS with below error: $ErrorMessage"
                 throw "Failed to install SSMS with below error: $ErrorMessage"
             }
             Start-Sleep -Seconds 10
@@ -268,31 +290,15 @@ class InstallDotNet4 {
         # Download
         $setup = "C:\temp\$($this.FileName)"
         
-        if ((Test-Path $setup)) {
-            If (-not (Get-Item $setup).length -gt 0kb) {
-                Remove-Item $setup -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-        }
-        if (!(Test-Path $setup)) {
-            Write-Verbose "Downloading .NET $($this.FileName) from $($this.DownloadUrl)..."
-            try {
-                Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
-            }
-            catch {
-                Write-Verbose $_
-                ipconfig /flushdns
-                Start-Sleep -Seconds 120
-                Start-BitsTransfer -Source $this.DownloadUrl -Destination $setup -Priority Foreground -ErrorAction Stop
-            }
-        }
-
+        Download-File $this.DownloadUrl $setup
+        
         # Install
         $cmd = $setup
         $arg1 = "/q"
         $arg2 = "/norestart"
 
         try {
-            Write-Verbose "Installing .NET $($this.FileName)..."
+            Write-Status "Installing .NET $($this.FileName)..."
             & $cmd $arg1 $arg2 | out-null
 
             $processName = ($this.FileName -split ".exe")[0]
@@ -304,7 +310,7 @@ class InstallDotNet4 {
                 }
             }
             Start-Sleep -Seconds 120 ## Buffer Wait
-            Write-Verbose ".NET $($this.FileName) Installed Successfully!"
+            Write-Status ".NET $($this.FileName) Installed Successfully!"
 
             # Reboot
             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
@@ -312,6 +318,7 @@ class InstallDotNet4 {
         }
         catch {
             $ErrorMessage = $_.Exception.Message
+            Write-Status "Failed to install .NET with below error: $ErrorMessage"
             throw "Failed to install .NET with below error: $ErrorMessage"
         }
     }
@@ -352,42 +359,9 @@ class InstallODBCDriver {
     [void] Set() {
         $_odbcpath = $this.ODBCPath
         $_URL = $this.URL
-        if (!(Test-Path $_odbcpath)) {
-            #$odbcurl = "https://go.microsoft.com/fwlink/?linkid=2220989"
-            $odbcurl = $_URL
-            Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server from $($odbcurl)..."
 
-            if ((Test-Path $_odbcpath)) {
-                If (-not (Get-Item $_odbcpath).length -gt 0kb) {
-                    Remove-Item $_odbcpath -Force -ErrorAction SilentlyContinue | Out-Null
-                }
-            }
-            try {
-                Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
-                Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Verbose "Failed to Download Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
-                ipconfig /flushdns
-                start-sleep -seconds 60
-                Write-Verbose "Downloading Microsoft ODBC Driver 18 for SQL Server"
-                try {
-                    Invoke-WebRequest -Uri $odbcurl -OutFile $_odbcpath -ErrorAction Stop
-                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
-                }
-                catch {
-                    $ErrorMessage = $_.Exception.Message
-                    # Force reboot
-                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-                    #$global:DSCMachineStatus = 1
-                    throw "Retry (Attempting Reboot) Failed to Download Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
-                    return
-                }
-
-            }
-        }
-
+        Download-File $_URL $_odbcpath
+       
         # Install ODBC Driver
         $cmd = "msiexec"
         $arg1 = "/i"
@@ -397,13 +371,14 @@ class InstallODBCDriver {
         #$arg5 = "/lv c:\temp\odbcinstallation.log"
 
         try {
-            Write-Verbose "Installing Microsoft ODBC Driver 18 for SQL Server..."
+            Write-Status "Installing Microsoft ODBC Driver 18 for SQL Server..."
             Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
             & $cmd $arg1 $arg2 $arg3 $arg4 #$arg5
-            Write-Verbose "Microsoft ODBC Driver 18 for SQL Server was Installed Successfully!"
+            Write-Status "Microsoft ODBC Driver 18 for SQL Server was Installed Successfully!"
         }
         catch {
             $ErrorMessage = $_.Exception.Message
+            Write-Status "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
             throw "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
         }
         Start-Sleep -Seconds 10
@@ -464,41 +439,7 @@ class InstallSqlClient {
     [void] Set() {
         $_path = $this.Path
         $_URL = $this.URL
-        if (!(Test-Path $_path)) {
-            $dlurl = $_URL
-
-            Write-Verbose "Downloading Sql Client from $($dlurl)..."
-
-            if ((Test-Path $_path)) {
-                If (-not (Get-Item $_path).length -gt 0kb) {
-                    Remove-Item $_path -Force -ErrorAction SilentlyContinue | Out-Null
-                }
-            }
-            try {
-                Write-Verbose "Downloading  Sql Client"
-                Start-BitsTransfer -Source $dlurl -Destination $_path -Priority Foreground -ErrorAction Stop
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Verbose "Failed to Download Sql Client with error: $ErrorMessage"
-                ipconfig /flushdns
-                start-sleep -seconds 60
-                Write-Verbose "Downloading Sql Client"
-                try {
-                    Invoke-WebRequest -Uri $dlurl -OutFile $_path -ErrorAction Stop
-                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
-                }
-                catch {
-                    $ErrorMessage = $_.Exception.Message
-                    # Force reboot
-                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-                    #$global:DSCMachineStatus = 1
-                    throw "Retry (Attempting Reboot) Failed to Download Sql Client with error: $ErrorMessage"
-                    return
-                }
-
-            }
-        }
+        Download-File $_URL $_path
 
         # Install
         #VC_redist.x64.exe /install /passive /quiet
@@ -510,13 +451,14 @@ class InstallSqlClient {
         #$arg5 = "/lv c:\temp\odbcinstallation.log"
 
         try {
-            Write-Verbose "Installing Sql Client..."
+            Write-Status "Installing Sql Client..."
             Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
             & $cmd $arg1 $arg2 $arg3 #$arg5
-            Write-Verbose "VC Redist was Installed Successfully!"
+            Write-Status "SQL Client was Installed Successfully!"
         }
         catch {
             $ErrorMessage = $_.Exception.Message
+            Write-Status "Failed to install Sql Client with error: $ErrorMessage"
             throw "Failed to install Sql Client with error: $ErrorMessage"
         }
         Start-Sleep -Seconds 20
@@ -578,41 +520,9 @@ class InstallVCRedist {
     [void] Set() {
         $_path = $this.Path
         $_URL = $this.URL
-        if (!(Test-Path $_path)) {
-            $dlurl = $_URL
 
-            Write-Verbose "Downloading VC Redist from $($dlurl)..."
-            if ((Test-Path $_path)) {
-                If (-not (Get-Item $_path).length -gt 0kb) {
-                    Remove-Item $_path -Force -ErrorAction SilentlyContinue | Out-Null
-                }
-            }
-            try {
-                Write-Verbose "Downloading VC Redist"
-                Start-BitsTransfer -Source $dlurl -Destination $_path -Priority Foreground -ErrorAction Stop
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Verbose "Failed to Download VC Redist with error: $ErrorMessage"
-                ipconfig /flushdns
-                start-sleep -seconds 60
-                Write-Verbose "Downloading VC Redist"
-                try {
-                    Invoke-WebRequest -Uri $dlurl -OutFile $_path -ErrorAction Stop
-                    #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
-                }
-                catch {
-                    $ErrorMessage = $_.Exception.Message
-                    # Force reboot
-                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-                    #$global:DSCMachineStatus = 1
-                    throw "Retry (Attempting Reboot) Failed to Download VC Redist with error: $ErrorMessage"
-                    return
-                }
-
-            }
-        }
-
+        Download-File $_URL $_path
+       
         # Install
         #VC_redist.x64.exe /install /passive /quiet
         $cmd = $_path
@@ -623,13 +533,14 @@ class InstallVCRedist {
         #$arg5 = "/lv c:\temp\odbcinstallation.log"
 
         try {
-            Write-Verbose "Installing VC Redist..."
+            Write-Status "Installing VC Redist..."
             Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3")
             & $cmd $arg1 $arg2 $arg3 #$arg5
-            Write-Verbose "VC Redist was Installed Successfully!"
+            Write-Status "VC Redist was Installed Successfully!"
         }
         catch {
             $ErrorMessage = $_.Exception.Message
+            Write-Status "Failed to install VC Redist with error: $ErrorMessage"
             throw "Failed to install VC Redist with error: $ErrorMessage"
         }
         Start-Sleep -Seconds 20
@@ -689,14 +600,14 @@ class InstallAndConfigWSUS {
         if (!(Test-Path -Path $_WSUSPath)) {
             New-Item -Path $_WSUSPath -ItemType Directory
         }
-        Write-Verbose "Installing WSUS..."
+        Write-Status "Installing WSUS..."
         Install-WindowsFeature -Name UpdateServices, UpdateServices-WidDB -IncludeManagementTools
-        Write-Verbose "Finished installing WSUS..."
+        Write-Status "Finished installing WSUS..."
 
-        Write-Verbose "Starting the postinstall for WSUS..."
+        Write-Status "Starting the postinstall for WSUS..."
         Set-Location "C:\Program Files\Update Services\Tools"
         .\wsusutil.exe postinstall CONTENT_DIR=C:\WSUS
-        Write-Verbose "Finished the postinstall for WSUS"
+        Write-Status "Finished the postinstall for WSUS"
     }
 
     [bool] Test() {
@@ -947,7 +858,7 @@ class WaitForExtendSchemaFile {
             $extadschpath4 = Join-Path -Path $_FilePath -ChildPath "cd.preview\SMSSETUP\BIN\X64\extadsch.exe"
         }
 
-        Write-Verbose "Extending the Active Directory schema..."
+        Write-Status "Extending the Active Directory schema..."
 
         # Force AD Replication
         $domainControllers = Get-ADDomainController -Filter *
@@ -958,24 +869,24 @@ class WaitForExtendSchemaFile {
         }
 
         if (Test-Path $extadschpath) {
-            Write-Verbose "Running $extadschpath"
+            Write-Status "Running $extadschpath"
             & $extadschpath | out-null
         }
         if (Test-Path $extadschpath2) {
-            Write-Verbose "Running $extadschpath2"
+            Write-Status "Running $extadschpath2"
             & $extadschpath2 | out-null
         }
 
         if (Test-Path $extadschpath3) {
-            Write-Verbose "Running $extadschpath3"
+            Write-Status "Running $extadschpath3"
             & $extadschpath3 | out-null
         }
 
         if (Test-Path $extadschpath4) {
-            Write-Verbose "Running $extadschpath4"
+            Write-Status "Running $extadschpath4"
             & $extadschpath4 | out-null
         }
-        Write-Verbose "Done."
+        Write-Status "Done Extending Schema"
     }
 
     [bool] Test() {
@@ -1127,6 +1038,7 @@ class AddNtfsPermissions {
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
+        Write-Status "Adding NTFS permissions to C:\tools"
         $testPath = "C:\staging\DSC\AddNtfsPermissions.txt"
         & icacls C:\tools /grant "Users:(M,RX)" /t | Out-File $testPath -Force -ErrorAction SilentlyContinue
         & icacls C:\temp /grant "Users:F" /t | Out-File $testPath -Append -Force
@@ -1158,6 +1070,7 @@ class AddBuiltinPermission {
     [Nullable[datetime]] $CreationTime
 
     [void] Set() {
+        Write-Status "Adding SQL permissions For 'BUILTIN\administrators'"
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
         sqlcmd -Q "if not exists(select * from sys.server_principals where name='BUILTIN\administrators') CREATE LOGIN [BUILTIN\administrators] FROM WINDOWS;EXEC master..sp_addsrvrolemember @loginame = N'BUILTIN\administrators', @rolename = N'sysadmin'"
         $retrycount = 0
@@ -1211,21 +1124,17 @@ class DownloadSCCM {
         $_CMURL = $this.CMDownloadUrl
         $cmpath = "c:\temp\$_CM.exe"
         $cmsourcepath = "c:\$_CM"
-        Write-Verbose "Downloading [$_CMURL] $_CM installation source... to $cmpath"
+        Write-Status "Downloading [$_CMURL] $_CM installation source... to $cmpath"
 
-        if ((Test-Path $cmpath)) {
-            If (-not (Get-Item $cmpath).length -gt 0kb) {
-                Remove-Item $cmpath -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-        }
-        Start-BitsTransfer -Source $_CMURL -Destination $cmpath -Priority Foreground -ErrorAction Stop
+        Download-File $_CMURL $cmpath
+        
         if (Test-Path $cmsourcepath) {
             Remove-Item -Path $cmsourcepath -Recurse -Force | Out-Null
         }
 
         if (!(Test-Path $cmsourcepath)) {
 
-
+            Write-Status "Extracting $cmpath to $cmsourcepath"
             if (($_CMURL -like "*MCM_*") -or ($_CMURL -like "*go.microsoft.com*")) {
                 $size = (Get-Item $cmpath).length / 1GB
                 if ($size -gt 1) {
@@ -1268,15 +1177,8 @@ class DownloadFile {
     [string] $FilePath
 
     [void] Set() {
-        if ((Test-Path $this.FilePath)) {
-            If (-not (Get-Item $this.FilePath).length -gt 0kb) {
-                Remove-Item $this.FilePath -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-        }
-        $dirname = Split-Path $this.FilePath -Parent
-        New-Item -ItemType Directory -Force -Path $dirname
         Write-Verbose "Downloading file from $($this.DownloadUrl) to $($this.FilePath)..."
-        Start-BitsTransfer -Source $this.DownloadUrl -Destination $this.FilePath -Priority Foreground -ErrorAction Stop
+        Download-File $this.DownloadUrl $this.FilePath
     }
 
     [bool] Test() {
@@ -1315,7 +1217,8 @@ class InstallDP {
 
     [void] Set() {
         $ProviderMachineName = $env:COMPUTERNAME + "." + $this.DomainFullName # SMS Provider machine name
-
+        $DPServerFullName = $this.DPMPName + "." + $this.DomainFullName
+        Write-Status "Adding DP to $DPServerFullName for $($this.Sitecode)"
         # Customizations
         $initParams = @{}
         if ($null -eq $ENV:SMS_ADMIN_UI_PATH) {
@@ -1340,7 +1243,7 @@ class InstallDP {
         # Set the current location to be the site code.
         Set-Location "$($this.SiteCode):\" @initParams
 
-        $DPServerFullName = $this.DPMPName + "." + $this.DomainFullName
+ 
         if ($null -eq $(Get-CMSiteSystemServer -SiteSystemServerName $DPServerFullName)) {
             New-CMSiteSystemServer -Servername $DPServerFullName -Sitecode $this.SiteCode
         }
@@ -1377,6 +1280,8 @@ class InstallMP {
 
     [void] Set() {
         $ProviderMachineName = $env:COMPUTERNAME + "." + $this.DomainFullName # SMS Provider machine name
+        $MPServerFullName = $this.DPMPName + "." + $this.DomainFullName
+        Write-Status "Adding MP to $MPServerFullName for $($this.Sitecode)"
         # Customizations
         $initParams = @{}
         if ($null -eq $ENV:SMS_ADMIN_UI_PATH) {
@@ -1401,7 +1306,7 @@ class InstallMP {
         # Set the current location to be the site code.
         Set-Location "$($this.SiteCode):\" @initParams
 
-        $MPServerFullName = $this.DPMPName + "." + $this.DomainFullName
+
         if (!(Get-CMSiteSystemServer -SiteSystemServerName $MPServerFullName)) {
             Write-Verbose "Creating cm site system server..."
             New-CMSiteSystemServer -SiteSystemServerName $MPServerFullName
@@ -1447,17 +1352,17 @@ class WaitForDomainReady {
         $_DomainName = $this.DomainName
         $_WaitSeconds = $this.WaitSeconds
         $_DCFullName = "$_DCName.$_DomainName"
-        Write-Verbose "Domain computer is: $_DCName"
+        Write-Verbose "Domain Controller is: $_DCName"
         $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         while (!$testconnection) {
-            Write-Verbose "Waiting for Domain ready , will try again 30 seconds later..."
+            Write-Status "Waiting for Domain ready. Trying to ping $_DCName, will try again 30 seconds later..."
             ipconfig /flushdns
             ipconfig /renew
             ipconfig /registerdns
             Start-Sleep -Seconds $_WaitSeconds
             $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         }
-        Write-Verbose "Domain is ready now."
+        Write-Status "Domain is ready now."
     }
 
     [bool] Test() {
@@ -1498,11 +1403,11 @@ class VerifyComputerJoinDomain {
         foreach ($CL in $_ComputernameList) {
             $searcher = [adsisearcher] "(cn=$CL)"
             while ($searcher.FindAll().count -ne 1) {
-                Write-Verbose "$CL not join into domain yet , will search again after 1 min"
-                Start-Sleep -Seconds 60
+                Write-Status "[adsisearcher] Waiting for $CL to join domain. Retrying in 30 Seconds."
+                Start-Sleep -Seconds 30
                 $searcher = [adsisearcher] "(cn=$CL)"
             }
-            Write-Verbose "$CL joined into the domain."
+            Write-Status "$CL has joined the domain."
         }
     }
 
@@ -1547,6 +1452,23 @@ class SetDNS {
     }
 }
 
+function Write-Status {
+    param(
+        [String] $Status
+    )
+
+    $_Status = $this.Status
+    $StatusFile = "C:\staging\DSC\DSC_Status.txt"
+    $_Status | Out-File -FilePath $StatusFile -Force
+
+    $StatusLog = "C:\staging\DSC\DSC_Log.txt"
+    $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
+    "$time $_Status" | Out-File -FilePath $StatusLog -Append
+
+    Write-Verbose "Writing Status: $_Status"
+
+}
+
 [DscResource()]
 class WriteStatus {
     [DscProperty(key)]
@@ -1555,15 +1477,7 @@ class WriteStatus {
     [void] Set() {
 
         $_Status = $this.Status
-        $StatusFile = "C:\staging\DSC\DSC_Status.txt"
-        $_Status | Out-File -FilePath $StatusFile -Force
-
-        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
-        $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
-        "$time $_Status" | Out-File -FilePath $StatusLog -Append
-
-        Write-Verbose "Writing Status: $_Status"
-
+        Write-Status $_Status
     }
 
     [bool] Test() {
@@ -1642,7 +1556,7 @@ class WaitForFileToExist {
     [void] Set() {
         $_FilePath = $this.FilePath
         while (!(Test-Path $_FilePath)) {
-            Write-Verbose "Wait for $_FilePath to exist, will try 60 seconds later..."
+            Write-Status "Wait for $_FilePath to exist, will try 60 seconds later..."
             Start-Sleep -Seconds 60
         }
 
@@ -1775,7 +1689,7 @@ class ChangeSqlInstancePort {
 
         Try {
             # Load the assemblies
-            Write-Verbose "[ChangeSqlInstancePort]: Setting port for $_SQLInstanceName to $_SQLInstancePort"
+            Write-Status "[ChangeSqlInstancePort]: Setting port for $_SQLInstanceName to $_SQLInstancePort"
 
             [system.reflection.assembly]::LoadWithPartialName("Microsoft.SqlServer.Smo") | Out-Null
             [system.reflection.assembly]::LoadWithPartialName("Microsoft.SqlServer.SqlWmiManagement") | Out-Null
@@ -1795,7 +1709,7 @@ class ChangeSqlInstancePort {
 
         }
         Catch {
-            Write-Verbose "ERROR[ChangeSqlInstancePort]: SET Failed: $($_.Exception.Message)"
+            Write-Status "ERROR[ChangeSqlInstancePort]: SET Failed: $($_.Exception.Message)"
         }
     }
 
@@ -1873,7 +1787,7 @@ class RegisterTaskScheduler {
         $success = $this.RegisterTask()
         $lastRunTime = $this.GetLastRunTime()
         $failCount = 0
-
+        Write-Status "Starting task $_Taskname from $_ScriptPath $_ScriptName $_ScriptArgument"
         Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
         while ($lastRunTime -lt $RegisterTime) {
             Write-Verbose "Checking to see if task has started Attempt $failCount"
@@ -1887,14 +1801,14 @@ class RegisterTaskScheduler {
             }
 
             if ($failCount -eq 5) {
-                Write-Verbose "Task has not ran yet after 5 Cycles. Re-Registering Task"
+                Write-Status "$_TaskName has not ran yet after 5 Cycles. Re-Registering Task"
                 #Unregister existing task
                 $success = $this.RegisterTask()
 
             }
 
             if ($failCount -eq 8) {
-                Write-Verbose "Task failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
+                Write-Status "$_TaskName failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
                 throw "Task failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
             }
 
@@ -1909,7 +1823,7 @@ class RegisterTaskScheduler {
             start-sleep -Seconds $waitTime
             $lastRunTime = $this.GetLastRunTime()
         }
-        Write-Verbose "Task was successfully started at $lastRunTime"
+        Write-Status "$_TaskName was successfully started at $lastRunTime"
 
 
 
@@ -2086,13 +2000,13 @@ class InitializeDisks {
 
     [void] Set() {
 
-        Write-Verbose "Initializing disks"
+        Write-Status "Initializing disks"
 
         $_VM = $this.VM | ConvertFrom-Json
         $_Disks = $_VM.additionalDisks
 
         # For debugging
-        Write-Verbose  "VM Additional Disks: $_Disks"
+        Write-Status  "VM Additional Disks: $_Disks"
         Get-Disk | Write-Verbose
 
         if ($null -eq $_Disks) {
@@ -2160,6 +2074,7 @@ class ChangeServices {
     [void] Set() {
         $_Name = $this.Name
         $_StartupType = $this.StartupType
+        Write-Status "Changing Service $_Name to start type $_StartupType"
         sc.exe config $_Name start=$_StartupType | Out-Null
     }
 
@@ -2210,7 +2125,7 @@ class AddUserToLocalAdminGroup {
         $_Name = $this.Name
         $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
         $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
-        Write-Verbose "[$(Get-Date -format HH:mm:ss)] add $_DomainName\$_Name to administrators group"
+        Write-Status "Adding $_DomainName\$_Name to administrators group"
         if (-not $GroupObj.IsMember("WinNT://$_DomainName/$_Name")) {
             $GroupObj.Add("WinNT://$_DomainName/$_Name")
         }
@@ -2248,14 +2163,15 @@ class JoinDomain {
         $_DomainName = $this.DomainName
         $_retryCount = 100
         try {
+            Write-Status "Joining computer to Domain $_DomainName"
             Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Stop
             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
         }
         catch {
-            Write-Verbose "Failed to join into the domain , retry..."
             $CurrentDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
             $count = 0
+            Write-Status "Failed to join into the domain $_DomainName, retry $count/$_retryCount"
             $flag = $false
             while ($CurrentDomain -ne $_DomainName) {
                 if ($count -lt $_retryCount) {
@@ -2307,7 +2223,7 @@ class OpenFirewallPortForSCCM {
     [void] Set() {
         $_Role = $this.Role
 
-        Write-Verbose "Current Role is : $_Role"
+        Write-Status "Opening firewall ports for Role:$_Role"
 
         New-NetFirewallRule -DisplayName "Cluster Network Outbound" -Profile Any -Direction Outbound -Action Allow -RemoteAddress "10.250.250.0/24"
         New-NetFirewallRule -DisplayName "Cluster Network Inbound" -Profile Any -Direction Inbound -Action Allow -RemoteAddress "10.250.250.0/24"
@@ -2607,7 +2523,7 @@ class InstallFeatureForSCCM {
     [void] Set() {
         $_Role = $this.Role
 
-        Write-Verbose "Current Role is : $_Role"
+        Write-Status "Installing Windows Features for Role:$_Role"
 
         # Install on all devices
         try {
@@ -2808,79 +2724,6 @@ class SetCustomPagingFile {
 }
 
 [DscResource()]
-class SetupDomain {
-    [DscProperty(Key)]
-    [string] $DomainFullName
-
-    [DscProperty(Mandatory)]
-    [System.Management.Automation.PSCredential] $SafemodeAdministratorPassword
-
-    [void] Set() {
-
-        #Dead Code.
-
-        $_DomainFullName = $this.DomainFullName
-        $_SafemodeAdministratorPassword = $this.SafemodeAdministratorPassword
-
-        $ADInstallState = Get-WindowsFeature AD-Domain-Services
-        if (!$ADInstallState.Installed) {
-            Install-WindowsFeature -Name AD-Domain-Services -IncludeAllSubFeature -IncludeManagementTools
-        }
-
-
-
-        $NetBIOSName = $_DomainFullName.split('.')[0]
-        Import-Module ADDSDeployment
-        Install-ADDSForest -SafeModeAdministratorPassword $_SafemodeAdministratorPassword.Password `
-            -CreateDnsDelegation:$false `
-            -DatabasePath "C:\Windows\NTDS" `
-            -DomainName $_DomainFullName `
-            -DomainNetbiosName $NetBIOSName `
-            -LogPath "C:\Windows\NTDS" `
-            -InstallDNS:$true `
-            -NoRebootOnCompletion:$false `
-            -SysvolPath "C:\Windows\SYSVOL" `
-            -Force:$true
-
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-        $global:DSCMachineStatus = 1
-    }
-
-    [bool] Test() {
-        # This is broken as AD-Domain-Services is installed in SCCMFeature code
-        $_DomainFullName = $this.DomainFullName
-
-        $_SafemodeAdministratorPassword = $this.SafemodeAdministratorPassword
-        $ADInstallState = Get-WindowsFeature AD-Domain-Services
-        if (!($ADInstallState.Installed)) {
-            return $false
-        }
-        else {
-            while ($true) {
-                try {
-                    $domain = Get-ADDomain -Identity $_DomainFullName -ErrorAction Stop
-                    Get-ADForest -Identity $domain.Forest -Credential $_SafemodeAdministratorPassword -ErrorAction Stop
-
-                    return $true
-                }
-                catch {
-                    Write-Verbose "Waiting for Domain ready..."
-                    Start-Sleep -Seconds 30
-                }
-            }
-
-        }
-
-        return $true
-    }
-
-    [SetupDomain] Get() {
-        return $this
-    }
-
-}
-
-[DscResource()]
 class FileReadAccessShare {
     [DscProperty(Key)]
     [string] $Name
@@ -2892,6 +2735,7 @@ class FileReadAccessShare {
         $_Name = $this.Name
         $_Path = $this.Path
 
+        Write-Status  "Creating SMB Share $_Name -> $_Path"
         New-SMBShare -Name $_Name -Path $_Path
     }
 
@@ -2923,25 +2767,26 @@ class InstallCA {
     [void] Set() {
         try {
             $_HashAlgorithm = $this.HashAlgorithm
-            Write-Verbose "Installing CA..."
             #Install CA
             Import-Module ServerManager
             Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools
 
             if ($this.RootCA) {
+                Write-Status "Installing Root CA with Hash Algorithm $_HashAlgorithm"
                 Install-AdcsCertificationAuthority -CAType EnterpriseSubordinateCa  -ParentCA $($this.RootCA) -force
             }
             else {
+                Write-Status "Installing Non-Root CA with Hash Algorithm $_HashAlgorithm"
                 Install-AdcsCertificationAuthority -CAType EnterpriseRootCa -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" -KeyLength 2048 -HashAlgorithmName $_HashAlgorithm -force
             }
 
             $StatusPath = "$env:windir\temp\InstallCAStatus.txt"
             "Finished" >> $StatusPath
 
-            Write-Verbose "Finished installing CA."
+            Write-Status "Finished installing CA."
         }
         catch {
-            Write-Verbose "Failed to install CA."
+            Write-Status "Failed to install CA."
         }
     }
 
@@ -3003,19 +2848,19 @@ class ClusterSetOwnerNodes {
     [string[]]$Nodes
 
     [void] Set() {
+        $_ClusterName = $this.ClusterName
+        $_Nodes = $this.Nodes
         try {
-            $_ClusterName = $this.ClusterName
-            $_Nodes = $this.Nodes
             foreach ($c in Get-ClusterResource -Cluster $_ClusterName) {
                 $NeedsFixing = $c | Get-ClusterOwnerNode | Where-Object { $_.OwnerNodes.Count -ne 2 }
                 if ($NeedsFixing) {
-                    Write-Verbose "Setting owners $($_Nodes -Join ',') on $($c.Name)"
+                    Write-Status "Cluster $_ClusterName`: Setting Cluster Node owners $($_Nodes -Join ',') on $($c.Name)"
                     $c | Set-ClusterOwnerNode -owners $_Nodes
                 }
             }
         }
         catch {
-            Write-Verbose "Failed to Set Owner Nodes"
+            Write-Status "$_ClusterName Failed to Set Owner Nodes"
             Write-Verbose "$_"
         }
     }
@@ -3171,6 +3016,7 @@ class FileACLPermission {
             $_account = $account
             $_path = $this.Path
 
+            Write-Status "Setting NTFS permissions for $_account to $_path"
             write-verbose -message ('Set Entered:  Path Set to:' + $_path + 'Account Operating on:' + $_account)
 
             $_access = $this.access
@@ -3280,6 +3126,7 @@ class ModuleAdd {
         $_moduleName = $this.CheckModuleName
         $_userScope = $this.UserScope
 
+        write-Status "Installing powershell module $_moduleName for scope $_userScope"
         $Nuget = $null
         try {
             $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
@@ -3740,7 +3587,7 @@ class ConfigureWSUS {
         $_FriendlyName = $this.TemplateName
         $postinstallOutput = ""
         try {
-            write-verbose ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
+            write-Status ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
                 New-Item -Path $this.ContentPath -ItemType Directory -Force
             }
@@ -3758,14 +3605,14 @@ class ConfigureWSUS {
             }
         }
         catch {
-            Write-Verbose "Failed to Configure WSUS"
+            Write-Status "Failed to Configure WSUS"
             Write-Verbose "$_ $postinstallOutput"
         }
         try {
             $wsus = get-WsusServer
         }
         catch {
-            Write-Verbose "Failed to Configure WSUS"
+            Write-Status "Failed to Configure WSUS"
             Write-Verbose "$_"
             throw
         }
@@ -3834,6 +3681,7 @@ class WSUSSync {
 
     [void] Set() {
        
+        Write-Status "Starting initial WSUSSync for $($this.ServerName) using Product SQL Server 2005 Category Tools"
         $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530 #-UseSsl
  
         Get-WsusProduct | Set-WsusProduct -disable
@@ -3861,7 +3709,7 @@ class WSUSSync {
             return $false
         }
         catch {
-            Write-Verbose "Failed to Find WSUS Server"
+            Write-Status "Failed to Find WSUS Server"
             Write-Verbose "$_"
             return $false
         }
@@ -3905,27 +3753,12 @@ class InstallPBIRS {
     [void] Set() {
         try {
             $_Creds = $this.DBcredentials
-            write-verbose ("Configuring PBIRS for $($this.SqlServer) in $($this.InstallPath)")
+            write-Status ("Configuring PBIRS for $($this.SqlServer) in $($this.InstallPath)")
 
 
             $pbirsSetup = "C:\temp\PowerBIReportServer.exe"
-            if ((Test-Path $pbirsSetup)) {
-                If (-not (Get-Item $pbirsSetup).length -gt 0kb) {
-                    Remove-Item $pbirsSetup -Force -ErrorAction SilentlyContinue | Out-Null
-                }
-            }
-            if (!(Test-Path $pbirsSetup)) {
-                Write-Verbose "Downloading PBIRS from $($this.DownloadUrl)..."
-                try {
-                    Start-BitsTransfer -Source $this.DownloadUrl -Destination $pbirsSetup -Priority Foreground -ErrorAction Stop
-                }
-                catch {
-                    ipconfig /flushdns
-                    start-sleep -seconds 60
-                    Start-BitsTransfer -Source $this.DownloadUrl -Destination $pbirsSetup -Priority Foreground -ErrorAction Stop
-                }
-            }
-
+            Download-File $this.DownloadUrl $pbirsSetup
+            
             try {
                 New-Item -Path $this.InstallPath -ItemType Directory -Force
             }
@@ -4031,7 +3864,7 @@ class InstallPBIRS {
             catch {}
         }
         catch {
-            Write-Verbose "Failed to Configure PBIRS"
+            Write-Status "Failed to Configure PBIRS"
             Write-Verbose "$_"
         }
     }
@@ -4082,10 +3915,9 @@ class ImportCertifcateTemplate {
         $_DNPath = $this.DNPath
 
 
-        $_Status = "Adding Certificate Template $_TemplateName"
+        Write-Status "Adding Certificate Template $_TemplateName"
+
         $StatusLog = "C:\staging\DSC\DSC_Log.txt"
-        $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
-        "$time $_Status" | Out-File -FilePath $StatusLog -Append
 
         $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
         if (!(Test-Path -Path $_Path -PathType Leaf)) {
@@ -4144,9 +3976,9 @@ class RebootNow {
 
         $_FileName = $this.FileName
 
-
         if (-not (Test-Path $_FileName)) {
-            Write-Verbose "Rebooting"
+            Write-Status "Rebooting machine."
+            Start-sleep -seconds 5
             New-Item $_FileName
             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
@@ -4184,7 +4016,7 @@ class InstallRootCertificate {
 
 
         if (-not (Test-Path $_FileName)) {
-            Write-Verbose "Install Root Cert"
+            Write-Status "Install Root Cert"
 
             $cmd = "certutil.exe"
             $arg1 = "-config"
@@ -4241,15 +4073,12 @@ class AddCertificateTemplate {
         $_Group = $this.GroupName
         $_Permissions = $this.Permissions
 
-        $_Status = "Adding Certificate Template $_TemplateName"
-        $StatusLog = "C:\staging\DSC\DSC_Log.txt"
-        $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
-        "$time $_Status" | Out-File -FilePath $StatusLog -Append
-
+        Write-Status "Adding Certificate Template $_TemplateName"           
 
         if (-not $this.PermissionsOnly) {
             $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
             if (!(Test-Path -Path $_Path -PathType Leaf)) {
+                Write-Status "Could not find $_Path"
                 throw "Could not find $_Path"
             }
         }
@@ -4258,7 +4087,7 @@ class AddCertificateTemplate {
         Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
         Write-Verbose "reStarting CertSvc: $_"
         restart-Service -Name CertSvc -ErrorAction SilentlyContinue
-
+        Write-Status "Adding Certificate Template $_TemplateName ."   
         if ($_Group) {
 
             $module = Get-InstalledModule -Name PSPKI -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
@@ -4269,7 +4098,7 @@ class AddCertificateTemplate {
                 Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
                 Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0
             }
-
+            Write-Status "Adding Certificate Template $_TemplateName .." 
             start-sleep -seconds 10
             Write-Verbose "Get-Command -Module PSPKI"
             Get-Command -Module PSPKI  | Out-null
@@ -4277,6 +4106,7 @@ class AddCertificateTemplate {
             $retries = 0
             $success = $false
             while ($retries -lt 10 -and $success -eq $false) {
+                Write-Status "Adding Certificate Template $_TemplateName ..." 
                 $retries++
                 try {
                     Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop"
@@ -4324,6 +4154,7 @@ class AddCertificateTemplate {
         }
 
         try {
+            Write-Status "Adding Certificate Template $_TemplateName ...." 
             $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
             Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
             Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
@@ -4339,6 +4170,7 @@ class AddCertificateTemplate {
                 }
                 catch {
                     try {
+                        Write-Status "Adding Certificate Template $_TemplateName ....." 
                         Start-Service -Name CertSvc
                         Start-Sleep -Seconds 10
                         Write-Verbose "$_"
@@ -4406,9 +4238,10 @@ class AddCertificateToIIS {
 
         $_FriendlyName = $this.FriendlyName
 
-
+        Write-Status "Installing cert $_FriendlyName to IIS"
         $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
         if (-not $cert) {
+            Write-Status "Could not find cert with friendly Name $_FriendlyName"
             throw "Could not find cert with friendly Name $_FriendlyName"
         }
         try {
@@ -4474,6 +4307,7 @@ class AddToAdminGroup {
     [void] Set() {
 
 
+        Write-Status "Adding accounts to $($this.TargetGroup)"
         $retries = 30
         $tryno = 0
         while ($tryno -le $retries) {
@@ -4540,6 +4374,7 @@ class RunPkiSync {
     [void] Set() {
 
 
+        write-Status "Running PKISync from $($this.SourceForest) to $($this.TargetForest)"
         while ($true) {
 
             try {

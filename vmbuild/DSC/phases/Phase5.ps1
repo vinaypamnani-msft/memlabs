@@ -642,6 +642,7 @@ Configuration Phase5
         }
 
         SqlScript 'InstallAgentJob' {
+            Id               = 'InstallAgentJob'
             ServerName       = $thisvm.VmName
             InstanceName     = $thisVM.sqlInstanceName
             #Credential       = $Admincreds
@@ -998,6 +999,7 @@ Configuration Phase5
         }
 
         SqlScript 'InstallAgentJob' {
+            Id               = 'InstallAgentJob'
             ServerName       = $node.nodename
             InstanceName     = $node1vm.sqlInstanceName
             #Credential       = $Admincreds

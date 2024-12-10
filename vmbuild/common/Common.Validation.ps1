@@ -883,7 +883,9 @@ function Test-Configuration {
         [Parameter(Mandatory = $true, ParameterSetName = "ConfigObject", HelpMessage = "Configuration File")]
         [object]$InputObject,
         [Parameter(Mandatory = $false, HelpMessage = "Fast Mode")]
-        [switch]$Fast
+        [switch]$Fast,
+        [Parameter(Mandatory = $false, HelpMessage = "Final Test")]
+        [switch]$Final
         #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
         #[bool] $fast = $false
     )
@@ -1242,7 +1244,7 @@ function Test-Configuration {
 
         # Total Memory
         # =============
-        if (-not $fast) {
+        if ($final) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
 
             $vms = $deployConfig.virtualMachines
@@ -1270,7 +1272,7 @@ function Test-Configuration {
         # Test URLS
         # ==========
 
-        if (-not $fast) {
+        if ($final) {
             Write-Progress2 -Activity "Testing URLS" -Status "Testing URLS" -PercentComplete 77
 
             $Common.AzureFileList.Urls | ForEach-Object {

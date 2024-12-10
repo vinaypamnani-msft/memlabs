@@ -40,7 +40,6 @@ DscResourcesToExport = @(
     'OpenFirewallPortForSCCM',
     'InstallFeatureForSCCM',
     'SetCustomPagingFile',
-    'SetupDomain',
     'FileReadAccessShare',
     'InstallCA',
     'FileACLPermission',

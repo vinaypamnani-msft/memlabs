@@ -1659,7 +1659,7 @@ function Get-List {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, ParameterSetName = "Type")]
-        [ValidateSet("VM", "Switch", "Prefix", "UniqueDomain", "UniqueSwitch", "UniquePrefix", "Network", "UniqueNetwork")]
+        [ValidateSet("VM", "Switch", "Prefix", "UniqueDomain", "UniqueSwitch", "UniquePrefix", "Network", "UniqueNetwork", "ForestTrust")]
         [string] $Type,
         [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [string] $DomainName,
@@ -1836,6 +1836,10 @@ function Get-List {
         }
         if ($Type -eq "UniqueDomain") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
+        }
+        if ($Type -eq "ForestTrust") {
+
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Where-Object {$_.ForestTrust -ne "NONE" -and $_.ForestTrust} | Select-Object -Property @("ForestTrust","Domain") -Unique -ErrorAction SilentlyContinue
         }
         if ($Type -eq "UniqueSwitch") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty 'Switch' -Unique -ErrorAction SilentlyContinue

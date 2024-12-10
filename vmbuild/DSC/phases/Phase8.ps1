@@ -74,6 +74,7 @@ Configuration Phase8
         }
 
         SqlScript 'DisableAgentJob' {
+            Id                   = 'DisableAgentJob'
             ServerName           = $thisvm.VmName
             InstanceName         = $thisVM.sqlInstanceName
             #Credential       = $Admincreds
@@ -124,6 +125,7 @@ Configuration Phase8
         }
 
         SqlScript 'EnableAgentJob' {
+            Id                   = 'EnableAgentJob'
             ServerName           = $thisvm.VmName
             InstanceName         = $thisVM.sqlInstanceName
             #Credential       = $Admincreds

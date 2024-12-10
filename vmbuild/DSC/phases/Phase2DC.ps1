@@ -150,11 +150,6 @@
             Status    = "Configuring ADDS and setting up the domain. The computer will reboot a couple of times."
         }
 
-        #SetupDomain FirstDS {
-        #    DependsOn                     = "[InstallFeatureForSCCM]InstallFeature"
-        #    DomainFullName                = $DomainName
-        #    SafemodeAdministratorPassword = $DomainCreds
-        #}
         $netbiosName = $deployConfig.vmOptions.domainNetBiosName
 
         ADDomain FirstDS {

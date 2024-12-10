@@ -286,6 +286,7 @@ configuration Phase4
         }
 
         SqlScript 'InstallBackupSolution' {
+            Id               = 'InstallBackupSolution'
             ServerName       = $thisvm.VmName
             InstanceName     = $SQLInstanceName
             #Credential       = $Admincreds
@@ -313,6 +314,7 @@ configuration Phase4
         }
 
         SqlScript 'InstallAgentJob' {
+            Id               = 'InstallAgentJob'
             ServerName       = $thisvm.VmName
             InstanceName     = $thisVM.sqlInstanceName
             #Credential       = $Admincreds

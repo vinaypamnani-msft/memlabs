@@ -232,6 +232,19 @@ function Start-VMMaintenance {
 
     if ($worked) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully."
+
+        $logoffusers = {
+            try {
+                query user 2>&1 | Select-Object -skip 1 | ForEach-Object {
+                    logoff ($_ -split "\s+")[-6]
+                }
+            }
+            catch {}
+        }
+        try {
+            Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $logoffusers
+        }
+        catch {}
     }
     else {
         Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log." -Failure
@@ -845,54 +858,54 @@ function Get-VMFixes {
         }
     }
 
-$fixesToPerform += [PSCustomObject]@{
-    FixName           = "Fix-CleanupSQL"
-    FixVersion        = "241124"
-    AppliesToThisVM   = $false
-    AppliesToNew      = $true
-    AppliesToExisting = $true
-    AppliesToRoles    = @()
-    NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
-    DependentVMs      = @()
-    ScriptBlock       = $Fix_CleanupSQL
-    RunAsAccount      = $vmNote.adminName
-    InjectFiles       = @("Cleanup-SQL.ps1") # must exist in filesToInject\staging dir
-}
-
-$Fix_EnableLogMachine = {
-
-    $taskName = "EnableLogMachine"
-    $filePath = "$env:systemdrive\staging\Enable-LogMachine.ps1"
-
-    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($task) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-CleanupSQL"
+        FixVersion        = "241124"
+        AppliesToThisVM   = $false
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_CleanupSQL
+        RunAsAccount      = $vmNote.adminName
+        InjectFiles       = @("Cleanup-SQL.ps1") # must exist in filesToInject\staging dir
     }
 
-    # Action
-    $taskCommand = "cmd"
-    $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
-    $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
+    $Fix_EnableLogMachine = {
 
-    # Trigger
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $taskName = "EnableLogMachine"
+        $filePath = "$env:systemdrive\staging\Enable-LogMachine.ps1"
 
-    # Principal
-    $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
+        }
 
-    # Task
-    $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Enable Log Machine"
+        # Action
+        $taskCommand = "cmd"
+        $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
+        $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
 
-    Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
-    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        # Trigger
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
 
-    if ($null -ne $task) {
-        return $true
+        # Principal
+        $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
+
+        # Task
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Enable Log Machine"
+
+        Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+        if ($null -ne $task) {
+            return $true
+        }
+        else {
+            return $false
+        }
     }
-    else {
-        return $false
-    }
-}
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-EnableLogMachine"
         FixVersion        = "240307"

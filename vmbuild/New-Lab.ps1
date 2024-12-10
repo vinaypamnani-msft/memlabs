@@ -283,11 +283,31 @@ try {
 
     # Test Config
     try {
-        $testConfigResult = Test-Configuration -InputObject $userConfig
+        $testConfigResult = Test-Configuration -InputObject $userConfig -Final
         if ($runPhase1 -eq $false -or $SkipValidation.IsPresent) {
             # Skip validation in phased run or when asked to skip
             $deployConfig = $testConfigResult.DeployConfig
-            Write-OrangePoint "Configuration validation skipped."
+            if (-not $testConfigResult.Valid) {
+                Write-Host
+                Write-Log "Configuration validation failed." -Failure
+                Write-Host
+                Write-ValidationMessages -TestObject $testConfigResult
+
+                if ($runPhase1 -eq $false -and -not $SkipValidation.IsPresent) {                
+                    $response = Read-YesorNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway?" -HideHelp -Default "y"
+                    if (-not [String]::IsNullOrWhiteSpace($response)) {
+                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {                           
+                            write-host
+                            Write-Log "Validation failed. If you want to continue bypassing the checks, run the following command" 
+                            Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
+                            write-host
+                            return
+                        }
+                    }
+                }
+                Write-ValidationMessages -TestObject $testConfigResult
+                Write-OrangePoint "Configuration validation skipped."
+            }
         }
         elseif ($testConfigResult.Valid) {
             $deployConfig = $testConfigResult.DeployConfig
@@ -298,7 +318,10 @@ try {
             Write-Log "Configuration validation failed." -Failure
             Write-Host
             Write-ValidationMessages -TestObject $testConfigResult
-            Write-Host
+            write-host
+            Write-Log "Validation failed. If you want to continue bypassing the checks, run the following command" 
+            Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
+            write-host
             return
         }
     }
@@ -557,7 +580,7 @@ try {
 
         $updateExistingRequired = $false
         foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
-            $updateExistingRequired = $true
+            $updateExistingRequired = $true                    
         }
 
         # Update Existing VMs
