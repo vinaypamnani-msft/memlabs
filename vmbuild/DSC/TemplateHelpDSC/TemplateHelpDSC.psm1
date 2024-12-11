@@ -92,7 +92,7 @@ class InstallADK {
 
         #Install DeploymentTools
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
-        Write-Status "Installing ADK to $adkinstallpath"
+        Write-Status "Installing ADK DeploymentTools to $adkinstallpath"
         while (!(Test-Path $adkinstallpath)) {
             $cmd = $_adkpath
             $arg1 = "/Features"
@@ -115,6 +115,7 @@ class InstallADK {
 
         #Install UserStateMigrationTool
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
+        Write-Status "Installing ADK UserStateMigrationTool to $adkinstallpath"
         while (!(Test-Path $adkinstallpath)) {
             $cmd = $_adkpath
             $arg1 = "/Features"
@@ -137,6 +138,7 @@ class InstallADK {
 
         #Install WindowsPreinstallationEnvironment
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment"
+        Write-Status "Installing ADK WindowsPreinstallationEnvironment to $adkinstallpath"
         while (!(Test-Path $adkinstallpath)) {
             $cmd = $_adkWinPEpath
             $arg1 = "/Features"
@@ -159,6 +161,7 @@ class InstallADK {
     }
 
     [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
         $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
         $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\Windows Kits\Installed Roots")
         if ($subKey) {
@@ -238,6 +241,7 @@ class InstallSSMS {
     }
 
     [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
         $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE\ssms.exe"
@@ -324,7 +328,7 @@ class InstallDotNet4 {
     }
 
     [bool] Test() {
-
+        Write-Status "DSC Test- Checking deployment status"
         $NETval = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Name "Release"
 
         If ($NETval.Release -ge $this.NetVersion) {
@@ -385,7 +389,7 @@ class InstallODBCDriver {
     }
 
     [bool] Test() {
-
+        Write-Status "DSC Test- Checking deployment status"
         try {
             $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
 
@@ -465,7 +469,7 @@ class InstallSqlClient {
     }
 
     [bool] Test() {
-
+        Write-Status "DSC Test- Checking deployment status"
         try {
             #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
             $RegistryPath = "HKLM:\SOFTWARE\Microsoft\SQLNCLI11"
@@ -547,7 +551,7 @@ class InstallVCRedist {
     }
 
     [bool] Test() {
-
+        Write-Status "DSC Test- Checking deployment status"
         try {
             #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
             $RegistryPath = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
@@ -611,6 +615,7 @@ class InstallAndConfigWSUS {
     }
 
     [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
         if ((Get-WindowsFeature -Name UpdateServices).installed -eq 'True') {
             return $true
         }
@@ -994,6 +999,7 @@ class DelegateControl {
     }
 
     [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
         $_machinename = $this.Machine
         $DomainName = $this.DomainFullName.split('.')[0]
         $root = (Get-ADRootDSE).defaultNamingContext
@@ -1047,6 +1053,7 @@ class AddNtfsPermissions {
     }
 
     [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
         $testPath = "C:\staging\DSC\AddNtfsPermissions.txt"
         if (Test-Path $testPath) {
             return $true
@@ -1056,51 +1063,6 @@ class AddNtfsPermissions {
     }
 
     [AddNtfsPermissions] Get() {
-        return $this
-    }
-}
-
-
-[DscResource()]
-class AddBuiltinPermission {
-    [DscProperty(key)]
-    [Ensure] $Ensure
-
-    [DscProperty(NotConfigurable)]
-    [Nullable[datetime]] $CreationTime
-
-    [void] Set() {
-        Write-Status "Adding SQL permissions For 'BUILTIN\administrators'"
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-        sqlcmd -Q "if not exists(select * from sys.server_principals where name='BUILTIN\administrators') CREATE LOGIN [BUILTIN\administrators] FROM WINDOWS;EXEC master..sp_addsrvrolemember @loginame = N'BUILTIN\administrators', @rolename = N'sysadmin'"
-        $retrycount = 0
-        $sqlpermission = sqlcmd -Q "if exists(select * from sys.server_principals where name='BUILTIN\administrators') Print 1"
-        while ($null -eq $sqlpermission) {
-            if ($retrycount -eq 3) {
-                $sqlpermission = 1
-            }
-            else {
-                $retrycount++
-                Start-Sleep -Seconds 240
-                sqlcmd -Q "if not exists(select * from sys.server_principals where name='BUILTIN\administrators') CREATE LOGIN [BUILTIN\administrators] FROM WINDOWS;EXEC master..sp_addsrvrolemember @loginame = N'BUILTIN\administrators', @rolename = N'sysadmin'"
-                $sqlpermission = sqlcmd -Q "if exists(select * from sys.server_principals where name='BUILTIN\administrators') Print 1"
-            }
-        }
-    }
-
-    [bool] Test() {
-        Start-Sleep -Seconds 60
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-        $sqlpermission = sqlcmd -Q "if exists(select * from sys.server_principals where name='BUILTIN\administrators') Print 1"
-        if ($null -eq $sqlpermission) {
-            Write-Verbose "Need to add the builtin administrators permission."
-            return $false
-        }
-        Write-Verbose "No need to add the builtin administrators permission."
-        return $true
-    }
-
-    [AddBuiltinPermission] Get() {
         return $this
     }
 }
@@ -1151,6 +1113,7 @@ class DownloadSCCM {
     }
 
     [bool] Test() {
+        
         $_CM = $this.CM
         $cmpath = "c:\temp\$_CM.exe"
         if (!(Test-Path $cmpath)) {
@@ -1194,138 +1157,6 @@ class DownloadFile {
     }
 
     [DownloadFile] Get() {
-        return $this
-    }
-}
-
-[DscResource()]
-class InstallDP {
-    [DscProperty(key)]
-    [string] $SiteCode
-
-    [DscProperty(Mandatory)]
-    [string] $DomainFullName
-
-    [DscProperty(Mandatory)]
-    [string] $DPMPName
-
-    [DscProperty(Mandatory)]
-    [Ensure] $Ensure
-
-    [DscProperty(NotConfigurable)]
-    [Nullable[datetime]] $CreationTime
-
-    [void] Set() {
-        $ProviderMachineName = $env:COMPUTERNAME + "." + $this.DomainFullName # SMS Provider machine name
-        $DPServerFullName = $this.DPMPName + "." + $this.DomainFullName
-        Write-Status "Adding DP to $DPServerFullName for $($this.Sitecode)"
-        # Customizations
-        $initParams = @{}
-        if ($null -eq $ENV:SMS_ADMIN_UI_PATH) {
-            $ENV:SMS_ADMIN_UI_PATH = "C:\Program Files (x86)\Microsoft Configuration Manager\AdminConsole\bin\i386"
-        }
-
-        # Import the ConfigurationManager.psd1 module
-        if ($null -eq (Get-Module ConfigurationManager)) {
-            Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1" @initParams
-        }
-
-        # Connect to the site's drive if it is not already present
-        Write-Verbose "Setting PS Drive..."
-
-        New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-        while ($null -eq (Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-            Write-Verbose "Failed ,retry in 10s. Please wait."
-            Start-Sleep -Seconds 10
-            New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-        }
-
-        # Set the current location to be the site code.
-        Set-Location "$($this.SiteCode):\" @initParams
-
- 
-        if ($null -eq $(Get-CMSiteSystemServer -SiteSystemServerName $DPServerFullName)) {
-            New-CMSiteSystemServer -Servername $DPServerFullName -Sitecode $this.SiteCode
-        }
-
-        $Date = [DateTime]::Now.AddYears(10)
-        Add-CMDistributionPoint -SiteSystemServerName $DPServerFullName -SiteCode $this.SiteCode -CertificateExpirationTimeUtc $Date -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force
-    }
-
-    [bool] Test() {
-        return $false
-    }
-
-    [InstallDP] Get() {
-        return $this
-    }
-}
-
-[DscResource()]
-class InstallMP {
-    [DscProperty(key)]
-    [string] $SiteCode
-
-    [DscProperty(Mandatory)]
-    [string] $DomainFullName
-
-    [DscProperty(Mandatory)]
-    [string] $DPMPName
-
-    [DscProperty(Mandatory)]
-    [Ensure] $Ensure
-
-    [DscProperty(NotConfigurable)]
-    [Nullable[datetime]] $CreationTime
-
-    [void] Set() {
-        $ProviderMachineName = $env:COMPUTERNAME + "." + $this.DomainFullName # SMS Provider machine name
-        $MPServerFullName = $this.DPMPName + "." + $this.DomainFullName
-        Write-Status "Adding MP to $MPServerFullName for $($this.Sitecode)"
-        # Customizations
-        $initParams = @{}
-        if ($null -eq $ENV:SMS_ADMIN_UI_PATH) {
-            $ENV:SMS_ADMIN_UI_PATH = "C:\Program Files (x86)\Microsoft Configuration Manager\AdminConsole\bin\i386"
-        }
-
-        # Import the ConfigurationManager.psd1 module
-        if ($null -eq (Get-Module ConfigurationManager)) {
-            Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1" @initParams
-        }
-
-        # Connect to the site's drive if it is not already present
-        Write-Verbose "Setting PS Drive..."
-
-        New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-        while ($null -eq (Get-PSDrive -Name $this.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-            Write-Verbose "Failed ,retry in 10s. Please wait."
-            Start-Sleep -Seconds 10
-            New-PSDrive -Name $this.SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-        }
-
-        # Set the current location to be the site code.
-        Set-Location "$($this.SiteCode):\" @initParams
-
-
-        if (!(Get-CMSiteSystemServer -SiteSystemServerName $MPServerFullName)) {
-            Write-Verbose "Creating cm site system server..."
-            New-CMSiteSystemServer -SiteSystemServerName $MPServerFullName
-            Write-Verbose "Finished creating cm site system server."
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPServerFullName
-            Write-Verbose "Adding management point on $MPServerFullName ..."
-            Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http
-            Write-Verbose "Finished adding management point on $MPServerFullName ..."
-        }
-        else {
-            Write-Verbose "$MPServerFullName is already a Site System Server , skip running this script."
-        }
-    }
-
-    [bool] Test() {
-        return $false
-    }
-
-    [InstallMP] Get() {
         return $this
     }
 }
@@ -1497,7 +1328,7 @@ function Write-Status {
         $Text = $_Status.ToString().Trim()
         $CallingFunction = Get-PSCallStack | Select-Object -first 2 | select-object -last 1
         $context = $CallingFunction.Command
-        if (-not $context){
+        if (-not $context) {
             $context = $CallingFunction.FunctionName
         }
         $file = $CallingFunction.Location
@@ -1596,35 +1427,6 @@ class WriteFileOnce {
     }
 
     [WriteFileOnce] Get() {
-        return $this
-    }
-}
-
-[DscResource()]
-class WaitForFileToExist {
-    [DscProperty(key)]
-    [string] $FilePath
-
-    [void] Set() {
-        $_FilePath = $this.FilePath
-        while (!(Test-Path $_FilePath)) {
-            Write-Status "Wait for $_FilePath to exist, will try 60 seconds later..."
-            Start-Sleep -Seconds 60
-        }
-
-    }
-
-    [bool] Test() {
-        $_FilePath = $this.FilePath
-
-        if (Test-Path $_FilePath) {
-            return $true
-        }
-
-        return $false
-    }
-
-    [WaitForFileToExist] Get() {
         return $this
     }
 }
@@ -2006,43 +1808,6 @@ class RegisterTaskScheduler {
 }
 
 [DscResource()]
-class SetAutomaticManagedPageFile {
-    [DscProperty(key)]
-    [string] $TaskName
-
-    [DscProperty(Mandatory)]
-    [bool] $Value
-
-    [DscProperty(Mandatory)]
-    [Ensure] $Ensure
-
-    [DscProperty(NotConfigurable)]
-    [Nullable[datetime]] $CreationTime
-
-    [void] Set() {
-        $_Value = $this.Value
-        $computersys = Get-WmiObject Win32_ComputerSystem -EnableAllPrivileges
-        Write-Verbose "Set AutomaticManagedPagefile to $_Value..."
-        $computersys.AutomaticManagedPagefile = $_Value
-        $computersys.Put()
-    }
-
-    [bool] Test() {
-        $_Value = $this.Value
-        $computersys = Get-WmiObject Win32_ComputerSystem -EnableAllPrivileges;
-        if ($computersys.AutomaticManagedPagefile -ne $_Value) {
-            return $false
-        }
-
-        return $true
-    }
-
-    [SetAutomaticManagedPageFile] Get() {
-        return $this
-    }
-}
-
-[DscResource()]
 class InitializeDisks {
     [DscProperty(key)]
     [string] $DummyKey
@@ -2105,61 +1870,6 @@ class InitializeDisks {
     }
 
     [InitializeDisks] Get() {
-        return $this
-    }
-}
-
-[DscResource()]
-class ChangeServices {
-    [DscProperty(key)]
-    [string] $Name
-
-    [DscProperty(Mandatory)]
-    [StartupType] $StartupType
-
-    [DscProperty(Mandatory)]
-    [Ensure] $Ensure
-
-    [DscProperty(NotConfigurable)]
-    [Nullable[datetime]] $CreationTime
-
-    [void] Set() {
-        $_Name = $this.Name
-        $_StartupType = $this.StartupType
-        Write-Status "Changing Service $_Name to start type $_StartupType"
-        sc.exe config $_Name start=$_StartupType | Out-Null
-    }
-
-    [bool] Test() {
-        $_Name = $this.Name
-        $_StartupType = $this.StartupType
-        $currentstatus = sc.exe qc $_Name
-
-        switch ($_StartupType) {
-            "auto" {
-                if ($currentstatus[4].contains("DELAYED")) {
-                    return $false
-                }
-                break
-            }
-            "delayedauto" {
-                if (!($currentstatus[4].contains("DELAYED"))) {
-                    return $false
-                }
-                break
-            }
-            "demand" {
-                if (!($currentstatus[4].contains("DEMAND_START"))) {
-                    return $false
-                }
-                break
-            }
-        }
-
-        return $true
-    }
-
-    [ChangeServices] Get() {
         return $this
     }
 }
@@ -3043,123 +2753,6 @@ class ClusterRemoveUnwantedIPs {
 
 
 [DscResource()]
-class FileACLPermission {
-    [DscProperty(Key)]
-    [string]$Path
-
-    [DscProperty(Mandatory)]
-    [string[]]$accounts
-
-    [DscProperty()]
-    [string]$access = "Allow"
-
-    [DscProperty()]
-    [string]$rights = "FullControl"
-
-    [DscProperty()]
-    [string]$inherit = "ContainerInherit,ObjectInherit"
-
-    [DscProperty()]
-    [string]$propagate = "None"
-
-
-    [void] Set() {
-        foreach ($account in $this.accounts) {
-            $_account = $account
-            $_path = $this.Path
-
-            Write-Status "Setting NTFS permissions for $_account to $_path"
-            write-verbose -message ('Set Entered:  Path Set to:' + $_path + 'Account Operating on:' + $_account)
-
-            $_access = $this.access
-            $_rights = $this.rights
-            $_inherit = $this.inherit
-            $_propagate = $this.propagate
-
-            write-verbose -Message ('Variables Set to:' + $_account + ' ' + $_rights + ' ' + $_inherit + ' ' + $_propagate + ' ' + $_access)
-
-            # Configure the access object values - READ-ONLY
-            $_access = [System.Security.AccessControl.AccessControlType]::$_access
-            $_rights = [System.Security.AccessControl.FileSystemRights]$_rights
-            $_inherit = [System.Security.AccessControl.InheritanceFlags]$_inherit
-            $_propagate = [System.Security.AccessControl.PropagationFlags]::$_propagate
-
-            $ace = New-Object System.Security.AccessControl.FileSystemAccessRule($_account, $_rights, $_inherit, $_propagate, $_access)
-
-            #Retrieve the directory ACL and add a new ACL rule
-            $acl = Get-Acl $_path
-            $acl.AddAccessRule($ace)
-            $acl.SetAccessRuleProtection($false, $false)
-
-            #Set-Acl  $directory $acl
-            set-acl -aclobject $acl $_path
-        }
-    }
-
-    [bool] Test() {
-        $PermissionTest = $false
-
-
-        $_access = $this.access
-        $_rights = $this.rights
-        $_inherit = $this.inherit
-        $_propagate = $this.propagate
-        $AccountTrack = @{ }
-
-        $GetACL = Get-Acl $this.Path
-
-        foreach ($account in $this.accounts) {
-
-            $_account = $account
-
-            Foreach ($AccessRight in $GetACL.access) {
-                IF ($AccessRight.IdentityReference -eq "$_account") {
-                    write-verbose -Message ("Account Discovered:" + $_account)
-                    IF ($AccessRight.InheritanceFlags -eq $_inherit) {
-                        write-verbose -Message ("InheritanceFlags Passed")
-                        IF ($AccessRight.AccessControlType -eq $_access) {
-                            write-verbose -Message ("Access Passed")
-                            IF ($AccessRight.FileSystemRights -eq $_rights) {
-                                write-verbose -Message ("Rights Passed")
-                                IF ($AccessRight.PropagationFlags -eq $_propagate) {
-                                    write-verbose -Message ("Propagate Passed")
-                                    $PermissionTest = $true
-                                    $AccountTrack.Add($_account, $PermissionTest)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            $PermissionTest = $false
-        }
-
-        IF (($AccountTrack.Count -eq 0) -or $AccountTrack.Count -ne $this.accounts.count) {
-            $PermissionTest = $false
-            Return $PermissionTest
-        }
-
-        $PermissionTest = $true
-
-
-        foreach ($object in $AccountTrack.Values) {
-
-            IF ($object -eq "$false") {
-                write-verbose -Message ("Permission check failed set to false")
-                $PermissionTest = $false
-            }
-        }
-
-
-        Return $PermissionTest
-    }
-
-    [FileACLPermission] Get() {
-        return $this
-    }
-}
-
-[DscResource()]
 class ModuleAdd {
     [DscProperty(Key)]
     [string]$key = 'Always'
@@ -3248,376 +2841,6 @@ class ModuleAdd {
 
 }
 
-
-[DscResource()]
-class ADServicePrincipalName2 {
-    [DscProperty(key)]
-    [string] $ServicePrincipalName
-
-    [DscProperty(Mandatory)]
-    [String] $Ensure = 'Present'
-
-    [DscProperty()]
-    [String] $Account
-
-    [void] Set() {
-        # Get all Active Directory object having the target SPN configured.
-        $spnAccounts = Get-ADObject -Filter { ServicePrincipalName -eq $this.ServicePrincipalName } -Properties 'SamAccountName', 'DistinguishedName'
-
-        if ($this.Ensure -eq 'Present') {
-            <#
-            Throw an exception, if no account was specified or the account does
-            not exist.
-        #>
-            if ([System.String]::IsNullOrEmpty($this.Account) -or ($null -eq (Get-ADObject -Filter { SamAccountName -eq $Account }))) {
-                throw ("Active Directory object with SamAccountName '{0}' not found. (ADSPN0004)" -f $this.Account)
-            }
-
-            # Remove the SPN(s) from any extra account.
-            foreach ($spnAccount in $spnAccounts) {
-                if ($spnAccount.SamAccountName -ne $this.Account) {
-                    Write-Verbose -Message ("Removing service principal name '{0}' from account '{1}'. (ADSPN0005)" -f $this.ServicePrincipalName, $spnAccount.SamAccountName)
-
-                    Set-ADObject -Identity $spnAccount.DistinguishedName -Remove @{
-                        ServicePrincipalName = $this.ServicePrincipalName
-                    }
-                }
-            }
-
-            <#
-            Add the SPN to the target account. Use Get-ADObject to get the target
-            object filtered by SamAccountName. Set-ADObject does not support the
-            field SamAccountName as Identifier.
-        #>
-            if ($spnAccounts.SamAccountName -notcontains $this.Account) {
-                Write-Verbose -Message ("Adding service principal name '{0}' to account '{1}. (ADSPN0006)" -f $this.ServicePrincipalName, $this.Account)
-
-                Get-ADObject -Filter { SamAccountName -eq $this.Account } |
-                Set-ADObject -Add @{
-                    ServicePrincipalName = $this.ServicePrincipalName
-                }
-            }
-        }
-
-        # Remove the SPN from any account
-        if ($this.Ensure -eq 'Absent') {
-            foreach ($spnAccount in $spnAccounts) {
-                Write-Verbose -Message ("Removing service principal name '{0}' from account '{1}'. (ADSPN0005)" -f $this.ServicePrincipalName, $spnAccount.SamAccountName)
-
-                if (-not ($this.Account) -or ($spnAccount.SamAccountName -eq $this.Account)) {
-                    Set-ADObject -Identity $spnAccount.DistinguishedName -Remove @{
-                        ServicePrincipalName = $this.ServicePrincipalName
-                    }
-                }
-            }
-        }
-        return
-    }
-
-    [bool] Test() {
-        $spnAccounts = Get-ADObject -Filter { ServicePrincipalName -eq $this.ServicePrincipalName } -Properties 'SamAccountName' |
-        Select-Object -ExpandProperty 'SamAccountName'
-
-        if ($spnAccounts.Count -eq 0) {
-
-            $currentConfiguration = @{
-                Ensure               = 'Absent'
-                ServicePrincipalName = $this.ServicePrincipalName
-                Account              = ''
-            }
-        }
-        else {
-            $currentConfiguration = @{
-                Ensure               = 'Present'
-                ServicePrincipalName = $this.ServicePrincipalName
-                Account              = $spnAccounts -join ';'
-            }
-        }
-
-
-        $desiredConfigurationMatch = $currentConfiguration.Ensure -eq $this.Ensure
-
-        if ($this.Ensure -eq 'Present') {
-            $desiredConfigurationMatch = $desiredConfigurationMatch -and
-            $currentConfiguration.Account -eq $this.Account
-        }
-        else {
-            if ($this.Account) {
-                $desiredConfigurationMatch = $currentConfiguration.Account -ne $this.Account
-            }
-        }
-
-        if ($desiredConfigurationMatch) {
-            Write-Verbose -Message ("Service principal name '{0}' is in the desired state. (ADSPN0007)" -f $this.ServicePrincipalName)
-        }
-        else {
-            Write-Verbose -Message ("Service principal name '{0}' is not in the desired state. (ADSPN0008)" -f $this.ServicePrincipalName)
-        }
-
-        return $desiredConfigurationMatch
-    }
-
-
-    [ADServicePrincipalName2] Get() {
-        Write-Verbose -Message ("Getting service principal name '{0}'. (ADSPN0001)" -f $this.ServicePrincipalName)
-
-        $spnAccounts = Get-ADObject -Filter { ServicePrincipalName -eq $ServicePrincipalName } -Properties 'SamAccountName' |
-        Select-Object -ExpandProperty 'SamAccountName'
-
-        if ($spnAccounts.Count -eq 0) {
-            # No SPN found
-            Write-Verbose -Message ("Service principal name '{0}' is absent. (ADSPN0002)" -f $this.ServicePrincipalName)
-
-            $returnValue = @{
-                Ensure               = 'Absent'
-                ServicePrincipalName = $this.ServicePrincipalName
-                Account              = ''
-            }
-        }
-        else {
-            # One or more SPN(s) found, return the account name(s)
-            Write-Verbose -Message ("Service principal name '{0}' is present on account(s) '{1}'. (ADSPN0003)" -f $this.ServicePrincipalName, ($spnAccounts -join ';'))
-
-            $returnValue = @{
-                Ensure               = 'Present'
-                ServicePrincipalName = $this.ServicePrincipalName
-                Account              = $spnAccounts -join ';'
-            }
-        }
-
-        return $returnValue
-    }
-}
-
-
-[DscResource()]
-class ActiveDirectorySPN {
-    [DscProperty(Key)]
-    [string]$key = 'Always'
-
-    [DscProperty()]
-    [string[]]$UserName
-
-    [DscProperty()]
-    [string]$UserNameCluster
-
-    [DscProperty()]
-    [string[]]$ClusterDevice
-
-    [DscProperty(Mandatory)]
-    [string]$FQDNDomainName
-
-    [DscProperty(Mandatory)]
-    [string]$OULocationUser
-
-    [DscProperty(Mandatory)]
-    [string]$OULocationDevice
-
-    [void] Set() {
-
-        Import-Module ActiveDirectory
-        New-PSDrive -PSProvider ActiveDirectory -Name AD -Root "" -Server localhost -ErrorAction SilentlyContinue
-        Set-Location AD:
-
-        #Set SPN permissions to object to allow it to update SPN registrations.
-        $_OULocationUser = $this.OULocationUser
-        $_OULocationDevice = $this.OULocationDevice
-        $_FQDNDomainName = $this.FQDNDomainName
-        $_UserNameCluster = $this.UserNameCluster
-
-        Foreach ($user in $this.UserName) {
-            $_UserName = $user
-
-            write-verbose ('Adding Write Validated SPN permission to User ' + $user + ' on ' + $user + ' account')
-            write-verbose ('Setting Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
-            #Set SPN permissions to object to allow it to update SPN registrations.
-
-            $oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
-            $UserObject = "CN=$_UserName,$_OULocationUser"
-
-            write-verbose ('ObjectPath set to  AD:' + $UserObject)
-
-            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
-            $UserSID = $UserSID.Value
-
-            write-verbose ('User:' + $_UserName + ' SIDValue is:' + $UserSID + ' On Domain:' + $_FQDNDomainName)
-
-            $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
-            $SIDMatch = $Matches[0]
-
-            $oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
-
-            #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
-            #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
-
-            $ACL = Get-Acl -Path "AD:$UserObject"
-            $currentSSDL = $ACL.Sddl
-
-            $newSSDL = $currentSSDL + $oldSddl
-            try {
-                $ACL.SetSecurityDescriptorSddlForm($newSSDL)
-                Set-Acl -AclObject $acl -Path "AD:$UserObject"
-            }
-            catch {
-                Write-Verbose "$_ $newSSDL"
-            }
-
-            write-verbose (' Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName + ' have been set')
-        }
-
-        Foreach ($device in $this.ClusterDevice) {
-            $_DeviceName = $device
-            write-verbose ('Adding Write Validated SPN permission to User ' + $_DeviceName + ' on ' + $_DeviceName + ' account')
-            write-verbose ('Setting Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName)
-
-            $oldSddl = "(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1145)"
-            $DeviceObject = "CN=$_DeviceName,$_OULocationDevice"
-            $UserObject = "CN=$_UserNameCluster,$_OULocationUser"
-
-            write-verbose ('ObjectPath set to  AD:' + $DeviceObject)
-
-            $ComputerSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADComputer -Server "$_FQDNDomainName" $DeviceObject).SID
-            $ComputerSID = $ComputerSID.Value
-
-            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
-            $UserSID = $UserSID.Value
-
-            write-verbose ('Device:' + $_DeviceName + ' SIDValue is:' + $ComputerSID + ' On Domain:' + $_FQDNDomainName)
-
-            $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
-            $SIDMatch = $Matches[0]
-
-            $oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
-
-            #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
-            #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
-
-            write-verbose ('Device:' + $_DeviceName + ' UserSet is:' + $_UserNameCluster + ' On Domain:' + $_FQDNDomainName)
-
-            $ACL = Get-Acl -Path "AD:$DeviceObject"
-            $currentSSDL = $ACL.Sddl
-
-            $newSSDL = $currentSSDL + $oldSddl
-            try {
-                $ACL.SetSecurityDescriptorSddlForm($newSSDL)
-                Set-Acl -AclObject $acl -Path "AD:$DeviceObject"
-            }
-            catch {
-                Write-Verbose "$_ $newSSDL"
-            }
-
-            write-verbose (' Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName + ' have been set')
-        }
-    }
-
-    [bool] Test() {
-
-        Import-Module ActiveDirectory
-        New-PSDrive -PSProvider ActiveDirectory -Name AD -Root "" -Server localhost -ErrorAction SilentlyContinue
-        Set-Location AD:
-
-        #Set SPN permissions to object to allow it to update SPN registrations.
-        $_OULocationUser = $this.OULocationUser
-        $_OULocationDevice = $this.OULocationDevice
-        $_FQDNDomainName = $this.FQDNDomainName
-        $_UserNameCluster = $this.UserNameCluster
-        $PermissionTest = $false
-        $AccountTrack = @{ }
-
-        Foreach ($user in $this.UserName) {
-            $_UserName = $user
-
-            write-verbose ('Checking Permissions for User:' + $_UserName + ' OULocation:' + $_OULocationUser + ' On Domain:' + $_FQDNDomainName)
-
-            $oldSddl = "(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1199)"
-            $UserObject = "CN=$_UserName,$_OULocationUser"
-
-            write-verbose ('ObjectPath set to  AD:' + $UserObject)
-
-            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
-            $UserSID = $UserSID.Value
-
-            write-verbose ('User:' + $_UserName + ' SIDValue is:' + $UserSID + ' On Domain:' + $_FQDNDomainName)
-
-            $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
-            $SIDMatch = $Matches[0]
-
-            $oldSddl = $oldSddl -replace ($SIDMatch, $UserSID)
-
-            #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
-            #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
-
-            $ACL = Get-Acl -Path "AD:$UserObject"
-            $currentSSDL = $ACL.Sddl
-
-            IF ($currentSSDL -match ("\(OA;;RPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;$UserSID\)")) {
-                write-verbose ('Permissions for SPN are already set')
-                $AccountTrack.Add($_UserName, $true)
-            }
-            ELSE {
-                write-verbose ('Permissions for SPN are not currently set')
-                $AccountTrack.Add($_UserName, $false)
-            }
-        }
-
-        Foreach ($device in $this.ClusterDevice) {
-            $_DeviceName = $device
-
-            write-verbose ('Checking Permissions for Device:' + $_DeviceName + ' OULocation:' + $_OULocationDevice + ' On Domain:' + $_FQDNDomainName)
-
-            $oldSddl = "(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;S-1-5-21-1914882237-739871479-3784143264-1145)"
-            $DeviceObject = "CN=$_DeviceName,$_OULocationDevice"
-            $UserObject = "CN=$_UserNameCluster,$_OULocationUser"
-
-            write-verbose ('ObjectPath set to  AD:' + $DeviceObject)
-
-            $ComputerSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADComputer -Server "$_FQDNDomainName" $DeviceObject).SID
-            $ComputerSID = $ComputerSID.Value
-
-            $UserSID = New-Object System.Security.Principal.SecurityIdentifier (Get-ADUser -Server "$_FQDNDomainName" $UserObject).SID
-            $UserSID = $UserSID.Value
-
-            write-verbose ('Device:' + $_DeviceName + ' SIDValue is:' + $ComputerSID + ' On Domain:' + $_FQDNDomainName)
-
-            $oldSddl -match "S\-1\-5\-21\-[0-9]*\-[0-9]*\-[0-9]*\-[0-9]*" | Out-Null
-            $SIDMatch = $Matches[0]
-
-            $oldSddl = $oldSddl -replace ($SIDMatch, $ComputerSID)
-
-            #$ACLObject = New-Object -TypeName System.Security.AccessControl.DirectorySecurity
-            #$ACLObject.SetSecurityDescriptorSddlForm($oldSddl)
-
-            write-verbose ('Device:' + $_DeviceName + ' UserSet is:' + $_UserNameCluster + ' On Domain:' + $_FQDNDomainName)
-
-            $ACL = Get-Acl -Path "AD:$DeviceObject"
-            $currentSSDL = $ACL.Sddl
-
-            IF ($currentSSDL -match ("\(OA;;SWRPWP;f3a64788-5306-11d1-a9c5-0000f80367c1;;$UserSID\)")) {
-                write-verbose ('Permissions for SPN are already set')
-                $AccountTrack.Add($_DeviceName, $true)
-            }
-            ELSE {
-                write-verbose ('Permissions for SPN are not currently set')
-                $AccountTrack.Add($_DeviceName, $false)
-            }
-        }
-
-        $PermissionTest = $true
-        foreach ($object in $AccountTrack.Values) {
-            #write-verbose ('Permissions for Object:' + $object)
-            IF ($object -eq $false) {
-                $PermissionTest = $false
-            }
-        }
-
-        Return $PermissionTest
-    }
-
-    [ActiveDirectorySPN] Get() {
-        return $this
-    }
-
-}
 
 [DscResource()]
 class ConfigureWSUS {

@@ -1043,17 +1043,6 @@ Configuration Phase5
             }
 
             $adGroupDependancy += "[ADGroup]SQLAOGroup$($pNode.vmName)"
-            #ActiveDirectorySPN "SQLAOSPN$i" {
-            #    Key              = "SQLAOSPN$i"
-            #    UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount
-            #    FQDNDomainName   = $DomainName
-            #    OULocationUser   = $pNode.thisParams.SQLAO.OULocationUser
-            #    OULocationDevice = $pNode.thisParams.SQLAO.OULocationDevice
-            #    ClusterDevice    = $pNode.thisParams.SQLAO.ClusterNodes
-            #    UserNameCluster  = $pNode.thisParams.SQLAO.SqlServiceAccount
-            #    Dependson        = "[ADGroup]SQLAOGroup$i"
-            #}
-            #$adGroupDependancy += "[ActiveDirectorySPN]SQLAOSPN$i"
         }
 
         WriteStatus Complete {

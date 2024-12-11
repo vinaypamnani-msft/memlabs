@@ -2040,6 +2040,42 @@ Function Write-RedX {
     }
 }
 
+Function Write-WhiteI {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string] $text,
+        [Parameter()]
+        [switch] $NoNewLine,
+        [Parameter()]
+        [switch] $NoIndent,
+        [Parameter()]
+        [switch] $WriteLog,
+        [Parameter()]
+        [string] $ForegroundColor
+    )
+    $text = $text.Replace("Info: ", "")
+    if (-not $NoIndent) {
+        Write-Host "  " -NoNewline
+    }
+    Write-Host "[" -NoNewLine
+    Write-Host2 -ForeGroundColor White "ⓘ" -NoNewline
+    Write-Host "] " -NoNewline
+    if ($ForegroundColor) {
+        Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text
+        #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
+    }
+    else {
+        Write-Host $text -NoNewline
+    }
+    if (!$NoNewLine) {
+        Write-Host
+    }
+    if ($WriteLog.IsPresent) {
+        Write-Log $text -Warning -LogOnly
+    }
+}
+
 Function Write-OrangePoint {
     [CmdletBinding()]
     param (

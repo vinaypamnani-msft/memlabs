@@ -1228,7 +1228,7 @@ function Test-NetworkNat {
     }
 
     try {
-        Write-Log "'$NetworkSubnet' not found in NAT. Adding it."
+        Write-OrangePoint "'$NetworkSubnet' not found in NAT. Adding it."
         New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
         return $true
     }
@@ -1249,11 +1249,11 @@ function Start-DHCP {
 
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
-        Write-Log "DHCP is not installed. Installing..."
+        Write-OrangePoint "DHCP is not installed. Installing..."
         $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
 
         if (-not $installed.Success) {
-            Write-Log "DHCP Installation failed $($installed.ExitCode). Install DHCP windows feature manually, and try again." -Failure
+            Write-RedX "DHCP Installation failed $($installed.ExitCode). Install DHCP windows feature manually, and try again." -Failure
             return $false
         }
     }
@@ -1339,21 +1339,21 @@ function Test-DHCPScope {
                 $scopeOptions = get-DhcpServerv4OptionValue -scopeID $scopeID -ErrorAction SilentlyContinue
                 $currentDNS = ($scopeOptions | Where-Object OptionID -eq 6).Value
                 if ($currentDNS -ne $DHCPDNSAddress) {
-                    Write-Log "'$ScopeID ($ScopeName)' scope does not match preferred DNS server"
+                    Write-OrangePoint "'$ScopeID ($ScopeName)' scope does not match preferred DNS server"
                     $createScope = $true
                 }
                 else {
-                    Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+                    Write-GreenCheck "'$ScopeID ($ScopeName)' scope is already present in DHCP."
                     $createScope = $false
                 }
             }
             else {
-                Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+                Write-GreenCheck "'$ScopeID ($ScopeName)' scope is already present in DHCP."
                 $createScope = $false
             }
         }
         else {
-            Write-Log "'$ScopeID ($ScopeName)' scope is not present in DHCP. Creating new scope"
+            Write-OrangePoint "'$ScopeID ($ScopeName)' scope is not present in DHCP. Creating new scope"
             $createScope = $true
         }
 
@@ -1383,7 +1383,7 @@ function Test-DHCPScope {
         $retry = 0
         if ($createScope) {
 
-            Write-Log "Creating '$ScopeID ($ScopeName)' scope with DHCPDefaultGateway: $DHCPDefaultGateway DHCPScopeStart: $DHCPScopeStart DHCPScopeEnd: $DHCPScopeEnd DNSServer: $DHCPDNSAddress "
+            Write-WhiteI "Creating '$ScopeID ($ScopeName)' scope with DHCPDefaultGateway: $DHCPDefaultGateway DHCPScopeStart: $DHCPScopeStart DHCPScopeEnd: $DHCPScopeEnd DNSServer: $DHCPDNSAddress "
             while (-not $scope) {
                 try {
                     if ($retry -gt 0) {
@@ -1401,7 +1401,7 @@ function Test-DHCPScope {
                     Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction Stop
                     $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction Stop
                     if ($scope) {
-                        Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
+                        Write-GreenCheck "'$ScopeID ($ScopeName)' scope added to DHCP."
                     }
                     else {
                         Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
@@ -1440,7 +1440,7 @@ function Test-DHCPScope {
                 }
 
                 Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
-                Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
+                Write-GreenCheck "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP."
                 return $true
             }
             catch {
@@ -3050,7 +3050,7 @@ function Get-Tools {
         }
 
         if (-not $worked) {
-            Write-Log "Failed to Download or Verify '$name'"
+            Write-RedX "Failed to Download or Verify '$name'"
             $allSuccess = $false
         }
 
@@ -3071,11 +3071,11 @@ function Get-Tools {
             $extractIfZip = $tool.ExtractFolderIfZip
             if (Test-Path $downloadPath) {
                 if ($downloadPath.ToLowerInvariant().EndsWith(".zip") -and $extractIfZip -eq $true) {
-                    Write-Log "Extracting $fileName to $fileDestination."
+                    Write-Log -LogOnly "Extracting $fileName to $fileDestination."
                     Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
                 }
                 else {
-                    Write-Log "Copying $fileName to $fileDestination."
+                    Write-Log -LogOnly "Copying $fileName to $fileDestination."
                     try {
                         Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
                     }
@@ -3555,9 +3555,9 @@ function Get-FileWithHash {
         # For dynamically updated packages, its impossible to know the hash ahead of time, so we just re-download these every run
         if ($ExpectedHash -ne "NONE") {
             if ($localFileHash -eq $ExpectedHash) {
-                Write-Log "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
+                Write-GreenCheck "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
                 if ($ForceDownload.IsPresent) {
-                    Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
+                    Write-WhiteI "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
                     Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
                     $return.download = $true
                 }
@@ -3568,7 +3568,7 @@ function Get-FileWithHash {
                 }
             }
             else {
-                Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
+                Write-OrangePoint "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
                 Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
                 Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
                 $return.download = $true
@@ -3587,12 +3587,12 @@ function Get-FileWithHash {
         else {
             if ($ExpectedHash -ne "NONE") {
                 # Calculate file hash, save to local hash file
-                Write-Log "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
+                Write-WhiteI "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
                 $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
                 $localFileHash = $hashFileResult.Hash
                 if ($localFileHash -eq $ExpectedHash) {
                     $localFileHash | Out-File -FilePath $localImageHashPath -Force
-                    Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
+                    Write-GreenCheck "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
                     $return.success = $true
                 }
                 else {
@@ -3600,7 +3600,7 @@ function Get-FileWithHash {
                         $return.success = $true
                     }
                     else {
-                        Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
+                        Write-RedX "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
                         $return.success = $false
                     }
                 }
