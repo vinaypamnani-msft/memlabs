@@ -9,7 +9,7 @@ enum StartupType {
     demand
 }
 
-function Download-File {
+function Invoke-DownloadFile {
     param(
         [string] $url,
         [string] $dest
@@ -85,10 +85,10 @@ class InstallADK {
 
 
         # Use this block to download the FULL ADK, Filename: adksetup.exe
-        Download-File $_ADKDownloadPath $_adkpath
+        Invoke-DownloadFile $_ADKDownloadPath $_adkpath
         
         # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
-        Download-File $_ADKWinPEDownloadPath $_adkWinPEpath        
+        Invoke-DownloadFile $_ADKWinPEDownloadPath $_adkWinPEpath        
 
         #Install DeploymentTools
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
@@ -200,7 +200,7 @@ class InstallSSMS {
 
         $ssmsSetup = "C:\temp\SSMS-Setup-ENU.exe"
 
-        Download-File $this.DownloadUrl $ssmsSetup
+        Invoke-DownloadFile $this.DownloadUrl $ssmsSetup
                 
         # Install SSMS
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
@@ -290,7 +290,7 @@ class InstallDotNet4 {
         # Download
         $setup = "C:\temp\$($this.FileName)"
         
-        Download-File $this.DownloadUrl $setup
+        Invoke-DownloadFile $this.DownloadUrl $setup
         
         # Install
         $cmd = $setup
@@ -360,7 +360,7 @@ class InstallODBCDriver {
         $_odbcpath = $this.ODBCPath
         $_URL = $this.URL
 
-        Download-File $_URL $_odbcpath
+        Invoke-DownloadFile $_URL $_odbcpath
        
         # Install ODBC Driver
         $cmd = "msiexec"
@@ -439,7 +439,7 @@ class InstallSqlClient {
     [void] Set() {
         $_path = $this.Path
         $_URL = $this.URL
-        Download-File $_URL $_path
+        Invoke-DownloadFile $_URL $_path
 
         # Install
         #VC_redist.x64.exe /install /passive /quiet
@@ -521,7 +521,7 @@ class InstallVCRedist {
         $_path = $this.Path
         $_URL = $this.URL
 
-        Download-File $_URL $_path
+        Invoke-DownloadFile $_URL $_path
        
         # Install
         #VC_redist.x64.exe /install /passive /quiet
@@ -1126,7 +1126,7 @@ class DownloadSCCM {
         $cmsourcepath = "c:\$_CM"
         Write-Status "Downloading [$_CMURL] $_CM installation source... to $cmpath"
 
-        Download-File $_CMURL $cmpath
+        Invoke-DownloadFile $_CMURL $cmpath
         
         if (Test-Path $cmsourcepath) {
             Remove-Item -Path $cmsourcepath -Recurse -Force | Out-Null
@@ -1178,7 +1178,7 @@ class DownloadFile {
 
     [void] Set() {
         Write-Verbose "Downloading file from $($this.DownloadUrl) to $($this.FilePath)..."
-        Download-File $this.DownloadUrl $this.FilePath
+        Invoke-DownloadFile $this.DownloadUrl $this.FilePath
     }
 
     [bool] Test() {
@@ -1456,16 +1456,68 @@ function Write-Status {
     param(
         [String] $Status
     )
+    $_Status = $Status
+    Write-Verbose "Writing Status: $_Status"    
 
-    $_Status = $this.Status
+    try {
+        try {
+            [void](Get-Variable this -ErrorAction Stop)
+            $Static = $false
+        }
+        catch {
+            $Static = $true
+        }
+        if ($Static) {
+            $prefix = (Get-PSCallStack)[1].FunctionName
+        }
+        else {
+            $prefix = $this.gettype().Name
+        }      
+        if ($prefix -ne "WriteStatus") {
+            $_Status = "$($prefix)`: $($_Status)"      
+        }
+    }
+    catch {}
+    
+
     $StatusFile = "C:\staging\DSC\DSC_Status.txt"
-    $_Status | Out-File -FilePath $StatusFile -Force
-
+    "$_Status" | Out-File -FilePath $StatusFile -Force
+    
+    
     $StatusLog = "C:\staging\DSC\DSC_Log.log"
-    $time = Get-Date -Format 'dd/MM/yyyy HH:mm:ss'
-    "$time $_Status" | Out-File -FilePath $StatusLog -Append
 
-    Write-Verbose "Writing Status: $_Status"
+    try {
+        try {
+            $caller = (Get-PSCallStack | Select-Object Command, Location, Arguments)[1].Command
+            if (-not $caller) {
+                $caller = $this.gettype().Name
+            }
+        }
+        catch {}
+        $Text = $_Status.ToString().Trim()
+        $CallingFunction = Get-PSCallStack | Select-Object -first 2 | select-object -last 1
+        $context = $CallingFunction.Command
+        if (-not $context){
+            $context = $CallingFunction.FunctionName
+        }
+        $file = $CallingFunction.Location
+        $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+        $date = Get-Date -Format 'MM-dd-yyyy'
+        $time = Get-Date -Format 'HH:mm:ss.fff'
+
+        $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""Status"" thread=""$tid"" file=""$file"">"
+        $logText | Out-File $StatusLog -Append -Encoding utf8
+    }
+    catch {
+        try {
+            # Retry once and ignore if failed
+            $logText | Out-File $StatusLog -Append -ErrorAction SilentlyContinue -Encoding utf8
+        }
+        catch {
+            $_Status | Out-File $StatusLog -Append -ErrorAction SilentlyContinue -Encoding utf8
+        }
+    }
+    
 
 }
 
@@ -1477,7 +1529,7 @@ class WriteStatus {
     [void] Set() {
 
         $_Status = $this.Status
-        Write-Status $_Status
+        Write-Status $_Status 
     }
 
     [bool] Test() {
@@ -3587,7 +3639,7 @@ class ConfigureWSUS {
         $_FriendlyName = $this.TemplateName
         $postinstallOutput = ""
         try {
-            write-Status ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
+            #write-Status ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
                 New-Item -Path $this.ContentPath -ItemType Directory -Force
             }
@@ -3596,10 +3648,12 @@ class ConfigureWSUS {
             }
 
             if ($this.SqlServer) {
+                write-Status ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
                 $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
             }
             else {
+                write-Status ("Configuring WSUS for WID in $($this.ContentPath)")
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)")
                 $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
             }
@@ -3681,17 +3735,22 @@ class WSUSSync {
 
     [void] Set() {
        
-        Write-Status "Starting initial WSUSSync for $($this.ServerName) using Product SQL Server 2005 Category Tools"
-        $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530 #-UseSsl
+        Write-Status "Starting initial WSUSSync for $($this.ServerName) using Product: SQL Server 2005 Category: Tools"
+        try {
+            $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530 #-UseSsl
  
-        Get-WsusProduct | Set-WsusProduct -disable
-        Get-WsusProduct | Where-Object { $_.Product.Title -eq "SQL Server 2005" } | Set-WsusProduct
+            Get-WsusProduct | Set-WsusProduct -disable
+            Get-WsusProduct | Where-Object { $_.Product.Title -eq "SQL Server 2005" } | Set-WsusProduct
          
-        Get-WsusClassification | Set-WsusClassification -disable
-        Get-WsusClassification | Where-Object { $_.Classification.Title -eq "Tools" } | Set-WsusClassification
+            Get-WsusClassification | Set-WsusClassification -disable
+            Get-WsusClassification | Where-Object { $_.Classification.Title -eq "Tools" } | Set-WsusClassification
          
-        $sub = $WSUS.GetSubscription()
-        $sub.StartSynchronization()
+            $sub = $WSUS.GetSubscription()
+            $sub.StartSynchronization()
+        }
+        catch {
+            
+        }
        
     }
 
@@ -3757,7 +3816,7 @@ class InstallPBIRS {
 
 
             $pbirsSetup = "C:\temp\PowerBIReportServer.exe"
-            Download-File $this.DownloadUrl $pbirsSetup
+            Invoke-DownloadFile $this.DownloadUrl $pbirsSetup
             
             try {
                 New-Item -Path $this.InstallPath -ItemType Directory -Force

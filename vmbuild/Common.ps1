@@ -3019,7 +3019,11 @@ function Get-Tools {
 
         if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-        if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { continue }
+        if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { 
+            if (-not $tool.Roles) {
+                continue 
+            }
+        }
 
         $name = $tool.Name
         $url = $tool.URL
@@ -3153,14 +3157,18 @@ function Install-Tools {
         if ($out.ScriptBlockOutput -ne $true) {
             foreach ($tool in $Common.AzureFileList.Tools) {
 
-
+                if ($ShowProgress) {
+                    Write-Progress2 "Injecting tools" -Status "Preparing to Inject $($tool.Name) to $VmName"
+                }
                 #SkipAutoDeploy is set when cmoptions.PrePopulateObjects is true
                 if ($SkipAutoDeploy) {
                     if ($tool.Appinstall -eq $true) {
                         if ($vm.operatingSystem.Contains("Windows 1")) {
                             if ($vm.Role -eq "DomainMember") {
                                 #If this is a Domain Member, windows 10 or 11, and the app is auto deployed.. dont add it to tools
-                                Write-Progress2 "Injecting tools" -Status "Skipping $($tool.Name) on $VmName, should be deployed via CM"
+                                if ($ShowProgress) {
+                                    Write-Progress2 "Injecting tools" -Status "Skipping $($tool.Name) on $VmName, should be deployed via CM"
+                                }
                                 continue
                                 
                             }
@@ -3172,7 +3180,23 @@ function Install-Tools {
 
                 if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-                if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { continue }
+                $stop = $true
+                if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { 
+                    if ($tool.Roles) {
+                        if ($vm.Role -in $tool.Roles) {     
+                            Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName (Stop1 False)"                       
+                            $stop = $false
+                        }
+                        if ($vm.InstallSUP -and "WSUS" -in $tool.Roles) {
+                            Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName (Stop2 False)"                       
+                            $stop = $false
+                        }
+                    }
+                    if ($stop) {
+                        continue 
+                    }
+                   
+                }
 
                 if ($ShowProgress) {
                     Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
@@ -3181,6 +3205,14 @@ function Install-Tools {
                 $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
                 if (-not $worked) {
                     $success = $false
+                    if ($ShowProgress) {
+                        Write-Progress2 "Injecting tools" -Status "Failed to Inject $($tool.Name) to $VmName"
+                    }
+                }
+                else {
+                    if ($ShowProgress) {
+                        Write-Progress2 "Injecting tools" -Status "Injected $($tool.Name) to $VmName"
+                    }
                 }
             }
         }
@@ -3233,6 +3265,7 @@ function Copy-ToolToVM {
 
     $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
     $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
+    $DirTargetPathInVM = Join-Path "C:\" $tool.Target
 
     $isContainer = $false
     if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
@@ -3243,6 +3276,7 @@ function Copy-ToolToVM {
     if ($tool.Name -eq "WMI Explorer") {
         $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
         $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
+        $DirTargetPathInVM = "C:\$fileTargetRelative"
     }
 
     Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
@@ -3250,6 +3284,10 @@ function Copy-ToolToVM {
     try {
         $progressPref = $ProgressPreference
         $ProgressPreference = "SilentlyContinue"
+        try {
+            Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock { New-Item -ItemType Directory -Force -Path $using:DirTargetPathInVM }
+        }
+        catch {}
         if ($isContainer) {
             #Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
             Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
@@ -3258,6 +3296,7 @@ function Copy-ToolToVM {
             #Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
             Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
+        Write-Log "$vmName`: Done Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
     }
     catch {
         Write-Log "$vmName`: Failed to inject '$($tool.Name)'. $_" -Failure
@@ -3494,7 +3533,7 @@ function Get-FileWithHash {
         download = $false
     }
 
-    Write-Log "Downloading/Verifying '$FileDisplayName'" -SubActivity
+    #Write-Log "Downloading/Verifying '$FileDisplayName'" -SubActivity
 
     if (Test-Path $localImagePath) {
 
