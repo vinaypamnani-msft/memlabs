@@ -136,18 +136,83 @@ function Get-PendingVMs {
     return $actualPending
 }
 
+
+function Check-OverallHealth {
+    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHeader "  ---  Quick Stats"
+    
+    $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
+    $vmsTotal = (Get-List -Type VM | Measure-Object).Count
+    
+    # Running VMs
+    if ($vmsTotal -eq 0) {
+        Write-OrangePoint "No VMs are currently deployed"
+    } else {
+
+    if ($vmsRunning -eq 0) {
+        Write-RedX "No VMs are currently running. $vmsRunning/$vmsTotal total"
+    }else {
+        if ($vm -eq $vmsTotal){
+            Write-GreenCheck "All $vmsTotal VMs are running"
+        }else{
+            Write-OrangePoint "$vmsRunning/$vmsTotal VMs are running"
+        }    
+    }
+
+    # Available Disk
+    $disk = Get-Volume -DriveLetter E
+    $diskTotalGB = $([math]::Round($($disk.Size/1GB),0))
+    $diskFreeGB = $([math]::Round($($disk.SizeRemaining/1GB),0))
+
+    if ($diskFreeGB -ge 700) {
+        Write-GreenCheck "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+    }else {
+        if ($diskFreeGB -ge 300) {
+        Write-OrangePoint "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+        }
+        else{
+            Write-RedX "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+        }
+    }
+
+    #Available Memory
+
+    $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
+    $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
+
+    if ($availableMemory -ge 40) {
+        Write-GreenCheck "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
+    }else {
+        if ($availableMemory -ge 20) {
+            Write-OrangePoint "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
+        }else{
+            Write-RedX "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
+        }
+    }
+
+}
+
+    $vmsTotal = (Get-List -Type VM | Measure-Object).Count
+    $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
+    $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
+    $disk = Get-Volume -DriveLetter E
+
+    $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%$($Global:Common.Colors.GenConfigHeader)" }
+}
+
 function Select-ConfigMenu {
     $Global:EnterKey = $true
     while ($true) {
         Write-Log -Activity "MemLabs Main Menu"
+
+        Check-OverallHealth
         #$customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
         if ($domainCount -gt 0) {
-            $customOptions = [ordered]@{ "1" = "Create New Domain or Expand Existing domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $customOptions = [ordered]@{ "1" = "Create New Domain or Expand Existing domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
             #   $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; }
         }
         else {
-            $customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
         }
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
@@ -160,17 +225,13 @@ function Select-ConfigMenu {
 
 
         $customOptions += [ordered]@{"*B3" = ""; }
-        $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
-        $vmsTotal = (Get-List -Type VM | Measure-Object).Count
-        $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
-        $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
-        $disk = Get-Volume -DriveLetter E
-        $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+       
+        $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"D" = "Manage Domains [Start/Stop/Snapshot/Delete Virtual Machines]%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         #$customOptions += [ordered]@{"E" = "Toggle <Enter> to finalize prompts%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; }
         #$customOptions += [ordered]@{"D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{"T" = "Update or Copy Optional Tools (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{"D" = "Manage Domains [Start/Stop/Snapshot/Delete]%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs(C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        
 
 
         $customOptions += [ordered]@{"*B4" = ""; "*BREAK4" = "---  List Resources%$($Global:Common.Colors.GenConfigHeader)" }
@@ -178,6 +239,8 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"N" = "Show Networks%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
 
         $customOptions += [ordered]@{"P" = "Show Passwords" }
+        $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "---  Other%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         #$pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
         $pendingCount = (Get-PendingVMs | Measure-Object).Count
 
@@ -185,7 +248,7 @@ function Select-ConfigMenu {
             $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
         }
         Write-Host
-        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHeader "---  Create Config"
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHeader "---  Create or Modify domain configs"
         $response = Get-Menu -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false
 
         write-Verbose "1 response $response"
