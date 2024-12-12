@@ -186,7 +186,12 @@
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
+            DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WriteEvent]WriteConfigFinished"
+            Status    = "Complete!"
         }
     }
 }

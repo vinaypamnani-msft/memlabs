@@ -1280,7 +1280,8 @@ function Test-Configuration {
 
         if ($final) {
             Write-Progress2 -Activity "Testing URLS" -Status "Testing URLS" -PercentComplete 77
-
+            Write-Host
+            Write-Log -SubActivity "Testing URLS"
             $Common.AzureFileList.Urls | ForEach-Object {
                 $_.psobject.properties | ForEach-Object {
                     if (-not (Test-URL -url $_.value -name $_.name )) {

@@ -704,17 +704,18 @@
             DependsOn          = $waitOnDependency
         }
 
-        WriteStatus Complete {
-            DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
-            Status    = "Complete!"
-        }
 
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
+            DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WriteEvent]WriteConfigFinished"
+            Status    = "Complete!"
         }
     }
 }

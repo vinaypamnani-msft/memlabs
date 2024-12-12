@@ -1270,19 +1270,51 @@ $global:VM_Config = {
 
                 # Define DSC variables
                 $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
-
                 # Update init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
                 "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n=====" | Out-File $log -Append
 
+
+                if (-not (Test-Path $dscConfigPath)) {
+                    $data = "Could not find path $dscConfigPath"
+                    $data | Out-File $log -Append                    
+                    Write-Error $data
+                    return $data
+                }
+                else {
+                    "Found DSC Configuration in $dscConfigPath" | Out-File $log -Append  
+                }
+
+
+
                 # Run for single-node DSC, multi-node DSC fail with Set-DscLocalConfigurationManager
                 if ($ConfigurationData.AllNodes.NodeName -contains "LOCALHOST") {
-                    "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
-                    Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
+                    try {
+                        "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
+                        Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
+                    }
+                    catch {
+                        $data = "Could not run Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose"
+                        $data | Out-File $log -Append      
+                        $_ | Out-File $log -Append              
+                        Write-Error $data
+                        Write-Error $_
+                        return $data
+                    }
 
+                    try {
                     "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
                     Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+                    }
+                    catch {
+                        $data = "Could not run Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop"
+                        $data | Out-File $log -Append      
+                        $_ | Out-File $log -Append              
+                        Write-Error $data
+                        Write-Error $_
+                        return $data
+                    }
                 }
                 else {
                     # Use domainCreds instead of local Creds for multi-node DSC

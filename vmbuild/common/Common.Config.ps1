@@ -1839,7 +1839,7 @@ function Get-List {
         }
         if ($Type -eq "ForestTrust") {
 
-            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Where-Object {$_.ForestTrust -ne "NONE" -and $_.ForestTrust} | Select-Object -Property @("ForestTrust","Domain") -Unique -ErrorAction SilentlyContinue
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Where-Object { $_.ForestTrust -ne "NONE" -and $_.ForestTrust } | Select-Object -Property @("ForestTrust", "Domain") -Unique -ErrorAction SilentlyContinue
         }
         if ($Type -eq "UniqueSwitch") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty 'Switch' -Unique -ErrorAction SilentlyContinue
@@ -2059,7 +2059,7 @@ Function Write-WhiteI {
         Write-Host "  " -NoNewline
     }
     Write-Host "[" -NoNewLine
-    Write-Host2 -ForeGroundColor White "ⓘ" -NoNewline
+    Write-Host2 -ForeGroundColor White "i" -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {
         Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text

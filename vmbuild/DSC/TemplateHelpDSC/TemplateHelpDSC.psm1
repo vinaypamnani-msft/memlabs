@@ -3,12 +3,6 @@
     Present
 }
 
-enum StartupType {
-    auto
-    delayedauto
-    demand
-}
-
 function Invoke-DownloadFile {
     param(
         [string] $url,
@@ -659,7 +653,7 @@ class WriteEvent {
         $_LogPath = $this.LogPath
         $ConfigurationFile = Join-Path -Path $_LogPath -ChildPath "$_FileName.json"
         $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-
+        Write-Status "Setting event $_Node to $_Status in $_LogPath"
         $Configuration.$_Node.Status = $_Status
         $Configuration.$_Node.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 
@@ -742,7 +736,7 @@ class WaitForEvent {
         $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
         Write-Verbose "Attempting to acquire '$_FileName' Mutex"
         [void]$mtx.WaitOne()
-        Write-Verbose "acquired '$_FileName' Mutex"
+        Write-Verbose "Acquired '$_FileName' Mutex"
         $Configuration = $null
         try {
             $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
@@ -757,7 +751,7 @@ class WaitForEvent {
             $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
             Write-Verbose "Attempting to acquire '$_FileName' Mutex"
             [void]$mtx.WaitOne()
-            Write-Verbose "acquired '$_FileName' Mutex"
+            Write-Verbose "Acquired '$_FileName' Mutex"
             try {
                 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
             }
@@ -766,6 +760,7 @@ class WaitForEvent {
                 [void]$mtx.Dispose()
             }
         }
+        Write-Status "Step: [$($this.ReadNode)] Finished on $($this.MachineName)"
     }
 
     [bool] Test() {
@@ -824,20 +819,22 @@ class WaitForExtendSchemaFile {
 
     [void] Set() {
 
-
+        Write-Status "Extend Schema. Testing network connection"
         $success = $false
         while ($success -eq $false) {
             if ($this.AdminCreds) {
                 $user = $this.AdminCreds.UserName
                 $pass = $this.AdminCreds.GetNetworkCredential().Password
-                Write-Verbose "Running New-SmbMapping -RemotePath \\$($this.MachineName) -UserName $user -Password $pass"
                 $machine = "\\$($this.MachineName)"
+                Write-Verbose "Running New-SmbMapping -RemotePath \\$machine -UserName $user -Password $pass"
+                Write-Status "Testing connection to \\$machine for user $user"
                 $smb = New-SmbMapping -RemotePath $machine -UserName $user -Password $pass
                 if ($smb) {
                     Write-Verbose "Mapping success: $smb"
                     $success = $true
                 }
                 else {
+                    Write-Status "Could not get a connection to \\$machine for user $user. Retrying."
                     Write-Verbose "Mapping Failure.."
                     start-sleep -Seconds 30
                 }
@@ -855,7 +852,7 @@ class WaitForExtendSchemaFile {
         $extadschpath4 = Join-Path -Path $_FilePath -ChildPath "cd.preview\SMSSETUP\BIN\X64\extadsch.exe"
         while (!(Test-Path $extadschpath) -and !(Test-Path $extadschpath2) -and !(Test-Path $extadschpath3) -and !(Test-Path $extadschpath4)) {
             Write-Verbose "Testing $extadschpath and $extadschpath2 and $extadschpath3"
-            Write-Verbose "Wait for extadsch.exe exist on $($this.MachineName), will try 10 seconds later..."
+            Write-Status "Wait for extadsch.exe exist on $($this.MachineName), will try 10 seconds later..."
             Start-Sleep -Seconds 10
             $extadschpath = Join-Path -Path $_FilePath -ChildPath "SMSSETUP\BIN\X64\extadsch.exe"
             $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
@@ -868,7 +865,7 @@ class WaitForExtendSchemaFile {
         # Force AD Replication
         $domainControllers = Get-ADDomainController -Filter *
         if ($domainControllers.Count -gt 1) {
-            Write-Verbose "Forcing AD Replication on $($domainControllers.Name -join ',')"
+            Write-Status "Forcing AD Replication on $($domainControllers.Name -join ',')"
             $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
             Start-Sleep -Seconds 3
         }
@@ -924,13 +921,17 @@ class DelegateControl {
         $_machinename = $this.Machine
         $root = (Get-ADRootDSE).defaultNamingContext
         $ou = $null
+
+        
         try {
+            Write-Status "Getting AD Object: CN=System Management,CN=System,$root"
             $ou = Get-ADObject "CN=System Management,CN=System,$root"
         }
         catch {
             Write-Verbose "System Management container does not currently exist."
         }
         if ($null -eq $ou) {
+            Write-Status "Creating new AD Object: CN=System Management,CN=System,$root"
             $ou = New-ADObject -Type Container -name "System Management" -Path "CN=System,$root" -Passthru
         }
         $DomainName = $this.DomainFullName.split('.')[0]
@@ -958,6 +959,7 @@ class DelegateControl {
                 $_FileName = "C:\temp\SysMgmt.txt"
 
                 if (-not (Test-Path $_FileName)) {
+                    Write-Status "dsacls.exe failed to add permissions 5 time.. Attempting reboot."
                     Write-Verbose "Rebooting"
                     New-Item $_FileName
                     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
@@ -967,6 +969,7 @@ class DelegateControl {
             }
 
             $retries++
+            Write-Status "Running dsacls.exe to add FULL Control to CN=System Management. Try $retries/$maxretries"
             Write-Verbose "Running $cmd $arg1 $arg2 $arg3 $arg4"
             $result = & $cmd $arg1 $arg2 $arg3 $arg4 *>&1
 
@@ -1265,7 +1268,7 @@ class SetDNS {
     [void] Set() {
         $_DNSIPAddress = $this.DNSIPAddress
         $dnsset = Get-DnsClientServerAddress | ForEach-Object { $_ | Where-Object { $_.InterfaceAlias.StartsWith("Ethernet") -and $_.AddressFamily -eq 2 } }
-        Write-Verbose "Set dns: $_DNSIPAddress for $($dnsset.InterfaceAlias)"
+        Write-Status "Set dns: $_DNSIPAddress for $($dnsset.InterfaceAlias)"
         Set-DnsClientServerAddress -InterfaceIndex $dnsset.InterfaceIndex -ServerAddresses $_DNSIPAddress
     }
 
@@ -1288,67 +1291,79 @@ function Write-Status {
         [String] $Status
     )
     $_Status = $Status
-    Write-Verbose "Writing Status: $_Status"    
-
-    try {
-        try {
-            [void](Get-Variable this -ErrorAction Stop)
-            $Static = $false
-        }
-        catch {
-            $Static = $true
-        }
-        if ($Static) {
-            $prefix = (Get-PSCallStack)[1].FunctionName
-        }
-        else {
-            $prefix = $this.gettype().Name
-        }      
-        if ($prefix -ne "WriteStatus") {
-            $_Status = "$($prefix)`: $($_Status)"      
-        }
-    }
-    catch {}
-    
 
     $StatusFile = "C:\staging\DSC\DSC_Status.txt"
-    "$_Status" | Out-File -FilePath $StatusFile -Force
-    
-    
     $StatusLog = "C:\staging\DSC\DSC_Log.log"
-
     try {
+        Write-Verbose "Writing Status: $_Status"    
+
         try {
-            $caller = (Get-PSCallStack | Select-Object Command, Location, Arguments)[1].Command
-            if (-not $caller) {
-                $caller = $this.gettype().Name
+            try {
+                [void](Get-Variable this -ErrorAction Stop)
+                $Static = $false
+            }
+            catch {
+                $Static = $true
+            }
+            if ($Static) {
+                $prefix = (Get-PSCallStack)[1].FunctionName
+            }
+            else {
+                $prefix = $this.gettype().Name
+            }      
+            if ($prefix -ne "WriteStatus") {
+                $_Status = "$($prefix)`: $($_Status)"      
             }
         }
         catch {}
-        $Text = $_Status.ToString().Trim()
-        $CallingFunction = Get-PSCallStack | Select-Object -first 2 | select-object -last 1
-        $context = $CallingFunction.Command
-        if (-not $context) {
-            $context = $CallingFunction.FunctionName
+        $AlreadyComplete = $false
+        if (Test-Path $StatusFile) {
+            try {
+                $AlreadyComplete = (Get-Content -Path $StatusFile -Force -ErrorAction SilentlyContinue) -eq "Complete!"
+            }
+            catch {}
         }
-        $file = $CallingFunction.Location
-        $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
-        $date = Get-Date -Format 'MM-dd-yyyy'
-        $time = Get-Date -Format 'HH:mm:ss.fff'
 
-        $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""Status"" thread=""$tid"" file=""$file"">"
-        $logText | Out-File $StatusLog -Append -Encoding utf8
-    }
-    catch {
+        if (-not $AlreadyComplete) {
+            "$_Status" | Out-File -FilePath $StatusFile -Force
+        }
+    
+
         try {
-            # Retry once and ignore if failed
-            $logText | Out-File $StatusLog -Append -ErrorAction SilentlyContinue -Encoding utf8
+            try {
+                $caller = (Get-PSCallStack | Select-Object Command, Location, Arguments)[1].Command
+                if (-not $caller) {
+                    $caller = $this.gettype().Name
+                }
+            }
+            catch {}
+            $Text = $_Status.ToString().Trim()
+            $CallingFunction = Get-PSCallStack | Select-Object -first 2 | select-object -last 1
+            $context = $CallingFunction.Command
+            if (-not $context) {
+                $context = $CallingFunction.FunctionName
+            }
+            $file = $CallingFunction.Location
+            $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+            $date = Get-Date -Format 'MM-dd-yyyy'
+            $time = Get-Date -Format 'HH:mm:ss.fff'
+
+            $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""Status"" thread=""$tid"" file=""$file"">"
+            $logText | Out-File $StatusLog -Append -Encoding utf8
         }
         catch {
-            $_Status | Out-File $StatusLog -Append -ErrorAction SilentlyContinue -Encoding utf8
+            try {
+                # Retry once and ignore if failed
+                $logText | Out-File $StatusLog -Append -ErrorAction SilentlyContinue -Encoding utf8
+            }
+            catch {
+                $_Status | Out-File $StatusLog -Append -ErrorAction SilentlyContinue -Encoding utf8
+            }
         }
     }
-    
+    catch {
+        Write-Verbose $_
+    }
 
 }
 
@@ -1398,9 +1413,11 @@ class WriteFileOnce {
         $_Content = $this.Content
         $flag = "$_FilePath.done"
 
+        Write-Status "Writing specified content to $_FilePath"
+
         $_Content | Out-File -FilePath $_FilePath -Force
         "WriteFileOnce" | Out-File -FilePath $flag -Force
-        Write-Verbose "Writing specified content to $_FilePath"
+
     }
 
     [bool] Test() {
@@ -1455,9 +1472,9 @@ class ChangeSQLServicesAccount {
             $sqlserveragentservices = Get-WmiObject win32_service -Filter "Name = '$sqlAgentService'"
             if ($null -ne $sqlserveragentservices) {
                 if ($sqlserveragentservices.State -eq 'Running') {
-                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] $sqlAgentService need to be stopped first"
+                    Write-Status "$sqlAgentService need to be stopped first"
                     $Result = $sqlserveragentservices.StopService()
-                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] Stopping $sqlAgentService.."
+                    Write-Status "Stopping $sqlAgentService.."
                     if ($Result.ReturnValue -eq '0') {
                         $sqlserveragentflag = 1
                         Write-Verbose "[$(Get-Date -format HH:mm:ss)] Stopped"
@@ -1465,28 +1482,28 @@ class ChangeSQLServicesAccount {
                 }
             }
             $Result = $services.StopService()
-            Write-Verbose "[$(Get-Date -format HH:mm:ss)] Stopping SQL Server services.."
+            Write-Status "Stopping SQL Server services.."
             if ($Result.ReturnValue -eq '0') {
                 Write-Verbose "[$(Get-Date -format HH:mm:ss)] Stopped"
             }
 
-            Write-Verbose "[$(Get-Date -format HH:mm:ss)] Changing the services account..."
+            Write-Status "Changing the services account to LocalSystem..."
 
             $Result = $services.change($null, $null, $null, $null, $null, $null, "LocalSystem", $null, $null, $null, $null)
             if ($Result.ReturnValue -eq '0') {
-                Write-Verbose "[$(Get-Date -format HH:mm:ss)] Successfully Change the services account"
+                Write-Status "Successfully Changed the service account"
                 if ($sqlserveragentflag -eq 1) {
-                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] Starting $sqlAgentService.."
+                    Write-Status "Starting $sqlAgentService.."
                     $Result = $sqlserveragentservices.StartService()
                     if ($Result.ReturnValue -eq '0') {
                         Write-Verbose "[$(Get-Date -format HH:mm:ss)] Started"
                     }
                 }
                 $Result = $services.StartService()
-                Write-Verbose "[$(Get-Date -format HH:mm:ss)] Starting SQL Server services.."
+                Write-Status "Starting SQL Server services.."
                 while ($Result.ReturnValue -ne '0') {
                     $returncode = $Result.ReturnValue
-                    Write-Verbose "[$(Get-Date -format HH:mm:ss)] Return $returncode , will try again"
+                    Write-Status "Start Service Returned $returncode, Retry in 10 seconds"
                     Start-Sleep -Seconds 10
                     $Result = $services.StartService()
                 }
@@ -1667,11 +1684,11 @@ class RegisterTaskScheduler {
             }
 
             if ($lastRunTime -gt $RegisterTime) {
-                Write-Verbose "Task was successfully started at $lastRunTime"
+                Write-Status "$_Taskname was successfully started at $lastRunTime"
                 break
             }
             else {
-                Write-Verbose "Task has not ran yet. Last run time was: $lastRunTime"
+                Write-Status "$_Taskname has not started. Last run time was: $lastRunTime"
                 $failCount++
             }
             start-sleep -Seconds $waitTime
@@ -1725,31 +1742,31 @@ class RegisterTaskScheduler {
         if (!(Test-Path $ProvisionToolPath)) {
             New-Item $ProvisionToolPath -ItemType directory | Out-Null
         }
-        Write-Verbose "Checking for existing task: $($this.TaskName)"
+        Write-Status "Checking for existing task: $($this.TaskName)"
         $exists = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
         if ($exists) {
-            Write-Verbose "Task $($this.TaskName) already exists. Removing"
+            Write-Status "Task $($this.TaskName) already exists. Removing"
             if ($exists.state -eq "Running") {
                 stop-Process -Name setup -Force -ErrorAction SilentlyContinue
                 stop-Process -Name setupwpf -Force -ErrorAction SilentlyContinue
                 $exists | Stop-ScheduledTask -ErrorAction SilentlyContinue
             }
             Unregister-ScheduledTask -TaskName $($this.TaskName) -Confirm:$false
-            Write-Verbose "Task $($this.TaskName) Removed"
+            Write-Status "Task $($this.TaskName) Removed"
             Start-Sleep -Seconds 10
         }
 
         $sourceDirctory = "$($this.ScriptPath)\*"
         $destDirctory = "$ProvisionToolPath\"
 
-        Write-Verbose "Copying $sourceDirctory to  $destDirctory"
+        Write-Status "Copying $sourceDirctory to $destDirctory"
         Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
 
         $TaskDescription = "vmbuild task"
         $TaskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
         $TaskScript = "$ProvisionToolPath\$($this.ScriptName)"
 
-        Write-Verbose "Task script full path is : $TaskScript "
+        Write-Status "Task script full path is : $TaskScript "
 
         $TaskArg = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $TaskScript $($this.ScriptArgument)"
 
@@ -1774,9 +1791,9 @@ class RegisterTaskScheduler {
 
         start-sleep -Seconds $waitTime
 
-        Write-Verbose "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) is starting"
+        Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) is starting"
         Start-ScheduledTask -TaskName $($this.TaskName)
-        Write-Verbose "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) has Started."
+        Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) has Started."
 
         return $true
 
@@ -1835,7 +1852,7 @@ class InitializeDisks {
         $count = 0
         $label = "DATA"
         foreach ($disk in $_Disks.psobject.properties) {
-            Write-Verbose "Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)"
+            Write-Status "Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)"
             $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $disk.Value } | Select-Object -First 1
             $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $disk.Name | Format-Volume -FileSystem NTFS -NewFileSystemLabel "$label`_$count" -Confirm:$false -Force
             $count++
@@ -1938,7 +1955,7 @@ class JoinDomain {
             while ($CurrentDomain -ne $_DomainName) {
                 if ($count -lt $_retryCount) {
                     $count++
-                    Write-Verbose "retry count: $count"
+                    Write-Status "Current Domain of $CurrentDomain does not match $_DomainName. Retry count: $count/$_retryCount"
                     Start-Sleep -Seconds 30
                     Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Ignore
 
@@ -1950,7 +1967,11 @@ class JoinDomain {
                 }
             }
             if ($flag) {
+                Write-Status "Failed too many times.  Rejoining domain, and rebooting."
                 Add-Computer -DomainName $_DomainName -Credential $_credential
+            }
+            else {
+                Write-Status "Domain Join Successful. Rebooting."
             }
             $global:DSCMachineStatus = 1
         }
@@ -2285,10 +2306,11 @@ class InstallFeatureForSCCM {
     [void] Set() {
         $_Role = $this.Role
 
-        Write-Status "Installing Windows Features for Role:$_Role"
+        Write-Status "Installing Windows Features for Role $_Role"
 
         # Install on all devices
         try {
+            Write-Status "Installing Windows Feature TelnetClient"
             dism /online /Enable-Feature /FeatureName:TelnetClient
         }
         catch {}
@@ -2317,12 +2339,20 @@ class InstallFeatureForSCCM {
             #
 
             # Always install BITS
+            Write-Status "Installing Windows Features: BITS, BITS-IIS-Ext"
             Install-WindowsFeature BITS, BITS-IIS-Ext
 
             # Always install IIS
+            Write-Status "Installing Windows Features: Web-Windows-Auth, web-ISAPI-Ext"
             Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
+
+            Write-Status "Installing Windows Features: Web-WMI, Web-Metabase"
             Install-WindowsFeature Web-WMI, Web-Metabase
+
+            Write-Status "Installing Windows Features: RSAT-AD-PowerShell"
             Install-WindowsFeature RSAT-AD-PowerShell
+
+            Write-Status "Installing Windows Features: AD-Domain-Services"
             $result = Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
             if ($result.RestartNeeded -eq "Yes") {
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
@@ -2330,6 +2360,7 @@ class InstallFeatureForSCCM {
             }
 
             if ($_Role -notcontains "DomainMember") {
+                Write-Status "Installing Windows Features: Rdc"
                 Install-WindowsFeature -Name "Rdc"
             }
 
@@ -2338,15 +2369,27 @@ class InstallFeatureForSCCM {
                 #Install-WindowsFeature RSAT-AD-PowerShell
             }
             if ($_Role -contains "SQLAO") {
+                Write-Status "Installing Windows Features: Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell"
                 Install-WindowsFeature Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell
             }
             if ($_Role -contains "Site Server") {
+                Write-Status "Installing Windows Features: Net-Framework-Core"
                 Install-WindowsFeature Net-Framework-Core
-                Install-WindowsFeature NET-Framework-45-Core
+
+                Write-Status "Installing Windows Features: NET-Framework-45-Core"
+                Install-WindowsFeature "NET-Framework-45-Core"
+
+                Write-Status "Installing Windows Features: Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext"
                 Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
+
+                Write-Status "Installing Windows Features: Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools"
                 Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
                 #Install-WindowsFeature BITS, BITS-IIS-Ext
+
+                Write-Status "Installing Windows Features: Rdc"
                 Install-WindowsFeature -Name "Rdc"
+
+                Write-Status "Installing Windows Features: UpdateServices-UI"
                 Install-WindowsFeature -Name UpdateServices-UI
                 #Install-WindowsFeature -Name WDS
             }
@@ -2400,6 +2443,7 @@ class InstallFeatureForSCCM {
                 #installed .net 4.5 or later
             }
             if ($_Role -contains "WSUS") {
+                Write-Status "Installing Windows Features: WSUS Stuff.. This shouldnt be used anymore."
                 Install-WindowsFeature "UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI"
             }
             if ($_Role -contains "State migration point") {
@@ -2441,7 +2485,7 @@ class SetCustomPagingFile {
         $_Drive = $this.Drive
         $_InitialSize = $this.InitialSize
         $_MaximumSize = $this.MaximumSize
-
+        Write-Status "Creating Page file on $_Drive"
         $currentstatus = Get-CimInstance -ClassName 'Win32_ComputerSystem'
         if ($currentstatus.AutomaticManagedPagefile) {
             set-ciminstance $currentstatus -Property @{AutomaticManagedPagefile = $false }
@@ -2455,7 +2499,7 @@ class SetCustomPagingFile {
         else {
             Set-CimInstance $currentpagingfile -Property @{InitialSize = $_InitialSize ; MaximumSize = $_MaximumSize }
         }
-
+        Write-Status "Page file configured. Rebooting"
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
@@ -2579,10 +2623,10 @@ class UpdateCAPrefs {
             $StatusPath = "$env:windir\temp\UpdateCAStatus.txt"
             "Finished" >> $StatusPath
 
-            Write-Verbose "Finished installing CA."
+            Write-Status "Finished installing CA."
         }
         catch {
-            Write-Verbose "Failed to install CA."
+            Write-Status "Failed to install CA. $_"
         }
     }
 
@@ -2642,7 +2686,7 @@ class ClusterSetOwnerNodes {
             return $true
         }
         catch {
-            Write-Verbose "Failed to Find Cluster Resources."
+            Write-Status "Failed to Find Cluster Resources."
             Write-Verbose "$_"
             return $true
         }
@@ -2664,11 +2708,13 @@ class ClusterRemoveUnwantedIPs {
             $_ClusterName = $this.ClusterName
             $valid = $false
             [int]$failCount = 0
+            Write-Status "Getting Cluster $_ClusterName"
             $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
             if ($Cluster) {
                 $valid = $true
             }
             while (-not $valid -and $failCount -lt 15) {
+                Write-Status "Failed to get Cluster $_ClusterName. Retrying $failCount/15"
                 try {
                     $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
                     if ($Cluster) {
@@ -2688,16 +2734,16 @@ class ClusterRemoveUnwantedIPs {
             $ResourcesToRemove = ($Cluster | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
             if ($ResourcesToRemove) {
                 foreach ($Resource in $ResourcesToRemove) {
-                    Write-Verbose "Cluster Removing $($resource.Name)"
+                    Write-Status "Cluster Removing $($resource.Name)"
                     Remove-ClusterResource -Name $resource.Name -Force
                 }
             }
-            Write-Verbose "Cluster Registering new DNS records"
+            Write-Status "Cluster Registering new DNS records"
             Get-ClusterResource -Name "Cluster Name" | Update-ClusterNetworkNameResource
-            Write-Verbose "Finished Removing Unwanted Cluster IPs"
+            Write-Status "Finished Removing Unwanted Cluster IPs"
         }
         catch {
-            Write-Verbose "Failed to Remove Cluster IPs."
+            Write-Status "Failed to Remove Cluster IPs."
             Write-Verbose "$_"
         }
     }
@@ -2791,6 +2837,7 @@ class ModuleAdd {
                 Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
             }
             catch {
+                write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope"
                 Start-Sleep -Seconds 120
                 Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             }
@@ -2801,18 +2848,22 @@ class ModuleAdd {
         IF ($null -eq $module) {
             IF ($this.Clobber -eq 'Yes') {
                 try {
+                    write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope."
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop
                 }
                 catch {
+                    write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope.."
                     Start-Sleep -Seconds 120
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
                 }
             }
             ELSE {
                 try {
+                    write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope..."
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
                 }
                 catch {
+                    write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope...."
                     Start-Sleep -Seconds 120
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
                 }
@@ -2895,33 +2946,41 @@ class ConfigureWSUS {
         }
 
         if ($this.HTTPSUrl) {
-
+            Write-Status "Configuring HTTPS for WSUS"
             $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
             if (-not $cert) {
+                Write-Status "Could not find cert with friendly Name $_FriendlyName"
                 throw "Could not find cert with friendly Name $_FriendlyName"
             }
+
+            Write-Status "Removing web binding for port 8531"
             (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https") | Remove-WebBinding
 
             $webBinding = (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https")
             if (-not $webBinding) {
                 #New-WebBinding -Name "WSUS Administration" -Protocol https -Port 8531 -IPAddress *
+                Write-Status "Creating new web binding for port 8531"
                 $webBinding = New-WebBinding -Name "WSUS Administration" -IPAddress "*" -Port 8531  -Protocol "https"
 
             }
             $webBinding = (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https")
             if (-not $webBinding) {
+                Write-Status "Could not create webbinding for 8531"
                 throw "Could not create webbinding for 8531"
             }
+
+            Write-Status "Adding SSL cert $($cert.Thumbprint) to MY store"
             $webBinding.AddSslCertificate($($cert.Thumbprint), "my")
 
             #$cert | New-Item -Path IIS:\SslBindings\0.0.0.0!8531
 
             $wsussslparams = @('ApiRemoting30', 'ClientWebService', 'DSSAuthWebService', 'ServerSyncWebService', 'SimpleAuthWebService')
             foreach ($item in $wsussslparams) {
+                Write-Status "Configuring IIS for WSUS SSL"
                 $cfgSection = Get-IISConfigSection -Location "WSUS Administration/$item" -SectionPath "system.webServer/security/access";
                 Set-IISConfigAttributeValue -ConfigElement $cfgSection -AttributeName "sslFlags" -AttributeValue "Ssl";
             }
-
+            Write-Status "Running WsusUtil.exe ConfigureSSL $_HTTPSurl"
             write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' configuressl $_HTTPSurl")
             & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' configuressl $_HTTPSurl
 
@@ -2972,7 +3031,7 @@ class WSUSSync {
             $sub.StartSynchronization()
         }
         catch {
-            
+            Write-Status "Initial WSUSSync failed.  Skipping."
         }
        
     }
@@ -3048,10 +3107,13 @@ class InstallPBIRS {
                 write-verbose ("InstallPBIRS $_")
             }
 
+
+            write-Status ("Starting $pbirsSetup")
             $PBIRSargs = "/quiet /InstallFolder=$($this.InstallPath) /IAcceptLicenseTerms /Edition=Dev /Log C:\staging\PBI.log"
             Start-Process $pbirsSetup $PBIRSargs -Wait
 
             try {
+                write-Status ("Installing Module ReportingServicesTools")
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Install-Module -Name ReportingServicesTools -Force -AllowClobber -Confirm:$false
             }
@@ -3061,23 +3123,24 @@ class InstallPBIRS {
 
 
             try {
+                Write-Status "Calling Set-RsDatabase"
                 if ($this.IsRemoteDatabaseServer) {
                     try {
-                        Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
                         Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                     catch {
-                        Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
                         Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
                 else {
                     try {
-                        Write-Verbose ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
                         Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                     catch {
-                        Write-Verbose ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
                         Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
@@ -3085,22 +3148,22 @@ class InstallPBIRS {
             catch {
                 Write-Verbose ("InstallPBIRS $_")
                 if ($this.IsRemoteDatabaseServer) {
-                    Write-Verbose ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
                     Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
                 else {
-                    Write-Verbose ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
                     Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
             }
 
 
-            Write-Verbose ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
+            Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
             Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
 
 
             if ($this.TemplateName) {
-                Write-Verbose ("Enabling HTTPS")
+                Write-Status ("Enabling HTTPS")
                 start-sleep -seconds 20
                 $_FriendlyName = $this.TemplateName
                 $_dnsName = $this.DNSName
@@ -3113,6 +3176,7 @@ class InstallPBIRS {
                 $version = (Get-WmiObject -namespace root\Microsoft\SqlServer\ReportServer\$wmiName -class __Namespace).Name
                 $rsConfig = Get-WmiObject -namespace "root\Microsoft\SqlServer\ReportServer\$wmiName\$version\Admin" -class MSReportServer_ConfigurationSetting
 
+                Write-Status ("Removing ReportServerWebApp ReportServerWebService URLS")
                 $rsConfig.RemoveURL("ReportServerWebApp", "https://+:$httpsPort", $lcid)
                 $rsConfig.RemoveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
                 $rsConfig.ReserveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
@@ -3124,6 +3188,8 @@ class InstallPBIRS {
                 if (-not $cert) {
                     throw "Could not find cert with friendly Name $_FriendlyName"
                 }
+
+                Write-Status ("Adding ReportServerWebApp ReportServerWebService URLS")
                 $thumbprint = $cert.ThumbPrint.ToLower()
                 $rsConfig.CreateSSLCertificateBinding('ReportServerWebApp', $Thumbprint, $ipAddress, $httpsport, $lcid)
                 $rsConfig.CreateSSLCertificateBinding('ReportServerWebService', $Thumbprint, $ipAddress, $httpsport, $lcid)
@@ -3133,12 +3199,13 @@ class InstallPBIRS {
                 $rsconfig.SetServiceState($false, $false, $false)
                 $rsconfig.SetServiceState($true, $true, $true)
             }
-
+            Write-Status ("Restart PowerBIReportServer Service")
             Start-Sleep -seconds 10
             Restart-Service -Name "PowerBIReportServer" -Force
             Start-Sleep -Seconds 10
-            Write-Verbose ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
+            Write-Status ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
             try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext } catch {}
+            Write-Status ("Restart PowerBIReportServer Service")
             Restart-Service -Name "PowerBIReportServer" -Force
             try {
                 Get-Service | Where-Object { $_.Name -eq "SQLSERVERAGENT" -or $_.Name -like "SqlAgent*" } | Start-Service
@@ -3206,9 +3273,9 @@ class ImportCertifcateTemplate {
             throw "Could not find $_Path"
         }
         $TargetFile = "c:\temp\$_TemplateName.ldf"
-        Write-Verbose "TargetFile $TargetFile source: $_Path"
+        Write-Status "TargetFile $TargetFile source: $_Path"
         (Get-Content $_Path).Replace('DC=TEMPLATE,DC=com', $_DNPath) | Set-Content $TargetFile -Force
-        Write-Verbose "Running ldifde -i -k -f $TargetFile"
+        Write-Status "Running ldifde -i -k -f $TargetFile"
         ldifde -i -k -f $TargetFile | Out-File -FilePath $StatusLog -Append
     }
 
@@ -3307,9 +3374,11 @@ class InstallRootCertificate {
             $arg4 = $_FileName
             & $cmd $arg1 $arg2 $arg3 $arg4
 
-
+            Write-Status "Running certutil.exe -dspublish -f $_FileName RootCA"
             certutil.exe -dspublish -f $_FileName RootCA
+            Write-Status "Running certutil.exe -dspublish -f $_FileName NtauthCA"
             certutil.exe -dspublish -f $_FileName NtauthCA
+            Write-Status "Running certutil.exe -dspublish -f $_FileName SubCA"
             certutil.exe -dspublish -f $_FileName SubCA
 
         }
@@ -3366,8 +3435,9 @@ class AddCertificateTemplate {
         }
 
         $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+        Write-Status "Removing $registryKey TimeStamp"  
         Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
-        Write-Verbose "reStarting CertSvc: $_"
+        Write-Status "Restarting CertSvc"
         restart-Service -Name CertSvc -ErrorAction SilentlyContinue
         Write-Status "Adding Certificate Template $_TemplateName ."   
         if ($_Group) {
@@ -3375,6 +3445,7 @@ class AddCertificateTemplate {
             $module = Get-InstalledModule -Name PSPKI -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
             IF ($null -eq $module) {
+                Write-Status "Installing PSPKI Module"  
                 Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
@@ -3391,16 +3462,16 @@ class AddCertificateTemplate {
                 Write-Status "Adding Certificate Template $_TemplateName ..." 
                 $retries++
                 try {
-                    Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop"
+                    Write-Status "PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop"
                     $template = PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop
 
-                    Write-Verbose "PSPKI\Get-CertificateTemplateAcl -ErrorAction stop"
+                    Write-Status "PSPKI\Get-CertificateTemplateAcl -ErrorAction stop"
                     $templateacl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction stop
 
-                    Write-Verbose "PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions -ErrorAction stop"
+                    Write-Status "PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions -ErrorAction stop"
                     $templateacl2 = $templateacl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions -ErrorAction stop
 
-                    Write-Verbose "PSPKI\Set-CertificateTemplateAcl -ErrorAction stop"
+                    Write-Status "PSPKI\Set-CertificateTemplateAcl -ErrorAction stop"
                     $templateacl2 | PSPKI\Set-CertificateTemplateAcl -ErrorAction stop
                     $success = $true
                 }
@@ -3408,8 +3479,8 @@ class AddCertificateTemplate {
                     try {
                         $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
                         Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
-                        Write-Verbose "Starting CertSvc: $_"
-                        start-Service -Name CertSvc -ErrorAction SilentlyContinue
+                        Write-Status "Restarting CertSvc"
+                        restart-Service -Name CertSvc -ErrorAction SilentlyContinue
                         start-sleep -Seconds 60
                     }
                     catch {
@@ -3417,14 +3488,14 @@ class AddCertificateTemplate {
                     }
 
                     try {
-                        Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl"
+                        Write-Status "PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl"
                         PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl
                         $success = $true
                     }
                     catch {
                         Write-Verbose "$_"
                         if (-not (Test-Path "C:\temp\certreboot2.txt")) {
-                            Write-Verbose "Rebooting $_"
+                            Write-Status "Rebooting $_"
                             New-Item "C:\temp\certreboot2.txt"
                             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                             $global:DSCMachineStatus = 1
@@ -3447,7 +3518,7 @@ class AddCertificateTemplate {
             $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
             while ($count -eq 0) {
                 try {
-                    Write-Verbose "ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop"
+                    Write-Status "ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop"
                     ADCSAdministration\Add-CATemplate $_TemplateName -Force -ErrorAction Stop
                 }
                 catch {
@@ -3456,14 +3527,14 @@ class AddCertificateTemplate {
                         Start-Service -Name CertSvc
                         Start-Sleep -Seconds 10
                         Write-Verbose "$_"
-                        Write-Verbose "PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName"
+                        Write-Status "PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName"
                         PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName
                     }
                     catch {
                         # Reboot
                         Write-Verbose "$_"
                         if (-not (Test-Path "C:\temp\certreboot.txt")) {
-                            Write-Verbose "Rebooting $_"
+                            Write-Status "Rebooting $_"
                             New-Item "C:\temp\certreboot.txt"
                             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                             $global:DSCMachineStatus = 1
@@ -3599,11 +3670,11 @@ class AddToAdminGroup {
                     foreach ($AccountName in $this.AccountNames) {
 
                         if ($AccountName.EndsWith("$")) {
-                            Write-Verbose "Adding Computer $($this.DomainName)\$AccountName"
+                            Write-Status "Adding Computer $($this.DomainName)\$AccountName"
                             $user1 = Get-ADComputer -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
                         }
                         else {
-                            Write-Verbose "Adding User  $($this.DomainName)\$AccountName"
+                            Write-Status "Adding User  $($this.DomainName)\$AccountName"
                             $user1 = Get-ADuser -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
                         }
                         Add-ADGroupMember -Identity $this.TargetGroup -Members $user1
@@ -3613,11 +3684,11 @@ class AddToAdminGroup {
                     foreach ($AccountName in $this.AccountNames) {
 
                         if ($AccountName.EndsWith("$")) {
-                            Write-Verbose "Adding Computer $AccountName"
+                            Write-Status "Adding Computer $AccountName"
                             $user2 = Get-ADComputer -Identity $AccountName
                         }
                         else {
-                            Write-Verbose "Adding User $AccountName"
+                            Write-Status "Adding User $AccountName"
                             $user2 = Get-ADuser -Identity $AccountName
                         }
                         Add-ADGroupMember -Identity $this.TargetGroup -Members $user2
@@ -3629,7 +3700,7 @@ class AddToAdminGroup {
                 start-sleep -seconds 60
                 continue
             }
-            Write-Verbose "Done."
+            Write-Status "Done."
             return
         }
 
@@ -3660,7 +3731,7 @@ class RunPkiSync {
         while ($true) {
 
             try {
-                Write-Verbose "Attempting to connect to $($this.TargetForest)"
+                Write-Status "Attempting to connect to $($this.TargetForest)"
                 $TargetForestContext = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext Forest, $this.TargetForest
                 $TargetForObj = [System.DirectoryServices.ActiveDirectory.Forest]::GetForest($TargetForestContext)
                 if (-not $TargetForObj) {
@@ -3676,7 +3747,7 @@ class RunPkiSync {
                 continue
             }
             try {
-                Write-Verbose "Attempting to connect to $($this.SourceForest)"
+                Write-Status "Attempting to connect to $($this.SourceForest)"
                 $SourceForestContext = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext Forest, $this.SourceForest
                 $SourceForObj = [System.DirectoryServices.ActiveDirectory.Forest]::GetForest($SourceForestContext)
                 if (-not $SourceForObj) {
@@ -3694,7 +3765,7 @@ class RunPkiSync {
             break
         }
 
-
+        Write-Status "Running C:\staging\DSC\phases\PKISync.Ps1"
         C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest -targetforest $this.TargetForest -f
     }
 
@@ -3715,7 +3786,7 @@ class GpUpdate {
     [string]$Run
 
     [void] Set() {
-
+        Write-Status "Forcing a gpupdate"
         gpupdate.exe /force
     }
 

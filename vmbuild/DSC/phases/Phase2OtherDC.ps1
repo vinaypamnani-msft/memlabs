@@ -115,6 +115,7 @@
             }
         }
 
+        $waitOnDependency = @()
         if ($iisCount) {
             AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
                 TemplateName = "ConfigMgrClientDistributionPointCertificate"
@@ -144,17 +145,19 @@
         $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
 
 
-        WriteStatus Complete {
-            DependsOn = $nextDepend
-            Status    = "Complete!"
-        }
+       
 
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
+            DependsOn = $waitOnDependency
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WriteEvent]WriteConfigFinished"
+            Status    = "Complete!"
         }
     }
 }
