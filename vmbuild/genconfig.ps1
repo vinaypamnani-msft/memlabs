@@ -48,12 +48,14 @@ Function Select-ToolsMenu {
         "1" {
             $customOptions2 = [ordered]@{"A" = "All Tools" }
             $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name
+            Write-Log -SubActivity "Tool Selection"
             $tool = Get-Menu -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
             if (-not $tool) {
                 return
             }
             $customOptions2 = [ordered]@{"A" = "All VMs" }
             $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName
+            Write-Log -SubActivity "Tool deployment VM Selection"
             $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
             if (-not $vmName) {
                 return
@@ -84,12 +86,14 @@ Function Select-ToolsMenu {
         }
         "2" {
             $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name
+            Write-Log -SubActivity "Optional Tool Selection"
             $tool = Get-Menu -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false -return
             if (-not $tool) {
                 return
             }
             $customOptions2 = [ordered]@{"A" = "All VMs listed above" }
             $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName
+            Write-Log -SubActivity "Optional Tool deployment VM Selection"
             $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
             if (-not $vmName) {
                 return
@@ -330,15 +334,16 @@ function Select-DomainMenu {
 
     Write-Verbose "2 Select-DomainMenu"
     while ($true) {
-        Write-Host
-        Write-Host "Domain '$domain' contains these resources:"
-        Write-Host
+
+        Write-Log -Activity "$domain Resources"
         $vmsInDomain = get-list -type vm  -DomainName $domain
         if (-not $vmsInDomain) {
             return
         }
         ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
         #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
+
+        Write-log -Activity "Domain Management Menu" -NoNewLine
 
         $customOptions = [ordered]@{
             "*d1" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)";
@@ -1191,9 +1196,10 @@ function select-timezone {
     $commonTimeZones += "Russian Standard Time"
 
     $commonTimeZones = $commonTimeZones | Select-Object -Unique
-
+Write-Log -Activity "Timezone Selection" -NoNewLine
     $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $commonTimeZones -CurrentValue $($ConfigToCheck.vmOptions.timezone) -additionalOptions @{"F" = "Display Full List" }
     if ($timezone -eq "F") {
+        Write-Log -Activity "Full Timezone Selection" -NoNewLine
         $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $((Get-TimeZone -ListAvailable).Id) -CurrentValue $($ConfigToCheck.vmOptions.timezone) -test:$false
     }
     return $timezone
@@ -1224,7 +1230,7 @@ function Select-Locale {
     }
 
     $commonLanguages = $commonLanguages | Select-Object -Unique
-
+Write-Log -Activity "Locale Menu using _localeConfig.json" -NoNewLine
     $locale = Get-Menu -Prompt "Select Locale" -OptionArray $commonLocales -CurrentValue $($ConfigToCheck.vmOptions.locale)
     return $locale
 }
@@ -1287,6 +1293,7 @@ function select-NewDomainName {
         }
         $domain = $null
         while (-not $domain) {
+            Write-Log -Activity "Existing Domains Selection" -NoNewLine
             $domain = Get-Menu -Prompt "Select Domain" -OptionArray $existingDomains -CurrentValue $ConfigToCheck.vmoptions.domainName -test:$false
         }
         return $domain
@@ -1393,10 +1400,11 @@ function Select-NewDomainConfig {
 
             $valid = $false
             while ($valid -eq $false) {
-                Write-Log -Activity "Select the DEFAULT network for new VMs" -NoNewLine
+                
                 $customOptions = @{ "C" = "Custom Network" }
                 $network = $null
                 while (-not $network) {
+                    Write-Log -Activity "Select the DEFAULT network for new VMs" -NoNewLine
                     $subnetlistEnhanced = Get-EnhancedSubnetList -subnetList $subnetList -ConfigToCheck $newConfig
                     $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -CurrentValue ($subnetList | Select-Object -First 1) -test:$test -Split
                     if ($network -and ($network.ToLowerInvariant() -eq "c")) {
@@ -1965,7 +1973,7 @@ function Select-RolesForExisting {
 
     $OptionArray = @{ "H" = $ha_Text }
     $OptionArray = @{  "L" = "Add Linux VM from Hyper-V Gallery" }
-
+Write-Log -Activity -NoNewLine "Add roles to Existing domain"
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
 
     $role = $role.Split("[")[0].Trim()
@@ -2074,6 +2082,7 @@ function Select-Subnet {
         }
         while (-not $network) {
             $subnetlistEnhanced = Get-EnhancedSubnetList -subnetList $subnetlist -ConfigToCheck $configToCheck
+            Write-Log -Activity "Select Subnet or use C for custom" -NoNewLine
             $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $current -Split
             if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                 $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
@@ -2424,6 +2433,7 @@ function Select-ExistingSubnets {
                 $response = "n"
             }
             else {
+                Write-Log -Activity -NoNewLine "Select a network"
                 if ($CurrentNetworkIsValid) {
                     $response = Get-Menu -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue -Split
                 }
@@ -2459,6 +2469,7 @@ function Select-ExistingSubnets {
                     else {
                         $subnetlistEnhanced = Get-EnhancedSubnetList -subnetList $subnetList -Domain $domain
                     }
+                    Write-Log -Activity -NoNewLine "New Network menu"
                     $network = Get-Menu -Prompt "Select New Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $($subnetList | Select-Object -First 1) -Split
                     if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                         $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
@@ -2656,6 +2667,7 @@ Function Get-ParentSiteCodeMenu {
 
         $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
         do {
+            Write-Log -Activity -NoNewLine "Primary Server Parent Selection"
             $result = Get-Menu -Prompt "Select CAS sitecode to connect primary to" -OptionArray $casSiteCodes -CurrentValue $CurrentValue -additionalOptions $additionalOptions -Test:$false
         } while (-not $result)
         if ($result -and ($result.ToLowerInvariant() -eq "x")) {
@@ -2672,6 +2684,7 @@ Function Get-ParentSiteCodeMenu {
             return $null
         }
         do {
+            Write-Log -Activity -NoNewLine "Secondary Server Parent Selection"
             $result = Get-Menu -Prompt "Select Primary sitecode to connect secondary to" -OptionArray $priSiteCodes -CurrentValue $CurrentValue -Test:$false
         } while (-not $result)
         return $result
@@ -2921,6 +2934,7 @@ Function Get-SiteCodeForDPMP {
             }
             $result = $null
             while (-not $result) {
+                Write-Log -Activity -NoNewLine "Site System SiteCode Selection"
                 $result = Get-Menu -Prompt "Select sitecode to connect Site System to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false -Split
             }
             if ($result -and ($result.ToLowerInvariant() -eq "x")) {
@@ -2995,6 +3009,7 @@ Function Get-SqlVersionMenu {
 
     $valid = $false
     while ($valid -eq $false) {
+        Write-Log -Activity -NoNewLine "Sql Server Version Selection for $($property.VmName)"
         $property."$name" = Get-Menu "Select SQL Version" $($Common.Supported.SqlVersions) $CurrentValue -Test:$false
         if (Get-TestResult -SuccessOnWarning) {
             return
@@ -3066,6 +3081,7 @@ Function Get-PrimarySitesForDomain {
         $valid = $false
         while ($valid -eq $false) {
             #$property.externalDomainJoinSiteCode
+            Write-Log -Activity -NoNewLine "Remote domain Management Server for this domains clients"
             $result = Get-Menu "Select Primary site code in $Domain to configure to manage clients in this domain" $($targetPrimaries) "NONE" -Test:$false
             $property | Add-Member -MemberType NoteProperty -Name "externalDomainJoinSiteCode" -Value $result -Force
 
@@ -3200,12 +3216,15 @@ Function Get-remoteSQLVM {
         if ($property.Role -eq "WSUS") {
             $additionalOptions += [ordered] @{ "R" = "Remote SQL" }
             $additionalOptions += [ordered] @{ "W" = "Use Local WID for SQL" }
+            Write-Log -Activity -NoNewLine "WSUS SQL Server Options"
         }
         else {
             $additionalOptions += [ordered] @{ "N" = "Remote SQL (Create a new SQL VM)" }
             $additionalOptions += [ordered] @{ "A" = "Remote SQL Always On Cluster (Create a new SQL Cluster)" }
+            Write-Log -Activity -NoNewLine "CM SQL Server Options"
         }
         #}
+       
         $result = Get-Menu "Select SQL Options" $($validVMs) $CurrentValue -Test:$false -additionalOptions $additionalOptions -return
 
         if (-not $result) {
@@ -3440,6 +3459,7 @@ function Rename-VirtualMachine {
         $newName = Get-NewMachineName -vm $vm
         if ($($vm.vmName) -ne $newName) {
             $rename = $true
+            Write-Log -Activity "Proposing to rename $($vm.vmName) to $($newName) due to configuration changes" -NoNewLine
             $response = Read-YesorNoWithTimeout -Prompt "Rename $($vm.vmName) to $($newName)? (Y/n)" -HideHelp -Default "y"
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
@@ -5630,6 +5650,7 @@ function select-PullDPMenu {
     $additionalOptions += @{ "N" = "Create a DP VM" }
 
     while ([string]::IsNullOrWhiteSpace($result)) {
+        Write-Log -Activity "Pull DP Source DP selection" -NoNewLine
         $result = Get-Menu "Select Source DP VM" $(Get-ListOfPossibleDPMP -Config $ConfigToModify -siteCode $CurrentVM.SiteCode) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
     }
     switch ($result.ToLowerInvariant()) {
@@ -5659,6 +5680,7 @@ function select-RemoteSQLMenu {
     $additionalOptions += @{ "N" = "Create new SQL Server" }
 
     while ([string]::IsNullOrWhiteSpace($result)) {
+        Write-Log -Activity -NoNewLine "Remote SQL Server Selection"
         $result = Get-Menu "Select SQL VM" $(Get-ListOfPossibleSQLServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
     }
     switch ($result.ToLowerInvariant()) {
@@ -5693,6 +5715,7 @@ function select-FileServerMenu {
         $additionalOptions += @{ "N" = "Create a New FileServer VM" }
     }
     while ([string]::IsNullOrWhiteSpace($result)) {
+        Write-Log -Activity "Fileserver selection.  FileServer is needed for Remote ContentLib (HA), and Quorum for SQLAO"
         $result = Get-Menu "Select FileServer VM" $(Get-ListOfPossibleFileServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
     }
     switch ($result.ToLowerInvariant()) {
@@ -5850,9 +5873,10 @@ function show-NewVMMenu {
 
         if ($PossibleSS.Count -eq 0) {
             Write-Host
-            Write-Host "No siteservers found that are elegible for HA"
+            Write-Host "No siteservers found that are eligible for HA"
             return
         }
+        Write-Log -Activity -NoNewLine "Enable CM High Availability"
         $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
         if ([string]::IsNullOrWhiteSpace($result)) {
             return
