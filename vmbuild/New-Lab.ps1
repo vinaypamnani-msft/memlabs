@@ -333,12 +333,19 @@ try {
         return
     }
     #Create VM Mutexes
-    $mtx = New-Object System.Threading.Mutex($false, $mutexName)
     $global:mutexes = @()
     foreach ($vm in $deployConfig.virtualMachines) {
         $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
         write-log -Verbose "Created Mutex $($vm.vmName)"
-        $global:mutexes += $mtx
+        if ($mtx.WaitOne(1000)) {
+            $global:mutexes += $mtx
+            write-log -Verbose "Acquired Mutex $($vm.vmName)"
+        }
+        else {
+            Write-RedX "Could not acquire mutex for $(vm.vmName).  A deployment for this VM may already be in progress"
+            return
+        }
+        
     }
     # Skip if any VM in progress
     if ($runPhase1 -and (Test-InProgress -DeployConfig $deployConfig)) {

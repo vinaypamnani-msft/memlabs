@@ -38,6 +38,7 @@ Write-Host2 -ForegroundColor Snow " on the left side of the options menu to navi
 
 Function Select-ToolsMenu {
 
+    Write-Log -Activity "Tools Menu"
     $customOptions = [ordered]@{"1" = "Update Tools On all Currently Running VMs (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
     $customOptions += [ordered]@{"2" = "Copy Optional Tools (eg Windbg)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
 
@@ -108,6 +109,29 @@ Function Select-ToolsMenu {
     }
 }
 
+function Get-PendingVMs {
+
+    $pending = get-list -type VM | Where-Object { $_.InProgress -eq "True" }
+    $actualPending = @()
+    foreach ($vm in $pending) {
+        $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
+        write-log -Verbose "Created Mutex $($vm.vmName)"
+        if ($mtx.WaitOne(1)) {
+            try {
+                [void]$mtx.ReleaseMutex()
+            }
+            catch {}
+            try {
+                [void]$mtx.Dispose()
+            }
+            catch {}            
+            write-log -Verbose "Acquired Mutex $($vm.vmName)"
+            $actualPending += $vm
+        }               
+    }
+    return $actualPending
+}
+
 function Select-ConfigMenu {
     $Global:EnterKey = $true
     while ($true) {
@@ -150,7 +174,8 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"N" = "Show Networks%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
 
         $customOptions += [ordered]@{"P" = "Show Passwords" }
-        $pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
+        #$pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
+        $pendingCount = (Get-PendingVMs | Measure-Object).Count
 
         if ($pendingCount -gt 0 ) {
             $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
@@ -193,8 +218,8 @@ function Select-ConfigMenu {
             "n" { Select-NetworkMenu }
             "t" { Select-ToolsMenu }
             "P" {
-                Write-Host
-                Write-Host "Password for all accounts is: " -NoNewline
+                Write-Log -Activity "Show Passwords"
+                Write-WhiteI "Default Password for all accounts is: " -NoNewline
                 Write-Host2 -foregroundColor $Global:Common.Colors.GenConfigNotice "$($Global:Common.LocalAdmin.GetNetworkCredential().Password)"
                 Write-Host
                 get-list -type vm | Where-Object { $_.Role -eq "DC" } | Format-Table domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
@@ -219,7 +244,7 @@ function Select-ConfigMenu {
 
 function  Select-NetworkMenu {
     #get-list -type network | out-host
-
+Write-Log -Activity "Display Networks"
     $networks = Get-EnhancedNetworkList
     ($networks | Select-Object Network, Domain, SiteCodes, "Virtual Machines" | Format-Table | Out-String).Trim() | out-host
     $customOptions = $null
@@ -238,8 +263,11 @@ function Select-VMMenu {
         Write-Host
         $vms = get-list -type vm
         if (-not $vms) {
+            Write-RedX "No VMs currently deployed"
             return
         }
+
+        Write-Log -Activity "Currently Deployed VMs"
         ($vms | Select-Object VmName, Domain, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
         #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
 
@@ -280,6 +308,7 @@ function Select-VMMenu {
 
 function Select-DomainMenu {
 
+    Write-Log -Activity "Domain Management Menu" -NoNewLine
     $domainList = @()
     foreach ($item in (Get-DomainList)) {
         $stats = Get-DomainStatsLine -DomainName $item
@@ -400,9 +429,11 @@ function select-OptimizeDomain {
 
 function Select-DeletePending {
 
+
+    Write-Log -Activity "These VMs are currently 'in progress', if there is no deployment running, you should delete them and redeploy"
     get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
-    Write-Host "Please confirm these VM's are not currently in process of being deployed."
-    Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
+    Write-WhiteI "Please confirm these VM's are not currently in process of being deployed."
+    Write-OrangePoint "Selecting 'Yes' will permantently delete all VMs and scopes."
     $response = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
     if (-not [String]::IsNullOrWhiteSpace($response)) {
         if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
@@ -565,6 +596,7 @@ function Select-MainMenu {
     while ($true) {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
+        Write-Log -Activity "VM Deployment Menu" -NoNewLine
         $preOptions = [ordered]@{}
         $preOptions += [ordered]@{ "*G" = "---  Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t`t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         if ($Global:Config.cmOptions) {
@@ -572,24 +604,11 @@ function Select-MainMenu {
         }
         $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions = [ordered]@{}
-        #$customOptions += @{"3" = "Virtual Machines `t`t $(get-VMSummary)" }
 
         $i = 0
-        #$valid = Get-TestResult -SuccessOnError
-
         $virtualMachines = @()
 
-        # Sort By Role
-        #foreach ($role in $global:Common.Supported.Roles) {
-        #    foreach ($vm in $global:config.virtualMachines){
-        #        if ($vm.Role -eq $role) {
-        #            $virtualMachines += $vm
-        #        }
-        #    }
-        #}
-
-
-        #$existingMachines = Get-ExistingVMs
+      
 
 
         if ($global:existingMachines) {
@@ -646,8 +665,14 @@ function Select-MainMenu {
             continue
         }
         switch ($response.ToLowerInvariant()) {
-            "v" { Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" }
-            "c" { Select-Options -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" }
+            "v" { 
+                Write-Log -Activity -NoNewLine "Global VM Options Menu"
+                Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" 
+            }
+            "c" { 
+                Write-Log -Activity -NoNewLine "Global Configuration Manager Menu"
+                Select-Options -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" 
+            }
             "d" {
                 foreach ($virtualMachine in $global:existingMachines) {
                     if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
@@ -1209,6 +1234,8 @@ function select-NewDomainName {
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
         [Object] $ConfigToCheck = $global:config
     )
+
+    Write-Log -Activity "Select a pre-approved domain name from the list, or use 'C' for a custom name." -NoNewLine
     if ($ConfigToCheck.virtualMachines.role -contains "DC") {
         while ($true) {
             $ValidDomainNames = Get-ValidDomainNames
@@ -1274,7 +1301,9 @@ function Select-NewDomainConfig {
     write-log -Activity "New Domain Wizard"
     $subnetlist = Get-ValidSubnets
 
+    $domain = $null
     $valid = $false
+    $response = $null
     while ($valid -eq $false) {
 
         $customOptions = [ordered]@{ "1" = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; "2" = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; "3" = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)" ; "4" = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)"; }
@@ -1283,7 +1312,7 @@ function Select-NewDomainConfig {
             Write-Host
             Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigTip "  Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
 
-            $response = Get-Menu -Prompt "Select New Domain Options" -AdditionalOptions $customOptions -test:$false -return
+            $response = Get-Menu -Prompt "Select type of deployment" -AdditionalOptions $customOptions -test:$false -return -CurrentValue "2"
             if ([string]::IsNullOrWhiteSpace($response)) {
                 return
             }
@@ -1364,6 +1393,7 @@ function Select-NewDomainConfig {
 
             $valid = $false
             while ($valid -eq $false) {
+                Write-Log -Activity "Select the DEFAULT network for new VMs" -NoNewLine
                 $customOptions = @{ "C" = "Custom Network" }
                 $network = $null
                 while (-not $network) {
@@ -2593,6 +2623,9 @@ Function Get-OperatingSystemMenu {
         if ($null -eq $OSList ) {
             return
         }
+
+        Write-Log -Activity -NoNewLine "Operating System Selection"
+
         $property."$name" = Get-Menu "Select OS Version" $OSList $CurrentValue -Test:$false
         if (Get-TestResult -SuccessOnWarning) {
             return
@@ -2990,6 +3023,7 @@ Function Get-ForestTrustMenu {
     $domains += "NONE"
     $valid = $false
     while ($valid -eq $false) {
+        Write-Log -Activity "Forest Trust Menu for domain $($global:Config.vmoptions.DomainName)" -NoNewLine
         $result = Get-Menu "Select Forest to Trust" $($domains) $CurrentValue -Test:$false
         $property."$name" = $result
 
@@ -3360,10 +3394,12 @@ Function Get-RoleMenu {
     while ($valid -eq $false) {
         $DC = Get-List -type VM -domain $global:config.vmOptions.domainName | Where-Object { $_.Role -eq "DC" }
         if ($DC) {
+            Write-Log -Activity -NoNewLine "VM role Selection menu for $($property.VmName)"
             $role = Get-Menu "Select Role" $(Select-RolesForExistingList) $CurrentValue -Test:$false
             $property."$name" = $role
         }
         else {
+            Write-Log -Activity -NoNewLine "Role Selection menu for $($property.VmName)"
             $role = Get-Menu "Select Role" $(Select-RolesForNewList) $CurrentValue -Test:$false
             $property."$name" = $role
         }
@@ -4607,6 +4643,13 @@ function Select-Options {
                         #$response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") -NoNewLine -Test:$false
                     }
                     else {
+                        if ($property.VmName) {
+                            $outputName = "$($Name) for VM $($property.VmName)"
+                        }
+                        else {
+                            $outputName = "$Name"
+                        }
+                        Write-Log -Activity -NoNewLine "Modify Property $outputName - Current Value: $value"
                         $response2 = Read-Host2 -Prompt "Select new Value for $($Name)" $value
                     }
                     if (-not [String]::IsNullOrWhiteSpace($response2)) {
@@ -5112,6 +5155,7 @@ function Add-NewVMForRole {
         if ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
             $OSList = Get-SupportedOperatingSystemsForRole -role $role
             $operatingSystem = "Windows 10 Latest (64-bit)"
+            Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
             $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
         }
         else {
@@ -5121,6 +5165,7 @@ function Add-NewVMForRole {
                     $OperatingSystem = "Linux Unknown"
                 }
                 else {
+                    Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
                     $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false
                 }
             }
@@ -5133,6 +5178,7 @@ function Add-NewVMForRole {
                     $OperatingSystem = "Server 2022"
                 }
                 if ($null -ne $OSList) {
+                    Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
                     $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
                 }
             }
@@ -5875,6 +5921,7 @@ function Select-VirtualMachines {
         return
     }
 
+    Write-Log -Activity -NoNewLine "Select VirtualMachines"
     #Write-Host
     Write-Verbose "8 Select-VirtualMachines"
     if (-not $response) {
@@ -5952,6 +5999,7 @@ function Select-VirtualMachines {
                     if ($machineName) {
                         $machineName = $virtualMachine.vmName
                     }
+                    Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
                     $newValue = Select-Options -propertyEnum $virtualMachine -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
                     #$newValue = Select-Options -Property $clone -prompt "Which Existing VM property to modify" -additionalOptions $customOptions -Test:$true
                     if (([string]::IsNullOrEmpty($newValue))) {
@@ -6009,7 +6057,7 @@ function Select-VirtualMachines {
                 $ii++
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                     $newValue = "Start"
-                    $machineName = $virtualMachine.vmName
+                    $machineName = $virtualMachine.vmName                    
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
                         $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%$($Global:Common.Colors.GenConfigHeader)"; "A" = "Add Additional Disk" }
@@ -6073,6 +6121,7 @@ function Select-VirtualMachines {
                         }
 
                         $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+                        Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
                         $newValue = Select-Options -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false
                         if (([string]::IsNullOrEmpty($newValue))) {
                             return
@@ -6283,6 +6332,7 @@ function Select-VirtualMachines {
                 $i = $i + 1
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                     #if ($i -eq $response) {
+                    Write-Log -Activity -NoNewLine "Remove $($virtualMachine.vmName) from current config"
                     $response = Read-YesorNoWithTimeout -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (Y/n)" -HideHelp -Default "y"
                     if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
                     }
