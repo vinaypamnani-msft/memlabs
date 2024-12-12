@@ -29,8 +29,8 @@ function Get-Colors {
         GenConfigNonDefaultNumber  = "LightSteelBlue"
 
         # [N] New Virtual Machine
-        GenConfigNewVM             = "DarkGreen"
-        GenConfigNewVMNumber       = "Green"
+        GenConfigNewVM             = "Chartreuse"
+        GenConfigNewVMNumber       = "Chartreuse"
 
         # [D] Deploy Config
         GenConfigDeploy            = "Green"

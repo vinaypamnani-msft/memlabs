@@ -607,7 +607,7 @@ function Select-MainMenu {
         if ($Global:Config.cmOptions) {
             $preOptions += [ordered]@{"C" = "Global SCCM Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         }
-        $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
+        
         $customOptions = [ordered]@{}
 
         $i = 0
@@ -617,6 +617,7 @@ function Select-MainMenu {
 
 
         if ($global:existingMachines) {
+            $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
             foreach ($existingVM in $global:existingMachines) {
                 $i = $i + 1
                 $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
@@ -652,12 +653,13 @@ function Select-MainMenu {
             }
         }
 
-        $customOptions += [ordered]@{ "N" = "New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)" }
+        $customOptions += [ordered]@{ "N" = "Add New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)" }
         $customOptions += [ordered]@{ "*D1" = ""; "*D" = "---  Deployment%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{ "!" = "Return to main menu %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($InternalUseOnly.IsPresent) {
             $customOptions += [ordered]@{ "D" = "Deploy And Save Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
+            $customOptions += [ordered]@{ "Q" = "Quit Without Saving!%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
         }
         if ($enableDebug) {
             $customOptions += [ordered]@{ "R" = "Return deployConfig" }
@@ -670,6 +672,9 @@ function Select-MainMenu {
             continue
         }
         switch ($response.ToLowerInvariant()) {
+            "q" {
+                exit(0)
+            }
             "v" { 
                 Write-Log -Activity -NoNewLine "Global VM Options Menu"
                 Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" 
