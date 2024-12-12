@@ -192,6 +192,8 @@ function write-help {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Default Value")]
+        [String] $WRCurrentValue = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Can Enter escape this menu")]
         [switch] $AllowEscape,
         [Parameter(Mandatory = $false, HelpMessage = "hint for help to show we will return")]
         [bool] $return = $false,
@@ -205,34 +207,46 @@ function write-help {
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Space]" -NoNewline
         Write-Host2 -ForegroundColor $color " to stop the countdown or " -NoNewline
     }
-    if (-not $AllowEscape) {
-        if ($return) {
-            Write-Host2 -ForegroundColor $color "Press " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to return to the previous menu or " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to exit without saving."
-        }
-        else {
-            Write-Host2 -ForegroundColor $color "Select an option or " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to exit without saving."
-        }
+
+    if ($WRCurrentValue) {
+        Write-Host2 -ForegroundColor $color "Press " -NoNewline
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+        Write-Host2 -ForegroundColor $color " to use the DEFAULT value of '" -NoNewline
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "$WRCurrentValue" -NoNewLine
+        Write-Host2 -ForegroundColor $color "' "
+        #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+        #Write-Host2 -ForegroundColor $color " to exit without saving."
     }
     else {
-        if ($return) {
-            Write-Host2 -ForegroundColor $color "Press " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to return to the previous menu or " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to exit without saving."
+        if (-not $AllowEscape) {
+            if ($return) {
+                Write-Host2 -ForegroundColor $color "Press " -NoNewline
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+                Write-Host2 -ForegroundColor $color " to return to the previous menu "
+                #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+                #Write-Host2 -ForegroundColor $color " to exit without saving."
+            }
+            else {
+                Write-Host2 -ForegroundColor $color "Select an option or " -NoNewline
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+                Write-Host2 -ForegroundColor $color " to exit the script without saving."
+            }
         }
         else {
-            Write-Host2 -ForegroundColor $color "Press " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to skip this section or " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to exit without saving."
+            if ($return) {
+                Write-Host2 -ForegroundColor $color "Press " -NoNewline
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+                Write-Host2 -ForegroundColor $color " to return to the previous menu "
+                #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+                #Write-Host2 -ForegroundColor $color " to exit without saving."
+            }
+            else {
+                Write-Host2 -ForegroundColor $color "Press " -NoNewline
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+                Write-Host2 -ForegroundColor $color " to skip this section "
+                #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+                #Write-Host2 -ForegroundColor $color " to exit without saving."
+            }
         }
     }
 }
@@ -257,10 +271,10 @@ function Read-YesorNoWithTimeout {
     }
     if (-not $HideHelp.IsPresent) {
         if ($Default) {
-            write-help -AllowEscape -timeout:$timeoutHelp
+            write-help -AllowEscape -timeout:$timeoutHelp -WRCurrentValue:$currentValue
         }
         else {
-            write-help -timeout:$timeoutHelp
+            write-help -timeout:$timeoutHelp -WRCurrentValue:$currentValue
         }
     }
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline

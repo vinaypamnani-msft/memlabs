@@ -368,7 +368,7 @@ function Read-Host2 {
     )
     if (-not $HideHelp.IsPresent) {
         if ($currentValue) {
-            write-help -AllowEscape
+            write-help -AllowEscape -WRCurrentValue:$currentValue
         }
         else {
             write-help
@@ -405,7 +405,7 @@ function Read-Single {
 
     if (-not $HideHelp.IsPresent) {
         if ($currentValue) {
-            write-help -AllowEscape -return:$return -timeout:$useReadHost
+            write-help -AllowEscape -return:$return -timeout:$useReadHost -WRCurrentValue:$currentValue
         }
         else {
             write-help -return:$return -timeout:$useReadHost

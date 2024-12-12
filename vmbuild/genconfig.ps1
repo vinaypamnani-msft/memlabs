@@ -1645,7 +1645,7 @@ function Show-ExistingNetwork2 {
 
     while ($true) {
 
-        Write-log -Activity "Create or modify existing domain"
+        Write-log -Activity "Create new domain -or- modify existing domain"
         $customOptions = [ordered]@{"*B" = ""; "*BREAK" = "---  Modify Existing Domains%$($Global:Common.Colors.GenConfigHeader)" }
         $i = 0
         foreach ($domain in $domainList) {
@@ -1654,9 +1654,9 @@ function Show-ExistingNetwork2 {
         }
 
         $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "---  New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
         #$domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -additionalOptions $customOptions -Split -test:$false -return -CurrentValue "N"
-        $response = Get-Menu -Prompt "Select existing domain" -additionalOptions $customOptions -Split -test:$false -return -CurrentValue "N" -NoNewLine
+        $response = Get-Menu -Prompt "Select Existing Domain or select 'N' to create a new domain" -additionalOptions $customOptions -Split -test:$false -CurrentValue "N" -NoNewLine
         if ([string]::isnullorwhitespace($response)) {
             return Select-NewDomainConfig
         }
@@ -1683,6 +1683,7 @@ function Show-ExistingNetwork2 {
             continue
         }
 
+        Write-Log -Activity -NoNewLine "Confirm selection of domain $response"
         $response = Read-YesorNoWithTimeout -Prompt "Modify existing VMs, or Add new VMs to this domain? (Y/n)" -HideHelp -Default "y"
         if (-not [String]::IsNullOrWhiteSpace($response)) {
             if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
