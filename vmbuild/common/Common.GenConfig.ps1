@@ -98,6 +98,9 @@ Function Read-SingleKeyWithTimeout {
     }
 
     $stopTimeout = $false
+    if ($timeout -eq 0) {
+        $stopTimeout = $true
+    }
     $key = $null
     $secs = 0
     $charsToDeleteNextTime = 0

@@ -111,10 +111,15 @@ Function Select-ToolsMenu {
 function Select-ConfigMenu {
     $Global:EnterKey = $true
     while ($true) {
-        $customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+        Write-Log -Activity "MemLabs Main Menu"
+        #$customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
         if ($domainCount -gt 0) {
-            $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; }
+            $customOptions = [ordered]@{ "1" = "Create New Domain or Expand Existing domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            #   $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; }
+        }
+        else {
+            $customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
@@ -160,8 +165,9 @@ function Select-ConfigMenu {
         }
         $SelectedConfig = $null
         switch ($response.ToLowerInvariant()) {
-            "1" { $SelectedConfig = Select-NewDomainConfig }
-            "2" { $SelectedConfig = Show-ExistingNetwork }
+            #"1" { $SelectedConfig = Select-NewDomainConfig }
+            #"2" { $SelectedConfig = Show-ExistingNetwork }
+            "1" { $SelectedConfig = Show-ExistingNetwork2 }
             #"3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "3" { $SelectedConfig = Select-Config $configDir -NoMore }
             "4" {
@@ -1264,6 +1270,8 @@ function select-NewDomainName {
 
 function Select-NewDomainConfig {
 
+
+    write-log -Activity "New Domain Wizard"
     $subnetlist = Get-ValidSubnets
 
     $valid = $false
@@ -1273,9 +1281,9 @@ function Select-NewDomainConfig {
         $response = $null
         while (-not $response) {
             Write-Host
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigTip "Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
+            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigTip "  Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
 
-            $response = Get-Menu -Prompt "Select ConfigMgr Options" -AdditionalOptions $customOptions -test:$false -return
+            $response = Get-Menu -Prompt "Select New Domain Options" -AdditionalOptions $customOptions -test:$false -return
             if ([string]::IsNullOrWhiteSpace($response)) {
                 return
             }
@@ -1385,6 +1393,21 @@ function Select-Config {
         [switch] $NoMore
     )
 
+
+    Write-Log -Activity "Select Config File to load"
+    if ($ConfigPath.EndsWith("tests")) {
+        Write-Log -SubActivity "Viewing config files located in $ConfigPath -- Sorted by Name"
+        $testMode = $true
+    }
+    else {
+        Write-Log -SubActivity "Viewing config files located in $ConfigPath -- Sorted by date"
+    }
+    
+    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonGood "  == Green  - Fully Deployed"
+    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonBad  "  == Red    - Partially Deployed"
+    Write-Host2 -ForegroundColor  $Global:Common.Colors.GenConfigNoCM    "  == Brown  - Not Deployed - New Domain"
+    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNormal   "  == Normal - Not Deployed - Needs existing domain"
+
     if (-not (Test-Path $ConfigPath)) {
         write-log "No files found in $configPath"
         return
@@ -1401,7 +1424,7 @@ function Select-Config {
     $files += Get-ChildItem $ConfigPath\*.json -Include "NoConfigMgr.json"
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property LastWriteTime
-    write-host $ConfigPath
+
 
     if ($testMode) {
         $files = $files | sort-Object -Property Name
@@ -1562,7 +1585,150 @@ Function Get-DomainStatsLine {
     return $stats
 }
 
+function Show-ExistingNetwork2 {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
 
+    $domainList = @()
+
+    foreach ($item in (Get-DomainList)) {
+        $stats = Get-DomainStatsLine -DomainName $item
+
+        $domainList += "$($item.PadRight(22," ")) $stats"
+    }
+
+    if ($domainList.Count -eq 0) {
+        return Select-NewDomainConfig
+    }
+
+    while ($true) {
+
+        Write-log -Activity "Create or modify existing domain"
+        $customOptions = [ordered]@{"*B" = ""; "*BREAK" = "---  Modify Existing Domains%$($Global:Common.Colors.GenConfigHeader)" }
+        $i = 0
+        foreach ($domain in $domainList) {
+            $i++
+            $customOptions += [ordered]@{ "$i" = "$domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        }
+
+        $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "---  New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        #$domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -additionalOptions $customOptions -Split -test:$false -return -CurrentValue "N"
+        $response = Get-Menu -Prompt "Select existing domain" -additionalOptions $customOptions -Split -test:$false -return -CurrentValue "N" -NoNewLine
+        if ([string]::isnullorwhitespace($response)) {
+            return Select-NewDomainConfig
+        }
+        if ($response.ToLowerInvariant() -eq "n") {
+            return Select-NewDomainConfig
+        }
+
+        $i = 0
+        foreach ($domain in $domainList) {
+            $i++
+            if ($i -eq $response) {    
+                $domain = $domain -Split " " | Select-Object -First 1     
+                Write-Verbose "Setting Response to $domain"     
+                $response = $domain
+            }
+        }
+        $list = get-list -Type VM -DomainName $response
+        if ($list) {
+            Write-Log -Activity "Modify $response"
+            get-list -Type VM -DomainName $response | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
+        }
+        else {
+            Write-RedX "Could not find domain $response"
+            continue
+        }
+
+        $response = Read-YesorNoWithTimeout -Prompt "Modify existing VMs, or Add new VMs to this domain? (Y/n)" -HideHelp -Default "y"
+        if (-not [String]::IsNullOrWhiteSpace($response)) {
+            if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+                continue
+            }
+            else {
+                break
+            }
+        }
+        else { break }
+
+    }
+
+    $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" -and ($_.Role -eq "CAS" -or $_.Role -eq "Primary" -or $_.Role -eq "DC") } | Measure-Object).Count
+    if ($TotalStoppedVMs -gt 0) {
+        $response = Read-YesorNoWithTimeout -Prompt "$TotalStoppedVMs Critical VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp -Default "y"
+        if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
+        }
+        else {
+            Select-StartDomain -domain $domain -response "C"
+        }
+
+    }
+    #[string]$role = Select-RolesForExisting
+
+
+    if ($role -eq "H") {
+        $role = "PassiveSite"
+    }
+    if ($role -eq "L") {
+        $role = "Linux"
+    }
+
+    if ($role) {
+        $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $domain
+    }
+   
+    if ($role -eq "Secondary") {
+        if (-not $parentSiteCode) {
+            return
+        }
+    }
+    if ($role -eq "PassiveSite") {
+        if (-not $global:Config) {
+            $existingPassive = Get-List -type VM -domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
+        }
+        else {
+            $existingPassive = Get-List2 -deployConfig $global:Config | Where-Object { $_.Role -eq "PassiveSite" }
+        }
+        $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+
+        $PossibleSS = @()
+        foreach ($item in $existingSS) {
+            if ($existingPassive.SiteCode -contains $item.Sitecode) {
+                continue
+            }
+            $PossibleSS += $item
+        }
+
+        if ($PossibleSS.Count -eq 0) {
+            Write-Host
+            Write-Host "No siteservers found that are elegible for HA"
+            return
+        }
+        $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
+        if ([string]::IsNullOrWhiteSpace($result)) {
+            return
+        }
+        $SiteCode = $result
+    }
+
+    if ($role -eq "SiteSystem") {
+        $SiteCode = Get-SiteCodeForDPMP -Domain $domain
+        #write-host "Get-SiteCodeForDPMP return $SiteCode"
+    }
+
+    [string]$subnet = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1).network
+    if ($role -ne "InternetClient" -and $role -ne "AADClient" -and $role -ne "PassiveSite") {
+        $subnet = Select-ExistingSubnets -Domain $domain -Role $role -SiteCode $SiteCode
+        Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
+        if ([string]::IsNullOrWhiteSpace($subnet)) {
+            return $null
+        }
+    }
+
+    Write-verbose "[Show-ExistingNetwork] Calling Get-ExistingConfig '$domain' '$subnet' '$role' '$SiteCode'"
+    $newConfig = Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -parentSiteCode $parentSiteCode -SiteCode $Sitecode
+    return $newConfig
+}
 
 function Show-ExistingNetwork {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
@@ -1626,42 +1792,7 @@ function Show-ExistingNetwork {
     if ($role) {
         $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $domain
     }
-    #if ($role -eq "Primary") {
-    #    $ExistingCasCount = (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-    #    if ($ExistingCasCount -gt 0) {
-    #
-    #        $existingSiteCodes = @()
-    #        $existingSiteCodes += (Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" }).SiteCode
-    #        #$existingSiteCodes += ($global:config.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
-    #
-    #        $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
-    #        $result = Get-Menu -Prompt "Select CAS sitecode to connect Primary to:" -OptionArray $existingSiteCodes -CurrentValue $value -additionalOptions $additionalOptions -Test $false
-    #        if ($result.ToLowerInvariant() -eq "x") {
-    #            $parentSiteCode = $null
-    #        }
-    #        else {
-    #            $parentSiteCode = $result
-    #        }
-    #        Get-TestResult -SuccessOnError | out-null
-    #    }
-    #}
-    #
-    #if ($role -eq "Secondary") {
-    #
-    #    $priSiteCodes = Get-ValidPRISiteCodes -config $global:config
-    #    if ($priSiteCodes -gt 0) {
-    #        while (-not $result) {
-    #            $result = Get-Menu -Prompt "Select Primary sitecode to connect Secondary to" -OptionArray $priSiteCodes -CurrentValue $value  -Test $false
-    #        }
-    #        $parentsiteCode = $result
-    #        Get-TestResult -SuccessOnError | out-null
-    #    }
-    #    else {
-    #        write-host "No valid primaries found to attach secondary to"
-    #        return
-    #    }
-    #}
-    #
+   
     if ($role -eq "Secondary") {
         if (-not $parentSiteCode) {
             return
@@ -5878,7 +6009,7 @@ function Select-VirtualMachines {
                 $ii++
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                     $newValue = "Start"
-                    $machineName =  $virtualMachine.vmName
+                    $machineName = $virtualMachine.vmName
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
                         $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%$($Global:Common.Colors.GenConfigHeader)"; "A" = "Add Additional Disk" }
@@ -5966,7 +6097,7 @@ function Select-VirtualMachines {
                                 $FSVM = $global:config.virtualMachines | Where-Object { $_.vmName -eq $PassiveNode.remoteContentLibVM }
                                 if ($FSVM) {
                                     $OtherVMs = $global:config.virtualMachines | Where-Object { $_.fileServerVM -eq $FSVM.vmName } 
-                                    $OtherVMs2 = $global:config.virtualMachines | Where-Object { $_.remoteContentLibVM -eq $FSVM.vmName -and $_.vmname -ne $PassiveNode.vmName} 
+                                    $OtherVMs2 = $global:config.virtualMachines | Where-Object { $_.remoteContentLibVM -eq $FSVM.vmName -and $_.vmname -ne $PassiveNode.vmName } 
                                     if (-not $OtherVMs -and -not $OtherVMs2) {
                                         write-host
                                         Write-OrangePoint "$($FSVM.vmName) is not in use by any other vm's.  Removing from config"
