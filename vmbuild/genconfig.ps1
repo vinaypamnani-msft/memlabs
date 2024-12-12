@@ -625,7 +625,7 @@ function Select-MainMenu {
             }
         }
         $customOptions += [ordered]@{"*V2" = "" }
-        $customOptions += [ordered]@{"*VV" = "---  New Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"*VV" = "---  Virtual Machines to be deployed%$($Global:Common.Colors.GenConfigHeader)" }
         try {
             if ($global:Config.virtualMachines) {
                 $virtualMachines = @($global:Config.virtualMachines | Where-Object { $_.role -in "DC", "BDC" })
@@ -654,7 +654,7 @@ function Select-MainMenu {
         }
 
         $customOptions += [ordered]@{ "N" = "Add New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)" }
-        $customOptions += [ordered]@{ "*D1" = ""; "*D" = "---  Deployment%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{ "*D1" = ""; "*D" = "---  Deployment Actions%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{ "!" = "Return to main menu %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($InternalUseOnly.IsPresent) {
