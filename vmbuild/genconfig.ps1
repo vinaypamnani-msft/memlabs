@@ -145,7 +145,7 @@ function Check-OverallHealth {
     
     # Running VMs
     if ($vmsTotal -eq 0) {
-        Write-OrangePoint "No VMs are currently deployed"
+        Write-OrangePoint2 "No VMs are currently deployed"
     } else {
 
     if ($vmsRunning -eq 0) {
@@ -154,7 +154,7 @@ function Check-OverallHealth {
         if ($vm -eq $vmsTotal){
             Write-GreenCheck "All $vmsTotal VMs are running"
         }else{
-            Write-OrangePoint "$vmsRunning/$vmsTotal VMs are running"
+            Write-OrangePoint2 "$vmsRunning/$vmsTotal VMs are running"
         }    
     }
 
@@ -167,7 +167,7 @@ function Check-OverallHealth {
         Write-GreenCheck "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
     }else {
         if ($diskFreeGB -ge 300) {
-        Write-OrangePoint "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+        Write-OrangePoint2 "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
         }
         else{
             Write-RedX "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
@@ -183,7 +183,7 @@ function Check-OverallHealth {
         Write-GreenCheck "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
     }else {
         if ($availableMemory -ge 20) {
-            Write-OrangePoint "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
+            Write-OrangePoint2 "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
         }else{
             Write-RedX "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
         }
@@ -191,12 +191,6 @@ function Check-OverallHealth {
 
 }
 
-    $vmsTotal = (Get-List -Type VM | Measure-Object).Count
-    $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
-    $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
-    $disk = Get-Volume -DriveLetter E
-
-    $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab [Mem Free: $($availableMemory)GB/$($os.TotalGB)GB] [E: Free $([math]::Round($($disk.SizeRemaining/1GB),0))GB/$([math]::Round($($disk.Size/1GB),0))GB] [VMs Running: $vmsRunning/$vmsTotal]%$($Global:Common.Colors.GenConfigHeader)" }
 }
 
 function Select-ConfigMenu {
@@ -1380,8 +1374,10 @@ function Select-NewDomainConfig {
     $valid = $false
     $response = $null
     while ($valid -eq $false) {
-
-        $customOptions = [ordered]@{ "1" = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; "2" = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; "3" = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)" ; "4" = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)"; }
+        $customOptions = [ordered]@{"*B1" = ""; "*BREAK1" = "---  DeploymentType%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{ "1" = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; "2" = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; "3" = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)" ; "4" = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)"; }
+        $customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{ "!" = "Return to Main Menu%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $response = $null
         while (-not $response) {
             Write-Host
@@ -1389,6 +1385,9 @@ function Select-NewDomainConfig {
 
             $response = Get-Menu -Prompt "Select type of deployment" -AdditionalOptions $customOptions -test:$false -return -CurrentValue "2"
             if ([string]::IsNullOrWhiteSpace($response)) {
+                return
+            }
+            if ($response -eq "!") {
                 return
             }
         }
@@ -1718,8 +1717,13 @@ function Show-ExistingNetwork2 {
 
         $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "---  New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+        $customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{ "!" = "Return to Main Menu%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         #$domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -additionalOptions $customOptions -Split -test:$false -return -CurrentValue "N"
         $response = Get-Menu -Prompt "Select Existing Domain or select 'N' to create a new domain" -additionalOptions $customOptions -Split -test:$false -CurrentValue "N" -NoNewLine
+        if ($response.ToLowerInvariant() -eq "!") {
+            return
+        }
         if ([string]::isnullorwhitespace($response)) {
             return Select-NewDomainConfig
         }
