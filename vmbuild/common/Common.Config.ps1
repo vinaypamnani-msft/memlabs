@@ -2095,7 +2095,7 @@ Function Write-OrangePoint {
         Write-Host "  " -NoNewline
     }
     Write-Host "[" -NoNewLine
-    Write-Host2 -ForeGroundColor Orange "!" -NoNewline
+    Write-Host2 -ForeGroundColor Orange "⚠ " -NoNewline
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {
         Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text

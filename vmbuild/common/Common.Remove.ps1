@@ -190,7 +190,7 @@ function Remove-ForestTrust {
         [switch] $WhatIf
     )
 
-    $TrustedForests = Get-List -Type ForestTrust | Where-Object { $_.ForestTrust -eq $DomainName -or $_Domain -eq $DomainName }
+    $TrustedForests = Get-List -Type ForestTrust | Where-Object { $_.ForestTrust -eq $DomainName -or $_.Domain -eq $DomainName }
     
     if ($TrustedForests) {
 

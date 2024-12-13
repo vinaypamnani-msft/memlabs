@@ -3597,10 +3597,11 @@ function Get-FileWithHash {
                 }
                 else {
                     if ($IgnoreHashFailure) {
+                        Write-WhiteI "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash."
                         $return.success = $true
                     }
                     else {
-                        Write-RedX "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
+                        Write-RedX "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash."
                         $return.success = $false
                     }
                 }
