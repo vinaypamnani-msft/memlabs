@@ -45,78 +45,84 @@ Function Select-PasswordMenu {
 }
 Function Select-ToolsMenu {
 
-    Write-Log -Activity "Tools Menu"
-    $customOptions = [ordered]@{"1" = "Update Tools On all Currently Running VMs (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-    $customOptions += [ordered]@{"2" = "Copy Optional Tools (eg Windbg)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    while ($true) {
+        Write-Log -Activity "Tools Menu"
+        $customOptions = [ordered]@{"1" = "Update Tools On all Currently Running VMs (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"2" = "Copy Optional Tools (eg Windbg)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
 
-    $response = Get-Menu -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false -return
+        $response = Get-Menu -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false -return
 
-    switch ($response.ToLowerInvariant()) {
-        "1" {
-            $customOptions2 = [ordered]@{"A" = "All Tools" }
-            $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name | Sort-Object
-            Write-Log -SubActivity "Tool Selection"
-            $tool = Get-Menu -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
-            if (-not $tool) {
-                return
-            }
-            $customOptions2 = [ordered]@{"A" = "All VMs" }
-            $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
-            Write-Log -SubActivity "Tool deployment VM Selection"
-            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
-            if (-not $vmName) {
-                return
-            }
-
-            #All VMs
-            if ($vmName -eq "A") {
-                if ($tool -eq "A") {
-                    #All Tools
-                    Get-tools -Inject | out-null
-                }
-                else {
-                    #Specific Tool
-                    Get-Tools -Inject -ToolName $tool
-                }
-            } #Specific VM
-            else {
-                if ($tool -eq "A") {
-                    #all Tools
-                    Get-Tools -Inject -vmName $vmName
-                }
-                else {
-                    #Specific Tool
-                    Get-Tools -Inject -vmName $vmName -ToolName $tool
-                }
-            }
-
+        if ([String]::IsNullOrWhiteSpace($response)) {
+            return
         }
-        "2" {
-            $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name | Sort-Object
-            Write-Log -SubActivity "Optional Tool Selection"
-            $tool = Get-Menu -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false -return
-            if (-not $tool) {
-                return
+
+        switch ($response.ToLowerInvariant()) {
+            "1" {
+                $customOptions2 = [ordered]@{"A" = "All Tools" }
+                $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name | Sort-Object
+                Write-Log -SubActivity "Tool Selection"
+                $tool = Get-Menu -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
+                if (-not $tool) {
+                    continue
+                }
+                $customOptions2 = [ordered]@{"A" = "All VMs" }
+                $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
+                Write-Log -SubActivity "Tool deployment VM Selection"
+                $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
+                if (-not $vmName) {
+                    continue
+                }
+
+                #All VMs
+                if ($vmName -eq "A") {
+                    if ($tool -eq "A") {
+                        #All Tools
+                        Get-tools -Inject | out-null
+                    }
+                    else {
+                        #Specific Tool
+                        Get-Tools -Inject -ToolName $tool
+                    }
+                } #Specific VM
+                else {
+                    if ($tool -eq "A") {
+                        #all Tools
+                        Get-Tools -Inject -vmName $vmName
+                    }
+                    else {
+                        #Specific Tool
+                        Get-Tools -Inject -vmName $vmName -ToolName $tool
+                    }
+                }
+
             }
-            $customOptions2 = [ordered]@{"A" = "All VMs listed above" }
-            $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
-            Write-Log -SubActivity "Optional Tool deployment VM Selection"
-            $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
-            if (-not $vmName) {
-                return
-            }
-            if ($vmName -eq "A") {
-                foreach ($vmName in $runningVMs) {
+            "2" {
+                $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name | Sort-Object
+                Write-Log -SubActivity "Optional Tool Selection"
+                $tool = Get-Menu -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false -return
+                if (-not $tool) {
+                    continue
+                }
+                $customOptions2 = [ordered]@{"A" = "All VMs listed above" }
+                $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
+                Write-Log -SubActivity "Optional Tool deployment VM Selection"
+                $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
+                if (-not $vmName) {
+                    continue
+                }
+                if ($vmName -eq "A") {
+                    foreach ($vmName in $runningVMs) {
+                        Get-Tools -Inject -ToolName $tool -vmName $vmName
+
+                    }
+                }
+                else {
                     Get-Tools -Inject -ToolName $tool -vmName $vmName
-
                 }
-            }
-            else {
-                Get-Tools -Inject -ToolName $tool -vmName $vmName
-            }
 
+            }
+            default { continue }
         }
-        default { return }
     }
 }
 
@@ -153,50 +159,56 @@ function Check-OverallHealth {
     # Running VMs
     if ($vmsTotal -eq 0) {
         Write-OrangePoint2 "No VMs are currently deployed"
-    } else {
-
-    if ($vmsRunning -eq 0) {
-        Write-RedX "No VMs are currently running. $vmsRunning/$vmsTotal total"
-    }else {
-        if ($vm -eq $vmsTotal){
-            Write-GreenCheck "All $vmsTotal VMs are running"
-        }else{
-            Write-OrangePoint2 "$vmsRunning/$vmsTotal VMs are running"
-        }    
     }
+    else {
 
-    # Available Disk
-    $disk = Get-Volume -DriveLetter E
-    $diskTotalGB = $([math]::Round($($disk.Size/1GB),0))
-    $diskFreeGB = $([math]::Round($($disk.SizeRemaining/1GB),0))
+        if ($vmsRunning -eq 0) {
+            Write-RedX "No VMs are currently running. $vmsRunning/$vmsTotal total"
+        }
+        else {
+            if ($vm -eq $vmsTotal) {
+                Write-GreenCheck "All $vmsTotal VMs are running"
+            }
+            else {
+                Write-OrangePoint2 "$vmsRunning/$vmsTotal VMs are running"
+            }    
+        }
 
-    if ($diskFreeGB -ge 700) {
-        Write-GreenCheck "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
-    }else {
-        if ($diskFreeGB -ge 300) {
-        Write-OrangePoint2 "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+        # Available Disk
+        $disk = Get-Volume -DriveLetter E
+        $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
+        $diskFreeGB = $([math]::Round($($disk.SizeRemaining / 1GB), 0))
+
+        if ($diskFreeGB -ge 700) {
+            Write-GreenCheck "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
         }
-        else{
-            Write-RedX "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+        else {
+            if ($diskFreeGB -ge 300) {
+                Write-OrangePoint2 "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+            }
+            else {
+                Write-RedX "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+            }
         }
+
+        #Available Memory
+
+        $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
+        $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
+
+        if ($availableMemory -ge 40) {
+            Write-GreenCheck "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
+        }
+        else {
+            if ($availableMemory -ge 20) {
+                Write-OrangePoint2 "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
+            }
+            else {
+                Write-RedX "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
+            }
+        }
+
     }
-
-    #Available Memory
-
-    $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
-    $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
-
-    if ($availableMemory -ge 40) {
-        Write-GreenCheck "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
-    }else {
-        if ($availableMemory -ge 20) {
-            Write-OrangePoint2 "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
-        }else{
-            Write-RedX "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
-        }
-    }
-
-}
 
 }
 
@@ -306,7 +318,7 @@ function Select-ConfigMenu {
 
 function  Select-NetworkMenu {
     #get-list -type network | out-host
-Write-Log -Activity "Display Networks"
+    Write-Log -Activity "Display Networks"
     $networks = Get-EnhancedNetworkList
     ($networks | Select-Object Network, Domain, SiteCodes, "Virtual Machines" | Format-Table | Out-String).Trim() | out-host
     $customOptions = $null
@@ -330,7 +342,7 @@ function Select-VMMenu {
         }
 
         Write-Log -Activity "Currently Deployed VMs"
-        ($vms | Select-Object VmName, Domain, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion, LastKnownIP | Sort-Object -property VmName |Format-Table | Out-String).Trim() | out-host
+        ($vms | Select-Object VmName, Domain, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion, LastKnownIP | Sort-Object -property VmName | Format-Table | Out-String).Trim() | out-host
         #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
 
         #$customOptions = [ordered]@{
@@ -1259,7 +1271,7 @@ function select-timezone {
     $commonTimeZones += "Russian Standard Time"
 
     $commonTimeZones = $commonTimeZones | Select-Object -Unique
-Write-Log -Activity "Timezone Selection" -NoNewLine
+    Write-Log -Activity "Timezone Selection" -NoNewLine
     $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $commonTimeZones -CurrentValue $($ConfigToCheck.vmOptions.timezone) -additionalOptions @{"F" = "Display Full List" }
     if ($timezone -eq "F") {
         Write-Log -Activity "Full Timezone Selection" -NoNewLine
@@ -1293,7 +1305,7 @@ function Select-Locale {
     }
 
     $commonLanguages = $commonLanguages | Select-Object -Unique
-Write-Log -Activity "Locale Menu using _localeConfig.json" -NoNewLine
+    Write-Log -Activity "Locale Menu using _localeConfig.json" -NoNewLine
     $locale = Get-Menu -Prompt "Select Locale" -OptionArray $commonLocales -CurrentValue $($ConfigToCheck.vmOptions.locale)
     return $locale
 }
@@ -1487,7 +1499,7 @@ function Select-NewDomainConfig {
     return $newConfig
 }
 
-Function Get-ConfigFiles{
+Function Get-ConfigFiles {
     param(
         [string] $ConfigPath,
         [switch] $SortByName
@@ -1543,7 +1555,7 @@ function Select-Config {
             Write-Log -SubActivity "Viewing config files located in $ConfigPath -- Sorted by Name"
             $files = Get-ConfigFiles -ConfigPath $ConfigPath -SortByName
         }
-        Else{
+        Else {
             Write-Log -SubActivity "Viewing config files located in $ConfigPath -- Sorted by date"
             $files = Get-ConfigFiles -ConfigPath $ConfigPath
         }
@@ -1610,8 +1622,9 @@ function Select-Config {
 
         }
         if ($SortByName) {
-        $customOptions = [ordered]@{"S" = "Sort by Date%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        }else {
+            $customOptions = [ordered]@{"S" = "Sort by Date%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        }
+        else {
             $customOptions = [ordered]@{"S" = "Sort by Name%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
         $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
@@ -2066,7 +2079,7 @@ function Select-RolesForExisting {
 
     $OptionArray = @{ "H" = $ha_Text }
     $OptionArray = @{  "L" = "Add Linux VM from Hyper-V Gallery" }
-Write-Log -Activity -NoNewLine "Add roles to Existing domain"
+    Write-Log -Activity -NoNewLine "Add roles to Existing domain"
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
 
     $role = $role.Split("[")[0].Trim()
