@@ -1274,7 +1274,7 @@ function Get-NetworkList {
 function Get-DomainList {
 
     try {
-        return (Get-List -Type UniqueDomain)
+        return (Get-List -Type UniqueDomain | Sort-Object)
     }
     catch {
         Write-Log "Failed to get domain list. $_" -Failure -LogOnly

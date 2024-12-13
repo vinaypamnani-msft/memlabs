@@ -47,14 +47,14 @@ Function Select-ToolsMenu {
     switch ($response.ToLowerInvariant()) {
         "1" {
             $customOptions2 = [ordered]@{"A" = "All Tools" }
-            $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name
+            $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name | Sort-Object
             Write-Log -SubActivity "Tool Selection"
             $tool = Get-Menu -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
             if (-not $tool) {
                 return
             }
             $customOptions2 = [ordered]@{"A" = "All VMs" }
-            $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName
+            $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
             Write-Log -SubActivity "Tool deployment VM Selection"
             $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
             if (-not $vmName) {
@@ -85,14 +85,14 @@ Function Select-ToolsMenu {
 
         }
         "2" {
-            $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name
+            $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name | Sort-Object
             Write-Log -SubActivity "Optional Tool Selection"
             $tool = Get-Menu -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false -return
             if (-not $tool) {
                 return
             }
             $customOptions2 = [ordered]@{"A" = "All VMs listed above" }
-            $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName
+            $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
             Write-Log -SubActivity "Optional Tool deployment VM Selection"
             $vmName = Get-Menu -Prompt "Select VM to deploy tool to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return
             if (-not $vmName) {
