@@ -35,7 +35,14 @@ Write-Host2 -ForegroundColor Yellow "numbers or letters" -NoNewline
 Write-Host2 -ForegroundColor Snow " on the left side of the options menu to navigate."
 
 
-
+Function Select-PasswordMenu {
+    Write-Log -Activity "Show Passwords"
+    Write-WhiteI "Default Password for all accounts is: " -NoNewline
+    Write-Host2 -foregroundColor $Global:Common.Colors.GenConfigNotice "$($Global:Common.LocalAdmin.GetNetworkCredential().Password)"
+    Write-Host
+    get-list -type vm | Where-Object { $_.Role -eq "DC" } | Format-Table domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
+    $response = Get-Menu -Prompt "Press Enter" -HideHelp:$true -test:$false               
+}
 Function Select-ToolsMenu {
 
     Write-Log -Activity "Tools Menu"
@@ -278,13 +285,7 @@ function Select-ConfigMenu {
             "d" { Select-DomainMenu }
             "n" { Select-NetworkMenu }
             "t" { Select-ToolsMenu }
-            "P" {
-                Write-Log -Activity "Show Passwords"
-                Write-WhiteI "Default Password for all accounts is: " -NoNewline
-                Write-Host2 -foregroundColor $Global:Common.Colors.GenConfigNotice "$($Global:Common.LocalAdmin.GetNetworkCredential().Password)"
-                Write-Host
-                get-list -type vm | Where-Object { $_.Role -eq "DC" } | Format-Table domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
-            }
+            "P" { Select-PasswordMenu }
             Default {}
         }
         if ($SelectedConfig) {
@@ -1486,6 +1487,31 @@ function Select-NewDomainConfig {
     return $newConfig
 }
 
+Function Get-ConfigFiles{
+    param(
+        [string] $ConfigPath,
+        [switch] $SortByName
+    )
+  
+    if (-not (Test-Path $ConfigPath)) {
+        write-log "No files found in $configPath"
+        return
+    }
+   
+    $files = @()
+    $files += Get-ChildItem $ConfigPath\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
+    $files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
+    $files += Get-ChildItem $ConfigPath\*.json -Include "NoConfigMgr.json"
+    $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
+    $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property LastWriteTime
+
+
+    if ($SortByName) {
+        $files = $files | sort-Object -Property Name
+    }
+    return $files
+}
+
 # Gets the json files from the config\samples directory, and offers them up for selection.
 # if 'M' is selected, shows the json files from the config directory.
 function Select-Config {
@@ -1500,43 +1526,28 @@ function Select-Config {
 
 
     Write-Log -Activity "Select Config File to load"
+    $SortByName = $false
     if ($ConfigPath.EndsWith("tests")) {
-        Write-Log -SubActivity "Viewing config files located in $ConfigPath -- Sorted by Name"
-        $testMode = $true
-    }
-    else {
-        Write-Log -SubActivity "Viewing config files located in $ConfigPath -- Sorted by date"
-    }
-    
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonGood "  == Green  - Fully Deployed"
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonBad  "  == Red    - Partially Deployed"
-    Write-Host2 -ForegroundColor  $Global:Common.Colors.GenConfigNoCM    "  == Brown  - Not Deployed - New Domain"
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNormal   "  == Normal - Not Deployed - Needs existing domain"
-
-    if (-not (Test-Path $ConfigPath)) {
-        write-log "No files found in $configPath"
-        return
-    }
-
-    if ($ConfigPath.EndsWith("tests")) {
-        write-host "TestMode- Sorting By Name"
-        $testMode = $true
-    }
-
-    $files = @()
-    $files += Get-ChildItem $ConfigPath\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
-    $files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
-    $files += Get-ChildItem $ConfigPath\*.json -Include "NoConfigMgr.json"
-    $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
-    $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property LastWriteTime
-
-
-    if ($testMode) {
-        $files = $files | sort-Object -Property Name
-    }
+        $SortByName = $true
+    }    
+        
     $responseValid = $false
-    $optionArray = @()
     while ($responseValid -eq $false) {
+        $optionArray = @()
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonGood "  == Green  - Fully Deployed"
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonBad  "  == Red    - Partially Deployed"
+        Write-Host2 -ForegroundColor  $Global:Common.Colors.GenConfigNoCM    "  == Brown  - Not Deployed - New Domain"
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNormal   "  == Normal - Not Deployed - Needs existing domain"   
+
+        If ($SortByName) {
+            Write-Log -SubActivity "Viewing config files located in $ConfigPath -- Sorted by Name"
+            $files = Get-ConfigFiles -ConfigPath $ConfigPath -SortByName
+        }
+        Else{
+            Write-Log -SubActivity "Viewing config files located in $ConfigPath -- Sorted by date"
+            $files = Get-ConfigFiles -ConfigPath $ConfigPath
+        }
+
         $i = 0
         $currentVMs = Get-List -type VM
 
@@ -1598,8 +1609,17 @@ function Select-Config {
             $optionArray += $($filename.PadRight($maxLength) + " " + $savedNotes) + "%$color"
 
         }
+        if ($SortByName) {
+        $customOptions = [ordered]@{"S" = "Sort by Date%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        }else {
+            $customOptions = [ordered]@{"S" = "Sort by Name%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        }
+        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
 
-        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -split -test:$false -return
+        if ($response.ToLowerInvariant() -eq "s") {
+            $SortByName = !$SortByName
+            continue
+        }
 
         $responseValid = $true
         if (-not $response) {
