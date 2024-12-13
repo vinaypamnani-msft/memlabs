@@ -391,7 +391,7 @@
                 TargetCredential     = $Admincreds
                 TrustDirection       = 'Bidirectional'
                 TrustType            = 'Forest'
-                AllowTrustRecreation = $true
+                AllowTrustRecreation = $false
                 DependsOn            = $nextDepend
             }
 

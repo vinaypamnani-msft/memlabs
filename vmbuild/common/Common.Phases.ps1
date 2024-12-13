@@ -18,6 +18,7 @@ function Write-JobProgress {
                 $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
                 $latestActivity = $lastProgress | Select-Object -expand Activity;
                 $latestStatus = $lastProgress | Select-Object -expand StatusDescription;
+                $secondsRemaining = $lastProgress | Select-Object -expand SecondsRemaining;
                 $jobName = $job.Name
                 if ($latestActivity) {
                     $latestActivity = $latestActivity.Replace("$jobName`: ", "").Trim()
@@ -60,6 +61,9 @@ function Write-JobProgress {
                     $HistoryLine = $Job.Id.ToString() + $CurrentActivity + $latestStatus
                     if ($global:JobProgressHistory -notcontains $HistoryLine) {
                         $global:JobProgressHistory += $HistoryLine
+                        if ($secondsRemaining -gt 0) {
+                            $latestStatus += "Remaining: $secondsRemaining"
+                        }
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
                         write-host -NoNewline "$hideCursor"
                         # start-sleep -seconds 1

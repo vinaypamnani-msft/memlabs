@@ -3728,8 +3728,17 @@ class RunPkiSync {
 
 
         write-Status "Running PKISync from $($this.SourceForest) to $($this.TargetForest)"
+        $MaxRetries = 20
+        $retry  = 0
         while ($true) {
 
+            if ($retry -ge $MaxRetries) {
+                Write-Verbose "Failed to connect to target forests after $MaxRetries attempts"
+                return
+            }
+            $retry++
+
+            
             try {
                 Write-Status "Attempting to connect to $($this.TargetForest)"
                 $TargetForestContext = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext Forest, $this.TargetForest

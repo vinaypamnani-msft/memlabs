@@ -1782,6 +1782,7 @@ function Show-ExistingNetwork2 {
             Write-RedX "Could not find domain $response"
             continue
         }
+        $domain = $response
 
         Write-Log -Activity -NoNewLine "Confirm selection of domain $response"
         $response = Read-YesorNoWithTimeout -Prompt "Modify existing VMs, or Add new VMs to this domain? (Y/n)" -HideHelp -Default "y"
