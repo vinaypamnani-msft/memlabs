@@ -1304,8 +1304,8 @@ $global:VM_Config = {
                     }
 
                     try {
-                    "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
-                    Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+                        "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
+                        Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
                     }
                     catch {
                         $data = "Could not run Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop"
@@ -1349,7 +1349,9 @@ $global:VM_Config = {
                         }
                         else {
                             $data | Out-File $log -Append
-                            Write-Error $data
+                            if ($data -is [String]) {
+                                Write-Error $data
+                            }
                             return $data
                         }
                     }
@@ -1359,7 +1361,9 @@ $global:VM_Config = {
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 $error_message | Out-File $log -Append
-                Write-Error $error_message
+                if ($error_message -is [String]) {
+                    Write-Error $error_message
+                }
                 return $error_message
             }
         }
@@ -1802,7 +1806,12 @@ $global:VM_Config = {
                 }
                 else {
                     if ($noStatus) {
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress. Polls: $dscStatusPolls Failed Heartbeats: $failedHeartbeats Status: $($dscStatus.ScriptBlockOutput.Status)"
+                        if ($failedHeartbeats -eq 0) {
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress. Polls: $dscStatusPolls Status: $($dscStatus.ScriptBlockOutput.Status)"
+                        }
+                        else {
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Waiting for job progress. Failed Heartbeats: $failedHeartbeats Polls: $dscStatusPolls  Status: $($dscStatus.ScriptBlockOutput.Status)"
+                        }
                     }
                     else {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $currentStatus

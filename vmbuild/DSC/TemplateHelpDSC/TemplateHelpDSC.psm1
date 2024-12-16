@@ -20,22 +20,26 @@ function Invoke-DownloadFile {
         $dirname = Split-Path $dest -Parent
         New-Item -ItemType Directory -Force -Path $dirname
         try {
-            Start-BitsTransfer -Source $url -Destination $dest -Priority Foreground -ErrorAction Stop
+            $wc = New-Object System.Net.WebClient
+            $wc.DownloadFile($url, $dest)
+            #Start-BitsTransfer -Source $url -Destination $dest -Priority Foreground -ErrorAction Stop
         }
         catch {
-            Write-Status "Failed Downloading $url to $dest. Retrying"
+            Write-Verbose $_
+            Write-Status "Failed Downloading $url to $dest Using WebClient. Retrying using Start-BitsTransfer"
             ipconfig /flushdns
-            start-sleep -seconds 60
             try {
                 Start-BitsTransfer -Source $url -Destination $dest -Priority Foreground -ErrorAction Stop
             }
             catch {
                 try {
                     Write-Status "Failed Downloading $url to $dest. Retrying with Invoke-WebRequest"
+                    Write-Verbose $_
                     Invoke-WebRequest -Uri $url -OutFile $dest -ErrorAction Stop
                     #Start-BitsTransfer -Source $odbcurl -Destination $_odbcpath -Priority Foreground -ErrorAction Stop
                 }
                 catch {
+                    Write-Verbose $_
                     $ErrorMessage = $_.Exception.Message
                     # Force reboot
                     #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
@@ -46,6 +50,13 @@ function Invoke-DownloadFile {
                 }
             }
         }        
+    }
+
+    if ((Test-Path $dest)) {
+        write-status "Download of $url Succeeded"
+    }
+    else {
+        write-status "Failed to Download $url Destination file $dest missing."
     }
 
 }
@@ -1091,6 +1102,10 @@ class DownloadSCCM {
         $cmsourcepath = "c:\$_CM"
         Write-Status "Downloading [$_CMURL] $_CM installation source... to $cmpath"
 
+        if (Test-Path $cmpath) {
+            stop-process -name $_CM -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $cmpath -Recurse -Force | Out-Null
+        }
         Invoke-DownloadFile $_CMURL $cmpath
         
         if (Test-Path $cmsourcepath) {
@@ -1103,14 +1118,20 @@ class DownloadSCCM {
             if (($_CMURL -like "*MCM_*") -or ($_CMURL -like "*go.microsoft.com*")) {
                 $size = (Get-Item $cmpath).length / 1GB
                 if ($size -gt 1) {
-                    Start-Process -Filepath ($cmpath) -ArgumentList ('-d' + $cmsourcepath + ' -s2') -Wait
+                    Write-Status "Extracting $cmpath to $cmsourcepath using: Start-Process -Filepath ($cmpath) -ArgumentList ('-d' + $cmsourcepath + ' -s2') -Wait"
+                    $process = Start-Process -Filepath ($cmpath) -ArgumentList ('-d' + $cmsourcepath + ' -s2') -Wait -PassThru
+                    Write-Status "$cmPath return code: $($process.ExitCode)"
                 }
                 else {
-                    Start-Process -Filepath ($cmpath) -ArgumentList ('/extract:"' + $cmsourcepath + '" /quiet') -Wait
+                    Write-Status "Extracting $cmpath to $cmsourcepath using: Start-Process -Filepath ($cmpath) -ArgumentList ('/extract:"' + $cmsourcepath + '" /quiet') -Wait"
+                    $process = Start-Process -Filepath ($cmpath) -ArgumentList ('/extract:"' + $cmsourcepath + '" /quiet') -Wait -PassThru
+                    Write-Status "$cmPath return code: $($process.ExitCode)"
                 }
             }
             else {
-                Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -Wait
+                Write-Status "Extracting $cmpath to $cmsourcepath using: Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -Wait"
+                $process = Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -Wait -PassThru
+                Write-Status "$cmPath return code: $($process.ExitCode)"
             }
         }
     }
@@ -1120,6 +1141,16 @@ class DownloadSCCM {
         $_CM = $this.CM
         $cmpath = "c:\temp\$_CM.exe"
         if (!(Test-Path $cmpath)) {
+            return $false
+        }
+
+        # if C:\CMCB doesnt exist, fail
+        $cmsourcepath = "c:\$_CM"
+        if (!(Test-Path $cmsourcepath)) {
+            return $false
+        }
+        # if C:\CMCB is empty, fail
+        if (!(Test-Path ($cmsourcepath+"\*"))) {
             return $false
         }
 
@@ -2543,6 +2574,7 @@ class FileReadAccessShare {
         $_Path = $this.Path
 
         Write-Status  "Creating SMB Share $_Name -> $_Path"
+        New-Item -ItemType Directory -Force -Path $_Path
         New-SMBShare -Name $_Name -Path $_Path
     }
 
@@ -3730,7 +3762,7 @@ class RunPkiSync {
 
         write-Status "Running PKISync from $($this.SourceForest) to $($this.TargetForest)"
         $MaxRetries = 20
-        $retry  = 0
+        $retry = 0
         while ($true) {
 
             if ($retry -ge $MaxRetries) {
