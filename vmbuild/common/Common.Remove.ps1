@@ -213,17 +213,27 @@ function Remove-ForestTrust {
                     )
                     & netdom trust $($forestDomain) /d:$($DomainName) /userD:admin /passwordD:$pw /userO:admin /PasswordO:$pw /verify /twoway
                 }
-                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlockTest -ArgumentList @($forestDomain, $domainName,$($Common.LocalAdmin.GetNetworkCredential().Password)) -SuppressLog  
-                if ($result.ScriptBlockOutput -contains "has been successfully verified  The command completed successfully.") {
+                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlockTest -ArgumentList @($forestDomain, $domainName, $($Common.LocalAdmin.GetNetworkCredential().Password)) -SuppressLog  
+
+                write-host -verbose "Netdom results: $($result.ScriptBlockOutput)"
+                if ($result.ScriptBlockOutput -and  $result.ScriptBlockOutput -like "*has been successfully verified*") {
+
                     if ($IfBroken) {
-                        write-log "Trust Verified Successfully"
+                        Write-GreenCheck "Trust Verified Successfully"
                         return
                     } 
+                    else {
+                        Write-OrangePoint "Trust Verified Successfully. Deleting Anyway"
+                    }
                 }
-                write-log $result.ScriptBlockOutput                
+                else {
+
+                    Write-RedX "Trust is not working. Removing."
+                    write-log $result.ScriptBlockOutput                
+                }
 
                 Write-Log "Removing Trust on $DC1 for '$otherDomain'" -Activity
-
+             
                 
                 $scriptBlock1 = {
                     param(

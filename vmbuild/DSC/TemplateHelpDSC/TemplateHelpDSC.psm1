@@ -1350,6 +1350,7 @@ function Write-Status {
 
             $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""Status"" thread=""$tid"" file=""$file"">"
             $logText | Out-File $StatusLog -Append -Encoding utf8
+            Write-Progress -Activity $caller -Status $Text -PercentComplete 50
         }
         catch {
             try {
@@ -1868,7 +1869,7 @@ class InitializeDisks {
 
         # Move CD-ROM drive to Z:
         if (-not (Get-Volume -DriveLetter "Z" -ErrorAction SilentlyContinue)) {
-            Write-Verbose "Moving CD-ROM drive to Z:.."
+            Write-Status "Moving CD-ROM drive to Z:.."
             Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter = 'Z:' }
         }
 

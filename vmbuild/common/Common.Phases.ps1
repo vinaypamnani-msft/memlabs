@@ -62,8 +62,9 @@ function Write-JobProgress {
                     if ($global:JobProgressHistory -notcontains $HistoryLine) {
                         $global:JobProgressHistory += $HistoryLine
                         if ($secondsRemaining -gt 0) {
-                            $latestStatus += "Remaining: $secondsRemaining"
+                            $latestStatus += " (Remaining: $secondsRemaining)"
                         }
+                        #TIMHE
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
                         write-host -NoNewline "$hideCursor"
                         # start-sleep -seconds 1
