@@ -231,7 +231,8 @@ function Select-ConfigMenu {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"3" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"3" = '$HIDDEN' }
+        $customOptions += [ordered]@{"L" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($Global:common.Devbranch) {
             $customOptions += [ordered]@{"4" = "Load TEST config from File%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
         }
@@ -275,6 +276,7 @@ function Select-ConfigMenu {
             "1" { $SelectedConfig = Show-ExistingNetwork2 }
             #"3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "3" { $SelectedConfig = Select-Config $configDir -NoMore }
+            "l" { $SelectedConfig = Select-Config $configDir -NoMore }
             "4" {
                 $testPath = Join-Path $configDir "tests"
                 $SelectedConfig = Select-Config $testPath -NoMore

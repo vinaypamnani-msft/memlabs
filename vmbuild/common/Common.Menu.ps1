@@ -58,6 +58,10 @@ function Get-Menu {
                     }
                 }
 
+                if ($TextValue[0].StartsWith("$")) {
+                    continue
+                }
+
                 if ($item.StartsWith("*")) {
                     write-host2 -ForeGroundColor $color1 $TextValue[0]
                     continue
@@ -113,6 +117,9 @@ function Get-Menu {
                     }
                 }
 
+                if ($TextValue[0].StartsWith("$")) {
+                    continue
+                }
                 if ($item.StartsWith("*")) {
                     write-host2 -ForeGroundColor $color1 $TextValue[0]
                     continue
