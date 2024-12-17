@@ -85,7 +85,14 @@ Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\flpydisk" -Name 
 
 Update-Log "Enable RDP and disable NLA"
 Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "fDenyTSConnections" -Value 0
+Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "updateRDStatus" -Value 1
 (Get-WmiObject -class Win32_TSGeneralSetting -Namespace root\cimv2\terminalservices -Filter "TerminalName='RDP-tcp'").SetUserAuthenticationRequired(0) | Out-Null
+
+Update-Log "     Update Win32_TerminalServiceSetting.AllowTSConnections"
+(Get-WmiObject -class Win32_TerminalServiceSetting -Namespace root\cimv2\terminalservices).SetAllowTSConnections(1, 0) | Out-Null
+
+Update-Log "     Update firewall rules for remote desktop"
+netsh advfirewall firewall set rule group="remote desktop" new enable=yes
 
 Update-Log "Set Password Expiration Policy to Never (Max Password Age = 0)"
 net accounts /MAXPWAGE:Unlimited
@@ -175,6 +182,69 @@ if ($RunOptional.IsPresent) {
         Copy-Item -Path "C:\staging\bginfo\bginfo_CLIENT.lnk" -Destination "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -Force -ErrorAction SilentlyContinue
     }
 }
+
+# download and install .NET 4.8
+# ==============================
+$url = 'https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe'
+$filename = "ndp48-x86-x64-allos-enu.exe"
+$dest = "C:\temp\$($filename)"
+
+# download
+Update-Log "Downloading .NET 4.8 from $($url) to $($dest)..."
+
+try {
+    $response = Invoke-WebRequest -Uri $url -OutFile $dest -ErrorAction Stop
+    if ($response) {
+        $response.Content.Trim()
+        Update-Log "     Download result:"
+        Update-Log "     Status Code: $($response.StatusCode)"
+        Update-Log "     Status Description: $($response.Content)"
+    }
+    else {
+        Update-Log "     response is false."
+    }
+}
+catch {
+    $errorRecord = $_
+    $statusCode = $errorRecord.Exception.Response.StatusCode.Value__
+    Update-Log "Download error: Status Code: $statusCode"
+}
+
+# check if file exists
+if (Test-Path $dest) {
+    Update-Log "     Succesfully downloaded .NET 4.8 $($dest)"
+
+    # install .NET 4.8
+    $cmd = $dest
+    $arg1 = "/q"
+    $arg2 = "/norestart"
+
+    Update-Log "Installing .NET $($filename)..."
+
+    & $cmd $arg1 $arg2 | Out-Null
+
+    $processName = ($filename -split ".exe")[0]
+
+    Update-Log "     processName: $($processName)"
+
+    while ($ture) {
+        Start-Sleep -Seconds 15
+
+        Update-Log "     Checking .NET installation process"
+        $process = GetProcess $processName -ErrorAction SlientlyContinue
+        if ($null -eq $process) {
+            break
+        }
+    }
+
+    Start-Sleep -Seconds 120 ## Buffer Wait
+    Update-Log ".NET $($filename) Installed Successrfully!"
+}
+else {
+    Update-Log "     Failed to download .NET 4.8."
+}
+
+
 
 # Completion
 # ============
