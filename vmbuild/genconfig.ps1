@@ -1320,7 +1320,7 @@ function select-NewDomainName {
     )
 
     Write-Log -Activity "Select a pre-approved domain name from the list, or use 'C' for a custom name." -NoNewLine
-    if ($ConfigToCheck.virtualMachines.role -contains "DC") {
+    if (-not $ConfigToCheck -or $ConfigToCheck.virtualMachines.role -contains "DC") {
         while ($true) {
             $ValidDomainNames = Get-ValidDomainNames
 
@@ -1379,65 +1379,116 @@ function select-NewDomainName {
 }
 
 
-
-function Select-NewDomainConfig {
-
-
-    write-log -Activity "New Domain Wizard"
-    $subnetlist = Get-ValidSubnets
-
-    $domain = $null
-    $valid = $false
+function Select-DeploymentType {
     $response = $null
-    while ($valid -eq $false) {
+
+        write-log -Activity "New Domain Wizard - Change Deployment type" -NoNewLine
         $customOptions = [ordered]@{"*B1" = ""; "*BREAK1" = "---  DeploymentType%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{ "1" = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; "2" = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; "3" = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)" ; "4" = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)"; }
+        $customOptions += [ordered]@{ "1" = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "2" = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "3" = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)" }
+        $customOptions += [ordered]@{ "4" = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)" }
         $customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{ "!" = "Return to Main Menu%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+
         $response = $null
         while (-not $response) {
             Write-Host
             Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigTip "  Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
 
-            $response = Get-Menu -Prompt "Select type of deployment" -AdditionalOptions $customOptions -test:$false -return -CurrentValue "2"
+            $response = Get-Menu -Prompt "Select type of deployment" -AdditionalOptions $customOptions -test:$false -return
             if ([string]::IsNullOrWhiteSpace($response)) {
                 return
-            }
-            if ($response -eq "!") {
-                return
-            }
+            }      
+            switch ($response.ToLowerInvariant()) {
+                "1" {
+                    return "CAS and Primary"
+                }     
+                "2" {
+                    return "Primary Site only"
+                }     
+                "3" {
+                    return "Tech Preview (NO CAS)"
+                }     
+                "4" {
+                    return "No ConfigMgr"
+                } 
+            }    
+                
         }
+    
+}
 
 
-        $templateDomain = "TEMPLATE2222.com"
-        $newconfig = New-UserConfig -Domain $templateDomain -Subnet "10.234.241.0"
+function Select-NewDomainConfig {
+
+
+    $valid = $false
+
+
+    $templateDomain = "TEMPLATE2222.com"
+    $newconfig = New-UserConfig -Domain $templateDomain -Subnet "10.234.241.0"
+    $subnetlist = Get-ValidSubnets
+
+    $domainDefaults = [PSCustomObject]@{
+        DeploymentType    = "Primary Site only"
+        CMVersion         = "current-branch"
+        DomainName        = ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1)
+        Network           = ($subnetList | Select-Object -First 1)
+        DefaultClientOS   = "Windows 11 Latest"
+        DefaultServerOS   = "Server 2022"
+        DefaultSqlVersion = "Sql Server 2019"
+        IncludeClients    = $true
+        IncludeSSMSOnNONSQL = $true
+    }
+    $newconfig | Add-Member -MemberType NoteProperty -name "domainDefaults" -Value $domainDefaults -Force
+
+
+    write-log -Activity "New Domain Wizard - Default Settings"
+    #Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" 
+    Select-Options -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" 
+    
+    write-log -Activity "New Domain Wizard"
+ 
+
+    $valid = $false
+    while ($valid -eq $false) {
+        
+
         $test = $false
         $version = $null
-        switch ($response.ToLowerInvariant()) {
-            "1" {
-                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "CAS" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -SiteCode "CS1" -Quiet:$true -test:$test
-                $version = "current-branch"
+        switch ($newconfig.domainDefaults.DeploymentType) {
+            "CAS and Primary" {
+                Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "CAS" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -SiteCode "CS1" -Quiet:$true -test:$test
+                if ($newconfig.domainDefaults.CMVersion -eq "tech-preview") {
+                    $newconfig.domainDefaults.CMVersion = "current-branch"
+                }
             }
 
-            "2" {
-                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -SiteCode "PS1" -Quiet:$true -test:$test
-                $version = "current-branch"
+            "Primary Site only" {
+                Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "Primary" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -SiteCode "PS1" -Quiet:$true -test:$test
+                if ($newconfig.domainDefaults.CMVersion -eq "tech-preview") {
+                    $newconfig.domainDefaults.CMVersion = "current-branch"
+                }                
 
             }
-            "3" {
-                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
-                Add-NewVMForRole -Role "Primary" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -SiteCode "CTP" -Quiet:$true -test:$test
+            "Tech Preview (NO CAS)" {
+                if ($newconfig.domainDefaults.CMVersion -ne "tech-preview") {
+                    $newconfig.domainDefaults.CMVersion = "tech-preview"
+                }
+
                 $usedPrefixes = Get-List -Type UniquePrefix
                 if ("CTP-" -notin $usedPrefixes) {
                     $prefix = "CTP-"
-                    $domain = "techpreview.com"
+                    $newconfig.domainDefaults.DomainName = "techpreview.com"
                 }
-                $version = "tech-preview"
+                Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
+                Add-NewVMForRole -Role "Primary" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -SiteCode "CTP" -Quiet:$true -test:$test
+                                              
             }
-            "4" {
-                Add-NewVMForRole -Role "DC" -Domain $templateDomain -ConfigToModify $newconfig -OperatingSystem "Server 2022" -Quiet:$true -test:$test
+            "No ConfigMgr" {
+                Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
             }
         }
         $valid = $true
@@ -1448,16 +1499,16 @@ function Select-NewDomainConfig {
         if ($valid) {
             $valid = $false
             while ($valid -eq $false) {
-                if (-not $domain) {
-                    $domain = select-NewDomainName -ConfigToCheck $newConfig
+                if (-not $newconfig.domainDefaults.DomainName) {
+                    $newconfig.domainDefaults.DomainName = select-NewDomainName -ConfigToCheck $newConfig
                 }
                 if (-not $prefix) {
-                    $prefix = get-PrefixForDomain -Domain $domain
+                    $prefix = get-PrefixForDomain -Domain $newconfig.domainDefaults.DomainName
                 }
                 Write-Verbose "Prefix = $prefix"
-                $newConfig.vmOptions.domainName = $domain
+                $newConfig.vmOptions.domainName = $newconfig.domainDefaults.DomainName
                 $newConfig.vmOptions.prefix = $prefix
-                $netbiosName = $domain.Split(".")[0]
+                $netbiosName = $newconfig.domainDefaults.DomainName.Split(".")[0]
                 $newConfig.vmOptions.DomainNetBiosName = $netbiosName
                 if ($version) {
                     $newConfig.cmOptions.version = $version
@@ -1474,30 +1525,18 @@ function Select-NewDomainConfig {
             }
         }
 
-        Add-NewVMForRole -Role "DomainMember" -Domain $domain -ConfigToModify $newconfig -OperatingSystem "Windows 10 Latest (64-bit)" -Quiet:$true -test:$test
-        Add-NewVMForRole -Role "DomainMember" -Domain $domain -ConfigToModify $newconfig -OperatingSystem "Windows 11 Latest" -Quiet:$true -test:$test
+        if ($newconfig.domainDefaults.IncludeClients) {
+        Add-NewVMForRole -Role "DomainMember" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultClientOS -Quiet:$true -test:$test
+        Add-NewVMForRole -Role "DomainMember" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultClientOS -Quiet:$true -test:$test
+        }
 
 
         if ($valid) {
-            Show-SubnetNote
-
-            $valid = $false
-            while ($valid -eq $false) {
-                
-                $customOptions = @{ "C" = "Custom Network" }
-                $network = $null
-                while (-not $network) {
-                    Write-Log -Activity "Select the DEFAULT network for new VMs" -NoNewLine
-                    $subnetlistEnhanced = Get-EnhancedSubnetList -subnetList $subnetList -ConfigToCheck $newConfig
-                    $network = Get-Menu -Prompt "Select Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -CurrentValue ($subnetList | Select-Object -First 1) -test:$test -Split
-                    if ($network -and ($network.ToLowerInvariant() -eq "c")) {
-                        $network = Read-Host2 -Prompt "Enter Custom Network (eg 192.168.1.0):"
-                    }
-                }
-                $newConfig.vmOptions.network = $network
+           
+                $newConfig.vmOptions.network = $newconfig.domainDefaults.network
                 $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
             }
-        }
+        
     }
     return $newConfig
 }
@@ -1630,7 +1669,7 @@ function Select-Config {
         else {
             $customOptions = [ordered]@{"S" = "Sort by Name%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
-        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
+        $response = -prompt "Which config do you want to load" -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
 
         if ($response.ToLowerInvariant() -eq "s") {
             $SortByName = !$SortByName
@@ -1744,15 +1783,15 @@ function Show-ExistingNetwork2 {
     while ($true) {
 
         Write-log -Activity "Create new domain -or- modify existing domain"
-        $customOptions = [ordered]@{"*B" = ""; "*BREAK" = "---  Modify Existing Domains%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions = [ordered]@{"*B1" = ""; "*BREAK1" = "---  New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Modify Existing Domains%$($Global:Common.Colors.GenConfigHeader)" }
         $i = 0
         foreach ($domain in $domainList) {
             $i++
             $customOptions += [ordered]@{ "$i" = "$domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
 
-        $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "---  New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
         $customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{ "!" = "Return to Main Menu%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         #$domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -additionalOptions $customOptions -Split -test:$false -return -CurrentValue "N"
@@ -2159,12 +2198,14 @@ function Select-Subnet {
         [Parameter(Mandatory = $false, HelpMessage = "CurrentNetworkIsValid")]
         [bool] $CurrentNetworkIsValid = $true,
         [Parameter(Mandatory = $false, HelpMessage = "Current VM")]
-        [object] $CurrentVM = $null
+        [object] $CurrentVM = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Current Value")]
+        [object] $CurrentValue = $null
     )
 
 
     #Get-PSCallStack | out-host
-    if ($configToCheck.virtualMachines.role -contains "DC") {
+    if (-not $configToCheck -or $configToCheck.virtualMachines.role -contains "DC") {
         if ($CurrentNetworkIsValid) {
             if ($CurrentVM) {
                 $subnetlist = Get-ValidSubnets -ConfigToCheck $configToCheck -vmToCheck $CurrentVM
@@ -2183,12 +2224,17 @@ function Select-Subnet {
         }
         $customOptions = @{ "C" = "Custom Subnet" }
         $network = $null
-        if ($CurrentNetworkIsValid) {
-            $current = $configToCheck.vmOptions.network
+        if (-not $CurrentValue) {
+            if ($CurrentNetworkIsValid) {
+                $current = $configToCheck.vmOptions.network
+            }
+            else {
+                $subnetList = $subnetList | where-object { $_ -ne $configToCheck.vmOptions.network }
+                $current = $subnetlist[0]
+            }
         }
         else {
-            $subnetList = $subnetList | where-object { $_ -ne $configToCheck.vmOptions.network }
-            $current = $subnetlist[0]
+            $current = $CurrentValue
         }
         while (-not $network) {
             $subnetlistEnhanced = Get-EnhancedSubnetList -subnetList $subnetlist -ConfigToCheck $configToCheck
@@ -2327,7 +2373,9 @@ function Get-EnhancedSubnetList {
 
         if (-not $domain) {
             $domainFromSubnet = (((Get-List -type network | Where-Object { $_.network -eq $sb }).domain) -join ",")
-            $entry += " [$domainFromSubnet]"
+            if ($domainFromSubnet) {
+                $entry += " [$domainFromSubnet]"
+            }
         }
 
         if ([string]::IsNullOrWhiteSpace($SiteCodes)) {
@@ -2335,7 +2383,9 @@ function Get-EnhancedSubnetList {
             #$validEntryFound = $true
         }
         else {
-            $entry = $entry + " [$($SiteCodes -join ",")]"
+            if ($SiteCodes) {
+                $entry = $entry + " [$($SiteCodes -join ",")]"
+            }
             #$subnetListModified += "$($sb.PadRight($padding))$($SiteCodes -join ",")"
         }
         $machines = @()
@@ -2347,7 +2397,9 @@ function Get-EnhancedSubnetList {
             }
         }
         if ($machines) {
-            $entry = $entry + " [$($machines.vmName -join ", ")]"
+            if ($machines.vmName) {
+                $entry = $entry + " [$($machines.vmName -join ", ")]"
+            }
         }
         if ($entry) {
             $subnetListModified += "$($sb.PadRight($padding))$entry"
@@ -2726,6 +2778,70 @@ Function Get-SupportedOperatingSystemsForRole {
     return $AllList
 }
 
+
+Function Get-OperatingSystemMenuClient {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+
+    $valid = $false
+    while ($valid -eq $false) {
+        $OSList = Get-SupportedOperatingSystemsForRole -role "DomainMember (Client)" 
+        if ($null -eq $OSList ) {
+            return
+        }
+
+        Write-Log -Activity -NoNewLine "Operating System Selection"
+
+        $property."$name" = Get-Menu "Select OS Version" $OSList $CurrentValue -Test:$false
+        if (Get-TestResult -SuccessOnWarning) {
+            return
+        }
+        else {
+            if ($property."$name" -eq $value) {
+                return
+            }
+        }
+    }
+}
+
+Function Get-OperatingSystemMenuServer {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+
+    $valid = $false
+    while ($valid -eq $false) {
+        $OSList = Get-SupportedOperatingSystemsForRole -role "DomainMember (Server)" 
+        if ($null -eq $OSList ) {
+            return
+        }
+
+        Write-Log -Activity -NoNewLine "Operating System Selection"
+
+        $property."$name" = Get-Menu "Select OS Version" $OSList $CurrentValue -Test:$false
+        if (Get-TestResult -SuccessOnWarning) {
+            return
+        }
+        else {
+            if ($property."$name" -eq $value) {
+                return
+            }
+        }
+    }
+}
 
 Function Get-OperatingSystemMenu {
     [CmdletBinding()]
@@ -4132,8 +4248,14 @@ function Get-SortedProperties {
     if ($members.Name -contains "vmName") {
         $sorted += "vmName"
     }
+    if ($members.Name -contains "DeploymentType") {
+        $sorted += "DeploymentType"
+    }
     if ($members.Name -contains "domainName") {
         $sorted += "domainName"
+    }
+    if ($members.Name -contains "CMVersion") {
+        $sorted += "CMVersion"
     }
     if ($members.Name -contains "prefix") {
         $sorted += "prefix"
@@ -4141,13 +4263,27 @@ function Get-SortedProperties {
     if ($members.Name -contains "network") {
         $sorted += "network"
     }
+    if ($members.Name -contains "DefaultServerOS") {
+        $sorted += "DefaultServerOS"
+    }
+    if ($members.Name -contains "DefaultClientOS") {
+        $sorted += "DefaultClientOS"
+    }
+    if ($members.Name -contains "DefaultSqlVersion") {
+        $sorted += "DefaultSqlVersion"
+    }
+    if ($members.Name -contains "IncludeClients") {
+        $sorted += "IncludeClients"
+    }
+    if ($members.Name -contains "IncludeSSMSOnNONSQL") {
+        $sorted += "IncludeSSMSOnNONSQL"
+    }
     if ($members.Name -contains "adminName") {
         $sorted += "adminName"
     }
     if ($members.Name -contains "basePath") {
         $sorted += "basePath"
     }
-
     if ($members.Name -contains "domainUser") {
         $sorted += "domainUser"
     }
@@ -4263,9 +4399,16 @@ function Get-SortedProperties {
         "sqlPort" { }
         "additionalDisks" { }
         "cmInstallDir" { }
+        "DeploymentType" { }
         "domainName" { }
         "prefix" { }
+        "CMVersion" { }
         "network" { }
+        "DefaultServerOS" { }
+        "DefaultClientOS" { }
+        "DefaultSqlVersion" { }
+        "IncludeClients" { }
+        "IncludeSSMSOnNONSQL" { }  
         "adminName" { }
         "basePath" { }
         "remoteSQLVM" {}
@@ -4618,6 +4761,14 @@ function Select-Options {
                     }
                     continue MainLoop
                 }
+                "DefaultClientOS" {
+                    Get-OperatingSystemMenuClient -property $property -name $name -CurrentValue $value                    
+                    continue MainLoop
+                }
+                "DefaultServerOS" {
+                    Get-OperatingSystemMenuServer -property $property -name $name -CurrentValue $value
+                    continue MainLoop
+                }
                 "remoteContentLibVM" {
                     $property.remoteContentLibVM = select-FileServerMenu -HA:$true -CurrentValue $value
                     continue MainLoop
@@ -4633,10 +4784,15 @@ function Select-Options {
                 "domainName" {
                     $domain = select-NewDomainName
                     $property.domainName = $domain
-                    $property.prefix = get-PrefixForDomain -Domain $domain
-                    $netbiosName = $domain.Split(".")[0]
-                    $property.DomainNetBiosName = $netbiosName
-                    Get-TestResult -SuccessOnError | out-null
+                    if ($property.prefix) {
+                        $property.prefix = get-PrefixForDomain -Domain $domain
+                    }
+                    if ($property.DoomainNetBiosName) {
+                        $netbiosName = $domain.Split(".")[0]
+                        $property.DomainNetBiosName = $netbiosName
+                    
+                        Get-TestResult -SuccessOnError | out-null
+                    }
                     continue MainLoop
                 }
                 "timeZone" {
@@ -4656,7 +4812,7 @@ function Select-Options {
                         $network = Get-NetworkForVM -vm $property
                     }
                     else {
-                        $network = Select-Subnet
+                        $network = Select-Subnet -CurrentValue $property.Network
                     }
 
                     if ($network -eq $global:config.vmOptions.network) {
@@ -4691,6 +4847,17 @@ function Select-Options {
                     continue MainLoop
                 }
                 "sqlVersion" {
+                    Get-SqlVersionMenu -property $property -name $name -CurrentValue $value
+                    continue MainLoop
+                }
+                "DeploymentType" {
+                    $dt = Select-DeploymentType
+                    if ($dt) {
+                        $property.DeploymentType = $dt
+                    }
+                    continue MainLoop
+                }
+                "DefaultsqlVersion" {
                     Get-SqlVersionMenu -property $property -name $name -CurrentValue $value
                     continue MainLoop
                 }
@@ -4745,6 +4912,10 @@ function Select-Options {
                         #VM was not deleted.. We can still edit other properties.
                         continue MainLoop
                     }
+                }
+                "CMVersion" {
+                    Get-CMVersionMenu -property $property -name $name -CurrentValue $value
+                    continue MainLoop
                 }
                 "version" {
                     Get-CMVersionMenu -property $property -name $name -CurrentValue $value
