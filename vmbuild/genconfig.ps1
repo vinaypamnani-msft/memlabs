@@ -231,9 +231,11 @@ function Select-ConfigMenu {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"3" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"3" = '$HIDDEN' }
+        $customOptions += [ordered]@{"L" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($Global:common.Devbranch) {
-            $customOptions += [ordered]@{"4" = "Load TEST config from File%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
+            $customOptions += [ordered]@{"4" = '$HIDDEN'; }
+            $customOptions += [ordered]@{"X" = "Load TEST config from File%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
         }
 
 
@@ -243,7 +245,7 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"D" = "Manage Domains [Start/Stop/Snapshot/Delete Virtual Machines]%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         #$customOptions += [ordered]@{"E" = "Toggle <Enter> to finalize prompts%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; }
         #$customOptions += [ordered]@{"D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs(C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         
 
 
@@ -275,6 +277,7 @@ function Select-ConfigMenu {
             "1" { $SelectedConfig = Show-ExistingNetwork2 }
             #"3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
             "3" { $SelectedConfig = Select-Config $configDir -NoMore }
+            "l" { $SelectedConfig = Select-Config $configDir -NoMore }
             "4" {
                 $testPath = Join-Path $configDir "tests"
                 $SelectedConfig = Select-Config $testPath -NoMore
@@ -1782,6 +1785,7 @@ function Show-ExistingNetwork2 {
             Write-RedX "Could not find domain $response"
             continue
         }
+        $domain = $response
 
         Write-Log -Activity -NoNewLine "Confirm selection of domain $response"
         $response = Read-YesorNoWithTimeout -Prompt "Modify existing VMs, or Add new VMs to this domain? (Y/n)" -HideHelp -Default "y"
@@ -6635,19 +6639,6 @@ function Save-Config {
     $filename = Split-Path -Path $fileName -Leaf
     Write-Log -HostOnly -Verbose "Returning File: $fileName"
     return $filename
-}
-
-# Automatically update DSC.Zip
-if ($Common.DevBranch) {
-    $psdLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
-    $psmLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
-    if (Test-Path ".\DSC\DSC.zip") {
-        $zipLastWriteTime = (Get-ChildItem ".\DSC\DSC.zip").LastWriteTime + (New-TimeSpan -Minutes 1)
-    }
-    if (-not $zipLastWriteTime -or ($psdLastWriteTime -gt $zipLastWriteTime) -or ($psmLastWriteTime -gt $zipLastWriteTime)) {
-        powershell .\dsc\createGuestDscZip.ps1 | Out-Host
-        Set-Location $PSScriptRoot | Out-Null
-    }
 }
 
 $Global:SavedConfig = $null

@@ -212,6 +212,22 @@ try {
     Set-QuickEdit -DisableQuickEdit
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
+# Automatically update DSC.Zip
+if ($Common.DevBranch) {
+    $psdLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
+    $psmLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
+    if (Test-Path ".\DSC\DSC.zip") {
+        $zipLastWriteTime = (Get-ChildItem ".\DSC\DSC.zip").LastWriteTime + (New-TimeSpan -Minutes 1)
+    }
+    if (-not $zipLastWriteTime -or ($psdLastWriteTime -gt $zipLastWriteTime) -or ($psmLastWriteTime -gt $zipLastWriteTime)) {
+        powershell .\dsc\createGuestDscZip.ps1 | Out-Host
+        Set-Location $PSScriptRoot | Out-Null
+        return
+    }
+}
+
+
+
     ### Run maintenance
     if (-not $Configuration) {
         Start-Maintenance

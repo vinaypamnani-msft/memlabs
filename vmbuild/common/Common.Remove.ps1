@@ -187,24 +187,54 @@ function Remove-ForestTrust {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
         [Parameter()]
+        [switch] $IfBroken,
+        [Parameter()]
         [switch] $WhatIf
-    )
-
+        
+    )    
     $TrustedForests = Get-List -Type ForestTrust | Where-Object { $_.ForestTrust -eq $DomainName -or $_.Domain -eq $DomainName }
     
     if ($TrustedForests) {
-
         foreach ($TrustedForest in $TrustedForests) {
-
+                        
             $DC1 = get-list -type VM -DomainName $TrustedForest.ForestTrust | Where-Object { $_.Role -eq "DC" }
             $DC2 = get-list -type VM -DomainName $TrustedForest.domain | Where-Object { $_.Role -eq "DC" }
 
             if ($DC1) {
                 $forestDomain = $TrustedForest.ForestTrust
                 $domainName = $TrustedForest.domain
-                Write-Log "Removing Trust on $DC1 for '$otherDomain'" -Activity
-
                 start-vm2 -Name $DC1.vmName
+
+                $scriptBlockTest = {
+                    param(
+                        [String]$forestDomain,
+                        [String]$DomainName,
+                        [String]$pw
+                    )
+                    & netdom trust $($forestDomain) /d:$($DomainName) /userD:admin /passwordD:$pw /userO:admin /PasswordO:$pw /verify /twoway
+                }
+                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlockTest -ArgumentList @($forestDomain, $domainName, $($Common.LocalAdmin.GetNetworkCredential().Password)) -SuppressLog  
+
+                write-host -verbose "Netdom results: $($result.ScriptBlockOutput)"
+                if ($result.ScriptBlockOutput -and  $result.ScriptBlockOutput -like "*has been successfully verified*") {
+
+                    if ($IfBroken) {
+                        Write-GreenCheck "Trust Verified Successfully"
+                        return
+                    } 
+                    else {
+                        Write-OrangePoint "Trust Verified Successfully. Deleting Anyway"
+                    }
+                }
+                else {
+
+                    Write-RedX "Trust is not working. Removing."
+                    write-log $result.ScriptBlockOutput                
+                }
+
+                Write-Log "Removing Trust on $DC1 for '$otherDomain'" -Activity
+             
+                
                 $scriptBlock1 = {
                     param(
                         [String]$forestDomain,
