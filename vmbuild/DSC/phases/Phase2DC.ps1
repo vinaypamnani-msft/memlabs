@@ -21,6 +21,19 @@
     $DomainName = $deployConfig.parameters.domainName
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
+
+    $usePKI = $false
+    $prePopulate = $false
+    if ($deployConfig.cmOptions) {
+        if ($deployConfig.cmOptions.UsePKI) {
+            $usePKI = $deployConfig.cmOptions.UsePKI
+        }
+        if ($deployConfig.cmOptions.PrePopulateObjects) {
+            $prePopulate = $deployConfig.cmOptions.PrePopulateObjects
+        }
+    }
+
+
     # This VM
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
@@ -167,17 +180,99 @@
             Status    = "Creating user accounts and groups"
         }
 
-        ADOrganizationalUnit 'MEMLABS-Users'
-        {
-            Name                            = "MEMLABS-Users"
-            Path                            = $DNName
-            ProtectedFromAccidentalDeletion = $false
-            Description                     = "MEMLABS auto created users"
-            Ensure                          = 'Present'
-            DependsOn                       = "[WriteStatus]CreateAccounts"
+        $nextDepend = "[WriteStatus]CreateAccounts"
+
+        WriteStatus InstallDotNet {
+            DependsOn = $nextDepend
+            Status    = "Installing .NET 4.8"
         }
 
-        $nextDepend = "[ADOrganizationalUnit]MEMLABS-Users"
+        InstallDotNet4 DotNet {
+            DownloadUrl = $deployConfig.URLS.DotNet
+            FileName    = "ndp48-x86-x64-allos-enu.exe"
+            NetVersion  = "528040"
+            Ensure      = "Present"
+            DependsOn   = "[WriteStatus]InstallDotNet"
+        }
+
+        $nextDepend = "[InstallDotNet4]DotNet"
+        
+        if ($prePopulate) {
+            ADOrganizationalUnit 'MEMLABS-Users'
+            {
+                Name                            = "MEMLABS-Users"
+                Path                            = $DNName
+                ProtectedFromAccidentalDeletion = $false
+                Description                     = "MEMLABS auto created users"
+                Ensure                          = 'Present'
+                DependsOn                       = $nextDepend
+            }
+
+            $nextDepend = "[ADOrganizationalUnit]MEMLABS-Users"
+
+             # Loop to create 50 users
+             for ($i = 1; $i -le 50; $i++) {
+                # Generate a random username
+                $Username = "MEMLABS-User" + ([System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+            
+            
+                # Create the new user
+                ADUser "MEMLABS-User$($i)" {
+                    Ensure               = 'Present'
+                    UserPrincipalName    = $Username + '@' + $DomainName
+                    UserName             = $Username
+                    Password             = $DomainCreds
+                    PasswordNeverResets  = $true
+                    PasswordNeverExpires = $true
+                    CannotChangePassword = $true
+                    DomainName           = $DomainName
+                    DependsOn            = $nextDepend
+                    Path                 = "OU=MEMLABS-Users,$DNName"
+                }
+            }
+
+
+            # List of department names
+            $Departments = @(
+                "HR",
+                "Finance",
+                "IT",
+                "Marketing",
+                "Sales",
+                "Operations",
+                "Legal",
+                "Customer Service",
+                "Engineering",
+                "Product Management",
+                "Research and Development",
+                "Quality Assurance",
+                "Supply Chain",
+                "Administration",
+                "Facilities",
+                "Procurement",
+                "Training",
+                "Security",
+                "Public Relations",
+                "Compliance"
+            )
+
+            # Loop to create security groups for each department
+            foreach ($Department in $Departments) {
+                $GroupName = "MEMLABS-$Department-SecurityGroup"
+
+                ADGroup $Department {
+                    Ensure      = 'Present'
+                    GroupName   = $GroupName
+                    GroupScope  = "Global"
+                    Category    = "Security"
+                    Description = $GroupName
+                    DependsOn   = $nextDepend
+                    Path        = "OU=MEMLABS-Users,$DNName"
+                }
+
+            }
+        }
+
         $adObjectDependency = @($nextDepend)
         $i = 0
         foreach ($user in $DomainAccounts) {
@@ -211,68 +306,7 @@
             $adObjectDependency += "[ADUser]User$($i)"
            
         }
-
-        # Loop to create 50 users
-        for ($i = 1; $i -le 50; $i++) {
-            # Generate a random username
-            $Username = "MEMLABS-User" + ([System.Guid]::NewGuid().ToString("N").Substring(0, 8))
-            
-            
-            # Create the new user
-            ADUser "MEMLABS-User$($i)" {
-                Ensure               = 'Present'
-                UserPrincipalName    = $Username + '@' + $DomainName
-                UserName             = $Username
-                Password             = $DomainCreds
-                PasswordNeverResets  = $true
-                PasswordNeverExpires = $true
-                CannotChangePassword = $true
-                DomainName           = $DomainName
-                DependsOn            = $nextDepend
-                Path                 = "OU=MEMLABS-Users,$DNName"
-            }
-        }
-
-
-        # List of department names
-        $Departments = @(
-            "HR",
-            "Finance",
-            "IT",
-            "Marketing",
-            "Sales",
-            "Operations",
-            "Legal",
-            "Customer Service",
-            "Engineering",
-            "Product Management",
-            "Research and Development",
-            "Quality Assurance",
-            "Supply Chain",
-            "Administration",
-            "Facilities",
-            "Procurement",
-            "Training",
-            "Security",
-            "Public Relations",
-            "Compliance"
-        )
-
-        # Loop to create security groups for each department
-        foreach ($Department in $Departments) {
-            $GroupName = "MEMLABS-$Department-SecurityGroup"
-
-            ADGroup $Department {
-                Ensure           = 'Present'
-                GroupName        = $GroupName
-                GroupScope       = "Global"
-                Category         = "Security"
-                Description      = $GroupName
-                DependsOn        = $nextDepend
-                Path             = "OU=MEMLABS-Users,$DNName"
-            }
-
-        }
+       
 
         $i = 0
         foreach ($computer in $DomainComputers) {
@@ -285,12 +319,7 @@
             $adObjectDependency += "[ADComputer]Computer$($i)"
         }
 
-
-        #ADGroup AddToAdmin {
-        #    GroupName        = "Administrators"
-        #    MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-        #    DependsOn        = $adObjectDependency
-        #}
+       
         AddToAdminGroup AddLocalAdmins {
             DomainName   = "NONE"
             AccountNames = @($DomainAdminName, $Admincreds.UserName)
@@ -421,55 +450,48 @@
             }
             $nextDepend = "[InstallCA]InstallCA"
 
-            WriteStatus ImportCertifcateTemplate {
-                DependsOn = $nextDepend
-                Status    = "Importing Template to Domain"
-            }
+            if ($usePKI) {
+                
+                WriteStatus ImportCertifcateTemplate {
+                    DependsOn = $nextDepend
+                    Status    = "Importing Template to Domain"
+                }
 
-            $waitOnDependency = @($nextDepend)
+                $waitOnDependency = @($nextDepend)
 
-            if ($iisCount) {
-                ImportCertifcateTemplate ConfigMgrClientDistributionPointCertificate {
-                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                if ($iisCount) {
+                    ImportCertifcateTemplate ConfigMgrClientDistributionPointCertificate {
+                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                        DNPath       = $DNName
+                        DependsOn    = $nextDepend
+                    }
+                    $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientDistributionPointCertificate"
+
+                    ImportCertifcateTemplate ConfigMgrWebServerCertificate {
+                        TemplateName = "ConfigMgrWebServerCertificate"
+                        DNPath       = $DNName
+                        DependsOn    = $nextDepend
+                    }
+                    $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrWebServerCertificate"
+                }
+                ImportCertifcateTemplate ConfigMgrClientCertificate {
+                    TemplateName = "ConfigMgrClientCertificate"
                     DNPath       = $DNName
                     DependsOn    = $nextDepend
                 }
-                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientDistributionPointCertificate"
-
-                ImportCertifcateTemplate ConfigMgrWebServerCertificate {
-                    TemplateName = "ConfigMgrWebServerCertificate"
-                    DNPath       = $DNName
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrWebServerCertificate"
+                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
             }
-            ImportCertifcateTemplate ConfigMgrClientCertificate {
-                TemplateName = "ConfigMgrClientCertificate"
-                DNPath       = $DNName
-                DependsOn    = $nextDepend
+            else {
+                $waitOnDependency = $nextDepend
             }
-            $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
-
         }
 
-        WriteStatus InstallDotNet {
-            DependsOn = $waitOnDependency
-            Status    = "Installing .NET 4.8"
-        }
-
-        InstallDotNet4 DotNet {
-            DownloadUrl = $deployConfig.URLS.DotNet
-            FileName    = "ndp48-x86-x64-allos-enu.exe"
-            NetVersion  = "528040"
-            Ensure      = "Present"
-            DependsOn   = "[WriteStatus]InstallDotNet"
-        }
-
+       
         File ShareFolder {
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = "[InstallDotNet4]DotNet"
+            DependsOn       = "$waitOnDependency"
         }
 
         FileReadAccessShare DomainSMBShare {
