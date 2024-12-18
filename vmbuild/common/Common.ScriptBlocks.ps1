@@ -822,6 +822,13 @@ $global:VM_Config = {
             $log = "C:\staging\DSC\DSC_Init.log"
             $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
 
+            try {
+                "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+            }
+            catch {
+                throw "Could not write to $log"
+            }
+
             $zipPath = "C:\staging\DSC\DSC.zip"
             $extractPath = "C:\staging\DSC\modules"
 
@@ -864,7 +871,12 @@ $global:VM_Config = {
                 # Create init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                "`r`n=====`r`nDSC_InstallModules: Started at $time`r`n=====" | Out-File $log -Force
+                try {
+                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+                }
+                catch {
+                    throw "Could not write to $log"
+                }
 
                 # Install modules
                 "Installing modules" | Out-File $log -Append
@@ -906,8 +918,12 @@ $global:VM_Config = {
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
+                try {
                 $error_message | Out-File $log -Append
+                }
+                catch {}
                 Write-Error $error_message
+                throw $error_message
                 return $error_message
             }
             "Modules Installed" | Out-File $log -Append
@@ -955,7 +971,12 @@ $global:VM_Config = {
 
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                "`r`n=====`r`nDSC_ClearStatus: Started at $time`r`n=====" | Out-File $log -Append
+                try {
+                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+                }
+                catch {
+                    throw "Could not write to $log"
+                }
 
                 # Rename the DSC_Events.json file, if it exists for DSC re-run
                 $jsonPath = Join-Path "C:\staging\DSC" "DSC_Events.json"
@@ -1025,7 +1046,10 @@ $global:VM_Config = {
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
-                $error_message | Out-File $log -Append -ErrorAction SilentlyContinue
+                try {
+                    $error_message | Out-File $log -Append -ErrorAction SilentlyContinue}
+                catch {
+                }
                 Write-Error $error_message
                 throw $error_message
                 return $error_message
@@ -1087,7 +1111,12 @@ $global:VM_Config = {
                 # Update init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                "`r`n=====`r`nDSC_CreateConfig: Started at $time`r`n=====" | Out-File $log -Append
+                try {
+                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+                }
+                catch {
+                    throw "Could not write to $log"
+                }
                 "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
                 "Current Item = $currentItem" | Out-File $log -Append
                 "Role Name = $dscRole" | Out-File $log -Append
@@ -1130,8 +1159,11 @@ $global:VM_Config = {
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
+                try {
                 $error_message | Out-File $log -Append
+                }catch{}
                 Write-Error $error_message
+                throw $error_message
                 return $error_message
             }
         }
@@ -1163,7 +1195,12 @@ $global:VM_Config = {
                 # Update init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                "`r`n=====`r`nDSC_CreateConfig: Started at $time`r`n=====" | Out-File $log -Append
+                try {
+                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+                }
+                catch {
+                    throw "Could not write to $log"
+                }
                 "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
                 "Current Item = $currentItem" | Out-File $log -Append
                 "Role Name = $dscRole" | Out-File $log -Append
@@ -1253,8 +1290,10 @@ $global:VM_Config = {
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
-                $error_message | Out-File $log -Append
+                try {$error_message | Out-File $log -Append} 
+                catch {}
                 Write-Error $error_message
+                throw $error_message
                 return $error_message
             }
         }
@@ -1274,7 +1313,12 @@ $global:VM_Config = {
                 # Update init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                "`r`n=====`r`nDSC_StartConfig: Started at $time`r`n=====" | Out-File $log -Append
+                try {
+                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+                }
+                catch {
+                    throw "Could not write to $log"
+                }
 
 
                 if (-not (Test-Path $dscConfigPath)) {
@@ -1361,10 +1405,13 @@ $global:VM_Config = {
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
+                try {
                 $error_message | Out-File $log -Append
+                }catch {}
                 if ($error_message -is [String]) {
                     Write-Error $error_message
                 }
+                throw $error_message
                 return $error_message
             }
         }

@@ -166,14 +166,14 @@ function Check-OverallHealth {
             Write-RedX "No VMs are currently running. $vmsRunning/$vmsTotal total"
         }
         else {
-            if ($vm -eq $vmsTotal) {
+            if ($vmsRunning -eq $vmsTotal) {
                 Write-GreenCheck "All $vmsTotal VMs are running"
             }
             else {
                 Write-OrangePoint2 "$vmsRunning/$vmsTotal VMs are running"
             }    
         }
-
+    }
         # Available Disk
         $disk = Get-Volume -DriveLetter E
         $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
@@ -208,7 +208,7 @@ function Check-OverallHealth {
             }
         }
 
-    }
+    
 
 }
 
