@@ -113,6 +113,12 @@ function Get-UserConfiguration {
             }
         }
 
+        if ($null -ne $config.cmOptions.Version) {
+            if ($config.cmOptions.Version -eq "current-branch") {
+                $config.cmOptions.Version = Get-CMLatestBaselineVersion
+            }
+        }
+
         if ($null -ne $config.cmOptions.updateToLatest ) {
             if ($config.cmOptions.updateToLatest -eq $true) {
                 $config.cmOptions.version = Get-CMLatestVersion
@@ -2309,7 +2315,7 @@ Function Show-Summary {
                 if ($baselineVersion -ne $deployConfig.cmOptions.version) {
                     Write-OrangePoint "ConfigMgr $baselineVersion will be installed and upgraded to $($deployConfig.cmOptions.version)"
                 }
-                else {
+                else {                    
                     Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
                 }
 

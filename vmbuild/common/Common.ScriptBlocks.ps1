@@ -983,7 +983,7 @@ $global:VM_Config = {
                 # Rename the DSC_Log that controls execution flow of DSC Logging and completion event before each run
                 $dscLog = "C:\staging\DSC\DSC_Log.log"
                 if (Test-Path $dscLog) {
-                    $newName = $dscLog -replace ".log", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".log")
+                    $newName = $dscLog -replace "Log.log", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".log")
                     "Renaming $dscLog to $newName" | Out-File $log -Append
                     Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
                 }
@@ -1041,7 +1041,7 @@ $global:VM_Config = {
         }
 
         Write-Progress2 $Activity -Status "Clearing DSC Status" -percentcomplete 65 -force
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Clearing previous DSC status"
+        Write-Log "[Phase $Phase]: $($currentItem.vmName):DSC_ClearStatus Clearing previous DSC status"
         $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
             start-sleep -seconds 60

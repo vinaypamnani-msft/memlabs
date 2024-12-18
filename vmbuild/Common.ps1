@@ -3762,6 +3762,9 @@ function Set-SupportedOptions {
 function Get-CMVersions {
     $cmVersions = @()
     foreach ($version in $Common.AzureFileList.CMVersions) {
+        if ($version -eq "current-branch") {
+            continue
+        }
         $cmversions += $version.versions
     }
     $cmVersions = $cmVersions | Sort-Object -Descending

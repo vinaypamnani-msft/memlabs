@@ -1431,9 +1431,10 @@ function Select-NewDomainConfig {
     $newconfig = New-UserConfig -Domain $templateDomain -Subnet "10.234.241.0"
     $subnetlist = Get-ValidSubnets
 
+    $Latestversion = Get-CMLatestBaselineVersion
     $domainDefaults = [PSCustomObject]@{
         DeploymentType      = "Primary Site only"
-        CMVersion           = "current-branch"
+        CMVersion           = $Latestversion
         DomainName          = ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1)
         Network             = ($subnetList | Select-Object -First 1)
         DefaultClientOS     = "Windows 11 Latest"
@@ -1463,7 +1464,7 @@ function Select-NewDomainConfig {
                 Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "CAS" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -SiteCode "CS1" -Quiet:$true -test:$test
                 if ($newconfig.domainDefaults.CMVersion -eq "tech-preview") {
-                    $newconfig.domainDefaults.CMVersion = "current-branch"
+                    $newconfig.domainDefaults.CMVersion = $Latestversion
                 }
             }
 
@@ -1471,7 +1472,7 @@ function Select-NewDomainConfig {
                 Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
                 Add-NewVMForRole -Role "Primary" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -SiteCode "PS1" -Quiet:$true -test:$test
                 if ($newconfig.domainDefaults.CMVersion -eq "tech-preview") {
-                    $newconfig.domainDefaults.CMVersion = "current-branch"
+                    $newconfig.domainDefaults.CMVersion = $Latestversion
                 }                
 
             }
@@ -1671,7 +1672,7 @@ function Select-Config {
         else {
             $customOptions = [ordered]@{"S" = "Sort by Name%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
-        $response = -prompt "Which config do you want to load" -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
+        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
 
         if ($response.ToLowerInvariant() -eq "s") {
             $SortByName = !$SortByName
@@ -3587,7 +3588,8 @@ Function Get-CMVersionMenu {
 
         switch ($cmVersion) {
             "current-branch" {
-                $cmVersions += "$cmVersion (Installs the latest baseline version of CM)"
+                $latest = Get-CMLatestBaselineVersion
+                $cmVersions += "$cmVersion (Installs $latest [Latest Baseline])"
             }
 
             "Tech-preview" {
@@ -5834,8 +5836,9 @@ function Add-NewVMForRole {
 
     if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "SiteSystem" -or $role -eq "Secondary") {
         if ($null -eq $ConfigToModify.cmOptions) {
+            $latestVersion = Get-CMLatestBaselineVersion
             $newCmOptions = [PSCustomObject]@{
-                Version                   = "current-branch"
+                Version                   = $latestVersion
                 Install                   = $true
                 PushClientToDomainMembers = $true
                 PrePopulateObjects        = $true
