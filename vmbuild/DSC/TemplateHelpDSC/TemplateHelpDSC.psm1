@@ -2475,8 +2475,8 @@ class InstallFeatureForSCCM {
                 #installed .net 4.5 or later
             }
             if ($_Role -contains "WSUS") {
-                Write-Status "Installing Windows Features: WSUS Stuff.. This shouldnt be used anymore."
-                Install-WindowsFeature "UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI"
+                #Write-Status "Installing Windows Features: WSUS Stuff.. This shouldnt be used anymore."
+                #Install-WindowsFeature "UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI"
             }
             if ($_Role -contains "State migration point") {
                 #iis
