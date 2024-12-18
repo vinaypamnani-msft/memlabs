@@ -558,7 +558,9 @@ function get-CMOptionsSummary {
     $offlineSUP = ""
     $testSystem = $fixedConfig | Where-Object { $_.installSUP }
     if ($testSystem) {
-        $offlineSUP = "[SUP: Offline]"
+        if ($options.OfflineSUP) {
+            $offlineSUP = "[SUP: Offline]"
+        }
     }
     $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki [SCP: $scp] $offlineSUP"
     return $Output
@@ -1382,39 +1384,39 @@ function select-NewDomainName {
 function Select-DeploymentType {
     $response = $null
 
-        write-log -Activity "New Domain Wizard - Change Deployment type" -NoNewLine
-        $customOptions = [ordered]@{"*B1" = ""; "*BREAK1" = "---  DeploymentType%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{ "1" = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "2" = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "3" = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)" }
-        $customOptions += [ordered]@{ "4" = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)" }
-        $customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
+    write-log -Activity "New Domain Wizard - Change Deployment type" -NoNewLine
+    $customOptions = [ordered]@{"*B1" = ""; "*BREAK1" = "---  DeploymentType%$($Global:Common.Colors.GenConfigHeader)" }
+    $customOptions += [ordered]@{ "1" = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "2" = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "3" = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)" }
+    $customOptions += [ordered]@{ "4" = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)" }
+    $customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
 
-        $response = $null
-        while (-not $response) {
-            Write-Host
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigTip "  Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
+    $response = $null
+    while (-not $response) {
+        Write-Host
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigTip "  Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
 
-            $response = Get-Menu -Prompt "Select type of deployment" -AdditionalOptions $customOptions -test:$false -return
-            if ([string]::IsNullOrWhiteSpace($response)) {
-                return
-            }      
-            switch ($response.ToLowerInvariant()) {
-                "1" {
-                    return "CAS and Primary"
-                }     
-                "2" {
-                    return "Primary Site only"
-                }     
-                "3" {
-                    return "Tech Preview (NO CAS)"
-                }     
-                "4" {
-                    return "No ConfigMgr"
-                } 
-            }    
+        $response = Get-Menu -Prompt "Select type of deployment" -AdditionalOptions $customOptions -test:$false -return
+        if ([string]::IsNullOrWhiteSpace($response)) {
+            return
+        }      
+        switch ($response.ToLowerInvariant()) {
+            "1" {
+                return "CAS and Primary"
+            }     
+            "2" {
+                return "Primary Site only"
+            }     
+            "3" {
+                return "Tech Preview (NO CAS)"
+            }     
+            "4" {
+                return "No ConfigMgr"
+            } 
+        }    
                 
-        }
+    }
     
 }
 
@@ -1430,14 +1432,14 @@ function Select-NewDomainConfig {
     $subnetlist = Get-ValidSubnets
 
     $domainDefaults = [PSCustomObject]@{
-        DeploymentType    = "Primary Site only"
-        CMVersion         = "current-branch"
-        DomainName        = ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1)
-        Network           = ($subnetList | Select-Object -First 1)
-        DefaultClientOS   = "Windows 11 Latest"
-        DefaultServerOS   = "Server 2022"
-        DefaultSqlVersion = "Sql Server 2019"
-        IncludeClients    = $true
+        DeploymentType      = "Primary Site only"
+        CMVersion           = "current-branch"
+        DomainName          = ((Get-ValidDomainNames).Keys | sort-object { $_.Length } | Select-Object -first 1)
+        Network             = ($subnetList | Select-Object -First 1)
+        DefaultClientOS     = "Windows 11 Latest"
+        DefaultServerOS     = "Server 2022"
+        DefaultSqlVersion   = "Sql Server 2019"
+        IncludeClients      = $true
         IncludeSSMSOnNONSQL = $true
     }
     $newconfig | Add-Member -MemberType NoteProperty -name "domainDefaults" -Value $domainDefaults -Force
@@ -1526,16 +1528,16 @@ function Select-NewDomainConfig {
         }
 
         if ($newconfig.domainDefaults.IncludeClients) {
-        Add-NewVMForRole -Role "DomainMember" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultClientOS -Quiet:$true -test:$test
-        Add-NewVMForRole -Role "DomainMember" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultClientOS -Quiet:$true -test:$test
+            Add-NewVMForRole -Role "DomainMember" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultClientOS -Quiet:$true -test:$test
+            Add-NewVMForRole -Role "DomainMember" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultClientOS -Quiet:$true -test:$test
         }
 
 
         if ($valid) {
            
-                $newConfig.vmOptions.network = $newconfig.domainDefaults.network
-                $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
-            }
+            $newConfig.vmOptions.network = $newconfig.domainDefaults.network
+            $valid = Get-TestResult -Config $newConfig -SuccessOnWarning
+        }
         
     }
     return $newConfig
