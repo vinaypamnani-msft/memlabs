@@ -3543,6 +3543,8 @@ class AddCertificateTemplate {
             Write-Status "Adding Certificate Template $_TemplateName ...." 
             $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
             Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+            $registryKey = "HKCU:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+            Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
             Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
             start-sleep -seconds 60
         }
@@ -3561,7 +3563,10 @@ class AddCertificateTemplate {
                         Start-Sleep -Seconds 10
                         Write-Verbose "$_"
                         Write-Status "PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName"
-                        PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName
+                        $output = PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $_TemplateName
+                        Write-Verbose "$output"
+                        $output = PSPKI\Get-CA | PSPKI\Add-CATemplate -Name $_TemplateName
+                        Write-Verbose "$output"
                     }
                     catch {
                         # Reboot
@@ -3577,6 +3582,20 @@ class AddCertificateTemplate {
                     }
                 }
                 $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+                if ($count -ne 0) {
+                    Write-Status "$_TemplateName added successfully"
+                }else{
+                    try {
+                        Write-Status "Deleting CertificateTemplateCache and restarting the CA" 
+                        $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+                        $registryKey = "HKCU:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+                        Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
+                        start-sleep -seconds 60
+                    }
+                    catch {}
+                }
             }
         }
     }

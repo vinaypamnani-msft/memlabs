@@ -1025,8 +1025,9 @@ $global:VM_Config = {
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
-                $error_message | Out-File $log -Append
+                $error_message | Out-File $log -Append -ErrorAction SilentlyContinue
                 Write-Error $error_message
+                throw $error_message
                 return $error_message
             }
 
@@ -1586,13 +1587,8 @@ $global:VM_Config = {
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Stopped"
                                         Start-Sleep -Seconds 20
                                         Start-VM2 -Name $currentItem.vmName
-                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 300 seconds to check status."
+                                        
 
-                                        Start-Sleep -Seconds 100
-
-                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 200 seconds to check status."
-
-                                        Start-Sleep -Seconds 100
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 100 seconds to check status."
 
                                         Start-Sleep -Seconds 90

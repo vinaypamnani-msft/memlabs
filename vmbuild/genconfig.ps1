@@ -1018,6 +1018,10 @@ function Get-NewMachineName {
         }
 
         switch ($OS) {
+            "Server 2025" {
+
+                $RoleName = "W25" + $RoleName
+            }
             "Server 2022" {
 
                 $RoleName = "W22" + $RoleName
@@ -1439,7 +1443,7 @@ function Select-NewDomainConfig {
         Network             = ($subnetList | Select-Object -First 1)
         DefaultClientOS     = "Windows 11 Latest"
         DefaultServerOS     = "Server 2022"
-        DefaultSqlVersion   = "Sql Server 2019"
+        DefaultSqlVersion   = "Sql Server 2022"
         IncludeClients      = $true
         IncludeSSMSOnNONSQL = $true
     }
@@ -1513,8 +1517,8 @@ function Select-NewDomainConfig {
                 $newConfig.vmOptions.prefix = $prefix
                 $netbiosName = $newconfig.domainDefaults.DomainName.Split(".")[0]
                 $newConfig.vmOptions.DomainNetBiosName = $netbiosName
-                if ($version) {
-                    $newConfig.cmOptions.version = $version
+                if ($newconfig.domainDefaults.CMVersion) {
+                    $newConfig.cmOptions.version = $newconfig.domainDefaults.CMVersion
                 }
                 if ($domain -in ((Get-ValidDomainNames).Keys)) {
                     $valid = $true
@@ -3329,7 +3333,12 @@ Function Set-SiteServerLocalSql {
     )
 
     if ($null -eq $virtualMachine.sqlVersion) {
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+
+        $SqlVersion = "SQL Server 2022"
+        if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
+            $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
+        }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
@@ -5460,6 +5469,9 @@ function Add-NewVMForRole {
         if ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
             $OSList = Get-SupportedOperatingSystemsForRole -role $role
             $operatingSystem = "Windows 10 Latest (64-bit)"
+            if ($ConfigToModify.domainDefaults.DefaultClientOS) {
+                $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
+            }
             Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
             $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
         }
@@ -5478,9 +5490,15 @@ function Add-NewVMForRole {
                 $OSList = Get-SupportedOperatingSystemsForRole -role $role
                 if ($role.Contains("Client")) {
                     $operatingSystem = "Windows 10 Latest (64-bit)"
+                    if ($ConfigToModify.domainDefaults.DefaultClientOS) {
+                        $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
+                    }
                 }
                 else {
                     $OperatingSystem = "Server 2022"
+                    if ($ConfigToModify.domainDefaults.DefaultClientOS) {
+                        $operatingSystem = $ConfigToModify.domainDefaults.DefaultServerOS
+                    }
                 }
                 if ($null -ne $OSList) {
                     Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
@@ -5572,7 +5590,12 @@ function Add-NewVMForRole {
 
         }
         "SqlServer" {
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $SqlVersion = "SQL Server 2022"
+
+            if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
+                $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
+            }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion 
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
@@ -5586,7 +5609,12 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
         }
         "SQLAO" {
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $SqlVersion = "SQL Server 2022"
+
+            if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
+                $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
+            }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
@@ -5599,7 +5627,12 @@ function Add-NewVMForRole {
 
         }
         "CAS" {
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $SqlVersion = "SQL Server 2022"
+
+            if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
+                $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
+            }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
@@ -5637,7 +5670,12 @@ function Add-NewVMForRole {
             if ($parentSiteCode) {
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
             }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+            $SqlVersion = "SQL Server 2022"
+
+            if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
+                $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
+            }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
@@ -5722,7 +5760,12 @@ function Add-NewVMForRole {
         "DomainMember (Server)" {}
         "DomainMember (Client)" {
             if ($OperatingSystem -like "*Server*") {
-                $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
+                if ($ConfigToModify.domainDefaults.DefaultClientOS) {
+                    $virtualMachine.operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
+                }
+                else {
+                    $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
+                }
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false
             }
             else {
@@ -6487,7 +6530,11 @@ function Select-VirtualMachines {
                                 continue VMLoop
                             }
                             else {
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value "SQL Server 2019"
+                                $SqlVersion = "SQL Server 2022"
+                                if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
+                                    $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
+                                }
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
                                 if ($virtualMachine.AdditionalDisks.E) {
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
                                 }

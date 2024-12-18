@@ -312,29 +312,32 @@ if (-not $pushClients) {
 # Wait for collection to populate
 
 if ($ClientNames) {
+    $CollectionName = "All Systems"
     Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
     Invoke-CMSystemDiscovery
     Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
-    $CollectionName = "All Systems"
 
-    $failCount = 0
-    $success = $false
-    while (-not $success) {
+    if ($false) {
+        #Let PushClients.ps1 handle this later.
+        $failCount = 0
+        $success = $false
+        while (-not $success) {
    
-        $failCount++
-        Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
-        $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-        Start-Sleep -Seconds 20
-        $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
-        $success = $PackageSuccess -ge 1
+            $failCount++
+            Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 15"
+            $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+            Start-Sleep -Seconds 30
+            $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+            $success = $PackageSuccess -ge 1
 
-        if ($failCount -ge 20) {
-            $success = $true   
-        }
+            if ($failCount -ge 15) {
+                $success = $true   
+            }
     
+        }
+        Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
     }
-    Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
 }
 else {
     Write-DscStatus "Skipping Client Push. No Clients to push."
@@ -344,47 +347,63 @@ else {
     return
 }
 
-$ClientNameList = $ClientNames.split(",")
-$machinelist = (get-cmdevice -CollectionName $CollectionName).Name
-Start-Sleep -Seconds 5
+if ($false) {
+    #Let PushClients.ps1 handle this later.
+    $ClientNameList = $ClientNames.split(",")
+    $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
+    Start-Sleep -Seconds 5
 
-foreach ($client in $ClientNameList) {
+    foreach ($client in $ClientNameList) {
 
-    if ([string]::IsNullOrWhiteSpace($client)) {
-        continue
-    }
-
-    $testClient = Test-NetConnection -ComputerName $client -CommonTCPPort SMB -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-    if (-not $testClient.TcpTestSucceeded) {
-        # Don't wait for client to appear in collection if it's not online
-        Write-DscStatus "Could not test SMB connection to $client. Skipping."
-        continue
-    }
-
-    $failCount = 0
-    $success = $true
-    while ($machinelist -notcontains $client) {
-       
-        if ($failCount -ge 2) {
-            $success = $false
-            break
+        if ([string]::IsNullOrWhiteSpace($client)) {
+            continue
         }
-        Invoke-CMSystemDiscovery
-        Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
-        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
-        Start-Sleep -Seconds 600
-        $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
-        $failCount++
+        $testClient = Test-NetConnection -ComputerName $client -CommonTCPPort SMB -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        if (-not $testClient.TcpTestSucceeded) {
+            # Don't wait for client to appear in collection if it's not online
+            Write-DscStatus "Could not test SMB connection to $client. Skipping."
+            continue
+        }
+
+        $failCount = 0
+        $success = $true
+        while ($machinelist -notcontains $client) {
+       
+            if ($failCount -ge 2) {
+                $success = $false
+                break
+            }
+            Invoke-CMSystemDiscovery
+            Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+
+
+            $seconds = 600
+            while ($seconds -ge 0) {
+                Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
+                Start-Sleep -Seconds 30
+                $seconds -= 30
+                $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
+                if ($machinelist -contains $client) {
+                    Write-DscStatus "$client is in'$CollectionName'"
+                    break
+                }
+            }
+
+            $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
+            $failCount++
+        }
+        if ($success) {
+            Write-DscStatus "Pushing client to $client."
+            Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
+            Start-Sleep -Seconds 5
+        }
     }
-    if ($success) {
-        Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
-        Start-Sleep -Seconds 5
-    }
+
+
+
+    # Update actions file
+    $Configuration.InstallClient.Status = 'Completed'
+    $Configuration.InstallClient.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 }
-
-# Update actions file
-$Configuration.InstallClient.Status = 'Completed'
-$Configuration.InstallClient.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
