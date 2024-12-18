@@ -1714,7 +1714,13 @@ function Get-List {
         if ($doSmartUpdate) {
             if ($global:vm_List) {
                 try {
-                    $virtualMachines = Get-VM
+                    try {
+                        $virtualMachines = Get-VM
+                    }
+                    catch {
+                        start-sleep -seconds 3
+                        $virtualMachines = Get-VM
+                    }
                     foreach ( $oldListVM in $global:vm_List) {
                         if ($DomainName) {
                             if ($oldListVM.domain -ne $DomainName) {
