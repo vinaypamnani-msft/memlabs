@@ -174,39 +174,39 @@ function Check-OverallHealth {
             }    
         }
     }
-        # Available Disk
-        $disk = Get-Volume -DriveLetter E
-        $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
-        $diskFreeGB = $([math]::Round($($disk.SizeRemaining / 1GB), 0))
+    # Available Disk
+    $disk = Get-Volume -DriveLetter E
+    $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
+    $diskFreeGB = $([math]::Round($($disk.SizeRemaining / 1GB), 0))
 
-        if ($diskFreeGB -ge 700) {
-            Write-GreenCheck "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+    if ($diskFreeGB -ge 700) {
+        Write-GreenCheck "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+    }
+    else {
+        if ($diskFreeGB -ge 300) {
+            Write-OrangePoint2 "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
         }
         else {
-            if ($diskFreeGB -ge 300) {
-                Write-OrangePoint2 "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
-            }
-            else {
-                Write-RedX "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
-            }
+            Write-RedX "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
         }
+    }
 
-        #Available Memory
+    #Available Memory
 
-        $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
-        $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
+    $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
+    $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
 
-        if ($availableMemory -ge 40) {
-            Write-GreenCheck "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
+    if ($availableMemory -ge 40) {
+        Write-GreenCheck "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
+    }
+    else {
+        if ($availableMemory -ge 20) {
+            Write-OrangePoint2 "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
         }
         else {
-            if ($availableMemory -ge 20) {
-                Write-OrangePoint2 "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
-            }
-            else {
-                Write-RedX "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
-            }
+            Write-RedX "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
         }
+    }
 
     
 
@@ -3342,6 +3342,9 @@ Function Set-SiteServerLocalSql {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
+        if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
+        }
     }
     if ($virtualMachine.Role -eq "WSUS") {
         $virtualMachine.virtualProcs = 4
@@ -3393,6 +3396,9 @@ Function Set-SiteServerRemoteSQL {
         $virtualMachine.PsObject.Members.Remove('sqlInstanceName')
         $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
         $virtualMachine.PsObject.Members.Remove('sqlPort')
+        if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
+        }
     }
     $virtualMachine.memory = "4GB"
     $virtualMachine.virtualProcs = 4
@@ -3495,6 +3501,9 @@ Function Get-remoteSQLVM {
                 $virtualMachine.PsObject.Members.Remove('sqlPort')
                 $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
                 $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
+                if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
+                }
 
             }
             Default {
@@ -5523,6 +5532,12 @@ function Add-NewVMForRole {
         $memory = "3GB"
         $vprocs = 4
         $installSSMS = $true
+        if ($ConfigToModify.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
+            $installSSMS = $false
+            if ($role -eq "SqlServer") {
+                $installSSMS = $true
+            }
+        }
     }
     if ($OperatingSystem.Contains("Windows 11") -and ($role -notin ("DC", "BDC"))) {
         $memory = "4GB"
@@ -5554,7 +5569,7 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
     }
     if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC", "Linux")) {
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS -force
     }
 
     #Match Windows 10 or 11
@@ -5607,6 +5622,7 @@ function Add-NewVMForRole {
             $virtualMachine.tpmEnabled = $false
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
         }
         "SQLAO" {
             $SqlVersion = "SQL Server 2022"
@@ -5624,6 +5640,7 @@ function Add-NewVMForRole {
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $virtualMachine.tpmEnabled = $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
 
         }
         "CAS" {
@@ -5635,6 +5652,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
             $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "250GB" }
@@ -5679,6 +5697,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
             $disk = [PSCustomObject]@{"E" = "600GB"; "F" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
@@ -6544,6 +6563,9 @@ function Select-VirtualMachines {
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
+                                if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
+                                }
                                 if ($virtualMachine.Role -ne "Secondary") {
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
                                 }
@@ -6568,6 +6590,9 @@ function Select-VirtualMachines {
                             $virtualMachine.psobject.properties.remove('sqlPort')
                             $virtualMachine.psobject.properties.remove('SqlServiceAccount')
                             $virtualMachine.psobject.properties.remove('SqlAgentAccount')
+                            if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
+                            }
                             $newName = Rename-VirtualMachine -vm $virtualMachine
                         }
                         if ($newValue -eq "A") {
