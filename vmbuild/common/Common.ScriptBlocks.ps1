@@ -453,6 +453,66 @@ $global:VM_Create = {
             Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
         }
 
+        if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.SiteCode -and $createVM) {
+            $Parent = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -siteCode $currentItem.SiteCode -type Name -SmartUpdate:$false
+
+            # This is the Top Level Site Server
+            if ($Parent -eq $currentItem.vmName) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying OS ISO files to the VM."
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying OS ISO files to the VM" -Completed
+
+                $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
+
+                $isoFiles = $azureFileList.OSISO | Where-Object { $_.id -in $OsVersionsToGet }
+
+                foreach ($isoFile in $isoFiles) {
+                    
+                    # SQL Iso Path
+                    $Iso = $isoFile.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying $iso files to the VM."
+                    Write-Progress2 -Activity "$($currentItem.vmName): Copying $iso files to the VM" -Completed
+                    $IsoPath = Join-Path $Common.AzureFilesPath $Iso
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounting $IsoPath to the VM."
+                    Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                    $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $isoPath -Passthru -ErrorVariable $err
+                    if ($dvd) {
+                        write-Log "Dvd successfully mounted from $($dvd.Path)"
+                    }
+                    else {
+                        write-Log "Failed to mount the dvd from $isoPath $err"
+                        start-sleep -seconds 30
+                        $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $isoPath -Passthru -ErrorVariable $err
+                        if (-not $dvd) {
+                            write-Log "2nd Try. Failed to mount the dvd from $isoPath $err"
+                        }else {
+                            write-Log "Successfully mounted the dvd from $($dvd.Path)"
+                        }
+                    }
+                    $dirname = $isoFile.id
+
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { param ($dirname) New-Item -Path "C:\temp\$dirname" -ItemType Directory -Force } -ArgumentList $dirname
+
+                    # Copy files from DVD
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock { param ($dirname) $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\Sources\*.wim" -Destination "C:\temp\$dirname" -Recurse -Force -Confirm:$false } -ArgumentList $dirname
+                    if ($result.ScriptBlockFailed) {
+                        $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Get-ChildItem "$($cd.DriveLetter):" }
+                        write-Log (Get-VMDvdDrive -VMName ADA-PS1SITE)
+                        Write-Log "Contents of Drive: $($result2.ScriptBlockOutput) Mounted on $((Get-VMDvdDrive -VMName $currentItem.vmName).Path)"
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy ISO WIM files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                        return
+                    }
+
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test WIM Files" -ScriptBlock { param ($dirname) get-item "c:\temp\$dirname\install.wim" } -ArgumentList $dirname 
+                    if ($result.ScriptBlockFailed) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy WIM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                        return
+                    }
+
+                    Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                }
+            }
+        }
+
         if ($createVM) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
         }
@@ -919,7 +979,7 @@ $global:VM_Config = {
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 try {
-                $error_message | Out-File $log -Append
+                    $error_message | Out-File $log -Append
                 }
                 catch {}
                 Write-Error $error_message
@@ -1047,7 +1107,8 @@ $global:VM_Config = {
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 try {
-                    $error_message | Out-File $log -Append -ErrorAction SilentlyContinue}
+                    $error_message | Out-File $log -Append -ErrorAction SilentlyContinue
+                }
                 catch {
                 }
                 Write-Error $error_message
@@ -1160,8 +1221,9 @@ $global:VM_Config = {
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 try {
-                $error_message | Out-File $log -Append
-                }catch{}
+                    $error_message | Out-File $log -Append
+                }
+                catch {}
                 Write-Error $error_message
                 throw $error_message
                 return $error_message
@@ -1290,7 +1352,7 @@ $global:VM_Config = {
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
-                try {$error_message | Out-File $log -Append} 
+                try { $error_message | Out-File $log -Append } 
                 catch {}
                 Write-Error $error_message
                 throw $error_message
@@ -1406,8 +1468,9 @@ $global:VM_Config = {
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
                 try {
-                $error_message | Out-File $log -Append
-                }catch {}
+                    $error_message | Out-File $log -Append
+                }
+                catch {}
                 if ($error_message -is [String]) {
                     Write-Error $error_message
                 }

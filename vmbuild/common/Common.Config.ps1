@@ -192,6 +192,9 @@ function Get-FilesForConfiguration {
     if ($config) {
         $operatingSystemsToGet = $config.virtualMachines.operatingSystem | Select-Object -Unique
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
+        if ($config.cmOptions.PrePopulateObjects) {
+            $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
+        }
     }
 
     Write-Log "Downloading/Verifying Files required by specified config..." -Activity
@@ -226,6 +229,16 @@ function Get-FilesForConfiguration {
             $allSuccess = $false
         }
     }
+
+    foreach ($file in $Common.AzureFileList.OSISO) {
+        if (-not $DownloadAll -and $OsVersionsToGet -notcontains $file.id) { continue }
+        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
+        if (-not $worked) {
+            Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
+            $allSuccess = $false
+        }
+    }
+    
 
     return $allSuccess
 }
@@ -970,6 +983,83 @@ function Get-ExistingForNetwork {
         Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
+}
+
+
+function Get-TopSiteServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
+        [object] $SiteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
+        [ValidateSet("Name", "VM")]
+        [string] $type = "Name",
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
+        [string] $DomainName
+
+    )
+    if (-not $SiteCode) {
+        throw "SiteCode is NULL"
+        return $null
+    }
+
+    $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    if ($DomainName) {
+        $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) })
+        if ($vmList) {
+            $first = $vmList | Select-Object -First 1
+            while ($first.ParentSiteCode) {        
+                $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) })
+                $first = $vmList | Select-Object -First 1
+            }
+            if ($type -eq "Name") {
+                return ($vmList | Select-Object -First 1).vmName
+            }
+            else {
+                return $vmList | Select-Object -First 1
+            }
+        }
+        return
+    }
+
+    $configVMs = @()
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
+    if ($configVMs) {
+        $first = $configVMs | Select-Object -First 1
+        while ($first.ParentSiteCode) {        
+            $configVMs = @()
+            $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
+            $first = $configVMs | Select-Object -First 1
+        }
+        if ($type -eq "Name") {
+            return ($configVMs | Select-Object -First 1).vmName
+        }
+        else {
+            return $configVMs | Select-Object -First 1
+        }
+    }
+    $existingVMs = @()
+    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($existingVMs) {
+        $first = $existingVMs | Select-Object -First 1
+        while ($first.ParentSiteCode) {        
+            $existingVMs = @()
+            $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+            $first = $existingVMs | Select-Object -First 1
+        }
+        if ($type -eq "Name") {
+            return ($existingVMs | Select-Object -First 1).vmName
+        }
+        else {
+            return $existingVMs | Select-Object -First 1
+        }
+    }
+    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $DomainName"
+    return $null
 }
 
 function Get-SiteServerForSiteCode {

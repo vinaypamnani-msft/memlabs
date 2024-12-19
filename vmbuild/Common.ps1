@@ -3964,6 +3964,7 @@ if (-not $Common.Initialized) {
         AzureFilesPath        = $storagePath                                                              # Path for downloaded files
         AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
         AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
+        AzureOSIsoPath        = New-Directory -DirectoryPath (Join-Path $storagePath "osiso")             # Path for ISO's (typically for Windows)
         AzureToolsPath        = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
         StagingAnswerFilePath = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
         StagingInjectPath     = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX

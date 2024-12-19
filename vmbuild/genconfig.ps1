@@ -4008,11 +4008,8 @@ function Get-AdditionalValidations {
                         $sitecode = $property.SiteCode
                     }
                     if ($sitecode) {
-                        $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
+                        $Parent = Get-TopSiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
 
-                        if ($Parent.ParentSiteCode) {
-                            $Parent = Get-SiteServerForSiteCode -deployConfig $Global:Config -siteCode $Parent.ParentSiteCode -type VM -SmartUpdate:$false
-                        }
                         $list2 = Get-List2 -deployConfig $Global:Config
                         $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
                         if (-not $existingSUP) {

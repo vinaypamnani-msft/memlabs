@@ -583,7 +583,7 @@ Configuration Phase5
         WaitForAll AddReplica {
             ResourceName     = '[SqlAGReplica]AddReplica'
             NodeName         = $node2
-            RetryIntervalSec = 4
+            RetryIntervalSec = 6
             RetryCount       = 900
             Dependson        = $nextDepend
             PsDscRunAsCredential = $Admincreds

@@ -111,8 +111,8 @@ Configuration Phase8
             WaitForAll WaitSCCM {
                 ResourceName     = '[WaitForEvent]WorkflowComplete'
                 NodeName         = $WaitFor
-                RetryIntervalSec = 60
-                RetryCount       = 300
+                RetryIntervalSec = 90
+                RetryCount       = 400
                 Dependson        = $nextDepend
             }
             $nextDepend = '[WaitForAll]WaitSCCM'
@@ -401,8 +401,8 @@ Configuration Phase8
         WaitForAll ActiveNode {
             ResourceName     = '[WriteStatus]Complete'
             NodeName         = $ThisVM.thisParams.ActiveNode
-            RetryIntervalSec = 15
-            RetryCount       = 1200
+            RetryIntervalSec = 25
+            RetryCount       = 1300
             Dependson        = '[WriteStatus]WaitActive'
         }
 
