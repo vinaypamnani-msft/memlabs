@@ -666,16 +666,26 @@ if ($UpdateRequired) {
 
         # trigger prerequisites check after the package downloaded
         Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
+        $count = 0
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612 -and $updatepack.State -ne 196609) {
 
+            $count++
+            if ($count -eq 6) {
+                Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
+            }
+            if ($count -ge 12) {
+                breaK
+            }
             Write-DscStatus "[$($state[$updatepack.State])] Prereq check for '$($updatepack.Name)'."
             Start-Sleep 120
             $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+            
         }
 
         if ($updatepack.State -eq 196607) {
+            Write-DscStatus "Update State: PREREQ_FAILED"
             $retrytimes++
-            Start-Sleep 300
+            Start-Sleep 100
             continue
         }
 
@@ -688,11 +698,24 @@ if ($UpdateRequired) {
             catch {}
         }
         # trigger setup after the prerequisites check
+        Write-DscStatus "Calling Install-CMSiteUpdate"
         Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
-        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {
+        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {           
             Write-DscStatus "Updating to '$($updatepack.Name)'. Current State: $($state[$updatepack.State])"
-            Start-Sleep 120
-            $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+            Start-Sleep -Seconds 60
+            try {
+                $instance = Get-CimInstance -Class SMS_CM_UpdatePackDetailedMonitoring -Namespace root/SMS/site_$sitecode -Filter "PackageGuid='$($updatepack.PackageGuid)'" | Where-Object { $_.Progress -and $_.Progress -lt 100 }
+            }
+            catch {}
+            if ($instance) {
+                Write-DscStatus "$($instance[0].MessageTime.ToShortDateString()) $($instance[0].MessageTime.ToLongTimeString()) $($instance[0].Description)" -NoLog
+            }
+            start-sleep -seconds 60
+
+            try {
+                $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+            }
+            catch {}
         }
 
         if ($updatepack.State -eq 196612) {

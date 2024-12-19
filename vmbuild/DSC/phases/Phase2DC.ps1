@@ -491,7 +491,7 @@
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = "$waitOnDependency"
+            DependsOn       = $waitOnDependency
         }
 
         FileReadAccessShare DomainSMBShare {
