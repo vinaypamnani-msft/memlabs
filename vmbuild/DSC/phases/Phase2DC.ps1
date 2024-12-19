@@ -196,7 +196,7 @@
         }
 
         $nextDepend = "[InstallDotNet4]DotNet"
-        
+
         if ($prePopulate) {
             ADOrganizationalUnit 'MEMLABS-Users'
             {
@@ -210,8 +210,8 @@
 
             $nextDepend = "[ADOrganizationalUnit]MEMLABS-Users"
 
-             # Loop to create 50 users
-             for ($i = 1; $i -le 50; $i++) {
+            # Loop to create 50 users
+            for ($i = 1; $i -le 50; $i++) {
                 # Generate a random username
                 $Username = "MEMLABS-User" + ([System.Guid]::NewGuid().ToString("N").Substring(0, 8))
             
@@ -563,6 +563,7 @@
             $waitOnDependency = "[ADGroup]ConfigMgrIISServers"
         }
 
+        if ($usePKI) {
 
         WriteStatus GroupPolicyStatus {
             DependsOn = $waitOnDependency
@@ -610,6 +611,7 @@
         }
         $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
         $waitOnDependency = $nextDepend
+    }
 
         if ($ThisVM.InstallCA) {
 
@@ -622,34 +624,36 @@
             ModuleAdd PSPKI {
                 Key             = 'Always'
                 CheckModuleName = 'PSPKI'
-                DependsOn       = $nextDepend
+                DependsOn       = $waitOnDependency
             }
             $nextDepend = "[ModuleAdd]PSPKI"
             $waitOnDependency = @("[ModuleAdd]PSPKI")
-            if ($iisCount) {
-                AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                    GroupName    = 'ConfigMgr IIS Servers'
-                    Permissions  = 'Read, Enroll'
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
+            if ($usePKI) {
+                if ($iisCount) {
+                    AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
+                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                        GroupName    = 'ConfigMgr IIS Servers'
+                        Permissions  = 'Read, Enroll'
+                        DependsOn    = $nextDepend
+                    }
+                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
 
-                AddCertificateTemplate ConfigMgrWebServerCertificate {
-                    TemplateName = "ConfigMgrWebServerCertificate"
-                    GroupName    = 'ConfigMgr IIS Servers'
-                    Permissions  = 'Read, Enroll'
+                    AddCertificateTemplate ConfigMgrWebServerCertificate {
+                        TemplateName = "ConfigMgrWebServerCertificate"
+                        GroupName    = 'ConfigMgr IIS Servers'
+                        Permissions  = 'Read, Enroll'
+                        DependsOn    = $nextDepend
+                    }
+                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+                }
+                AddCertificateTemplate ConfigMgrClientCertificate {
+                    TemplateName = "ConfigMgrClientCertificate"
+                    GroupName    = 'Domain Computers'
+                    Permissions  = 'Read, Enroll, AutoEnroll'
                     DependsOn    = $nextDepend
                 }
-                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
             }
-            AddCertificateTemplate ConfigMgrClientCertificate {
-                TemplateName = "ConfigMgrClientCertificate"
-                GroupName    = 'Domain Computers'
-                Permissions  = 'Read, Enroll, AutoEnroll'
-                DependsOn    = $nextDepend
-            }
-            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
         }
 
         if ($ThisVM.externalDomainJoinSiteCode) {

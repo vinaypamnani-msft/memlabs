@@ -57,19 +57,25 @@ if (-not $FirstRun) {
     $attempts = $maxAttempts
 }
 
-Write-DscStatus "Enabling HTTPS" -NoStatus
-
+Write-DscStatus "Enabling HTTPS"
+$prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
+$enabled = ($prop.Value -eq 63)
+if ($enabled) {
+    Write-DscStatus "HTTPS Already Enabled.. Done." 
+    return
+}
 $CAName = $DCName + "-CA"
 $CertPath = "c:\temp\rootca.cer"
 
 if (-not (Test-Path $CertPath)) {
     Get-Item  Cert:\LocalMachine\CA\* | Where-Object { $_.Subject -cmatch $CAName } | Export-Certificate -FilePath $CertPath -Force
+    Write-DscStatus "Exported root CA to $CertPath"
 }
 
 do {
     $attempts++
     Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath *>&1 | Out-File $global:StatusLog -Append
-
+    Write-DscStatus "Enable HTTPS"
     $NameSpace = "ROOT\SMS\site_$SiteCode"
     #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
     # Get the WMI object
@@ -90,12 +96,12 @@ do {
 
     $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
     $enabled = ($prop.Value -eq 63)
-    Write-DscStatus "IISSSLState Value is $($prop.Value). HTTPS enabled: $enabled" -RetrySeconds 15 -NoStatus
+    Write-DscStatus "IISSSLState Value is $($prop.Value). HTTPS enabled: $enabled" -RetrySeconds 15
 } until ($attempts -ge $maxAttempts)
 
 if (-not $enabled) {
-    Write-DscStatus "HTTPS not enabled after trying $attempts times, skip." -NoStatus
+    Write-DscStatus "HTTPS not enabled after trying $attempts times, skip."
 }
 else {
-    Write-DscStatus "HTTPS was enabled." -NoStatus
+    Write-DscStatus "HTTPS was enabled."
 }

@@ -3,7 +3,7 @@ param(
     [string]$ConfigFilePath,
     [string]$LogPath
 )
-
+Write-DscStatus "Started InstallAndUpdateSCCM.ps1"
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
@@ -33,7 +33,7 @@ if ($locale -and $locale -ne "en-US") {
 # Set scenario
 $scenario = "Standalone"
 if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
-
+Write-DscStatus "InstallAndUpdateSCCM.ps1 Scenerio $scenario"
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
 if ($ThisVM.cmInstallDir) {
@@ -343,6 +343,7 @@ CurrentBranch=1
 }
 else {
     Write-DscStatus "ConfigMgr is already installed."
+    Write-DscStatusSetup
 }
 
 # Read Site Code from registry
@@ -529,7 +530,7 @@ if ($UpdateRequired) {
             $originalbuildnumber = $sites[0].BuildNumber
         }
     }
-
+    Write-DscStatus "InstallAndUpdateSCCM.ps1 Found Current Build number $originalbuildnumber"
     # Check for updates
     $retrytimes = 0
     $downloadretrycount = 0
@@ -568,6 +569,19 @@ if ($UpdateRequired) {
             break
         }
 
+        if (-not $deployConfig.cmOptions.UsePKI) {
+            # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
+            Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
+            . $ScriptFile $ConfigFilePath $LogPath $firstRun
+            Write-DscStatus "EnableEHTTP.ps1 done"
+        }
+        else {
+            Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
+            . $ScriptFile $ConfigFilePath $LogPath $firstRun
+            Write-DscStatus "EnableHTTPS.ps1 done"
+        }
 
         # Invoke update download
         while ($updatepack.State -eq 327682 -or $updatepack.State -eq 262145 -or $updatepack.State -eq 327679) {
@@ -579,7 +593,7 @@ if ($UpdateRequired) {
                 Write-DscStatus "Invoking download for '$($updatepack.Name)', waiting for download to begin."
                 Invoke-CMSiteUpdateDownload -Name $updatepack.Name -Force -WarningAction SilentlyContinue
                 Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-                Start-Sleep 120
+                Start-Sleep 120                               
 
                 # Check state
                 $updatepack = Get-CMSiteUpdate -Name $updatepack.Name -Fast
@@ -840,7 +854,7 @@ else {
             $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
             Write-DscStatus "Waiting for Primary site installation to finish"
             while (!$PSSystemServer) {
-                Write-DscStatus "Waiting for Primary site installation to finish" -NoLog -RetrySeconds 30
+                Write-DscStatus "Waiting for Primary site to show up via Get-CMSiteSystemServer" -NoLog -RetrySeconds 30
                 Start-Sleep -Seconds 30
                 $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
             }

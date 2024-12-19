@@ -1839,6 +1839,12 @@ $global:VM_Config = {
                         $bailEarly = $true
                     }
 
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "~Prereq check didn't pass, site installation will be stopped. Please check ConfigMgrPrereq.log for results." -Context 0, 0 } -SuppressLog
+                    if ($result.ScriptBlockOutput.Line) {
+                        $failEntry = $result.ScriptBlockOutput.Line
+                        $bailEarly = $true
+                    }
+
                     if ($bailEarly) {
                         if ($failEntry -is [string] -and $failEntry.Contains("$")) {
                             $failEntry = $failEntry.Substring(0, $failEntry.IndexOf("$"))
