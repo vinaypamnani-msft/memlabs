@@ -2430,7 +2430,10 @@ function Wait-ForVm {
             return
         }
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
+        $count = 0
+        $restarted = $false
         do {
+            $count++
             Start-Sleep -Seconds 5
             try {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
@@ -2450,6 +2453,20 @@ function Wait-ForVm {
             if ($ready) {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
             }
+            else {
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding"
+                if ($count -eq 3 -or $stopWatch.Elapsed.TotalMinutes -ge 5) {
+                    if (-not $restarted) {
+                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Restarting VM"
+                        stop-vm2 -name $vmName
+                        start-sleep -seconds 30
+                        start-vm2 -name $vmName
+                        start-sleep -seconds 30
+                        $restarted = $true
+                    }
+                }
+            }
+        
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
 

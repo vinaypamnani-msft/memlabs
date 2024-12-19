@@ -93,7 +93,7 @@ function Start-VM2 {
                 else {
                     write-progress2 "Start VM" -Status "Starting VM $Name"  -force
                 }
-                Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinu
+                Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
                 $vm = Get-VM2 -Name $Name
                 if ($vm.State -eq "Running") {
                     $running = $true
@@ -179,7 +179,7 @@ function Stop-VM2 {
         if ($vm) {
             $i = 0
             if ($TurnOff) {
-                Stop-VM -VM $vm -TurnOff -force:$force -WarningAction SilentlyContinu
+                Stop-VM -VM $vm -TurnOff -force:$force -WarningAction SilentlyContinue
                 start-sleep -seconds 5
             }
             do {
@@ -187,20 +187,21 @@ function Stop-VM2 {
                 if ($i -gt 1) {
                     Start-Sleep -Seconds $RetrySeconds
                 }
-                Stop-VM -VM $vm -force:$force -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinu
+                Stop-VM -VM $vm -force:$force -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             }
             until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
             if ($StopError.Count -ne 0) {
-                if ($TurnOff) {
-                    Stop-VM -VM $vm -TurnOff -force:$force -WarningAction SilentlyContinu
-                    Start-Sleep -Seconds 5
+                
+                    Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
+                    Start-Sleep -Seconds $RetrySeconds
                     $vm = Get-VM2 -Name $Name
                     if ($vm.State -eq "Off") {
                         return $true
                     }
-                }
+                
                 Write-Log "${Name}: Failed to stop the VM. $StopError" -Warning
+                
                 if ($Passthru.IsPresent) {
                     return $false
                 }
