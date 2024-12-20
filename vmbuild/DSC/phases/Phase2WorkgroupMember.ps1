@@ -120,11 +120,12 @@
             DependsOn   = "[WriteStatus]InstallDotNet"
         }
 
+        $PageFileSize = ($thisVM.memory)/2MB
         SetCustomPagingFile PagingSettings {
-            DependsOn   = "[InstallDotNet4]DotNet"
+            DependsOn   = "[InitializeDisks]InitDisks"
             Drive       = 'C:'
-            InitialSize = '8192'
-            MaximumSize = '8192'
+            InitialSize = $PageFileSize
+            MaximumSize = $PageFileSize
         }
 
         WriteStatus InstallFeature {

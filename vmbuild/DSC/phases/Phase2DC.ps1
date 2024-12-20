@@ -110,12 +110,7 @@
             VM        = $ThisVM | ConvertTo-Json
         }
 
-        SetCustomPagingFile PagingSettings {
-            DependsOn   = "[InitializeDisks]InitDisks"
-            Drive       = 'C:'
-            InitialSize = '8192'
-            MaximumSize = '8192'
-        }
+       
 
         WriteStatus SetIPDG {
             DependsOn = "[Computer]NewName"
@@ -155,7 +150,7 @@
         InstallFeatureForSCCM InstallFeature {
             Name      = 'DC'
             Role      = 'DC'
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            DependsOn = "[InitializeDisks]InitDisks"
         }
 
         WriteStatus FirstDS {
@@ -175,8 +170,16 @@
             DomainNetBiosName             = $netbiosName
         }
 
+        $PageFileSize = ($thisVM.memory)/2MB
+        SetCustomPagingFile PagingSettings {
+            DependsOn   = "[ADDomain]FirstDS"
+            Drive       = 'C:'
+            InitialSize = $PageFileSize
+            MaximumSize = $PageFileSize
+        }
+
         WriteStatus CreateAccounts {
-            DependsOn = "[ADDomain]FirstDS"
+            DependsOn = "[SetCustomPagingFile]PagingSettings"
             Status    = "Creating user accounts and groups"
         }
 
@@ -197,6 +200,42 @@
 
         $nextDepend = "[InstallDotNet4]DotNet"
 
+        AddNtfsPermissions AddNtfsPerms {
+            Ensure    = "Present"
+            DependsOn = $nextDepend
+        }
+
+        OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
+            Name      = "DC"
+            Role      = "DC"
+        }
+
+        WriteStatus NetworkDNS {
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            Status    = "Setting Primary DNS, and DNS Forwarders"
+        }
+
+        DnsServerForwarder DnsServerForwarder {
+            DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
+            IsSingleInstance = 'Yes'
+            IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+            UseRootHint      = $true
+            EnableReordering = $true
+        }
+
+        $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
+        $waitOnDependency = "[DnsServerForwarder]DnsServerForwarder"
+
+        Service ADWS
+        {
+            Name = "ADWS"
+            State = "Running"
+            DependsOn = $nextDepend
+        }
+
+        $nextDepend = "[Service]ADWS"
+        $waitOnDependency = "[Service]ADWS"
 
         $adObjectDependency = @($nextDepend)
         $i = 0
@@ -299,33 +338,7 @@
             $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
             $nextDepend = $adSiteDependency
         }
-
-        AddNtfsPermissions AddNtfsPerms {
-            Ensure    = "Present"
-            DependsOn = $nextDepend
-        }
-
-        OpenFirewallPortForSCCM OpenFirewall {
-            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
-            Name      = "DC"
-            Role      = "DC"
-        }
-
-        WriteStatus NetworkDNS {
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
-            Status    = "Setting Primary DNS, and DNS Forwarders"
-        }
-
-        DnsServerForwarder DnsServerForwarder {
-            DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
-            IsSingleInstance = 'Yes'
-            IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
-            UseRootHint      = $true
-            EnableReordering = $true
-        }
-
-        $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
-        $waitOnDependency = "[DnsServerForwarder]DnsServerForwarder"
+      
 
         if ($OtherDC) {
             DnsServerConditionalForwarder 'Forwarder1' {

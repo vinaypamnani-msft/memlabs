@@ -68,13 +68,14 @@
             VM        = $ThisVM | ConvertTo-Json
         }
 
+        $PageFileSize = ($thisVM.memory)/2MB
         SetCustomPagingFile PagingSettings {
             DependsOn   = "[InitializeDisks]InitDisks"
             Drive       = 'C:'
-            InitialSize = '8192'
-            MaximumSize = '8192'
+            InitialSize = $PageFileSize
+            MaximumSize = $PageFileSize
         }
-
+        
         WriteStatus WaitDomain {
             DependsOn = "[SetCustomPagingFile]PagingSettings"
             Status    = "Waiting for domain to be ready (Trying to ping the DC)"

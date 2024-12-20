@@ -466,6 +466,9 @@ $global:VM_Create = {
 
                 $isoFiles = $azureFileList.OSISO | Where-Object { $_.id -in $OsVersionsToGet }
 
+                if ($currentItem.cmInstallDir) {
+                    $driveLetter = (Split-Path -Path $currentItem.cmInstallDir -Qualifier)
+                }
                 foreach ($isoFile in $isoFiles) {
                     
                     # SQL Iso Path
@@ -489,12 +492,12 @@ $global:VM_Create = {
                             write-Log "Successfully mounted the dvd from $($dvd.Path)"
                         }
                     }
-                    $dirname = $isoFile.id
+                    $dirname = $dirname = (join-path $driveLetter "OSD" $isoFile.id)
 
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { param ($dirname) New-Item -Path "C:\temp\$dirname" -ItemType Directory -Force } -ArgumentList $dirname
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { param ($dirname) New-Item -Path $dirname -ItemType Directory -Force } -ArgumentList $dirname
 
                     # Copy files from DVD
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock { param ($dirname) $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\Sources\*.wim" -Destination "C:\temp\$dirname" -Recurse -Force -Confirm:$false } -ArgumentList $dirname
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock { param ($dirname) $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\Sources\*.wim" -Destination $dirname -Recurse -Force -Confirm:$false } -ArgumentList $dirname
                     if ($result.ScriptBlockFailed) {
                         $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Get-ChildItem "$($cd.DriveLetter):" }
                         write-Log (Get-VMDvdDrive -VMName ADA-PS1SITE)
@@ -503,7 +506,7 @@ $global:VM_Create = {
                         return
                     }
 
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test WIM Files" -ScriptBlock { param ($dirname) get-item "c:\temp\$dirname\install.wim" } -ArgumentList $dirname 
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test WIM Files" -ScriptBlock { param ($dirname) get-item "$dirname\install.wim" } -ArgumentList $dirname 
                     if ($result.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy WIM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                         return
@@ -1700,9 +1703,9 @@ $global:VM_Config = {
                                         Start-VM2 -Name $currentItem.vmName
                                         
 
-                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 100 seconds to check status."
+                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 60 seconds to check status."
 
-                                        Start-Sleep -Seconds 90
+                                        Start-Sleep -Seconds 50
                                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 10 seconds to check status."
 
                                         Start-Sleep -Seconds 10
