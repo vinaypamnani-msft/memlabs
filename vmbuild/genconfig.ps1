@@ -3740,6 +3740,30 @@ function Rename-VirtualMachine {
 
 }
 
+<#
+.SYNOPSIS
+Adds an error or warning message to the global GenConfigErrorMessages array.
+
+.DESCRIPTION
+The Add-ErrorMessage function is used to add an error or warning message to the global GenConfigErrorMessages array. It takes the message, property, and Warning parameters as input.
+
+.PARAMETER message
+Specifies the name of the Notefield to modify.
+
+.PARAMETER property
+Specifies the base property object.
+
+.PARAMETER Warning
+Specifies whether the message is a warning. If this switch is present, the message will be treated as a warning; otherwise, it will be treated as an error.
+
+.EXAMPLE
+Add-ErrorMessage -message "Invalid value" -property "SomeProperty" -Warning
+Adds a warning message to the global GenConfigErrorMessages array with the specified message and property.
+
+.EXAMPLE
+Add-ErrorMessage -message "Error occurred" -property "AnotherProperty"
+Adds an error message to the global GenConfigErrorMessages array with the specified message and property.
+#>
 function Add-ErrorMessage {
     [CmdletBinding()]
     param (

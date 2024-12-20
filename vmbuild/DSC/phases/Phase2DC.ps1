@@ -197,81 +197,6 @@
 
         $nextDepend = "[InstallDotNet4]DotNet"
 
-        if ($prePopulate) {
-            ADOrganizationalUnit 'MEMLABS-Users'
-            {
-                Name                            = "MEMLABS-Users"
-                Path                            = $DNName
-                ProtectedFromAccidentalDeletion = $false
-                Description                     = "MEMLABS auto created users"
-                Ensure                          = 'Present'
-                DependsOn                       = $nextDepend
-            }
-
-            $nextDepend = "[ADOrganizationalUnit]MEMLABS-Users"
-
-            # Loop to create 50 users
-            for ($i = 1; $i -le 50; $i++) {
-                # Generate a random username
-                $Username = "MEMLABS-User" + ([System.Guid]::NewGuid().ToString("N").Substring(0, 8))
-            
-            
-                # Create the new user
-                ADUser "MEMLABS-User$($i)" {
-                    Ensure               = 'Present'
-                    UserPrincipalName    = $Username + '@' + $DomainName
-                    UserName             = $Username
-                    Password             = $DomainCreds
-                    PasswordNeverResets  = $true
-                    PasswordNeverExpires = $true
-                    CannotChangePassword = $true
-                    DomainName           = $DomainName
-                    DependsOn            = $nextDepend
-                    Path                 = "OU=MEMLABS-Users,$DNName"
-                }
-            }
-
-
-            # List of department names
-            $Departments = @(
-                "HR",
-                "Finance",
-                "IT",
-                "Marketing",
-                "Sales",
-                "Operations",
-                "Legal",
-                "Customer Service",
-                "Engineering",
-                "Product Management",
-                "Research and Development",
-                "Quality Assurance",
-                "Supply Chain",
-                "Administration",
-                "Facilities",
-                "Procurement",
-                "Training",
-                "Security",
-                "Public Relations",
-                "Compliance"
-            )
-
-            # Loop to create security groups for each department
-            foreach ($Department in $Departments) {
-                $GroupName = "MEMLABS-$Department-SecurityGroup"
-
-                ADGroup $Department {
-                    Ensure      = 'Present'
-                    GroupName   = $GroupName
-                    GroupScope  = "Global"
-                    Category    = "Security"
-                    Description = $GroupName
-                    DependsOn   = $nextDepend
-                    Path        = "OU=MEMLABS-Users,$DNName"
-                }
-
-            }
-        }
 
         $adObjectDependency = @($nextDepend)
         $i = 0
@@ -372,11 +297,12 @@
             }
             $adSiteDependency += "[ADReplicationSiteLink]HQSiteLink$($i)"
             $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
+            $nextDepend = $adSiteDependency
         }
 
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = $adSiteDependency
+            DependsOn = $nextDepend
         }
 
         OpenFirewallPortForSCCM OpenFirewall {
@@ -428,23 +354,102 @@
             $waitOnDependency = "[ADDomainTrust]Trust"
         }
 
+        if ($prePopulate) {
+            ADOrganizationalUnit 'MEMLABS-Users'
+            {
+                Name                            = "MEMLABS-Users"
+                Path                            = $DNName
+                ProtectedFromAccidentalDeletion = $false
+                Description                     = "MEMLABS auto created users"
+                Ensure                          = 'Present'
+                DependsOn                       = $nextDepend
+            }
+
+            $nextDepend = "[ADOrganizationalUnit]MEMLABS-Users"
+
+            $waitOnDependency = @($nextDepend)
+            # Loop to create 50 users
+            for ($i = 1; $i -le 50; $i++) {
+                # Generate a random username
+                $Username = "MEMLABS-User" + ([System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+            
+            
+                # Create the new user
+                ADUser "MEMLABS-User$($i)" {
+                    Ensure               = 'Present'
+                    UserPrincipalName    = $Username + '@' + $DomainName
+                    UserName             = $Username
+                    Password             = $DomainCreds
+                    PasswordNeverResets  = $true
+                    PasswordNeverExpires = $true
+                    CannotChangePassword = $true
+                    DomainName           = $DomainName
+                    DependsOn            = $nextDepend
+                    Path                 = "OU=MEMLABS-Users,$DNName"
+                }
+                $waitOnDependency += "[ADUser]MEMLABS-User$($i)"
+            }
+
+            
+
+            # List of department names
+            $Departments = @(
+                "HR",
+                "Finance",
+                "IT",
+                "Marketing",
+                "Sales",
+                "Operations",
+                "Legal",
+                "Customer Service",
+                "Engineering",
+                "Product Management",
+                "Research and Development",
+                "Quality Assurance",
+                "Supply Chain",
+                "Administration",
+                "Facilities",
+                "Procurement",
+                "Training",
+                "Security",
+                "Public Relations",
+                "Compliance"
+            )
+
+            # Loop to create security groups for each department
+            foreach ($Department in $Departments) {
+                $GroupName = "MEMLABS-$Department-SecurityGroup"
+
+                ADGroup $Department {
+                    Ensure      = 'Present'
+                    GroupName   = $GroupName
+                    GroupScope  = "Global"
+                    Category    = "Security"
+                    Description = $GroupName
+                    DependsOn   = $nextDepend
+                    Path        = "OU=MEMLABS-Users,$DNName"
+                }
+                $waitOnDependency += "[ADGroup]$Department"
+            }
+        }
+
         if ($ThisVM.InstallCA) {
 
             WriteStatus ADCS {
-                DependsOn = $nextDepend
+                DependsOn =  $waitOnDependency
                 Status    = "Installing Certificate Authority"
             }
 
             if ($ThisVM.ThisParams.RootCA) {
                 InstallCA InstallCA {
-                    DependsOn     = $nextDepend
+                    DependsOn     =  $waitOnDependency
                     HashAlgorithm = "SHA256"
                     #RootCa        = $ThisVM.ThisParams.RootCA
                 }
             }
             else {
                 InstallCA InstallCA {
-                    DependsOn     = $nextDepend
+                    DependsOn     =  $waitOnDependency
                     HashAlgorithm = "SHA256"
                 }
             }

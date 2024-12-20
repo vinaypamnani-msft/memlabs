@@ -452,8 +452,9 @@ $global:VM_Create = {
             # Eject ISO from guest
             Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
         }
-
+        
         if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.SiteCode -and $createVM) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if this is the Top Level SiteServer to prepopulate objects"
             $Parent = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -siteCode $currentItem.SiteCode -type Name -SmartUpdate:$false
 
             # This is the Top Level Site Server

@@ -414,7 +414,7 @@ function Wait-Phase {
             }
 
             # Sleep
-            Start-Sleep -Milliseconds 200
+            Start-Sleep -Milliseconds 250
 
         } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
 
@@ -482,7 +482,7 @@ function Get-ConfigurationData {
     if ($cd) {
 
         $global:preparePhasePercent++
-        Start-Sleep -Milliseconds 201
+        Start-Sleep -Milliseconds 251
         Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VM's are running" -PercentComplete $global:preparePhasePercent
 
         $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
@@ -492,7 +492,7 @@ function Get-ConfigurationData {
 
 
         $global:preparePhasePercent++
-        Start-Sleep -Milliseconds 201
+        Start-Sleep -Milliseconds 251
         Write-Progress2 "Preparing Phase $Phase" -Status "Starting required VMs (if needed)" -PercentComplete $global:preparePhasePercent
 
         if ($critlist) {
@@ -506,7 +506,7 @@ function Get-ConfigurationData {
         if ($dc) {
 
             $global:preparePhasePercent++
-            Start-Sleep -Milliseconds 201
+            Start-Sleep -Milliseconds 251
             Write-Progress2 "Preparing Phase $Phase" -Status "Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent
 
             $OriginalProgressPreference = $Global:ProgressPreference

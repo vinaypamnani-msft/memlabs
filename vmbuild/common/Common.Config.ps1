@@ -1032,7 +1032,7 @@ function Get-TopSiteServerForSiteCode {
         $first = $configVMs | Select-Object -First 1
         while ($first.ParentSiteCode) {        
             $configVMs = @()
-            $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
+            $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
             $first = $configVMs | Select-Object -First 1
         }
         if ($type -eq "Name") {
@@ -1048,7 +1048,7 @@ function Get-TopSiteServerForSiteCode {
         $first = $existingVMs | Select-Object -First 1
         while ($first.ParentSiteCode) {        
             $existingVMs = @()
-            $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+            $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) }
             $first = $existingVMs | Select-Object -First 1
         }
         if ($type -eq "Name") {
