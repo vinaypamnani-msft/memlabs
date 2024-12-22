@@ -3156,7 +3156,8 @@ Function Get-SiteCodeForDPMP {
             foreach ($item in (Get-ExistingSiteServer -DomainName $Domain -Role "CAS" | Select-Object SiteCode, Network, VmName -Unique)) {
                 $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
             }
-
+            $siteCodes = $siteCodes | Get-Unique
+            
             if ($siteCodes.Length -eq 0) {
                 Write-Host
                 write-host "No valid site codes are eligible to accept this Site System"

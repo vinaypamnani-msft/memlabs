@@ -1993,7 +1993,7 @@ function New-VirtualMachine {
         if ($AdditionalDisks) {
             $count = 0
             $label = "DATA"
-            Write-Progress2 $Activity -Status "Adding Additional Disks" -percentcomplete 80 -force
+            Write-Progress2 $Activity -Status "Adding Additional Disks" -percentcomplete 80 -force -log
             foreach ($disk in $AdditionalDisks.psobject.properties) {
                 $newDiskName = "$VmName`_$label`_$count.vhdx"
                 $newDiskPath = Join-Path $vm.Path $newDiskName

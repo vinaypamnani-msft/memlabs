@@ -410,6 +410,61 @@ $global:VM_Create = {
             }
         }
 
+        # Initialize disks
+        $Initialize_Disk = {
+            param($letter,
+                $size,
+                $label
+            )
+            $OriginalPref = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+            $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null     
+            $ProgressPreference = $OriginalPref  
+ 
+            # Create NO_SMS_ON_DRIVE.SMS
+            New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
+        }
+
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
+        Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed -Log
+        $count = 0
+        $label = $null
+        foreach ($disk in $currentItem.AdditionalDisks.psobject.properties) {
+            $label = $null
+            Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Log
+            if ($currentItem.cmInstallDir -like "$($disk.Name)*") {
+                if ($label) {
+                    $label = $label + "_"
+                }
+                $label = $label + "CM"
+            }
+            if ($currentItem.sqlInstanceDir -like "$($disk.Name)*") {
+                if ($label) {
+                    $label = $label + "_"
+                }
+                $label = $label + "SQL"
+            }
+            if ($currentItem.wsusContentDir -like "$($disk.Name)*") {
+                if ($label) {
+                    $label = $label + "_"
+                }
+                $label = $label + "WSUS"
+            }
+            if (-not $label) {
+                $label = "DATA`_$count"
+                $count++
+            }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Initialize_Disk -ArgumentList @($disk.Name, $disk.Value, $label)
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
+            else {
+                Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Completed -Log
+            }
+            
+        }
         # Copy SQL files to VM
         if ($currentItem.sqlVersion -and $createVM) {
 
@@ -488,7 +543,8 @@ $global:VM_Create = {
                         $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $isoPath -Passthru -ErrorVariable $err
                         if (-not $dvd) {
                             write-Log "2nd Try. Failed to mount the dvd from $isoPath $err"
-                        }else {
+                        }
+                        else {
                             write-Log "Successfully mounted the dvd from $($dvd.Path)"
                         }
                     }
