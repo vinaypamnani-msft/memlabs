@@ -3281,7 +3281,7 @@ Function Get-ForestTrustMenu {
                 Write-OrangePoint "Domain $result already has a CA. Disabling CA in this domain"
                 $property.InstallCA = $false
             }
-            Get-PrimarySitesForDomain $property $result
+            Get-TargetSitesForDomain $property $result
         }
         else {
             $property.psobject.properties.remove('externalDomainJoinSiteCode')
@@ -3298,16 +3298,16 @@ Function Get-ForestTrustMenu {
     }
 }
 
-Function Get-PrimarySitesForDomain {
+Function Get-TargetSitesForDomain {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
         [Object] $property,
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To get Primary Sites")]
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To get Target Sites")]
         [string] $Domain
     )
 
-    $targetPrimaries = @((Get-list -type vm -DomainName $Domain | Where-Object { $_.Role -eq "Primary" } ).SiteCode)
+    $targetPrimaries = @((Get-list -type vm -DomainName $Domain | Where-Object { $_.Role -eq "Primary" -or $_.Role -eq "Secondary" } ).SiteCode)
 
     if ($targetPrimaries) {
         $targetPrimaries += "NONE"
@@ -3315,7 +3315,7 @@ Function Get-PrimarySitesForDomain {
         while ($valid -eq $false) {
             #$property.externalDomainJoinSiteCode
             Write-Log -Activity -NoNewLine "Remote domain Management Server for this domains clients"
-            $result = Get-Menu "Select Primary site code in $Domain to configure to manage clients in this domain" $($targetPrimaries) "NONE" -Test:$false
+            $result = Get-Menu "Select Target site code in $Domain to configure to manage clients in this domain" $($targetPrimaries) "NONE" -Test:$false
             $property | Add-Member -MemberType NoteProperty -Name "externalDomainJoinSiteCode" -Value $result -Force
 
             if (Get-TestResult -SuccessOnWarning) {
@@ -3342,7 +3342,7 @@ Function Set-SiteServerLocalSql {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
-        if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+        if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
         }
     }
@@ -3396,7 +3396,7 @@ Function Set-SiteServerRemoteSQL {
         $virtualMachine.PsObject.Members.Remove('sqlInstanceName')
         $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
         $virtualMachine.PsObject.Members.Remove('sqlPort')
-        if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+        if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
         }
     }
@@ -3501,7 +3501,7 @@ Function Get-remoteSQLVM {
                 $virtualMachine.PsObject.Members.Remove('sqlPort')
                 $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
                 $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
-                if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+                if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
                 }
 
@@ -4886,7 +4886,7 @@ function Select-Options {
                     continue MainLoop
                 }
                 "externalDomainJoinSiteCode" {
-                    Get-PrimarySitesForDomain -property $property -domain $property.ForestTrust
+                    Get-TargetSitesForDomain -property $property -domain $property.ForestTrust
                     continue MainLoop
                 }
                 "sqlVersion" {
@@ -5493,7 +5493,7 @@ function Add-NewVMForRole {
 
 
     $oldConfig = $configToModify | ConvertTo-Json -Depth 5 | ConvertFrom-Json
-    Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem"
+    Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem SiteCode: $SiteCode ParentSiteCode: $parentSiteCode Network: $network"
 
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
         if ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
@@ -5502,8 +5502,10 @@ function Add-NewVMForRole {
             if ($ConfigToModify.domainDefaults.DefaultClientOS) {
                 $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
             }
-            Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
-            $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
+            else {           
+                Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
+                $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
+            }
         }
         else {
             if ($role -eq "Linux") {
@@ -5531,8 +5533,13 @@ function Add-NewVMForRole {
                     }
                 }
                 if ($null -ne $OSList) {
-                    Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
-                    $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
+                    if ($OperatingSystem -like "*Server*" -and $ConfigToModify.domainDefaults.DefaultServerOS) {                       
+                        $OperatingSystem = $ConfigToModify.domainDefaults.DefaultServerOS
+                    }
+                    else {
+                        Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
+                        $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
+                    }
                 }
             }
         }
@@ -5875,7 +5882,7 @@ function Add-NewVMForRole {
                 #write-log "Adding new DPMP for sitecode $newSiteCode"
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
             }
-            $siteCode = $virtualMachine.siteCode
+            #$siteCode = $virtualMachine.siteCode
             if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $siteCode) -eq "Secondary") {
                 $virtualMachine.installMP = $false
             }
@@ -5951,6 +5958,17 @@ function Add-NewVMForRole {
             Write-Host "New Primary server found. Adding new DPMP for sitecode $newSiteCode"
         }
         Add-NewVMForRole -Role SiteSystem -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -SiteCode $newSiteCode -Quiet:$Quiet
+    }
+    if ($Role -eq "PassiveSite") {
+        $SiteCode = $virtualMachine.SiteCode
+
+        $primaryNode = $ConfigToModify.virtualMachines | Where-Object { $_.Role -in ("Primary", "CAS") -and $_.siteCode -eq $SiteCode }
+        if ($primaryNode.Role -eq "Primary") {                 
+            $DPsForSiteCode = $ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "SiteSystem" -and $_.siteCode -eq $SiteCode -and $_.installDP -eq $true }
+            if (-not $DPsForSiteCode) {
+                Add-NewVMForRole -Role SiteSystem -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -SiteCode $SiteCode -Quiet:$Quiet
+            }
+        }
     }
     if ($Role -eq "SQLAO" -and (-not $secondSQLAO)) {
         write-host "$($virtualMachine.VmName) is the 1st SQLAO"
@@ -6584,7 +6602,7 @@ function Select-VirtualMachines {
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
-                                if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+                                if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
                                 }
                                 if ($virtualMachine.Role -ne "Secondary") {
@@ -6611,7 +6629,7 @@ function Select-VirtualMachines {
                             $virtualMachine.psobject.properties.remove('sqlPort')
                             $virtualMachine.psobject.properties.remove('SqlServiceAccount')
                             $virtualMachine.psobject.properties.remove('SqlAgentAccount')
-                            if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false){
+                            if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
                             }
                             $newName = Rename-VirtualMachine -vm $virtualMachine

@@ -170,7 +170,7 @@
             DomainNetBiosName             = $netbiosName
         }
 
-        $PageFileSize = ($thisVM.memory)/2MB
+        $PageFileSize = ($thisVM.memory) / 2MB
         SetCustomPagingFile PagingSettings {
             DependsOn   = "[ADDomain]FirstDS"
             Drive       = 'C:'
@@ -227,10 +227,9 @@
         $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
         $waitOnDependency = "[DnsServerForwarder]DnsServerForwarder"
 
-        Service ADWS
-        {
-            Name = "ADWS"
-            State = "Running"
+        Service ADWS {
+            Name      = "ADWS"
+            State     = "Running"
             DependsOn = $nextDepend
         }
 
@@ -449,20 +448,20 @@
         if ($ThisVM.InstallCA) {
 
             WriteStatus ADCS {
-                DependsOn =  $waitOnDependency
+                DependsOn = $waitOnDependency
                 Status    = "Installing Certificate Authority"
             }
 
             if ($ThisVM.ThisParams.RootCA) {
                 InstallCA InstallCA {
-                    DependsOn     =  $waitOnDependency
+                    DependsOn     = $waitOnDependency
                     HashAlgorithm = "SHA256"
                     #RootCa        = $ThisVM.ThisParams.RootCA
                 }
             }
             else {
                 InstallCA InstallCA {
-                    DependsOn     =  $waitOnDependency
+                    DependsOn     = $waitOnDependency
                     HashAlgorithm = "SHA256"
                 }
             }
@@ -581,7 +580,6 @@
             $waitOnDependency = "[ADGroup]ConfigMgrIISServers"
         }
 
-        if ($usePKI) {
 
         WriteStatus GroupPolicyStatus {
             DependsOn = $waitOnDependency
@@ -629,7 +627,7 @@
         }
         $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
         $waitOnDependency = $nextDepend
-    }
+        
 
         if ($ThisVM.InstallCA) {
 

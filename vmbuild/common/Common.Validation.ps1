@@ -280,7 +280,7 @@ function Test-ValidVmSupported {
 
     if ($VM.OtherNode) {
         Test-ValidMachineName $VM.OtherNode -ReturnObject $ReturnObject
-        Test-MachineNameExists $VM.OtherNode -ReturnObject $ReturnObject -config $ConfigObject
+        Test-MachineNameExists $VM.OtherNode -ReturnObject $ReturnObject -config $ConfigObject        
     }
 
     if ($VM.AlwaysOnListenerName) {
@@ -1011,6 +1011,21 @@ function Test-Configuration {
 
             # Valid additionalDisks
             Test-ValidVmDisks -VM $vm -ReturnObject $return
+
+
+            if ($vm.Role -eq "Primary") {
+                $passiveSite = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" -and $_.siteCode -eq $vm.SiteCode }
+                if ($passiveSite) {
+                    write-log -verbose "Checking Passive Site Server has DP in sitecode"
+                    $DPsForSiteCode = $ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "SiteSystem" -and $_.siteCode -eq $vm.SiteCode -and $_.installDP -eq $true }
+                    if (-not $DPsForSiteCode) {
+                        Add-ValidationMessage -Message "Passive Validation: [$($vm.vmName)] SiteCode $($vm.SiteCode) does not contain a DP which is needed with remote contentlib." -ReturnObject $return -Failure
+                    }
+                    else {
+                        write-log -verbose "Passive Site has DP $($DPsForSiteCode.vmName)"
+                    }
+                }
+            }
 
             if ($vm.sqlVersion) {
 
