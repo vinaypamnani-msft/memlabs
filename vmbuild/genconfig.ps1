@@ -3157,7 +3157,7 @@ Function Get-SiteCodeForDPMP {
                 $sitecodes += "$($item.SiteCode) ($($item.vmName), $($item.Network))"
             }
             $siteCodes = $siteCodes | Get-Unique
-            
+
             if ($siteCodes.Length -eq 0) {
                 Write-Host
                 write-host "No valid site codes are eligible to accept this Site System"
@@ -5883,7 +5883,7 @@ function Add-NewVMForRole {
                 #write-log "Adding new DPMP for sitecode $newSiteCode"
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
             }
-            #$siteCode = $virtualMachine.siteCode
+            $siteCode = $virtualMachine.siteCode
             if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $siteCode) -eq "Secondary") {
                 $virtualMachine.installMP = $false
             }
