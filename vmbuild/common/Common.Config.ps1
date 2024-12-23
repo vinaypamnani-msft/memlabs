@@ -404,6 +404,12 @@ function Add-ExistingVMsToDeployConfig {
             Add-ExistingVMToDeployConfig -vmName $OtherDC.vmName -configToModify $config -OtherDC:$true
             if ($null -ne $dc.externalDomainJoinSiteCode -and $dc.externalDomainJoinSiteCode -ne "NONE") {
                 $RemoteSiteServer = Get-SiteServerForSiteCode -deployConfig $config -SiteCode $dc.externalDomainJoinSiteCode -DomainName $dc.ForestTrust -type VM
+                if ($RemoteSiteServer.Role -eq "Secondary") {
+                    write-Log "Remote Site server is a Secondary, adding Primary to list" -LogOnly
+                    $PrimarySiteServer = Get-SiteServerForSiteCode -deployConfig $config -SiteCode $RemoteSiteServer.ParentSiteCode -DomainName $dc.ForestTrust -type VM
+                    write-Log "Adding $($PrimarySiteServer.vmName) to list" -LogOnly
+                    Add-ExistingVMToDeployConfig -vmName $PrimarySiteServer.vmName -configToModify $config
+                }
                 Add-ExistingVMToDeployConfig -vmName $RemoteSiteServer.vmName -configToModify $config
             }
 

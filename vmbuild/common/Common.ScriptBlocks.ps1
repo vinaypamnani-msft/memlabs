@@ -306,8 +306,18 @@ $global:VM_Create = {
             start-sleep -seconds 60
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
             if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
+                start-sleep -seconds 60
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
+                if ($result.ScriptBlockFailed) {
+                    if (-not $currentItem.operatingSystem -like "*Server*") {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                        return
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)"
+                    }
+                    
+                }
             }
         }
 
@@ -408,104 +418,105 @@ $global:VM_Create = {
                 $inProgress = (-not $Migrate)
                 New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $inProgress
             }
-        }
+        
 
-        # Initialize disks
-        $Initialize_Disk = {
-            param($letter,
-                $size,
-                $label
-            )
-            $OriginalPref = $ProgressPreference
-            $ProgressPreference = "SilentlyContinue"
-            $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
-            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null     
-            $ProgressPreference = $OriginalPref  
+            # Initialize disks
+            $Initialize_Disk = {
+                param($letter,
+                    $size,
+                    $label
+                )
+                $OriginalPref = $ProgressPreference
+                $ProgressPreference = "SilentlyContinue"
+                $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+                $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null     
+                $ProgressPreference = $OriginalPref  
  
-            # Create NO_SMS_ON_DRIVE.SMS
-            New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
-        }
+                # Create NO_SMS_ON_DRIVE.SMS
+                New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
+            }
 
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
-        Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed -Log
-        $count = 0
-        $label = $null
-        foreach ($disk in $currentItem.AdditionalDisks.psobject.properties) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
+            Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed -Log
+            $count = 0
             $label = $null
-            Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Log
-            if ($currentItem.cmInstallDir -like "$($disk.Name)*") {
-                if ($label) {
-                    $label = $label + "_"
+            foreach ($disk in $currentItem.AdditionalDisks.psobject.properties) {
+                $label = $null
+                Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Log
+                if ($currentItem.cmInstallDir -like "$($disk.Name)*") {
+                    if ($label) {
+                        $label = $label + "_"
+                    }
+                    $label = $label + "CM"
                 }
-                $label = $label + "CM"
-            }
-            if ($currentItem.sqlInstanceDir -like "$($disk.Name)*") {
-                if ($label) {
-                    $label = $label + "_"
+                if ($currentItem.sqlInstanceDir -like "$($disk.Name)*") {
+                    if ($label) {
+                        $label = $label + "_"
+                    }
+                    $label = $label + "SQL"
                 }
-                $label = $label + "SQL"
-            }
-            if ($currentItem.wsusContentDir -like "$($disk.Name)*") {
-                if ($label) {
-                    $label = $label + "_"
+                if ($currentItem.wsusContentDir -like "$($disk.Name)*") {
+                    if ($label) {
+                        $label = $label + "_"
+                    }
+                    $label = $label + "WSUS"
                 }
-                $label = $label + "WSUS"
-            }
-            if (-not $label) {
-                $label = "DATA`_$count"
-                $count++
-            }
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Initialize_Disk -ArgumentList @($disk.Name, $disk.Value, $label)
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
-            }
-            else {
-                Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Completed -Log
-            }
+                if (-not $label) {
+                    $label = "DATA`_$count"
+                    $count++
+                }
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Initialize_Disk -ArgumentList @($disk.Name, $disk.Value, $label)
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
+                else {
+                    Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Completed -Log
+                }
             
-        }
-        # Copy SQL files to VM
-        if ($currentItem.sqlVersion -and $createVM) {
-
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying SQL installation files to the VM."
-            Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed
-
-            # Determine which SQL version files should be used
-            $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
-
-            # SQL Iso Path
-            $sqlIso = $sqlFiles.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
-            $sqlIsoPath = Join-Path $Common.AzureFilesPath $sqlIso
-
-            # Add SQL ISO to guest
-            Set-VMDvdDrive -VMName $currentItem.vmName -Path $sqlIsoPath
-
-            # Create C:\temp\SQL & C:\temp\SQL_CU inside VM
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force }
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
-
-            # Copy files from DVD
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy SQL Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
             }
+            # Copy SQL files to VM
+            if ($currentItem.sqlVersion -and $createVM) {
 
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL_CU" }
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying SQL installation files to the VM."
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed
+
+                # Determine which SQL version files should be used
+                $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
+
+                # SQL Iso Path
+                $sqlIso = $sqlFiles.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
+                $sqlIsoPath = Join-Path $Common.AzureFilesPath $sqlIso
+
+                # Add SQL ISO to guest
+                Set-VMDvdDrive -VMName $currentItem.vmName -Path $sqlIsoPath
+
+                # Create C:\temp\SQL & C:\temp\SQL_CU inside VM
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force }
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
+
+                # Copy files from DVD
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy SQL Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
+
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL_CU" }
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
+
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL\setup.exe" }
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    return
+                }
+
+                # Eject ISO from guest
+                Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
             }
-
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL\setup.exe" }
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
-            }
-
-            # Eject ISO from guest
-            Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
         }
         
         if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.SiteCode -and $createVM) {

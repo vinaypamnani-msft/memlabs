@@ -15,7 +15,7 @@ function Start-Maintenance {
     }
     else {
         $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
-        $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
+        $vmsNeedingMaintenance = $allVMs | Where-Object { -not $_.memLabsVersion -or $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     }
 
     # Filter in-progress

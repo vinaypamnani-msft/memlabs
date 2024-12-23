@@ -180,7 +180,7 @@ if ($mpCount -eq 0) {
 # Create Boundary groups
 $bgs = $ThisVM.thisParams.sitesAndNetworks | Where-Object { $_.SiteCode -in $ValidSiteCodes }
 $bgsCount = $bgs.count
-Write-DscStatus "Create $bgsCount Boundary Groups"
+Write-DscStatus "Create $bgsCount Boundary Groups for site $SiteCode"
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     $siteStatus = Get-CMSite -SiteCode $bgsitecode
     if ($siteStatus.Status -eq 1) {
@@ -192,20 +192,21 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
         try {
             $exists = Get-CMBoundaryGroup -Name $bgsitecode
             if ($exists) {
-                Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',')"
+                Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
                 Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $sitesystems
             }
             else {
-                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',')"
-                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $sitesystems
+                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
+                #New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $sitesystems
+                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgsitecode -AddSiteSystemServerName $sitesystems
             }
         }
         catch {
-            Write-DscStatus "Failed to create Boundary Group '$bgsitecode'. Error: $_"
+            Write-DscStatus "Failed to create Boundary Group '$bgsitecode' in sitecode $siteCode. Error: $_"
         }
     }
     else {
-        Write-DscStatus "Skip creating Boundary groups for site $bgsitecode because Site Status is not 'Active'."
+        Write-DscStatus "Skip creating Boundary groups for site $bgsitecode because Site Status for sitecode $siteCode is not 'Active'."
     }
     Start-Sleep -Seconds 5
 }

@@ -14,6 +14,9 @@ $DomainFullName = $deployConfig.vmOptions.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 
+$DC = $deployConfig.virtualMachines | where-object { $_.Role -eq "DC" }
+
+$Externaldomainsitecode = $DC.externalDomainJoinSiteCode
 
 
 $cm_svc = "$DomainFullName\cm_svc"
@@ -53,13 +56,34 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
     return $false
 }
 
+if (-not $Externaldomainsitecode) {
+    Write-DscStatus "ExternalDomainSiteCode is not set. Skipping PKI configuration" -Log
+    return
+}
+else {
+    Write-DscStatus "ExternalDomainSiteCode is $Externaldomainsitecode." -Log
+}
+
+if ($SiteCode -ne $Externaldomainsitecode) {
+
+    $childSites = (Get-CMSiteDefinition | Where-Object { $_.ParentSiteCode -eq $SiteCode }).Sitecode
+    if ($childSites) {
+        Write-DscStatus "SiteCode $SiteCode has child sites $childSites. Configuring for ChildSite"        
+    }
+    else {
+        Write-DscStatus "SiteCode $SiteCode is not the external domain site code $Externaldomainsitecode. Skipping PKI configuration"
+        return
+    }
+}
+
+
 $cm_svc_file = "C:\Windows\Temp\ProvisionScript\certauth.txt"
 if (Test-Path $cm_svc_file) {
     # Add cm_svc user as a CM Account
     $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
-    Write-DscStatus "Adding $cm_svc domain account as CM account"
+    Write-DscStatus "Adding $cm_svc domain account as CM account for sitecode $Externaldomainsitecode" -Log
     Start-Sleep -Seconds 5
-    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
+    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $Externaldomainsitecode *>&1 | Out-File $global:StatusLog -Append
     #Remove-Item -Path $cm_svc_file -Force -Confirm:$false
 
     # Set client push account
@@ -69,20 +93,32 @@ if (Test-Path $cm_svc_file) {
 
     $ForestDiscoveryAccount = "$DomainFullName\admin"
 
-    Write-DscStatus "Adding $ForestDiscoveryAccount domain account as CM account"
+    Write-DscStatus "Adding $ForestDiscoveryAccount domain account as CM account for sitecode $SiteCode" -Log
     Start-Sleep -Seconds 5
-    New-CMAccount -Name $ForestDiscoveryAccount -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
+    New-CMAccount -Name $ForestDiscoveryAccount -Password $secure -SiteCode $Externaldomainsitecode *>&1 | Out-File $global:StatusLog -Append
 
-    Write-DscStatus "Creating New-CMActiveDirectoryForest"
-    New-CMActiveDirectoryForest -Description "Multi Forest $DomainFullName" -EnableDiscovery $true -UserName $ForestDiscoveryAccount -Password $secure -ForestFqdn $DomainFullName *>&1 | Out-File $global:StatusLog -Append
+    Write-DscStatus "Creating New-CMActiveDirectoryForest for domain $DomainFullName" -Log
+    try {
+        New-CMActiveDirectoryForest -Description "Multi Forest $DomainFullName" -EnableDiscovery $true -UserName $ForestDiscoveryAccount -Password $secure -ForestFqdn $DomainFullName *>&1 | Out-File $global:StatusLog -Append
+    }
+    catch {
+        Write-DscStatus "Failed to create New-CMActiveDirectoryForest for domain $DomainFullName $_" -Log     
+    }
+    Write-DscStatus "Get-CMSiteDefinition -SiteCode $Externaldomainsitecode" -Log   
+    $sitedef = Get-CMSiteDefinition -SiteCode $Externaldomainsitecode
 
-    $sitedef = Get-CMSiteDefinition -SiteCode $SiteCode
-
-    Write-DscStatus "Enable Discovery Set-CMActiveDirectoryForest"
+    if (-not $sitedef) {
+        Write-DscStatus "Failed to get CMSiteDefinition for sitecode $Externaldomainsitecode" -Log
+        return
+    }   
+    
+    Write-DscStatus "Enable Discovery Set-CMActiveDirectoryForest" -Log
+    "Set-CMActiveDirectoryForest -EnableDiscovery $true -ForestFQDN $DomainFullName -AddPublishingSite $sitedef" | Out-File $global:StatusLog -Append
     Set-CMActiveDirectoryForest -EnableDiscovery $true -ForestFQDN $DomainFullName -AddPublishingSite $sitedef *>&1 | Out-File $global:StatusLog -Append
 
-    Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery"
-    Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery -SiteCode $SiteCode -Enabled $true -Verbose | Out-File $global:StatusLog -Append
+    Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery for sitecode $sitecode"
+    "Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery -SiteCode $sitecode -Enabled $true -Verbose" | Out-File $global:StatusLog -Append
+    Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery -SiteCode $sitecode -Enabled $true -Verbose | Out-File $global:StatusLog -Append
 
     $DomainA = $DomainFullName.Split(".")[0]
     $DomainB = $DomainFullName.Split(".")[1]
@@ -111,7 +147,7 @@ if (Test-Path $cm_svc_file) {
     }
 
     foreach ($network in $networks) {
-        Write-DscStatus "New Boundary $DomainFullName - $network"
+        Write-DscStatus "New Boundary $DomainFullName - $network - $Externaldomainsitecode"
         #New-CMBoundary -DisplayName "$DomainFullName - $network" -BoundaryType IPSubNet -Value "$network/24" *>&1 | Out-File $global:StatusLog -Append
         $IP = $network
         $mask = '255.255.255.0'
@@ -123,24 +159,38 @@ if (Test-Path $cm_svc_file) {
         $Broadcast = $BroadcastBits -join '.'
 
         $sitesystems = @()
-        $sitesystems += (Get-CMDistributionPoint -SiteCode $sitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems += (Get-CMManagementPoint -SiteCode $sitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $sitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems += (Get-CMDistributionPoint -SiteCode $Externaldomainsitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems += (Get-CMManagementPoint -SiteCode $Externaldomainsitecode).NetworkOSPath -replace "\\", ""
+        $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $Externaldomainsitecode).NetworkOSPath -replace "\\", ""
         $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
 
-        New-CMBoundary -Type IPRange -Name "$DomainFullName - $network" -Value "$($NetworkID)-$($Broadcast)" *>&1 | Out-File $global:StatusLog -Append
-        "New-CMBoundaryGroup -Name $network -DefaultSiteCode $sitecode -AddSiteSystemServerName $sitesystems" | Out-File $global:StatusLog -Append
-        New-CMBoundaryGroup -Name $network -DefaultSiteCode $sitecode -AddSiteSystemServerName $sitesystems *>&1 | Out-File $global:StatusLog -Append
-        Add-CMBoundaryToGroup -BoundaryName "$DomainFullName - $network" -BoundaryGroupName $network *>&1 | Out-File $global:StatusLog -Append
+        try {
+            "New-CMBoundary -Type IPRange -Name `"$DomainFullName - $network`" -Value `"$($NetworkID)-$($Broadcast)`"" | Out-File $global:StatusLog -Append
+            New-CMBoundary -Type IPRange -Name "$DomainFullName - $network" -Value "$($NetworkID)-$($Broadcast)" *>&1 | Out-File $global:StatusLog -Append
+        
+        }
+        catch {
+            Write-DscStatus "Failed to create New-CMBoundary for $DomainFullName - $network - $sitecode $_" -Log
+        }
+        try {
+            "New-CMBoundaryGroup -Name `"$DomainFullName - $network`" -DefaultSiteCode $Externaldomainsitecode -AddSiteSystemServerName $sitesystems" | Out-File $global:StatusLog -Append
+            New-CMBoundaryGroup -Name "$DomainFullName - $network" -DefaultSiteCode $Externaldomainsitecode -AddSiteSystemServerName $sitesystems *>&1 | Out-File $global:StatusLog -Append
+        }
+        catch {
+            Write-DscStatus "Failed to create New-CMBoundaryGroup for $DomainFullName - $network - $Externaldomainsitecode $_" -Log
+        }
+
+        Add-CMBoundaryToGroup -BoundaryName "$DomainFullName - $network" -BoundaryGroupName "$DomainFullName - $network" *>&1 | Out-File $global:StatusLog -Append
+        "Add-CMBoundaryToGroup -BoundaryName `"$DomainFullName - $network`" -BoundaryGroupName `"$DomainFullName - $network`"" | Out-File $global:StatusLog -Append
     }
     Write-DscStatus "Set-CMClientPushInstallation $cm_svc"
-    $accounts = (get-CMClientPushInstallation -SiteCode $sitecode).EmbeddedPropertyLists.Reserved2.values
+    $accounts = (get-CMClientPushInstallation -SiteCode $Externaldomainsitecode).EmbeddedPropertyLists.Reserved2.values
 
     if ($cm_svc -in $accounts) {
         Write-DscStatus "Skip Set-CMClientPushInstallation since $cm_svc already exists"
     }
     else {
-        Set-CMClientPushInstallation -SiteCode $SiteCode -EnableAutomaticClientPushInstallation $True -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
+        Set-CMClientPushInstallation -SiteCode $Externaldomainsitecode -EnableAutomaticClientPushInstallation $True -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
     }
 
     # Restart services to make sure push account is acknowledged by CCM
