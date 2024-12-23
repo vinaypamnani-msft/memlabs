@@ -727,7 +727,8 @@ function ConvertTo-DeployConfigEx {
                     $ExternalTopLevelSiteServer = $ExternalSiteServer
                     $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalSiteServer" -Value $ExternalSiteServer -Force
                     if ($RemoteSS.ParentSiteCode) {
-                        $RemoteCAS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $RemoteSS.ParentSiteCode -DomainName $thisVM.ForestTrust -type VM
+                        $RemoteCAS = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $RemoteSS.ParentSiteCode -DomainName $thisVM.ForestTrust -type VM
+                        #$RemoteCAS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $RemoteSS.ParentSiteCode -DomainName $thisVM.ForestTrust -type VM
                         $ExternalTopLevelSiteServer = "$($RemoteCAS.VmName).$($thisVM.ForestTrust)"
                     }
                     $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalTopLevelSiteServer" -Value $ExternalTopLevelSiteServer -Force

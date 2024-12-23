@@ -556,7 +556,7 @@ $global:VM_Create = {
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock { param ($dirname) $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\Sources\*.wim" -Destination $dirname -Recurse -Force -Confirm:$false } -ArgumentList $dirname
                     if ($result.ScriptBlockFailed) {
                         $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Get-ChildItem "$($cd.DriveLetter):" }
-                        write-Log (Get-VMDvdDrive -VMName ADA-PS1SITE)
+                        #write-Log (Get-VMDvdDrive -VMName $currentItem.vmName)
                         Write-Log "Contents of Drive: $($result2.ScriptBlockOutput) Mounted on $((Get-VMDvdDrive -VMName $currentItem.vmName).Path)"
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy ISO WIM files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                         return

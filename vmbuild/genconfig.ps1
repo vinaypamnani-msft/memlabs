@@ -806,7 +806,8 @@ function Select-MainMenu {
 
                 $params = @{configName = $filename; vmName = $vmName; Debug = $false }
 
-                write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"
+                write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"    
+                [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory(".\dsc\createGuestDscZip.ps1 -configName `"$fileName`" -vmName $vmName") 
                 #Invoke-Expression  ".\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName -confirm:$false"
                 & ".\dsc\createGuestDscZip.ps1" @params | Out-Host
                 Set-Location $PSScriptRoot | Out-Null
@@ -5862,6 +5863,7 @@ function Add-NewVMForRole {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
                 }
                 else {
+                    #This sets the virtualmachine.Sitecode property.. Make sure to read this back in when done.
                     Get-SiteCodeMenu -property $virtualMachine -name "siteCode" -CurrentValue $SiteCode -ConfigToCheck $configToModify -test:$false
                 }
 
@@ -5883,6 +5885,7 @@ function Add-NewVMForRole {
                 #write-log "Adding new DPMP for sitecode $newSiteCode"
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -Force
             }
+            # Needed when expanding an existing domain
             $siteCode = $virtualMachine.siteCode
             if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $siteCode) -eq "Secondary") {
                 $virtualMachine.installMP = $false
@@ -7003,6 +7006,7 @@ $return.ConfigFileName = Save-Config $Global:Config
 if (-not $InternalUseOnly.IsPresent) {
     Write-Host "You may deploy this configuration by running the following command:"
     Write-Host "$($PSScriptRoot)\New-Lab.ps1 -Configuration ""$($return.ConfigFileName)"""
+    [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("$($PSScriptRoot)\New-Lab.ps1 -Configuration ""$($return.ConfigFileName)""")
 }
 
 #================================= NEW LAB SCENERIO ============================================
