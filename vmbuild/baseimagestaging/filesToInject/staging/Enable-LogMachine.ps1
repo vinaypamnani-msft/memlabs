@@ -17,26 +17,43 @@ if (-not (Test-Path $flagPath)) {
 }
 
 
+$CMInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
+if ($CMInstallDir) {
+$CMlogs = (Join-Path $CMInstallDir "Logs")
+}
+
+$UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "UI Installation Directory"  -ErrorAction SilentlyContinue
+if ($UIInstallDir) {
+    $CMExe = (Join-Path $UIInstallDir "bin" "Microsoft.ConfigurationManagement.exe")
+}
+
+$ControlPanel = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "SMSCFGRC"  -ErrorAction SilentlyContinue
+
+$ClientPath = Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Services\CcmExec"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "ImagePath" -ErrorAction SilentlyContinue | split-path -parent  -ErrorAction SilentlyContinue
+
+if ($ClientPath) {
+    $ClientlogsPath = (Join-Path $ClientPath "Logs")
+}
+
 $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
 
 $fixFlag = "ClientShortcuts.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
     # Define the paths
-    $ClientlogsPath = "c:\windows\ccm\logs"
-    $sccmAppletPath = "C:\Windows\System32\control.exe"
-    $iconPath = "C:\Windows\CCM\SMSCFGRC.cpl"
-    $CMlogs = "E:\ConfigMgr\Logs"
 
-    if ((Test-Path $ClientlogsPath)) {
-    
+    $sccmAppletPath = "C:\Windows\System32\control.exe"
+
+    if ($ControlPanel) {
         # Create the MECM Control Panel Applet shortcut
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\SCCM Control Panel Applet.lnk")
         $shortcut.TargetPath = $sccmAppletPath
         $shortcut.Arguments = "smscfgrc"
-        $shortcut.IconLocation = $iconPath
+        $shortcut.IconLocation = $ControlPanel
         $shortcut.Save()
 
+    }
+    if ((Test-Path $ClientlogsPath)) {
         # Create the Logs shortcut
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\Client Logs.lnk")
         $shortcut.TargetPath = $ClientlogsPath
@@ -49,8 +66,6 @@ if (-not (Test-Path $flagPath)) {
 $fixFlag = "ServerShortcuts.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
-    # Define the paths
-    $CMlogs = "E:\ConfigMgr\Logs"
     # Check if the new path exists
     if (Test-Path $CMlogs) {
         # Create the new shortcut if the path exists
@@ -63,8 +78,6 @@ if (-not (Test-Path $flagPath)) {
 $fixFlag = "ServerShortcuts2.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
-    # Define the paths
-    $CMexe = "E:\ConfigMgr\AdminConsole\bin\Microsoft.ConfigurationManagement.exe"
     # Check if the new path exists
     if (Test-Path $CMexe) {
         # Create the new shortcut if the path exists
@@ -74,42 +87,6 @@ if (-not (Test-Path $flagPath)) {
         "Shortcuts Enabled" | Out-File $flagPath -Force
     }
 }
-
-$fixFlag = "MPShortcuts.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
-if (-not (Test-Path $flagPath)) {
-    # Define the paths
-    $CMlogs = "E:\SMS_CCM\Logs"
-    # Check if the new path exists
-    if (Test-Path $CMlogs) {
-        # Create the new shortcut if the path exists
-        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr MP Logs.lnk")
-        $shortcut.TargetPath = $CMlogs
-        $shortcut.Save()
-        "Shortcuts Enabled" | Out-File $flagPath -Force
-    }
-}
-
-$fixFlag = "MPShortcuts2.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
-if (-not (Test-Path $flagPath)) {
-    # Define the paths
-    $sccmAppletPath = "C:\Windows\System32\control.exe"
-    $iconPath = "E:\SMS_CCM\SMSCFGRC.cpl"
-    # Check if the new path exists
-   
-    # Create the MECM Control Panel Applet shortcut
-    if (Test-Path $iconPath) {
-        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\SCCM Control Panel Applet.lnk")
-        $shortcut.TargetPath = $sccmAppletPath
-        $shortcut.Arguments = "smscfgrc"
-        $shortcut.IconLocation = $iconPath
-        $shortcut.Save()
-        "Shortcuts Enabled" | Out-File $flagPath -Force
-    }
-
-}
-
 
 $fixFlag = "IISShortcuts.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
