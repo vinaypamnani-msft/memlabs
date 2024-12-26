@@ -564,7 +564,7 @@ $global:VM_Create = {
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { param ($dirname) New-Item -Path $dirname -ItemType Directory -Force } -ArgumentList $dirname
 
                     # Copy files from DVD
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock { param ($dirname) $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\Sources\*.wim" -Destination $dirname -Recurse -Force -Confirm:$false } -ArgumentList $dirname
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock { param ($dirname) $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\Sources\*.*" -Destination $dirname -Recurse -Force -Confirm:$false } -ArgumentList $dirname
                     if ($result.ScriptBlockFailed) {
                         $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Get-ChildItem "$($cd.DriveLetter):" }
                         #write-Log (Get-VMDvdDrive -VMName $currentItem.vmName)
