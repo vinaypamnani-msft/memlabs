@@ -27,7 +27,7 @@ $DCName = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" }).vmN
 # Read Site Code from registry
 #Write-DscStatus "Setting PS Drive for ConfigMgr" -NoStatus
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
-$ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
+$ProviderMachineName = $ThisMachineName + "." + $DomainFullName # SMS Provider machine name
 
 # Get CM module path
 $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
@@ -128,7 +128,7 @@ $apps | ForEach-Object {
     Write-DscStatus "Deploying MEMLBAS application $($_.Name) to all Systems as available deployment"
     #deploy apps to all systems
     New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
-    Write-DscStatus "Succesfully deployed MEMLBAS application $($_.Name) to all Systems as available deployment"
+    Write-DscStatus "successfully deployed MEMLBAS application $($_.Name) to all Systems as available deployment"
 
     Write-DscStatus "Creating an MEMLBAS application deployment for $($_.Name) as Package model"
     # Create the Package
@@ -151,7 +151,7 @@ $apps | ForEach-Object {
     Write-DscStatus "Deploying MEMLBAS package $($_.Name) to all Systems as available deployment"
     #Deploy all packages to all systems
     New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
-    Write-DscStatus "Succesfully deployed MEMLBAS package $($_.Name) to all Systems as available deployment"
+    Write-DscStatus "successfully deployed MEMLBAS package $($_.Name) to all Systems as available deployment"
 }
 
 
@@ -194,9 +194,9 @@ if ($instance -ne $null) {
     if (-not $propertyFound) {
         Write-DscStatus "Property 'TwoKeyApproval' not found in existing instance. Adding it."
       
-     $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace $namespace
-     $i = New-CimInstance -CimClass $class -Property @{PropertyName="TwoKeyApproval";Value="0";Value1=$null;Value2=$null}
-     $propsArray += $i
+        $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace $namespace
+        $i = New-CimInstance -CimClass $class -Property @{PropertyName = "TwoKeyApproval"; Value = "0"; Value1 = $null; Value2 = $null }
+        $propsArray += $i
         $instance.Props = $propsArray
         Set-CimInstance -InputObject $instance
         Write-DscStatus "TwoKeyApproval property added and value set successfully."
@@ -240,7 +240,7 @@ foreach ($ScriptFile in $ScriptFiles) {
 }
 
 
-<## Task sequences 
+## Task sequences 
 
 # Get all boot images
 $BootImages = Get-CMBootImage
@@ -259,47 +259,87 @@ foreach ($BootImage in $BootImages) {
 }
 
 
-#Tim help here to copy the images locally
+#Tim is copying the iso directly at phase 1
+Write-Dscstatus "ISO files are already copied from phase 1"
+
+$DriveLetter = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" | Select-Object -ExpandProperty "Installation Directory" | Split-Path -Qualifier
+
+Write-Dscstatus "SCCM is installed on the drive -  $DriveLetter"
+
+# Define the folder path and share name
+$folderPath = "$DriveLetter\OSD"
+$shareName = "OSD"
+
+Write-Dscstatus "sharing the OSD folder as - $folderPath"
+
+# Create the folder if it doesn't exist
+if (-not (Test-Path -Path $folderPath)) {
+    New-Item -ItemType Directory -Path $folderPath
+    Write-DscStatus "OSD folder doesnt exist and creating one"
+}
+
+# Create the share with read access for "Everyone"
+New-SmbShare -Name $shareName -Path $folderPath -FullAccess "Administrators" -ReadAccess "Everyone"
+
+Write-Dscstatus "$shareName share successfully shared with Administrators"
+
+# Verify the share was created
+#Get-SmbShare -Name $shareName
+
 
 #get OS upgrade package 
-New-CMOperatingSystemInstaller -Name "Windows 11 latest" -Path "\\$ThisMachineName\osd\windows11" -Version 10.0.22621.1 -Index 6
+New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 
+New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 
+Write-Dscstatus "Windows 10 and 11 OS upgrade packages created"
 
 #get OS pacakge
-New-CMOperatingSystemImage -Name "Windows 11 " -Path "\\$ThisMachineName\osd\windows11\sources\install.wim" -Version 10.0.22621.2861
-
-
+New-CMOperatingSystemImage -Name "Windows 11" -Path "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim" -Version 10.0.26100
+New-CMOperatingSystemImage -Name "Windows 10" -Path "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim" -Version 10.0.19041
+Write-Dscstatus "Windows 10 and 11 OS packages created"
 
 # Define variables for TS
 #$TaskSequenceName = "Windows 11 In-Place Upgrade Task Sequence"
-$UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 11" | Select-Object -ExpandProperty PackageID
+$win11UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade" | Select-Object -ExpandProperty PackageID
+$win10UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade" | Select-Object -ExpandProperty PackageID
 $BootImagePackageID = Get-CMBootImage | Where-Object { $_.Name -eq "Boot image (x64)" }  | Select-Object -ExpandProperty PackageID
-$OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 11" | Select-Object -ExpandProperty PackageID
+$win11OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 11" | Select-Object -ExpandProperty PackageID
+$win10OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 10" | Select-Object -ExpandProperty PackageID
 $ClientPackagePackageId = Get-CMPackage -Fast -Name "Configuration Manager Client Package" | Select-Object -ExpandProperty PackageID
 $UserStateMigrationToolPackageId = Get-CMPackage -Fast -Name "User State Migration Tool for Windows" | Select-Object -ExpandProperty PackageID
-#tim help here for calling the cas or primary site
-$UpgradeOperatingSystempath = "\\$ThisMachineName\osd\windows11"  
-$UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\sources\install.wim"
-$clientProps = '/mp:mp01.contoso.com CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000" SMSMP=mp01.contoso.com'
+$win11UpgradeOperatingSystempath = "\\$ThisMachineName\osd\Windows 11 24h2"  
+$win11UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 11 24h2\sources\install.wim"
+$win10UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 10 22h2\sources\install.wim"
+$clientProps = 'CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000"'
+$cm_svc_file = "$LogPath\cm_svc.txt"
+if (Test-Path $cm_svc_file) {
+    # Add cm_svc user as a CM Account
+    $unencrypted = Get-Content $cm_svc_file
+}
 
+#distribute the OS packages and upgrade packages 
+Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS"
+Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS"
+Write-DscStatus "Successfully distributed for OS packages"
+     
 
 # Create the inplace upgrade task sequence
-New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS - In-Place Upgrade Task Sequence" -UpgradePackageId $UpgradePackageID -SoftwareUpdateStyle All
-
+New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-Windows 11 In-Place Upgrade Task Sequence" -UpgradePackageId $win11UpgradePackageID -SoftwareUpdateStyle All
+New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-Windows 10 In-Place Upgrade Task Sequence" -UpgradePackageId $win10UpgradePackageID -SoftwareUpdateStyle All
 
 ## Build and capture TS
 
-$buildandcapture = @{
+$buildandcapturewin11 = @{
     BuildOperatingSystemImage          = $true
-    Name                               = "MEMLABS - Build and capture"
+    Name                               = "MEMLABS-w11-Build and capture"
     Description                        = "NewBuildOSImage parameter set"
     BootImagePackageId                 = $BootImagePackageID
     HighPerformance                    = $true
     ApplyAll                           = $false
-    OperatingSystemImagePackageId      = $OSimagepackageID
-    OperatingSystemImageIndex          = 1
+    OperatingSystemImagePackageId      = $win11OSimagepackageID
+    OperatingSystemImageIndex          = 3
     ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
     GeneratePassword                   = $true
-    TimeZone                           = Get-TimeZone -Name "Eastern Standard Time"
+    TimeZone                           = Get-TimeZone -Name "$deployconfig.vmOptions.timeZone"
     JoinDomain                         = "WorkgroupType"
     WorkgroupName                      = "groupwork"
     ClientPackagePackageId             = $ClientPackagePackageId
@@ -307,22 +347,49 @@ $buildandcapture = @{
     ApplicationName                    = "Admin Console"
     IgnoreInvalidApplication           = $true
     SoftwareUpdateStyle                = "All"
-    OperatingSystemFilePath            = $UpgradeOperatingSystemWim
+    OperatingSystemFilePath            = $win11UpgradeOperatingSystemWim
     ImageDescription                   = "image description"
     ImageVersion                       = "image version 1"
     CreatedBy                          = "MEMLABS"
-    OperatingSystemFileAccount         = "contoso\jqpublic" 
-    OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "w%1H6EoxjQ&70^W" -AsPlainText -Force
+    OperatingSystemFileAccount         = "$DomainFullName\admin" 
+    OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
 }
 
-New-CMTaskSequence @buildandcapture
+New-CMTaskSequence @buildandcapturewin11
 
+$buildandcapturewin10 = @{
+    BuildOperatingSystemImage          = $true
+    Name                               = "MEMLABS-w10-Build and capture"
+    Description                        = "NewBuildOSImage parameter set"
+    BootImagePackageId                 = $BootImagePackageID
+    HighPerformance                    = $true
+    ApplyAll                           = $false
+    OperatingSystemImagePackageId      = $win10OSimagepackageID
+    OperatingSystemImageIndex          = 3
+    ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+    GeneratePassword                   = $true
+    TimeZone                           = Get-TimeZone -Name "$deployconfig.vmOptions.timeZone"
+    JoinDomain                         = "WorkgroupType"
+    WorkgroupName                      = "groupwork"
+    ClientPackagePackageId             = $ClientPackagePackageId
+    InstallationProperty               = $clientProps
+    ApplicationName                    = "Admin Console"
+    IgnoreInvalidApplication           = $true
+    SoftwareUpdateStyle                = "All"
+    OperatingSystemFilePath            = $win10UpgradeOperatingSystemWim
+    ImageDescription                   = "image description"
+    ImageVersion                       = "image version 1"
+    CreatedBy                          = "MEMLABS"
+    OperatingSystemFileAccount         = "$DomainFullName\admin" 
+    OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+}
+New-CMTaskSequence @buildandcapturewin10
 
 ##Create a task sequence to install an OS image
 
-$installOSimage = @{
+$installw11OSimage = @{
     InstallOperatingSystemImage     = $true
-    Name                            = "MEMLABS - Install OS image"
+    Name                            = "MEMLABS-w11-Install OS image"
     Description                     = "NewInstallOSImage parameter set"
     BootImagePackageId              = $BootImagePackageID
     HighPerformance                 = $true
@@ -335,22 +402,54 @@ $installOSimage = @{
     ConfigureBitLocker              = $true
     PartitionAndFormatTarget        = $true
     ApplyAll                        = $false
-    OperatingSystemImagePackageId   = $OSimagepackageID
-    OperatingSystemImageIndex       = 1
+    OperatingSystemImagePackageId   = $win11OSimagepackageID
+    OperatingSystemImageIndex       = 3
     ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
     GeneratePassword                = $true
-    TimeZone                        = Get-TimeZone -Name "Eastern Standard Time"
+    TimeZone                        = Get-TimeZone -Name "$deployconfig.vmOptions.timeZone"
     JoinDomain                      = "DomainType"
-    DomainAccount                   = "contoso\jqpublic"
-    DomainName                      = "contoso"
-    DomainOrganizationUnit          = "LDAP://OU=Workstations,OU=Devices,DC=na,DC=contoso,DC=com"
-    DomainPassword                  = ConvertTo-SecureString -String "w%1H6EoxjQ&70^W" -AsPlainText -Force
+    DomainAccount                   = "$DomainFullName\admin"
+    DomainName                      = "$DomainFullName"
+    DomainOrganizationUnit          = "LDAP://OU=Workstations,OU=Devices,DC=na,DC=$DomainFullName,DC=com"
+    DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
     ClientPackagePackageId          = $ClientPackagePackageId
     InstallationProperty            = $clientProps
     SoftwareUpdateStyle             = "All"
 }
 
-New-CMTaskSequence @installOSimage
+New-CMTaskSequence @installw11OSimage
+
+$installw10OSimage = @{
+    InstallOperatingSystemImage     = $true
+    Name                            = "MEMLABS-w10-Install OS image"
+    Description                     = "NewInstallOSImage parameter set"
+    BootImagePackageId              = $BootImagePackageID
+    HighPerformance                 = $true
+    CaptureNetworkSetting           = $true
+    CaptureUserSetting              = $true
+    SaveLocally                     = $true
+    CaptureLocallyUsingLink         = $true
+    UserStateMigrationToolPackageId = $UserStateMigrationToolPackageId
+    CaptureWindowsSetting           = $true
+    ConfigureBitLocker              = $true
+    PartitionAndFormatTarget        = $true
+    ApplyAll                        = $false
+    OperatingSystemImagePackageId   = $win10OSimagepackageID
+    OperatingSystemImageIndex       = 3
+    ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+    GeneratePassword                = $true
+    TimeZone                        = Get-TimeZone -Name "$deployconfig.vmOptions.timeZone"
+    JoinDomain                      = "DomainType"
+    DomainAccount                   = "$DomainFullName\admin"
+    DomainName                      = "$DomainFullName"
+    DomainOrganizationUnit          = "LDAP://OU=Workstations,OU=Devices,DC=na,DC=$DomainFullName,DC=com"
+    DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+    ClientPackagePackageId          = $ClientPackagePackageId
+    InstallationProperty            = $clientProps
+    SoftwareUpdateStyle             = "All"
+}
+
+New-CMTaskSequence @installw10OSimage
 
 $customTS = @{
     CustomTaskSequence = $true
@@ -363,7 +462,7 @@ $customTS = @{
 New-CMTaskSequence @customTS
 
 
-
+<#
 
 ### CI and baselines 
 
@@ -391,6 +490,7 @@ $ConfigNames = @(
         Description        = "Checks if the Windows Update service is running"
     }
 )
+
 
 
 $ConfigNames | ForEach-Object {
