@@ -19,12 +19,13 @@ if (-not (Test-Path $flagPath)) {
 
 $CMInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
 if ($CMInstallDir) {
-$CMlogs = (Join-Path $CMInstallDir "Logs")
+    $CMlogs = (Join-Path $CMInstallDir "Logs")
 }
 
 $UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "UI Installation Directory"  -ErrorAction SilentlyContinue
 if ($UIInstallDir) {
-    $CMExe = (Join-Path $UIInstallDir "bin" "Microsoft.ConfigurationManagement.exe")
+    $CMExe = (Join-Path $UIInstallDir "bin")
+    $CMexe = (Join-Path $CMexe "Microsoft.ConfigurationManagement.exe")
 }
 
 $ControlPanel = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "SMSCFGRC"  -ErrorAction SilentlyContinue
@@ -53,7 +54,7 @@ if (-not (Test-Path $flagPath)) {
         $shortcut.Save()
 
     }
-    if ((Test-Path $ClientlogsPath)) {
+    if (($ClientLogsPath -and (Test-Path $ClientlogsPath))) {
         # Create the Logs shortcut
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\Client Logs.lnk")
         $shortcut.TargetPath = $ClientlogsPath
@@ -86,7 +87,8 @@ if (-not (Test-Path $flagPath)) {
         $shortcut.Save()
 
         $shortcut2 = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Powershell.lnk")
-        $shortcut2.TargetPath = "powershell -NoExit -ExecutionPolicy Bypass C:\staging\DSC\Phases\Start-CMPS.ps1"
+        $shortcut2.TargetPath = "powershell"
+        $shortcut2.Arguments = "-NoExit -ExecutionPolicy Bypass C:\staging\DSC\Phases\Start-CMPS.ps1"
         $shortcut2.Save()
 
         $bytes = [System.IO.File]::ReadAllBytes("$desktopPath\ConfigMgr Powershell.lnk")
