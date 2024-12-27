@@ -84,6 +84,16 @@ if (-not (Test-Path $flagPath)) {
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Console.lnk")
         $shortcut.TargetPath = $CMexe
         $shortcut.Save()
+
+        $shortcut2 = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Powershell.lnk")
+        $shortcut2.TargetPath = "powershell -NoExit -ExecutionPolicy Bypass C:\staging\DSC\Phases\Start-CMPS.ps1"
+        $shortcut2.Save()
+
+        $bytes = [System.IO.File]::ReadAllBytes("$desktopPath\ConfigMgr Powershell.lnk")
+        # Set byte 21 (0x15) bit 6 (0x20) ON
+        $bytes[0x15] = $bytes[0x15] -bor 0x20
+        [System.IO.File]::WriteAllBytes("$desktopPath\ConfigMgr Powershell.lnk", $bytes)
+
         "Shortcuts Enabled" | Out-File $flagPath -Force
     }
 }

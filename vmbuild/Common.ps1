@@ -817,6 +817,7 @@ function Copy-ItemSafe {
 function Test-URL {
     [CmdletBinding()]
     param (
+        [Parameter(Mandatory = $true)]
         [string] $url,
         [string] $name
     )
@@ -827,21 +828,25 @@ function Test-URL {
         return $false
     }
 
-    
-    $output = & $curlPath -s -L --head -f $url
-    if ($LASTEXITCODE -eq 0) {        
-        if ($output -match 'Location: https://www.bing.com') {
-            Write-RedX "[$name] $url (Redirects to bing)"
+    try {
+        $output = & $curlPath -s -L --head -f $url
+        if ($LASTEXITCODE -eq 0) {        
+            if ($output -match 'Location: https://www.bing.com') {
+                Write-RedX "[$name] $url (Redirects to bing)"
+                return $false
+            }
+            Write-GreenCheck "[$name] $url"
+            return $true       
+        }
+        else {
+            Write-RedX "[$name] $url"
             return $false
         }
-        Write-GreenCheck "[$name] $url"
-        return $true       
     }
-    else {
-        Write-RedX "[$name] $url"
+    catch {
+        Write-Log "An error occurred while testing the URL: $_" -Failure
         return $false
     }
-
 }
 function Start-CurlTransfer {
     [CmdletBinding()]
@@ -1775,6 +1780,67 @@ function Remove-DHCPReservation {
     }
 }
 
+<#
+.SYNOPSIS
+Creates a new virtual machine.
+
+.DESCRIPTION
+The New-VirtualMachine function creates a new virtual machine with the specified parameters.
+
+.PARAMETER VmName
+The name of the virtual machine.
+
+.PARAMETER VmPath
+The path where the virtual machine will be created.
+
+.PARAMETER SourceDiskPath
+The path of the source disk to be used for the virtual machine.
+
+.PARAMETER Memory
+The amount of memory to allocate for the virtual machine.
+
+.PARAMETER Processors
+The number of processors to allocate for the virtual machine.
+
+.PARAMETER Generation
+The generation of the virtual machine.
+
+.PARAMETER SwitchName
+The name of the virtual switch to connect the virtual machine to.
+
+.PARAMETER DiskControllerType
+The type of disk controller to use for the virtual machine. Default value is "SCSI".
+
+.PARAMETER SwitchName2
+The name of an additional virtual switch to connect the virtual machine to.
+
+.PARAMETER AdditionalDisks
+Additional disks to attach to the virtual machine.
+
+.PARAMETER ForceNew
+Forces the creation of a new virtual machine, even if a virtual machine with the same name already exists.
+
+.PARAMETER DeployConfig
+The deployment configuration for the virtual machine.
+
+.PARAMETER OSDClient
+Specifies whether the virtual machine is an OSD client.
+
+.PARAMETER tpmEnabled
+Specifies whether the virtual machine has TPM enabled.
+
+.PARAMETER Migrate
+Specifies whether to migrate the virtual machine.
+
+.PARAMETER WhatIf
+Shows what would happen if the command runs.
+
+.EXAMPLE
+New-VirtualMachine -VmName "MyVM" -VmPath "C:\VMs" -Memory "4GB" -Processors 2 -Generation 2 -SwitchName "VirtualSwitch"
+
+This example creates a new virtual machine named "MyVM" with 4GB of memory, 2 processors, generation 2, and connects it to the "VirtualSwitch" virtual switch.
+
+#>
 function New-VirtualMachine {
     param (
         [Parameter(Mandatory = $true)]
@@ -2864,6 +2930,7 @@ function Get-StorageConfig {
 
         # See if image list needs to be updated
         if (Test-Path $fileListPath) {
+            Write-Log -Verbose "Reading file list from $fileListPath"
             $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             $updateList = $Common.AzureFileList.UpdateFromStorage
         }
@@ -3912,6 +3979,11 @@ if (-not $Common.Initialized) {
     $devBranch = $false
     try {
         if ($pwd.Path -like '*memlabs*') {
+            $currentBranch = Get-BranchName
+        }
+        else {
+            #Set the current location to the script root
+            Set-Location -Path $PSScriptRoot
             $currentBranch = Get-BranchName
         }
     }

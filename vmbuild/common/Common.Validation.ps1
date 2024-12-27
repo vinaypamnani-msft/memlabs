@@ -1297,23 +1297,45 @@ function Test-Configuration {
             Write-Progress2 -Activity "Testing URLS" -Status "Testing URLS" -PercentComplete 77
             Write-Host
             Write-Log -SubActivity "Testing URLS"
-            $Common.AzureFileList.Urls | ForEach-Object {
-                $_.psobject.properties | ForEach-Object {
-                    if (-not (Test-URL -url $_.value -name $_.name )) {
-                        Add-ValidationMessage -Message "Deployment Validation: URL $($_.value) for $($_.name) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+
+            if (-not $Common.AzureFileList.Urls) {
+                Add-ValidationMessage -Message "Deployment Validation: No URLs found to test." -ReturnObject $return -Error                
+            }
+            else {
+                $Common.AzureFileList.Urls | ForEach-Object {
+                    $_.psobject.properties | ForEach-Object {
+                        try {
+                            if (-not (Test-URL -url $_.value -name $_.name )) {
+                                Add-ValidationMessage -Message "Deployment Validation: URL $($_.value) for $($_.name) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                            }
+                        }
+                        catch {
+                            Add-ValidationMessage -Message "Error occurred while testing URL $($_.value) for $($_.name): $($_.Exception.Message)" -ReturnObject $return -Error
+                        }
                     }
                 }
             }
+           
 
             foreach ($version in $common.AzureFileList.CmVersions) {
-                if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
-                    Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                try {
+                    if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
+                        Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                    }
+                }
+                catch {
+                    Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
                 }
             }
 
             foreach ($sql in $common.AzureFileList.ISO) {
-                if (-not (Test-URL -url $sql.cuUrl -name $sql.id )) {
-                    Add-ValidationMessage -Message "Deployment Validation: CU URL $($sql.cuUrl) for SQL Version $($sql.id) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                try {
+                    if (-not (Test-URL -url $sql.cuUrl -name $sql.id )) {
+                        Add-ValidationMessage -Message "Deployment Validation: CU URL $($sql.cuUrl) for SQL Version $($sql.id) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                    }
+                }
+                catch {
+                    Add-ValidationMessage -Message "Error occurred while testing CU URL $($sql.cuUrl) for SQL Version $($sql.id): $($_.Exception.Message)" -ReturnObject $return -Error
                 }
             }
 

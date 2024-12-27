@@ -151,6 +151,10 @@ function Get-PendingVMs {
 
 
 function Check-OverallHealth {
+    $disk = Get-Volume -DriveLetter E
+    $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
+    $diskFreeGB = $([math]::Round($($disk.SizeRemaining / 1GB), 0))
+    
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHeader "  ---  Quick Stats"
     
     $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
@@ -175,9 +179,6 @@ function Check-OverallHealth {
         }
     }
     # Available Disk
-    $disk = Get-Volume -DriveLetter E
-    $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
-    $diskFreeGB = $([math]::Round($($disk.SizeRemaining / 1GB), 0))
 
     if ($diskFreeGB -ge 700) {
         Write-GreenCheck "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
