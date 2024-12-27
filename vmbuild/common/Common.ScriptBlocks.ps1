@@ -570,7 +570,7 @@ $global:VM_Create = {
                    
 
                     # Copy files from DVD
-                    Write-Status "Copying ISO WIM Files to $dirname"
+                    Write-Log "Copying ISO WIM Files to $dirname"
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock $CopyIsoFiles -ArgumentList $dirname
                     if ($result.ScriptBlockFailed) {
                         $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Get-ChildItem "$($cd.DriveLetter):" }
