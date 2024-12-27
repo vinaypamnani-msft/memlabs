@@ -128,7 +128,7 @@ $apps | ForEach-Object {
     Write-DscStatus "Deploying MEMLBAS application $($_.Name) to all Systems as available deployment"
     #deploy apps to all systems
     New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
-    Write-DscStatus "Succesfully deployed MEMLBAS application $($_.Name) to all Systems as available deployment"
+    Write-DscStatus "successfully deployed MEMLBAS application $($_.Name) to all Systems as available deployment"
 
     Write-DscStatus "Creating an MEMLBAS application deployment for $($_.Name) as Package model"
     # Create the Package
@@ -151,7 +151,7 @@ $apps | ForEach-Object {
     Write-DscStatus "Deploying MEMLBAS package $($_.Name) to all Systems as available deployment"
     #Deploy all packages to all systems
     New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
-    Write-DscStatus "Succesfully deployed MEMLBAS package $($_.Name) to all Systems as available deployment"
+    Write-DscStatus "successfully deployed MEMLBAS package $($_.Name) to all Systems as available deployment"
 }
 
 
@@ -281,7 +281,7 @@ if (-not (Test-Path -Path $folderPath)) {
 # Create the share with read access for "Everyone"
 New-SmbShare -Name $shareName -Path $folderPath -FullAccess "Administrators" -ReadAccess "Everyone"
 
-Write-Dscstatus "$shareName share succesfully shared with Adminsitrators"
+Write-Dscstatus "$shareName share successfully shared with Administrators"
 
 # Verify the share was created
 #Get-SmbShare -Name $shareName
@@ -310,10 +310,15 @@ $win11UpgradeOperatingSystempath = "\\$ThisMachineName\osd\Windows 11 24h2"
 $win11UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 11 24h2\sources\install.wim"
 $win10UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 10 22h2\sources\install.wim"
 $clientProps = 'CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000"'
+$cm_svc_file = "$LogPath\cm_svc.txt"
+if (Test-Path $cm_svc_file) {
+    # Add cm_svc user as a CM Account
+    $unencrypted = Get-Content $cm_svc_file
+}
 
 #distribute the OS packages and upgrade packages 
-Start-CMContentDistribution -OperatingSystemImageIds @("$win11OSimagepackageID", "$win10OSimagepackageID") -DistributionPointGroupName  "ALL DPS"
-Start-CMContentDistribution -OperatingSystemInstallerIds @("$win11UpgradePackageID", "$win10UpgradePackageID") -DistributionPointGroupName "ALL DPS"
+Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS"
+Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS"
 Write-DscStatus "Successfully distributed for OS packages"
      
 
@@ -334,7 +339,7 @@ $buildandcapturewin11 = @{
     OperatingSystemImageIndex          = 3
     ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
     GeneratePassword                   = $true
-    TimeZone                           = Get-TimeZone -Name "Eastern Standard Time"
+    TimeZone                           = Get-TimeZone -Name "$deployconfig.vmOptions.timeZone"
     JoinDomain                         = "WorkgroupType"
     WorkgroupName                      = "groupwork"
     ClientPackagePackageId             = $ClientPackagePackageId
@@ -347,7 +352,7 @@ $buildandcapturewin11 = @{
     ImageVersion                       = "image version 1"
     CreatedBy                          = "MEMLABS"
     OperatingSystemFileAccount         = "$DomainFullName\admin" 
-    OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "P@ssw0rd1" -AsPlainText -Force
+    OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
 }
 
 New-CMTaskSequence @buildandcapturewin11
@@ -363,7 +368,7 @@ $buildandcapturewin10 = @{
     OperatingSystemImageIndex          = 3
     ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
     GeneratePassword                   = $true
-    TimeZone                           = Get-TimeZone -Name "Eastern Standard Time"
+    TimeZone                           = Get-TimeZone -Name "$deployconfig.vmOptions.timeZone"
     JoinDomain                         = "WorkgroupType"
     WorkgroupName                      = "groupwork"
     ClientPackagePackageId             = $ClientPackagePackageId
@@ -376,7 +381,7 @@ $buildandcapturewin10 = @{
     ImageVersion                       = "image version 1"
     CreatedBy                          = "MEMLABS"
     OperatingSystemFileAccount         = "$DomainFullName\admin" 
-    OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "P@ssw0rd1" -AsPlainText -Force
+    OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
 }
 New-CMTaskSequence @buildandcapturewin10
 
@@ -401,12 +406,12 @@ $installw11OSimage = @{
     OperatingSystemImageIndex       = 3
     ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
     GeneratePassword                = $true
-    TimeZone                        = Get-TimeZone -Name "Eastern Standard Time"
+    TimeZone                        = Get-TimeZone -Name "$deployconfig.vmOptions.timeZone"
     JoinDomain                      = "DomainType"
     DomainAccount                   = "$DomainFullName\admin"
     DomainName                      = "$DomainFullName"
     DomainOrganizationUnit          = "LDAP://OU=Workstations,OU=Devices,DC=na,DC=$DomainFullName,DC=com"
-    DomainPassword                  = ConvertTo-SecureString -String "P@ssw0rd1" -AsPlainText -Force
+    DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
     ClientPackagePackageId          = $ClientPackagePackageId
     InstallationProperty            = $clientProps
     SoftwareUpdateStyle             = "All"
@@ -433,12 +438,12 @@ $installw10OSimage = @{
     OperatingSystemImageIndex       = 3
     ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
     GeneratePassword                = $true
-    TimeZone                        = Get-TimeZone -Name "Eastern Standard Time"
+    TimeZone                        = Get-TimeZone -Name "$deployconfig.vmOptions.timeZone"
     JoinDomain                      = "DomainType"
     DomainAccount                   = "$DomainFullName\admin"
     DomainName                      = "$DomainFullName"
     DomainOrganizationUnit          = "LDAP://OU=Workstations,OU=Devices,DC=na,DC=$DomainFullName,DC=com"
-    DomainPassword                  = ConvertTo-SecureString -String "P@ssw0rd1" -AsPlainText -Force
+    DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
     ClientPackagePackageId          = $ClientPackagePackageId
     InstallationProperty            = $clientProps
     SoftwareUpdateStyle             = "All"
