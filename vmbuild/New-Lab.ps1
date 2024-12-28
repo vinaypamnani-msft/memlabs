@@ -391,7 +391,7 @@ if ($Common.DevBranch) {
 
     if ($Restore) {
         Write-Log "### RESTORE SNAPSHOT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
-        select-RestoreSnapshotDomain -domain $domainName
+        select-RestoreSnapshotDomain -domain $domainName -auto:$true
     }
 
     Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity

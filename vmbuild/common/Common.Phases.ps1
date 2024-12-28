@@ -54,20 +54,16 @@ function Write-JobProgress {
                             $roleName = ($jobName -split " ")[1]
                             $jobName2 = "  $($vmName.PadRight($padding1," ")) $($roleName.PadRight($padding2," "))"
                         }
-
-                        # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                     }
                     $CurrentActivity = "$jobName2`: $latestActivity"
                     $HistoryLine = $Job.Id.ToString() + $CurrentActivity + $latestStatus
                     if ($global:JobProgressHistory -notcontains $HistoryLine) {
                         $global:JobProgressHistory += $HistoryLine
                         if ($secondsRemaining -gt 0) {
-                            $latestStatus += " (Remaining: $secondsRemaining)"
+                            $latestStatus += " (Remaining: $($secondsRemaining)s)"
                         }
-                        #TIMHE
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
-                        write-host -NoNewline "$hideCursor"
-                        # start-sleep -seconds 1
+                        write-host -NoNewline "$hideCursor"                        
                     }
                 }
                 catch {

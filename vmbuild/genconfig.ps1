@@ -5546,12 +5546,7 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr CAS"
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
-            $virtualMachine.operatingSystem = $OperatingSystem
-            #$existingPrimary = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
-            #$existingPrimaryVM = $ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1
-            #if ($existingPrimaryVM) {
-            #    $existingPrimaryVM | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $newSiteCode -Force
-            #}
+            $virtualMachine.operatingSystem = $OperatingSystem   
             if (-not $test) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig -ReturnIfNotNeeded:$true
                 if ($network) {
@@ -5560,13 +5555,6 @@ function Add-NewVMForRole {
             }
         }
         "Primary" {
-            #$existingCAS = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
-            #if ([string]::IsNullOrWhiteSpace($parentSiteCode)) {
-            #    $parentSiteCode = $null
-            #    if ($existingCAS -eq 1) {
-            #        $parentSiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "CAS" } | Select-Object -First 1).SiteCode
-            #    }
-            #}
             if ($parentSiteCode) {
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
             }

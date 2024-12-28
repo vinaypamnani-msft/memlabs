@@ -103,14 +103,8 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
     # Ensure CM files were downloaded
     $cmsourcepath = "c:\$CM"
     if (!(Test-Path $cmsourcepath)) {
-        $cmurl = $ThisVM.thisParams.cmDownloadUrl
-        Write-DscStatus "Downloading $CM installation source..."
-        Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
-
-        if (!(Test-Path $cmsourcepath)) {
-            #BUG, FIXME, TIMHE: This does not work in 2303. Fix Me
-            Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
-        }
+        Write-DscStatus "$CM Does not exist. Failed." -Failure
+        return
     }
 
     Write-DscStatus "Creating $scenario.ini file" # Standalone or Hierarchy
@@ -277,7 +271,9 @@ CurrentBranch=1
         }
     }
 
-    $CMSetupDL = "$CMDir\SMSSETUP\BIN\X64\Setupdl.exe"
+
+    $CMBin = "$CMDir\SMSSETUP\BIN\X64"
+    $CMSetupDL = "$CMBin\Setupdl.exe"
     $CMRedist = "C:\$CM\REdist"
     $CMLog = "C:\ConfigMgrSetup.log"
     $success = 0
@@ -318,6 +314,20 @@ CurrentBranch=1
             start-sleep -Seconds 30
         }
     }
+
+    #Fix 0 byte files in CMCB
+
+    Get-ChildItem $CMBIN | ForEach-Object {
+        if(!$_.PSIsContainer -and $_.length -eq 0) {
+           write-host (“{0} -> {1} {2}” -f $_.FullName, $_.Name, $_.Length)
+           $RedistFile = (Join-Path $CMRedist $_.Name)
+           if ((Test-Path $RedistFile)) {
+           write-host "found $RedistFile"
+           Copy-Item $RedistFile $_.FullName -force
+           }
+           }
+        }
+
     # Create ini
     $cmini > $CMINIPath
 

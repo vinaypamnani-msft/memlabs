@@ -220,8 +220,15 @@ configuration Phase3
             Ensure    = "Present"
         }
 
-        WriteStatus SQLClientInstall {
+        InstallVCRedist VCInstallx86 {
             DependsOn = "[InstallVCRedist]VCInstall"
+            Path      = "C:\temp\vc_redist.x86.exe"
+            URL       = $deployConfig.URLS.VCredistx86
+            Ensure    = "Present"
+        }
+
+        WriteStatus SQLClientInstall {
+            DependsOn = "[InstallVCRedist]VCInstallx86"
             Status    = "Downloading and installing SQL Client"
         }
 

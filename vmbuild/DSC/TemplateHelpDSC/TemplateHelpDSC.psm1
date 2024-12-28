@@ -640,7 +640,12 @@ class InstallVCRedist {
         Write-Status "DSC Test- Checking deployment status"
         try {
             #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
-            $RegistryPath = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+            if ($this.Path -like "*x64*") {
+                $RegistryPath = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+            }
+            else {
+                $RegistryPath = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86"
+            }
 
             if (Test-Path -Path $RegistryPath) {
                 try {
@@ -658,8 +663,8 @@ class InstallVCRedist {
                 return $false
             }
 
-            If ($Version.Major -ge "14") {
-                Write-Host "VC Redist 14 or greater $($Version.InstalledVersion) is installed"
+            If ($Version.Major -ge "14" -and $Version.Minor -ge "42") {
+                Write-Host "VC Redist 14.42 or greater $($Version.InstalledVersion) is installed"
                 return $true
             }
             return $false
@@ -1231,7 +1236,7 @@ class DownloadSCCM {
             return $false
         }
         # if C:\CMCB is empty, fail
-        if (!(Test-Path ($cmsourcepath+"\*"))) {
+        if (!(Test-Path ($cmsourcepath + "\*"))) {
             return $false
         }
 
@@ -3667,7 +3672,8 @@ class AddCertificateTemplate {
                 $count = (ADCSAdministration\get-CaTemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
                 if ($count -ne 0) {
                     Write-Status "$_TemplateName added successfully"
-                }else{
+                }
+                else {
                     try {
                         Write-Status "Deleting CertificateTemplateCache and restarting the CA" 
                         $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"

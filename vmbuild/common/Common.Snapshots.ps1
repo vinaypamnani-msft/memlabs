@@ -210,7 +210,9 @@ function select-RestoreSnapshotDomain {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
-        [string] $domain
+        [string] $domain,
+        [Parameter(Mandatory = $false, HelpMessage = "Run automatically if only one snapshot")]
+        [bool] $auto = $false
     )
 
 
@@ -222,10 +224,16 @@ function select-RestoreSnapshotDomain {
         Write-OrangePoint "No snapshots found for $domain"
         return
     }
-    $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots -test:$false -return
-    if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
-        return
+    if ($auto -and $snapshots.Count -eq 1) {
+        $response = $snapshots
+        Write-Log "Auto restoring snapshot $response" -SubActivity
     }
+    else {
+        $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots -test:$false -return
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+            return
+        }
+    }    
     $missingVMS = @()
 
     foreach ($vm in $vms) {
@@ -239,13 +247,18 @@ function select-RestoreSnapshotDomain {
         $DeleteVMs = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
     }
 
-    $startAll = Read-YesorNoWithTimeout -Prompt "Start All vms after restore? (Y/n)" -HideHelp -Default "y"
-    if ($startAll -and ($startAll.ToLowerInvariant() -eq "n" -or $startAll.ToLowerInvariant() -eq "no")) {
-        $startAll = $null
-    }
-    else {
+    if ($auto -and $snapshots.Count -eq 1) {
         $startAll = "A"
     }
+    else {
+        $startAll = Read-YesorNoWithTimeout -Prompt "Start All vms after restore? (Y/n)" -HideHelp -Default "y"
+        if ($startAll -and ($startAll.ToLowerInvariant() -eq "n" -or $startAll.ToLowerInvariant() -eq "no")) {
+            $startAll = $null
+        }
+        else {
+            $startAll = "A"
+        }
+    }   
 
     Write-Log "Restoring Virtual Machines in '$domain' to previous snapshot" -Activity
 
