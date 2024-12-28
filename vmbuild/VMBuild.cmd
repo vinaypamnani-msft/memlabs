@@ -36,13 +36,13 @@ IF EXIST "C:\Program Files\PowerShell\7\pwsh.exe" GOTO PS7 ELSE GOTO PS5
 :PS7
 IF "%~1"=="" (
     if "%WT%"=="1" (
-        wt --profile "MemLabs" -d . "C:\Program Files\PowerShell\7\pwsh.exe" -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1"
+        wt -d . "C:\Program Files\PowerShell\7\pwsh.exe" -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1"
     ) ELSE (
         "C:\Program Files\PowerShell\7\pwsh.exe" -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
     )
 ) ELSE (
     if "%WT%"=="1" (
-        wt --profile "MemLabs" -d . "C:\Program Files\PowerShell\7\pwsh.exe" -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1 -Configuration %1"
+        wt -d . "C:\Program Files\PowerShell\7\pwsh.exe" -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1 -Configuration %1"
     ) ELSE (
         "C:\Program Files\PowerShell\7\pwsh.exe" -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1 -Configuration %1"
     )
