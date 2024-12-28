@@ -4,6 +4,49 @@ try {
 }
 catch {}
 
+function Get-Animate {
+    # Clear the screen
+    Write-Host "`e[2J`e[H"
+    
+    # Define the Unicode text art for "MemLabs"
+    $textArt = @"
+     ███    ███ ███████ ███    ███     ██       █████  ██████  ███████ 
+     ████  ████ ██      ████  ████     ██      ██   ██ ██   ██ ██      
+     ██ ████ ██ █████   ██ ████ ██     ██      ███████ ██████  ███████ 
+     ██  ██  ██ ██      ██  ██  ██     ██      ██   ██ ██   ██      ██ 
+     ██      ██ ███████ ██      ██     ███████ ██   ██ ██████  ███████ 
+"@
+    
+    # Convert the text art into an array of lines
+    $lines = $textArt -split "`n"
+    
+    # Get the dimensions of the console
+    $rows, $columns = $Host.UI.RawUI.WindowSize.Height, $Host.UI.RawUI.WindowSize.Width
+    
+    # Calculate the start position for centering the text
+    $startRow = [math]::Max(0, [math]::Floor(($rows - $lines.Length) / 2))
+    $startCol = [math]::Max(0, [math]::Floor(($columns - $lines[0].Length) / 2))
+    $colorCode = "`e[38;2;0;127;255m"  # RGB 0, 127, 255 (Azure Blue)
+    $resetCode = "`e[0m"               # Reset ANSI formatting
+    # Animation function to reveal characters one at a time
+    
+        # Loop through each line and character
+        for ($lineIndex = 0; $lineIndex -lt $lines.Length; $lineIndex++) {
+            for ($charIndex = 0; $charIndex -lt $lines[$lineIndex].Length; $charIndex++) {
+                # Set cursor position and write the character
+                $char = $lines[$lineIndex][$charIndex]
+                if ($char -ne ' ') {
+                    $row = $startRow + $lineIndex
+                    $col = $startCol + $charIndex
+                    Write-Host "`e[${row};${col}H$colorCode$char$resetCode" -NoNewline                    
+                    Start-Sleep -Milliseconds 0 # Faster reveal
+                }
+    Start-Sleep -Milliseconds 0 # Faster reveal
+            }
+                Start-Sleep -Milliseconds 100 # Faster reveal    
+        }
+    
+    }
 
 function Get-Colors {
     $colors = [PSCustomObject]@{

@@ -135,6 +135,8 @@ New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Nam
 
 if (-not $Common.DevBranch) {
     Clear-Host
+}else {
+    Get-Animate
 }
 
 function Write-Phase {
