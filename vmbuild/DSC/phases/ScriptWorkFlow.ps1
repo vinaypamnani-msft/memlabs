@@ -213,19 +213,26 @@ if ($scenario -eq "Standalone") {
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
+    #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
+    Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+
     if ($containsSecondary) {
-        # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+        # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
         Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
-    #Install DP/MP/Client
-    Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+    #Install BGs
+    Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
+   
 
     Write-DscStatus "$scenario Running InstallRoles.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
@@ -260,8 +267,14 @@ if ($scenario -eq "Hierarchy") {
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
+        #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
+        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+               
         if ($containsSecondary) {
-            # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+            # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
             Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
             Set-Location $LogPath
@@ -269,8 +282,8 @@ if ($scenario -eq "Hierarchy") {
         }
 
         #Install DP/MP/Client
-        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+        Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
@@ -321,6 +334,19 @@ if ($TopLevelSiteServer) {
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
     Write-DscStatus "Complete!"
+
+    $AdminConsoleVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "AdminConsoleVersion" -ErrorAction SilentlyContinue
+    if ($AdminConsoleVersion) {
+        $ConsoleShortVersion = ([System.Version]$AdminConsoleVersion).Minor
+    }
+    if ($deployConfig.cmOptions.Version -eq $ConsoleShortVersion) { 
+        # Do Nothing
+    }
+    else {
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
+
 }
 
 if ($ThisVM.role -ne "CAS") {

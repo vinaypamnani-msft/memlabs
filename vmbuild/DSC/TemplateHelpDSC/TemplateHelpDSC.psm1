@@ -432,6 +432,87 @@ class InstallODBCDriver {
 }
 
 [DscResource()]
+class InstallOleDbDriver {
+    [DscProperty(Key)]
+    [string] $Path
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(Mandatory)]
+    [string] $URL
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $_msipath = $this.Path
+        $_URL = $this.URL
+
+        Invoke-DownloadFile $_URL $_msipath
+       
+        $packageName = "Microsoft OLEDB Driver 19"
+        # Install ODBC Driver
+        $cmd = "msiexec"
+        $arg1 = "/i"
+        $arg2 = $_msipath
+        $arg3 = "IACCEPTMSOLEDBSQLLICENSETERMS=YES"
+        $arg4 = "/qn"
+        #$arg5 = "/lv c:\temp\odbcinstallation.log"
+
+        try {
+            Write-Status "Installing $packageName..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
+            & $cmd $arg1 $arg2 $arg3 $arg4 #$arg5
+            Write-Status "$packageName was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            Write-Status "Failed to install $packageName with error: $ErrorMessage"
+            throw "Failed to install $packageName with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 10
+    }
+
+    [bool] Test() {
+        $packageName = "Microsoft OLEDB Driver 19"
+        Write-Status "DSC Test- Checking deployment status for $packageName"
+        try {
+            $InstallRegistryPath = "HKLM:\SOFTWARE\Microsoft\MSOLEDBSQL19"
+
+            if (Test-Path -Path $InstallRegistryPath) {
+                try {
+                    # Get the InstalledVersion only if the path exists
+                    $InstallVersion = Get-ItemProperty -Path $InstallRegistryPath -Name "InstalledVersion" -ErrorAction SilentlyContinue
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Verbose "$packageName Error $($ErrorMessage)!"
+
+                    return $false
+                }
+            }
+            else {
+                return $false
+            }
+
+            If ($InstallVersion.InstalledVersion -ge "19.2.0.0") {
+                Write-Host "$packageName 19.2.0.0 or greater $($InstallVersion.InstalledVersion) is installed"
+                return $true
+            }
+
+            return $false
+        }
+        catch {
+            return $false
+        }
+    }
+
+    [InstallOleDbDriver] Get() {
+        return $this
+    }
+}
+[DscResource()]
 class InstallSqlClient {
     [DscProperty(Key)]
     [string] $Path

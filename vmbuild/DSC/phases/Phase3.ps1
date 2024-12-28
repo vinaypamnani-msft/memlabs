@@ -244,6 +244,19 @@ configuration Phase3
             Ensure    = "Present"
         }
 
+        WriteStatus OleDbDriverInstall {
+            DependsOn = "[InstallODBCDriver]ODBCDriverInstall"
+            Status    = "Downloading and installing OleDB driver"
+        }
+
+        InstallOleDbDriver InstallOleDbDriver {
+            DependsOn = "[WriteStatus]OleDbDriverInstall"
+            URL       = $deployConfig.URLS.OleDB
+            Path  = "C:\temp\msoledbsql.msi"
+            Ensure    = "Present"
+        }
+
+
         $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
 
         if ($AddIISCert) {

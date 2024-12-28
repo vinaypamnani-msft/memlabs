@@ -154,7 +154,7 @@ function Check-OverallHealth {
     $disk = Get-Volume -DriveLetter E
     $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
     $diskFreeGB = $([math]::Round($($disk.SizeRemaining / 1GB), 0))
-    
+
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHeader "  ---  Quick Stats"
     
     $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
@@ -818,120 +818,7 @@ function Select-MainMenu {
     }
 }
 
-function Get-ValidSubnets {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $false, HelpMessage = "Config")]
-        [object] $configToCheck = $global:config,
-        [Parameter(Mandatory = $false, HelpMessage = "Allow Existing")]
-        [bool] $AllowExisting = $false,
-        [Parameter(Mandatory = $false, HelpMessage = "Networks to Exclude")]
-        [object] $excludeList = @(),
-        [Parameter(Mandatory = $false, HelpMessage = "VM to Check")]
-        [object] $vmToCheck = $null
 
-    )
-
-
-    $usedSubnets = @()
-    $usedSubnets += (Get-NetworkList).Network
-
-    $usedSubnets += $excludeList
-    if (-not $AllowExisting) {
-        $usedSubnets += $configToCheck.vmOptions.network
-        foreach ($vm in $configToCheck.VirtualMachines) {
-            if ($vm.network) {
-                $usedSubnets += $vm.network
-            }
-        }
-    }
-
-    $subnetlist = @()
-    if ($vmToCheck) {
-        $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck
-        #foreach ($vm in $configToCheck.virtualMachines) {
-        #    if ($vm.network) {
-        #        if ($vm.network -in $usedSubnets) {
-        #            continue
-        #        }
-        #        if ($vm.network -in $subnetList) {
-        #            continue
-        #        }
-        #    }
-        #    switch ($vmToCheck.Role) {
-        #        "Primary" {
-        #            if ($vm.Role -in ("Primary", "Secondary")) {
-        #                continue
-        #            }
-        #        }
-        #        "Secondary" {
-        #            if ($vm.Role -in ("Primary", "Secondary")) {
-        #                continue
-        #            }
-        #        }
-        #        Default {
-        #            $subnetList += $vm.network
-        #        }
-        #    }
-        #}
-    }#
-
-    $usedSubnets += $subnetList
-    $subnetList = @($subnetList | Sort-Object -Property { [System.Version]$_ } | Get-Unique)
-    $addedsubnets = 0
-
-    for ($i = 1; $i -lt 200; $i++) {
-        $newSubnet = "192.168." + $i + ".0"
-        $found = $false
-        if ($usedSubnets -contains $newSubnet) {
-            $found = $true
-            continue
-        }
-        if (-not $found) {
-            $subnetlist += $newSubnet
-            $addedsubnets++
-            if ($addedsubnets -gt 2) {
-                break
-            }
-
-        }
-
-    }
-
-    for ($i = 1; $i -lt 200; $i++) {
-        $newSubnet = "172.16." + $i + ".0"
-        $found = $false
-        if ($usedSubnets -contains $newSubnet) {
-            $found = $true
-            continue
-        }
-        if (-not $found) {
-            $subnetlist += $newSubnet
-            $addedsubnets++
-            if ($addedsubnets -gt 5) {
-                break
-            }
-
-        }
-    }
-
-    for ($i = 1; $i -lt 200; $i++) {
-        $newSubnet = "10.0." + $i + ".0"
-        $found = $false
-        if ($usedSubnets -contains $newSubnet) {
-            $found = $true
-            continue
-        }
-        if (-not $found) {
-            $subnetlist += $newSubnet
-            $addedsubnets++
-            if ($addedsubnets -gt 8) {
-                break
-            }
-        }
-    }
-    return $subnetlist | Where-Object { $_ }
-}
 
 function Get-NewMachineName {
     [CmdletBinding()]
@@ -1194,42 +1081,6 @@ function Get-NewSiteCode {
         return $desiredSiteCode
     }
 
-}
-
-function Get-ValidDomainNames {
-    # Old List.. Some have netbios portions longer than 15 chars
-    #$ValidDomainNames = [System.Collections.ArrayList]("adatum.com", "adventure-works.com", "alpineskihouse.com", "bellowscollege.com", "bestforyouorganics.com", "contoso.com", "contososuites.com",
-    #   "consolidatedmessenger.com", "fabrikam.com", "fabrikamresidences.com", "firstupconsultants.com", "fourthcoffee.com", "graphicdesigninstitute.com", "humongousinsurance.com",
-    #   "lamnahealthcare.com", "libertysdelightfulsinfulbakeryandcafe.com", "lucernepublishing.com", "margiestravel.com", "munsonspicklesandpreservesfarm.com", "nodpublishers.com",
-    #   "northwindtraders.com", "proseware.com", "relecloud.com", "fineartschool.net", "southridgevideo.com", "tailspintoys.com", "tailwindtraders.com", "treyresearch.net", "thephone-company.com",
-    #  "vanarsdelltd.com", "wideworldimporters.com", "wingtiptoys.com", "woodgrovebank.com", "techpreview.com" )
-
-    #Trimmed list, only showing domains with 15 chars or less in netbios portion
-    $ValidDomainNames = @{"adatum.com" = "ADA-" ; "adventure-works.com" = "ADV-" ; "alpineskihouse.com" = "ALP-" ; "bellowscollege.com" = "BLC-" ; "contoso.com" = "CON-" ; "contososuites.com" = "COS-" ;
-        "fabrikam.com" = "FAB-" ; "fourthcoffee.com" = "FOR-" ;
-        "lamnahealthcare.com" = "LAM-"  ; "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
-        "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-";
-        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" #; "techpreview.com" = "CTP-" #techpreview.com is reserved for tech preview CM Installs
-    }
-    foreach ($domain in (Get-DomainList)) {
-        if ($domain) {
-            $ValidDomainNames.Remove($domain.ToLowerInvariant())
-        }
-    }
-
-    $usedPrefixes = Get-List -Type UniquePrefix
-    $ValidDomainNamesClone = $ValidDomainNames.Clone()
-    foreach ($dname in $ValidDomainNamesClone.Keys) {
-        foreach ($usedPrefix in $usedPrefixes) {
-            if ($usedPrefix -and $ValidDomainNames[$dname]) {
-                if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $usedPrefix.ToLowerInvariant()) {
-                    Write-Verbose ("Removing $dname")
-                    $ValidDomainNames.Remove($dname)
-                }
-            }
-        }
-    }
-    return $ValidDomainNames
 }
 
 

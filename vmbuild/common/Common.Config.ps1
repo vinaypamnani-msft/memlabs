@@ -251,6 +251,21 @@ function New-DeployConfig {
     )
     try {
 
+
+        if ($null -ne ($configObject.vmOptions.domainName)) { 
+            if (($configObject.vmOptions.domainName) -eq "AUTO"){
+                $domains = (Get-ValidDomainNames)
+                $domainEntry = ($domains.Keys | sort-object { $_.Length } | Select-Object -first 1)
+                $domainPrefix = $domains[$domainEntry] 
+                $configObject.vmOptions.domainName = $domainEntry
+                $configObject.vmOptions.prefix = $domainPrefix
+            }
+        }
+        if ($null -ne ($configObject.vmOptions.network)) { 
+            if (($configObject.vmOptions.network) -eq "AUTO"){                
+                $configObject.vmOptions.network = (Get-ValidSubnets)[0]                
+            }
+        }
         # domainAdminName was renamed, this is here for backward compat
         if ($null -ne ($configObject.vmOptions.domainAdminName)) {
             if ($null -eq ($configObject.vmOptions.adminName)) {
