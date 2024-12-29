@@ -3966,14 +3966,16 @@ Function Set-TitleBar {
 
 if (-not $Common.Initialized) {
 
+    $image = (Join-Path $PSScriptRoot "MemLabs.png")    
     # Write progress
+    Set-BackgroundImage $image "right" (50-1) "uniform" -InJob:$InJob
     Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
-
     $global:vm_remove_list = @()
 
     ###################
     ### GIT BRANCH  ###
     ###################
+    Set-BackgroundImage $image "right" (50-2) "uniform" -InJob:$InJob
     Write-Progress2 "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
     write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
     $devBranch = $false
@@ -3994,6 +3996,7 @@ if (-not $Common.Initialized) {
 
     # PS Version
     $PS7 = $false
+    Set-BackgroundImage $image "right" (50-3) "uniform" -InJob:$InJob
     Write-Progress2 "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
     if ($PSVersionTable.PSVersion.Major -eq 7) {
         $PS7 = $true
@@ -4007,6 +4010,7 @@ if (-not $Common.Initialized) {
     # if ($devBranch) {
     #     Set-StrictMode -Version 1.0
     # }
+    Set-BackgroundImage $image "right" (50-5) "uniform" -InJob:$InJob
     Write-Progress2 "Loading required modules." -Status "Checking Directories" -PercentComplete 5
     # Paths
     $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
@@ -4016,7 +4020,7 @@ if (-not $Common.Initialized) {
 
     # Get latest hotfix version
 
-
+    Set-BackgroundImage $image "right" (50-7) "uniform" -InJob:$InJob
     Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 7
     # Common global props
 
@@ -4066,6 +4070,7 @@ if (-not $Common.Initialized) {
     Write-Log "Loading required modules." -Verbose
 
     ### Test Storage config and access
+    Set-BackgroundImage $image "right" (50-9) "uniform" -InJob:$InJob
     Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
     $getresults = Get-StorageConfig 
     if ($getresults -eq $false) {
@@ -4074,11 +4079,12 @@ if (-not $Common.Initialized) {
     }
 
 
-
+    Set-BackgroundImage $image "right" (50-11) "uniform" -InJob:$InJob
     Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
     $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
 
     ### Set supported options
+    Set-BackgroundImage $image "right" (50-13) "uniform" -InJob:$InJob
     Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13
     Set-SupportedOptions
 
@@ -4105,6 +4111,7 @@ if (-not $Common.Initialized) {
         catch {}
 
         # Retrieve VM List, and cache results
+        Set-BackgroundImage $image "right" (50-$i) "uniform" -InJob:$InJob
         Write-Progress2 "Loading required modules." -Status "Reset Cache" -PercentComplete $i
         $list = Get-List -Type VM -ResetCache
         foreach ($vm in $list) {
@@ -4112,12 +4119,14 @@ if (-not $Common.Initialized) {
             if ($i -ge 98) {
                 $i = 98
             }
+            Set-BackgroundImage $image "right" (50-$i) "uniform" -InJob:$InJob
             Write-Progress2 "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
             $vm2 = Get-VM -id $vm.vmId
             Update-VMInformation -vm $vm2
         }
 
         $i++
+        Set-BackgroundImage $image "right" (50-$i) "uniform" -InJob:$InJob
         Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
 
         # Add HGS Registry key to allow local CA Cert

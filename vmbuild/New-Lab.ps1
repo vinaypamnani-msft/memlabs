@@ -135,7 +135,10 @@ New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Nam
 
 if (-not $Common.DevBranch) {
     Clear-Host
+    Get-Animate
 }else {
+    $image = (Join-Path $PSScriptRoot "MemLabs.png")
+    Set-BackgroundImage $image "right" 5 "uniform"
     Get-Animate
 }
 
