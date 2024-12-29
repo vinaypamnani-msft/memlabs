@@ -317,16 +317,16 @@ CurrentBranch=1
 
     #Fix 0 byte files in CMCB
 
-    Get-ChildItem $CMBIN | ForEach-Object {
-        if(!$_.PSIsContainer -and $_.length -eq 0) {
-           write-host (“{0} -> {1} {2}” -f $_.FullName, $_.Name, $_.Length)
-           $RedistFile = (Join-Path $CMRedist $_.Name)
-           if ((Test-Path $RedistFile)) {
-           write-host "found $RedistFile"
-           Copy-Item $RedistFile $_.FullName -force
-           }
-           }
-        }
+   # Get-ChildItem $CMBIN | ForEach-Object {
+   #     if(!$_.PSIsContainer -and $_.length -eq 0) {
+   #        write-host (“{0} -> {1} {2}” -f $_.FullName, $_.Name, $_.Length)
+   #        $RedistFile = (Join-Path $CMRedist $_.Name)
+   #        if ((Test-Path $RedistFile)) {
+   #        write-host "found $RedistFile"
+   #        Copy-Item $RedistFile $_.FullName -force
+   #        }
+   #        }
+   #     }
 
     # Create ini
     $cmini > $CMINIPath

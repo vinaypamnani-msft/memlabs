@@ -617,15 +617,20 @@ class InstallVCRedist {
         #VC_redist.x64.exe /install /passive /quiet
         $cmd = $_path
         $arg1 = "/install"
-        $arg2 = "/passive"
-        $arg3 = "/quiet"
-        #$arg4 = "/qn"
-        #$arg5 = "/lv c:\temp\odbcinstallation.log"
+        $arg2 = "/quiet"
+        $arg3 = "/norestart"
+        $arg4 = "/l"
+        if ($_path -like "*x64*") {
+            $arg5 = "c:\temp\vc_redistx64.log"
+        } else {
+            $arg5 = "c:\temp\vc_redistx86.log"
+        }
+
 
         try {
             Write-Status "Installing VC Redist..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3")
-            & $cmd $arg1 $arg2 $arg3 #$arg5
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4 $arg5")
+            & $cmd $arg1 $arg2 $arg3 $arg4 $arg5
             Write-Status "VC Redist was Installed Successfully!"
         }
         catch {
