@@ -290,7 +290,7 @@
             "provisionVmAgent": true,
             "patchSettings": {
               "enableHotpatching": false,
-              "patchMode": "AutomaticByPlatform"
+              "patchMode": "AutomaticByOS"
             }
           }
         },
