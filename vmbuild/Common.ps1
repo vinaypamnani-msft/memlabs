@@ -740,7 +740,7 @@ function Copy-ItemSafe {
         [switch] $WhatIf,
         [Parameter(Mandatory = $false)]
         [switch]$Force,
-        [Parameter(tory = $false, HelpMessage = "When running as a job.. Timeout length")]
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
         [int]$TimeoutSeconds = 360
     )
     #$PSScriptRoot = $using:PSScriptRoot
