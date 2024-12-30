@@ -35,4 +35,12 @@ $Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-
 
 foreach ($testjson in $Tests) {
     ./New-Lab.ps1 -Configuration $testjson
+    if ($LASTEXITCODE -eq 55) {
+        ./New-Lab.ps1 -Configuration $testjson
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Failed to create lab for $testjson"
+        exit 1
+    }    
 }

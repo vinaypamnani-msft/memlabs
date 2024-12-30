@@ -120,13 +120,13 @@ if (-not $NoWindowResize.IsPresent) {
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
-    return
+    exit 1
 }
 
 # Validate PS7
 if (-not $Common.PS7) {
     Write-Log "You must use PowerShell version 7.1 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
-    return
+    exit 1
 }
 
 Set-PS7ProgressWidth
@@ -211,7 +211,7 @@ try {
         Write-RedX "MemLabs requires administrative rights to configure. Please run vmbuild.cmd as administrator." -ForegroundColor Red
         Write-Host
         Start-Sleep -seconds 60
-        return $false
+        exit 1
     }
 
     Set-QuickEdit -DisableQuickEdit
@@ -227,7 +227,7 @@ if ($Common.DevBranch) {
     if (-not $zipLastWriteTime -or ($psdLastWriteTime -gt $zipLastWriteTime) -or ($psmLastWriteTime -gt $zipLastWriteTime)) {
         powershell .\dsc\createGuestDscZip.ps1 | Out-Host
         Set-Location $PSScriptRoot | Out-Null
-        return
+        exit 55
     }
 }
 
@@ -246,16 +246,12 @@ if ($Common.DevBranch) {
 
         # genconfig was called with -Debug true, and returned DeployConfig instead of ConfigFileName
         if ($result.DeployConfig) {
-            return $result
+            exit 0
         }
 
         # genconfig specified not to deploy
-        if (-not $result.DeployNow) {
-            return
-        }
-
         if (-not $($result.DeployNow)) {
-            return
+            exit 0
         }
 
         $Configuration = $result.ConfigFileName
@@ -277,14 +273,14 @@ if ($Common.DevBranch) {
         else {
             Write-Log $configResult.Message -Failure
             Write-Host
-            return
+            exit 1
         }
     }
     else {
         Write-Host
         Write-Log "No Configuration was specified." -Failure
         Write-Host
-        return
+        exit 1
     }
 
     # Determine if we need to run Phase 1
@@ -324,7 +320,7 @@ if ($Common.DevBranch) {
                             Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
                             [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation")
                             write-host
-                            return
+                            exit 1
                         }
                     }
                 }
@@ -346,14 +342,14 @@ if ($Common.DevBranch) {
             Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
             [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation")
             write-host
-            return
+            exit 1
         }
     }
     catch {
         Write-Log "Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
         Write-Log "$($_.ScriptStackTrace)" -LogOnly
         Write-Host
-        return
+        exit 1
     }
     #Create VM Mutexes
     $global:mutexes = @()
@@ -366,14 +362,14 @@ if ($Common.DevBranch) {
         }
         else {
             Write-RedX "Could not acquire mutex for $(vm.vmName).  A deployment for this VM may already be in progress"
-            return
+            exit 1
         }
         
     }
     # Skip if any VM in progress
     if ($runPhase1 -and (Test-InProgress -DeployConfig $deployConfig)) {
         Write-Host
-        return
+        exit 1
     }
 
     # Timer
@@ -420,7 +416,7 @@ if ($Common.DevBranch) {
             if (-not $success) {
                 $timer.Stop()
                 Write-Log "Failed to download all required files. Exiting." -Failure
-                return
+                exit 1
             }
         }
 
@@ -429,7 +425,7 @@ if ($Common.DevBranch) {
             Write-Host
             Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Success
             Write-Host
-            return
+            exit 0
         }
     }
 
@@ -437,7 +433,7 @@ if ($Common.DevBranch) {
     $AddedScopes = @($deployConfig.vmOptions.network)
     $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
     if (-not $worked) {
-        return
+        exit 1
     }
 
     # Create additional switches
@@ -451,7 +447,7 @@ if ($Common.DevBranch) {
             $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
             $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
             if (-not $worked) {
-                return
+                exit 1
             }
         }
     }
@@ -460,7 +456,7 @@ if ($Common.DevBranch) {
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
     $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -WhatIf:$WhatIf
     if ($containsIN -and (-not $worked)) {
-        return
+        exit 1
     }
 
     # AO VM switch and DHCP scope
@@ -468,7 +464,7 @@ if ($Common.DevBranch) {
     if ($containsAO) {
         $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
         if (-not $worked) {
-            return
+            exit 1
         }
     }
 
@@ -477,7 +473,7 @@ if ($Common.DevBranch) {
     $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
     if ($service) {
         Write-Log "DHCPServer Service could not be started." -Failure
-        return $false
+        exit 1
     }
 
     # Remove existing jobs
@@ -492,7 +488,7 @@ if ($Common.DevBranch) {
             }
             catch {
                 write-log "Failed to remove jobs $_"
-                return
+                exit 1
             }
         }
     }
