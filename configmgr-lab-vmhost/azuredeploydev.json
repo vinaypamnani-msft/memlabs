@@ -26,11 +26,11 @@
     },
     "windowsOSVersion": {
       "type": "string",
-      "defaultValue": "2025-datacenter-azure-edition",
+      "defaultValue": "2025-datacenter-g2",
       "allowedValues": [
         "2022-datacenter-g2",
         "2019-datacenter-gensecond",
-        "2025-datacenter-azure-edition"
+        "2025-datacenter-g2"
       ],
       "metadata": {
         "description": "Windows version for the VM."
