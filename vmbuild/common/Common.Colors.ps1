@@ -8,9 +8,16 @@ catch {}
 function Set-BackgroundImage {
 
     param (
-        [string] $file,
+        [Parameter(Mandatory = $true, HelpMessage = "Enter the path to the image file")]
+        [string] $file,        
+        [Parameter(Mandatory = $true, HelpMessage = "Enter the alignment of the image")]
+        [ValidateSet("center", "left", "right", "top", "bottom", "topLeft", "topRight", "bottomLeft", "bottomRight")]
         [string] $alignment,
+        [Parameter(Mandatory = $true, HelpMessage = "Enter the opacity of the image as a percentage (5-100)")]
+        [ValidateRange(1, 100)]
         [int] $opacityPercent,
+        [Parameter(Mandatory = $true, HelpMessage = "Enter the stretch mode of the image")]
+        [ValidateSet("none", "fill", "uniform", "uniformToFill")]
         [string] $stretchMode,
         [bool] $InJob = $false
     )
@@ -32,8 +39,13 @@ function Set-BackgroundImage {
     if ($opacityPercent -lt 5) {
         $opacityPercent = 5        
     }
+
+    if ($opacityPercent -gt 100) {
+        $opacityPercent = 100
+    }
+
     
-    
+
     $a = Get-Content $SettingsJson | ConvertFrom-Json   
     $a | Add-Member -MemberType NoteProperty -Name "tabWidthMode" -Value "titleLength" -Force
     
@@ -43,6 +55,7 @@ function Set-BackgroundImage {
             backgroundImageAlignment   = $alignment
             backgroundImageOpacity     = ($opacityPercent / 100)
             backgroundImageStretchMode = $stretchMode
+            antialiasingMode           = "cleartype"
         }
         $a.profiles | Add-Member -MemberType NoteProperty -Name "defaults" -Value $defaults -Force
     }
@@ -51,6 +64,7 @@ function Set-BackgroundImage {
         $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageAlignment" -Value $alignment -Force
         $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageOpacity" -Value ($opacityPercent / 100) -Force
         $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageStretchMode" -Value $stretchMode -Force
+        $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "antialiasingMode" -Value "cleartype" -Force
     
     }
     

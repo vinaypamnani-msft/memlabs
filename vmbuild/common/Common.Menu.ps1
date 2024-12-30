@@ -185,7 +185,9 @@ function get-ValidResponse {
         [Parameter(Mandatory = $false, HelpMessage = "Hide Help")]
         [bool] $HideHelp = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Hint for help to show we will return")]
-        [bool] $return = $false
+        [bool] $return = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Hint for help to show we will continue")]
+        [bool] $ContinueMode = $false
 
     )
 
@@ -203,7 +205,7 @@ function get-ValidResponse {
             Write-Verbose "5 else get-ValidResponse max = $max"
             if ($first) {
                 Write-Verbose "6 else get-ValidResponse max = $max"
-                $response = Read-Single -Prompt $prompt $currentValue -timeout:$timeout -HideHelp:$HideHelp -return:$return
+                $response = Read-Single -Prompt $prompt $currentValue -timeout:$timeout -HideHelp:$HideHelp -return:$return -ContinueMode:$ContinueMode
             }
             else {
                 Write-Verbose "7 else get-ValidResponse max = $max"
@@ -407,7 +409,9 @@ function Read-Single {
         [Parameter(Mandatory = $false, HelpMessage = "Use Read-Host after keypress")]
         [switch] $useReadHost,
         [Parameter(Mandatory = $false, HelpMessage = "hint for help to show we will return")]
-        [bool] $return = $false
+        [bool] $return = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Hint for help to show we will continue")]
+        [bool] $ContinueMode = $false
     )
 
     if (-not $HideHelp.IsPresent) {
@@ -415,7 +419,13 @@ function Read-Single {
             write-help -AllowEscape -return:$return -timeout:$useReadHost -WRCurrentValue:$currentValue
         }
         else {
-            write-help -return:$return -timeout:$useReadHost
+            if ($ContinueMode) {
+                write-help -return:$return -timeout:$useReadHost -AllowEscape
+            }
+            else {
+                write-help -return:$return -timeout:$useReadHost
+            }
+            
         }
     }
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline

@@ -1305,7 +1305,7 @@ function Select-NewDomainConfig {
 
     write-log -Activity "New Domain Wizard - Default Settings"
     #Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" 
-    Select-Options -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" 
+    Select-Options -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true
     
     write-log -Activity "New Domain Wizard"
  
@@ -4422,6 +4422,8 @@ function Select-Options {
         [string] $prompt,
         [Parameter(Mandatory = $false, HelpMessage = "Append additional Items to menu.. Eg X = Exit")]
         [PSCustomObject] $additionalOptions,
+        [Parameter(Mandatory = $false, HelpMessage = "Let the prompt help show we will continue on enter")]
+        [bool] $ContinueMode = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
         [bool] $Test = $true
     )
@@ -4510,7 +4512,6 @@ function Select-Options {
                 }
                 "Role" {
                     $color = $Global:Common.Colors.GenConfigVMRole
-
                 }
                 "RemoteSQLVM" {
                     $color = $Global:Common.Colors.GenConfigVMRemoteServer
@@ -4555,14 +4556,7 @@ function Select-Options {
             Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
         }
 
-        #if ($isVM) {
-        #    $i++
-        #    $fakeNetwork = $i
-        #    $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
-        #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
-        #    Write-Option $i "$($("network").PadRight($padding," "")) = $network"
-        #        }
-
+       
         if ($null -ne $additionalOptions) {
             foreach ($item in $additionalOptions.keys) {
                 $value = $additionalOptions."$($item)"
@@ -4590,7 +4584,12 @@ function Select-Options {
 
         Show-GenConfigErrorMessages
 
-        $response = get-ValidResponse $prompt $i $null $additionalOptions -return:$true
+        if ($ContinueMode) {
+            $response = get-ValidResponse $prompt $i $null $additionalOptions -ContinueMode:$ContinueMode
+        }
+        else {
+            $response = get-ValidResponse $prompt $i $null $additionalOptions -return:$true
+        }
 
         if ([String]::IsNullOrWhiteSpace($response)) {
             return
@@ -4617,9 +4616,7 @@ function Select-Options {
         foreach ($item in (Get-SortedProperties $property)) {
             $value = $property."$($item)"
             if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
-
                 continue
-
             }
 
             if ($done) {

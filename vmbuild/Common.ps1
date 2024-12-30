@@ -740,7 +740,7 @@ function Copy-ItemSafe {
         [switch] $WhatIf,
         [Parameter(Mandatory = $false)]
         [switch]$Force,
-        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
+        [Parameter(tory = $false, HelpMessage = "When running as a job.. Timeout length")]
         [int]$TimeoutSeconds = 360
     )
     #$PSScriptRoot = $using:PSScriptRoot
@@ -4132,6 +4132,7 @@ if (-not $Common.Initialized) {
         # Add HGS Registry key to allow local CA Cert
         New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
     }
+    Set-BackgroundImage $image "right" 5 "uniform" -InJob:$InJob
     # Write progress
     Write-Progress2 "Loading required modules." -Completed
 
