@@ -306,7 +306,8 @@
       },
       "tags": {
         "CSSLAB": "[variables('tagName')]",
-        "Automation": "Ignore"
+        "Automation": "Ignore",
+        "CostControl": "Ignore"
       }
     },
     {
