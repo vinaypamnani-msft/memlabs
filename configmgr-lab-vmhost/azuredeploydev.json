@@ -289,7 +289,7 @@
             "timeZone": "[parameters('timeZone')]",
             "provisionVmAgent": true,
             "patchSettings": {
-              "enableHotpatching": true,
+              "enableHotpatching": false,
               "patchMode": "AutomaticByPlatform"
             }
           }
