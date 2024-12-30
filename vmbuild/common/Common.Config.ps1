@@ -2257,9 +2257,9 @@ Function Write-OrangePoint2 {
         Write-Host "  " -NoNewline
     }
     Write-Host "[" -NoNewLine
-    Write-Host2 -ForeGroundColor Orange "☢️" -NoNewline
+    Write-Host2 -ForeGroundColor Orange "⚠️" -NoNewline
     #Write-Host2 -ForeGroundColor Orange "⚠ " -NoNewline
-    #☢️
+    #☢️ ⚠️
     #Write-Host2 -ForeGroundColor Orange "❗" -NoNewline
     #Write-Host2 -ForeGroundColor Orange "🚩" -NoNewline
     
