@@ -3968,172 +3968,180 @@ if (-not $Common.Initialized) {
 
     $image = (Join-Path $PSScriptRoot "MemLabs.png")    
     # Write progress
-    Set-BackgroundImage $image "right" (50-1) "uniform" -InJob:$InJob
+    Set-BackgroundImage $image "right" (50 - 1) "uniform" -InJob:$InJob
     Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
     $global:vm_remove_list = @()
-
-    ###################
-    ### GIT BRANCH  ###
-    ###################
-    Set-BackgroundImage $image "right" (50-2) "uniform" -InJob:$InJob
-    Write-Progress2 "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
-    write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
-    $devBranch = $false
+    $global:init_failed = $false
     try {
-        if ($pwd.Path -like '*memlabs*') {
-            $currentBranch = Get-BranchName
-        }
-        else {
-            #Set the current location to the script root
-            Set-Location -Path $PSScriptRoot
-            $currentBranch = Get-BranchName
-        }
-    }
-    catch {}
-    if ($currentBranch -and $currentBranch -notmatch "main") {
-        $devBranch = $true
-    }
-
-    # PS Version
-    $PS7 = $false
-    Set-BackgroundImage $image "right" (50-3) "uniform" -InJob:$InJob
-    Write-Progress2 "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
-    if ($PSVersionTable.PSVersion.Major -eq 7) {
-        $PS7 = $true
-        $PSStyle.Progress.Style = "`e[38;5;123m"
-        $psstyle.Formatting.TableHeader = "`e[3;38;5;195m"
-        $psstyle.Formatting.Warning = "`e[33m"
-
-    }
-
-    # Set-StrictMode -Off
-    # if ($devBranch) {
-    #     Set-StrictMode -Version 1.0
-    # }
-    Set-BackgroundImage $image "right" (50-5) "uniform" -InJob:$InJob
-    Write-Progress2 "Loading required modules." -Status "Checking Directories" -PercentComplete 5
-    # Paths
-    $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
-    $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
-    $logsPath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "logs")                      # Path for log files
-    $desktopPath = [Environment]::GetFolderPath("Desktop")
-
-    # Get latest hotfix version
-
-    Set-BackgroundImage $image "right" (50-7) "uniform" -InJob:$InJob
-    Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 7
-    # Common global props
-
-    $colors = Get-Colors
-
-    $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "240920"
-        LatestHotfixVersion   = "240710"
-        PS7                   = $PS7
-        Initialized           = $true
-        TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
-        ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
-        # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
-        CachePath             = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
-        SizeCache             = $null                                                                     # Cache for Memory Assigned, and Disk Usage
-        NetCache              = $null                                                                     # Cache for Get-NetworkAdapter
-        AzureFilesPath        = $storagePath                                                              # Path for downloaded files
-        AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
-        AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
-        AzureOSIsoPath        = New-Directory -DirectoryPath (Join-Path $storagePath "osiso")             # Path for ISO's (typically for Windows)
-        AzureToolsPath        = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
-        StagingAnswerFilePath = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
-        StagingInjectPath     = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX
-        StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
-        StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
-        StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
-        LogPath               = Join-Path $logsPath "VMBuild.log"                                         # Log File
-        CrashLogsPath         = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
-        RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
-        VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
-        DevBranch             = $devBranch                                                                # Git dev branch
-        Supported             = $null                                                                     # Supported Configs
-        AzureFileList         = $null
-        LocalAdmin            = $null
-        FatalError            = $null
-        Colors                = $colors
-    }
-
-    # Storage config
-    $global:StorageConfig = [PSCustomObject]@{
-        StorageLocation = $null
-        StorageToken    = $null
-    }
-    Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
-
-    Set-TitleBar "Init Phase"
-    Write-Log "Loading required modules." -Verbose
-
-    ### Test Storage config and access
-    Set-BackgroundImage $image "right" (50-9) "uniform" -InJob:$InJob
-    Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
-    $getresults = Get-StorageConfig 
-    if ($getresults -eq $false) {
-        Write-Log "failed to get the storage JSON file" -Failure
-        return 
-    }
-
-
-    Set-BackgroundImage $image "right" (50-11) "uniform" -InJob:$InJob
-    Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
-    $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
-
-    ### Set supported options
-    Set-BackgroundImage $image "right" (50-13) "uniform" -InJob:$InJob
-    Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13
-    Set-SupportedOptions
-
-    # Generate cache
-    $i = 14
-    if (-not $InJob.IsPresent) {
-
-        #disable Sticky Keys
-        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
-        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
-        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
-
+        ###################
+        ### GIT BRANCH  ###
+        ###################
+        Set-BackgroundImage $image "right" (50 - 2) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
+        write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
+        $devBranch = $false
         try {
-            if ($global:common.CachePath) {
-                $threshold = 2
-                Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force | out-null
+            if ($pwd.Path -like '*memlabs*') {
+                $currentBranch = Get-BranchName
+            }
+            else {
+                #Set the current location to the script root
+                Set-Location -Path $PSScriptRoot
+                $currentBranch = Get-BranchName
             }
         }
         catch {}
-
-        try {
-            Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse | ForEach-Object { $_.PSChildName } | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 1 }
+        if ($currentBranch -and $currentBranch -notmatch "main") {
+            $devBranch = $true
         }
-        catch {}
 
-        # Retrieve VM List, and cache results
-        Set-BackgroundImage $image "right" (50-$i) "uniform" -InJob:$InJob
-        Write-Progress2 "Loading required modules." -Status "Reset Cache" -PercentComplete $i
-        $list = Get-List -Type VM -ResetCache
-        foreach ($vm in $list) {
+        # PS Version
+        $PS7 = $false
+        Set-BackgroundImage $image "right" (50 - 3) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
+        if ($PSVersionTable.PSVersion.Major -eq 7) {
+            $PS7 = $true
+            $PSStyle.Progress.Style = "`e[38;5;123m"
+            $psstyle.Formatting.TableHeader = "`e[3;38;5;195m"
+            $psstyle.Formatting.Warning = "`e[33m"
+
+        }
+
+        # Set-StrictMode -Off
+        # if ($devBranch) {
+        #     Set-StrictMode -Version 1.0
+        # }
+        Set-BackgroundImage $image "right" (50 - 5) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Checking Directories" -PercentComplete 5
+        # Paths
+        $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
+        $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
+        $logsPath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "logs")                      # Path for log files
+        $desktopPath = [Environment]::GetFolderPath("Desktop")
+
+        # Get latest hotfix version
+
+        Set-BackgroundImage $image "right" (50 - 7) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 7
+        # Common global props
+
+        $colors = Get-Colors
+
+        $global:Common = [PSCustomObject]@{
+            MemLabsVersion        = "240920"
+            LatestHotfixVersion   = "240710"
+            PS7                   = $PS7
+            Initialized           = $true
+            TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
+            ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
+            # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
+            CachePath             = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
+            SizeCache             = $null                                                                     # Cache for Memory Assigned, and Disk Usage
+            NetCache              = $null                                                                     # Cache for Get-NetworkAdapter
+            AzureFilesPath        = $storagePath                                                              # Path for downloaded files
+            AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
+            AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
+            AzureOSIsoPath        = New-Directory -DirectoryPath (Join-Path $storagePath "osiso")             # Path for ISO's (typically for Windows)
+            AzureToolsPath        = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
+            StagingAnswerFilePath = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
+            StagingInjectPath     = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX
+            StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
+            StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
+            StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
+            LogPath               = Join-Path $logsPath "VMBuild.log"                                         # Log File
+            CrashLogsPath         = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
+            RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
+            VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
+            DevBranch             = $devBranch                                                                # Git dev branch
+            Supported             = $null                                                                     # Supported Configs
+            AzureFileList         = $null
+            LocalAdmin            = $null
+            FatalError            = $null
+            Colors                = $colors
+        }
+
+        # Storage config
+        $global:StorageConfig = [PSCustomObject]@{
+            StorageLocation = $null
+            StorageToken    = $null
+        }
+        Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
+
+        Set-TitleBar "Init Phase"
+        Write-Log "Loading required modules." -Verbose
+
+        ### Test Storage config and access
+        Set-BackgroundImage $image "right" (50 - 9) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
+        $getresults = Get-StorageConfig 
+        if ($getresults -eq $false) {
+            $global:init_failed = $true
+            Write-Log "failed to get the storage JSON file" -Failure
+            return 
+        }
+
+
+        Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
+        $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+
+        ### Set supported options
+        Set-BackgroundImage $image "right" (50 - 13) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13
+        Set-SupportedOptions
+
+        # Generate cache
+        $i = 14
+        if (-not $InJob.IsPresent) {
+
+            #disable Sticky Keys
+            Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
+            Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
+            Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
+
+            try {
+                if ($global:common.CachePath) {
+                    $threshold = 2
+                    Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force | out-null
+                }
+            }
+            catch {}
+
+            try {
+                Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse | ForEach-Object { $_.PSChildName } | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 1 }
+            }
+            catch {}
+
+            # Retrieve VM List, and cache results
+            Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
+            Write-Progress2 "Loading required modules." -Status "Reset Cache" -PercentComplete $i
+            $list = Get-List -Type VM -ResetCache
+            foreach ($vm in $list) {
+                $i++
+                if ($i -ge 98) {
+                    $i = 98
+                }
+                Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
+                Write-Progress2 "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
+                $vm2 = Get-VM -id $vm.vmId
+                Update-VMInformation -vm $vm2
+            }
+
             $i++
-            if ($i -ge 98) {
-                $i = 98
-            }
-            Set-BackgroundImage $image "right" (50-$i) "uniform" -InJob:$InJob
-            Write-Progress2 "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
-            $vm2 = Get-VM -id $vm.vmId
-            Update-VMInformation -vm $vm2
+            Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
+            Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
+
+            # Add HGS Registry key to allow local CA Cert
+            New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
         }
-
-        $i++
-        Set-BackgroundImage $image "right" (50-$i) "uniform" -InJob:$InJob
-        Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
-
-        # Add HGS Registry key to allow local CA Cert
-        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-BackgroundImage $image "right" 5 "uniform" -InJob:$InJob
+        # Write progress
+        Write-Progress2 "Loading required modules." -Completed
     }
-    Set-BackgroundImage $image "right" 5 "uniform" -InJob:$InJob
-    # Write progress
-    Write-Progress2 "Loading required modules." -Completed
+    catch {
+        Write-Log "Failed to initialize MemLabs. $_" -Failure
+        $global:init_failed = $true
+        return
+    }
 
 }

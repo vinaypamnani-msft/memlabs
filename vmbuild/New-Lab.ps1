@@ -86,6 +86,12 @@ $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false }
 # Dot source common
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
+if ($global:init_failed) {
+    Write-Log "Failed to initialize common. Exiting." -Failure
+    exit 1
+}
+
+
 Test-NoRRAS
 
 
