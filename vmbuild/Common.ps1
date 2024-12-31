@@ -3943,8 +3943,8 @@ Function Install-HostToServer2025 {
         }else {
             Write-Host "Stopping all VMs"
             Get-VM | Stop-VM -TurnOff
-            Write-Host "Running $exe /auto upgrade /dynamicupdate disable /eula accept"            
-        Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept" -Wait
+            Write-Host "Running $exe /auto upgrade /dynamicupdate disable /eula accept /imageindex 4"            
+        Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept /imageindex 4" -Wait
         }
     }
     
