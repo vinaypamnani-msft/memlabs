@@ -892,7 +892,7 @@ function Start-CurlTransfer {
         }
         else {
             Write-Host
-            Write-Log "Download failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
+            Write-Log "Download $Source failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
             Write-Host
             Start-Sleep -Seconds 5
         }
@@ -3577,6 +3577,9 @@ function Get-FileFromStorage {
         $fileUrl = "$($StorageConfig.StorageLocation)/$($filename)"
         $worked = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -HashAlg $hashAlg -UseCDN:$UseCDN -WhatIf:$WhatIf
         $success = $($worked.success)
+        if (-not $success) {
+            Write-Log "Failed to download/verify $imageName from $fileUrl" -Failure
+        }
     }
 
     Write-Log -Verbose "Returning $success"

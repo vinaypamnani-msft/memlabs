@@ -221,12 +221,14 @@ function Select-ConfigMenu {
         Check-OverallHealth
         #$customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
+        $customOptions = [ordered]@{}
+        
         if ($domainCount -gt 0) {
-            $customOptions = [ordered]@{ "1" = "Create New Domain or Expand Existing domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+            $customOptions += [ordered]@{ "1" = "Create New Domain or Expand Existing domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
             #   $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; }
         }
         else {
-            $customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+            $customOptions += [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
         }
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
@@ -257,6 +259,12 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"P" = "Show Passwords" }
         $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "---  Other%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+            #Do nothing as we are on server 2025
+        } else {
+            $customOptions += [ordered]@{"*BU" = ""; "*UBREAK" = "---  Host machine needs to be on server 2025 to activate Server 2025 VMs ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
+            $customOptions += [ordered]@{ "U" = "Upgrade HOST to server 2025%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+        }
         #$pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
         $pendingCount = (Get-PendingVMs | Measure-Object).Count
 
@@ -302,6 +310,7 @@ function Select-ConfigMenu {
             "n" { Select-NetworkMenu }
             "t" { Select-ToolsMenu }
             "P" { Select-PasswordMenu }
+            "U" { Upgrade-HostToServer2025 }
             Default {}
         }
         if ($SelectedConfig) {

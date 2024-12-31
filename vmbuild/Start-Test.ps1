@@ -1,3 +1,4 @@
+#Start-Test.ps1
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true, HelpMessage = "TestName")]
@@ -27,20 +28,40 @@ param (
             if ($WordToComplete) { $Tests = $Tests | Where-Object { $_.ToLowerInvariant().StartsWith($WordToComplete) } }
             return [string[]] $Tests
         })]   
-        [string]$Test
+        [string]$Test,
+        [Parameter(Mandatory = $true, HelpMessage = "CMVersion")]
+        [ArgumentCompleter({
+            param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
+            . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -InJob:$true
+            $argument = @(Get-CMVersions)
+            return $argument | Where-Object {$_ -match $WordToComplete}
+        })]
+        [string]$cmVersion
 )
 Write-Host "Starting all tests for $Test"
 $Test = $Test.ToLowerInvariant()
 $Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name } | Where-Object {$_.Name.ToLowerInvariant().StartsWith($Test)}
 $history = @()
+$ModifiedtestFile = "c:\temp\test.json"
 foreach ($testjson in $Tests) {
-    ./New-Lab.ps1 -Configuration $testjson
+
+    $config = Get-Content $testjson -Force | ConvertFrom-Json
+    if ($cmVersion) {
+        if ($config.cmOptions.version -ne $cmVersion) {
+            $config.cmOptions.version = $cmVersion
+            write-host "updating cmVersion to $cmVersion"
+        }        
+    }
+    $domainName = $config.vmOptions.domainName
+    $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
+    
+    ./New-Lab.ps1 -Configuration $ModifiedtestFile
     if ($LASTEXITCODE -eq 55) {
-        ./New-Lab.ps1 -Configuration $testjson
+        ./New-Lab.ps1 -Configuration $ModifiedtestFile
     }
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "Failed to create lab for $testjson"
+        Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
         exit 1
     }   
     $history += "$testjson Completed Successfully"
@@ -49,3 +70,4 @@ foreach ($testjson in $Tests) {
 foreach ($historyitem in $history) {
     Write-Host $historyitem
 }
+[Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./Remove-lab.ps1 -DomainName $domainName")

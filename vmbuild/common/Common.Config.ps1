@@ -43,11 +43,35 @@ function Get-UserConfiguration {
         #Apply Fixes to Config
 
         if ($config.cmOptions) {
+            #Version                   = $latestVersion
+            #Install                   = $true
+            #PushClientToDomainMembers = $true
+            #PrePopulateObjects        = $true
+            #EVALVersion               = $false
+            #InstallSCP                = $true
+            #OfflineSCP                = $false
+            #OfflineSUP                = $false
+            #UsePKI                    = $false
             if ($null -eq ($config.cmOptions.EVALVersion)) {
-                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EVALVersion" -Value $false
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EVALVersion" -Value $false -Force
             }
             if ($null -eq ($config.cmOptions.UsePKI)) {
-                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UsePKI" -Value $false
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UsePKI" -Value $false -Force
+            }
+            if ($null -eq ($config.cmOptions.PrePopulateObjects)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "PrePopulateObjects" -Value $true -Force
+            }
+            if ($null -eq ($config.cmOptions.OfflineSCP)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "OfflineSCP" -Value $false -Force
+            }
+            if ($null -eq ($config.cmOptions.OfflineSUP)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "OfflineSUP" -Value $false -Force
+            }
+            if ($null -eq ($config.cmOptions.Version)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value "current-branch" -Force
+            }
+            if ($null -eq ($config.cmOptions.Install)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value $true -Force
             }
         }
         if ($null -ne $config.vmOptions.domainAdminName) {
@@ -2434,6 +2458,11 @@ Function Show-Summary {
 
             }
            
+            if ($deployConfig.cmOptions.PrePopulateObjects) {
+                Write-GreenCheck "ConfigMgr: Scripts/apps/task sequences/etc will be pre-populated"
+            }else{
+                Write-OrangePoint "ConfigMgr: Scripts/apps/task sequences/etc will NOT be pre-populated"
+            }
 
             $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PS) {
