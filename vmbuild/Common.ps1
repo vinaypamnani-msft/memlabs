@@ -3942,7 +3942,9 @@ Function Install-HostToServer2025 {
             write-host "Host is already on Server 2025. Not running $exe /auto upgrade /dynamicupdate disable /eula accept"
         }else {
             Write-Host "Stopping all VMs"
-            Get-VM | Stop-VM -TurnOff
+
+            Get-VM | Where-Object {$_.State -eq "Running" } | Stop-VM -Force
+            Get-VM | Where-Object {$_.State -eq "Running" } | Stop-VM -TurnOff -Force
             Write-Host "Running $exe /auto upgrade /dynamicupdate disable /eula accept /imageindex 4"            
         Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept /imageindex 4" -Wait
         }
