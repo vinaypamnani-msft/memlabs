@@ -3941,6 +3941,9 @@ Function Install-HostToServer2025 {
         if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
             write-host "Host is already on Server 2025. Not running $exe /auto upgrade /dynamicupdate disable /eula accept"
         }else {
+            Write-Host "Stopping all VMs"
+            Get-VM | Stop-VM -TurnOff
+            Write-Host "Running $exe /auto upgrade /dynamicupdate disable /eula accept"            
         Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept" -Wait
         }
     }
