@@ -310,7 +310,7 @@ function Select-ConfigMenu {
             "n" { Select-NetworkMenu }
             "t" { Select-ToolsMenu }
             "P" { Select-PasswordMenu }
-            "U" { Upgrade-HostToServer2025 }
+            "u" { Install-HostToServer2025 }
             Default {}
         }
         if ($SelectedConfig) {

@@ -3924,7 +3924,28 @@ Function Set-PS7ProgressWidth {
         $PSStyle.Progress.MaxWidth = $maxWidth
     }
 }
+Function Install-HostToServer2025 {
+    $server2025 = $common.azureFilelist.SupportFiles | Where-Object {$_.id -like "*Server 2025*"}
+    Get-FileFromStorage $server2025
+    $filename = (Join-Path $common.AzureFilesPath $server2025.filename)
+    if (Test-Path $filename) {
 
+    $expandLocation = "C:\temp\Upgrade2025"
+    Expand-Archive -Path  $filename -DestinationPath $expandLocation -Force    
+    }else{
+        Write-Log "Failed to download $filename" -Failure
+    }
+    $exeLocation = (Join-Path $expandLocation "Windows Server 2025")
+    $exe = (Join-Path $exeLocation "setup.exe")
+    if (Test-Path $exe) {
+        if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+            write-host "Host is already on Server 2025. Not running $exe /auto upgrade /dynamicupdate disable /eula accept"
+        }else {
+        Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept" -Wait
+        }
+    }
+    
+}
 Function Set-TitleBar {
     [CmdletBinding()]
     param (
