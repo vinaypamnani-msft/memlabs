@@ -12,7 +12,7 @@ if ( -not $ConfigFilePath) {
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 
-if ($deployConfig.cmOptions.PrePopulateObjects -eq $false) {
+if ($deployConfig.cmOptions.PrePopulateObjects -ne $true) {
     return
 }
 
