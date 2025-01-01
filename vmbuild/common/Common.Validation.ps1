@@ -167,6 +167,21 @@ function Test-ValidCmOptions {
         Add-ValidationMessage -Message "CM Options Validation: cmOptions.pushClientToDomainMembers has an invalid value [$($ConfigObject.cmOptions.pushClientToDomainMembers)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
+    # pushClientToDomainMembers
+    if ($ConfigObject.cmOptions.usePKI -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI has an invalid value [$($ConfigObject.cmOptions.usePKI)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    }
+
+    if ($ConfigObject.cmOptions.usePKI) {
+        foreach ($vm in $ConfigObject.virtualMachines) {
+            if ($vm.role -eq "DC" ) {
+                if (-not $vm.InstallCA) {
+                    Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI is enabled but no CA is specified for DC [$($vm.vmName)]." -ReturnObject $ReturnObject -Failure
+                }
+            }            
+        }
+    }
+
 }
 function Test-MachineNameExists {
     param (

@@ -108,6 +108,13 @@ function Get-UserConfiguration {
                 $vm.role = "SiteSystem"
             }
 
+            if ($vm.role -eq "DC") {
+                if ($null -eq $vm.InstallCA) {
+                    if ($config.cmOptions.UsePKI) {                    
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -force
+                    }
+                }
+            }
             #add missing Properties
             if ($vm.Role -in "SiteSystem", "CAS", "Primary") {
                 if ($null -eq $vm.InstallRP) {
@@ -261,7 +268,7 @@ function Get-FilesForConfiguration {
             Write-Log -Verbose "$baselineFile Failed to download via Get-FileFromStorage"
             $allSuccess = $false
         }
-        
+
         foreach ($file in $Common.AzureFileList.OSISO) {
             if (-not $DownloadAll -and $OsVersionsToGet -notcontains $file.id) { continue }
             $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure

@@ -429,6 +429,10 @@ if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
 }
 
 
+if ($Configuration.UpgradeSCCM.Status -eq 'Completed') {
+    $UpdateRequired = $false
+}
+
 if ($UpdateRequired) {
 
     if ($InstalltoAO) {
@@ -768,7 +772,7 @@ if ($UpdateRequired) {
     # Update Action file
     if ($downloadretrycount -ge 2) {
         Write-DscStatus "Failed to download '$($updatepack.Name)'"
-        $Configuration.UpgradeSCCM.Status = 'Completed'
+        $Configuration.UpgradeSCCM.Status = 'Error'
     }
 
     # Update Action file

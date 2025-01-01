@@ -106,7 +106,7 @@ function Start-Phase {
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
-        Write-OrangePoint "[Phase $Phase] Not Applicable. Skipping." -ForegroundColor Yellow -WriteLog
+        Write-OrangePoint "[Phase $Phase] No VMs need this step. Skipping." -ForegroundColor Yellow -WriteLog
         $global:PhaseSkipped = $true
         return $true
     }
@@ -137,7 +137,7 @@ function Start-PhaseJobs {
     # Determine single vs. multi-DSC
     $multiNodeDsc = $true
     $ConfigurationData = $null
-    if ($Phase -gt 1) {
+    if ($Phase -gt 1 -and $Phase -lt 10) {
         $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
         if (-not $ConfigurationData) {
             # Nothing applicable for this phase
@@ -191,7 +191,7 @@ function Start-PhaseJobs {
 
             if ($Phase -eq 9 -and ($currentItem.role -in ("Primary"))) {
                 $valid = $true
-            }
+            }           
 
             if ($valid -eq $false) {
                 continue
@@ -232,19 +232,30 @@ function Start-PhaseJobs {
             $maxRoleNameLength = $currentItem.role.Length
         }
 
-        if ($Phase -eq 0 -or $Phase -eq 1) {
-            # Create/Prepare VM
-            $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
-            if (-not $job) {
-                Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
-                $job_created_no++
+        if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10) {
+
+            if ($Phase -eq 10) {
+                Write-Log "[Phase $Phase] Will start a job for VM $($currentItem.vmName)"
+                $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ErrorAction Stop -ErrorVariable Err
+                if (-not $job) {
+                    Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
+                    $job_created_no++
+                }
             }
             else {
-                if ($Phase -eq 1) {
-                    # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
-                    #if (-not $Migrate) {
+                # Create/Prepare VM
+                $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
+                if (-not $job) {
+                    Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
+                    $job_created_no++
+                }
+                else {
+                    if ($Phase -eq 1) {
+                        # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
+                        #if (-not $Migrate) {
                         $global:vm_remove_list += ($jobName -split " ")[0]
-                    #}
+                        #}
+                    }
                 }
             }
         }

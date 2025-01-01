@@ -37,10 +37,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 9)]
+    [ValidateRange(2, 10)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 9)]
+    [ValidateRange(2, 10)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
@@ -193,6 +193,9 @@ function Write-Phase {
 
         9 {
             Write-Log "Phase $Phase - Setup Multi-Forest ConfigMgr" -Activity
+        }
+        10 {
+            Write-Log "Phase $Phase - Run Maintenance" -Activity
         }
     }
 }
@@ -518,7 +521,7 @@ if ($Common.DevBranch) {
 
     # Define phases
     $start = 1
-    $maxPhase = 9
+    $maxPhase = 10
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -597,7 +600,7 @@ if ($Common.DevBranch) {
         Write-Host
     }
     else {
-        $currentPhase = 9
+        $currentPhase = 10
         foreach ($mutex in $global:mutexes) {
             try {
                 [void]$mutex.ReleaseMutex()
@@ -611,7 +614,8 @@ if ($Common.DevBranch) {
         }
         $global:mutexes = @()
 
-        Start-Maintenance -DeployConfig $deployConfig
+        #This is now done in Phase 10
+       # Start-Maintenance -DeployConfig $deployConfig
 
         $updateExistingRequired = $false
         foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
@@ -666,7 +670,7 @@ finally {
         Set-TitleBar "Script Cancelled"
         Write-Log "### $Configuration Terminated $currentPhase" -HostOnly
 
-        if ($currentPhase -ge 2 -and $currentPhase -le 9) {
+        if ($currentPhase -ge 2 -and $currentPhase -le $maxPhase) {
             if ($currentPhase -eq 8) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 

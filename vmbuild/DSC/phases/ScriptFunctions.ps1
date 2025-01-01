@@ -188,10 +188,12 @@ function Install-DP {
                     }
                     else {
                         "Could Not find $CertAuth" *>&1 | Out-File $global:StatusLog -Append
+                        $installFailure = $true
                     }
                 }
                 else {
                     "Could Not find $CertPath" *>&1 | Out-File $global:StatusLog -Append
+                    $installFailure = $true
                 }
             }
             else {
@@ -262,10 +264,12 @@ function Install-PullDP {
                     }
                     else {
                         "Could Not find $CertAuth" *>&1 | Out-File $global:StatusLog -Append
+                        $installFailure = $true
                     }
                 }
                 else {
                     "Could Not find $CertPath" *>&1 | Out-File $global:StatusLog -Append
+                    $installFailure = $true
                 }
             }
             else {

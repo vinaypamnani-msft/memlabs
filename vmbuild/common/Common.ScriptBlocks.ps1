@@ -1,4 +1,35 @@
 
+
+$global:Phase10Job = {
+    
+    try {
+        $global:ScriptBlockName = "Phase10Job"
+        # Dot source common
+        #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+
+        $rootPath = Split-Path $using:PSScriptRoot -Parent
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+
+        # Get variables from parent scope
+        $deployConfig = $using:deployConfigCopy
+        $currentItem = $using:currentItem
+        $azureFileList = $using:Common.AzureFileList
+        $Phase = $using:Phase
+        $Migrate = $using:Migrate
+        $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$true
+        if (-not $worked) {
+            throw "Could not run VM Maintenance on $($currentItem.vmName)"
+        }else{
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Maintenance completed successfully for $($currentItem.role)." -OutputStream -Success
+        }
+    }
+    catch {
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)"
+    }
+
+}
+
 # Create VM script block
 $global:VM_Create = {
 
@@ -106,7 +137,7 @@ $global:VM_Create = {
 
             $dynamicMinRam = 0
             if ($currentItem.dynamicMinRam) {
-            $dynamicMinRam = $currentItem.dynamicMinRam
+                $dynamicMinRam = $currentItem.dynamicMinRam
             }
 
             if ($currentItem.Role -eq "DomainMember" -and $currentItem.SqlVersion) {
