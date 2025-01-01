@@ -234,8 +234,7 @@ function Start-PhaseJobs {
 
         if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10) {
 
-            if ($Phase -eq 10) {
-                Write-Log "[Phase $Phase] Will start a job for VM $($currentItem.vmName)"
+            if ($Phase -eq 10) {                
                 $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ErrorAction Stop -ErrorVariable Err
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
