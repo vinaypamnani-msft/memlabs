@@ -2179,7 +2179,7 @@ function New-VirtualMachine {
                 }
                 catch {
                     #retry
-                    Start-DHCP -Restart
+                    Start-DHCP -Restart | out-null
                     $ip = $null
                     try {
                         $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
@@ -4136,6 +4136,7 @@ if (-not $Common.Initialized) {
         $i = 14
         if (-not $InJob.IsPresent) {
 
+            Start-DHCP | out-null
             #disable Sticky Keys
             Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
             Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"

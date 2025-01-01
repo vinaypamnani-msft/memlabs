@@ -29,14 +29,15 @@ param (
             return [string[]] $Tests
         })]   
         [string]$Test,
-        [Parameter(Mandatory = $true, HelpMessage = "CMVersion")]
+        [Parameter(Mandatory = $false, HelpMessage = "CMVersion")]
         [ArgumentCompleter({
             param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
             . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -InJob:$true
             $argument = @(Get-CMVersions)
             return $argument | Where-Object {$_ -match $WordToComplete}
         })]
-        [string]$cmVersion
+        [string]$cmVersion,
+        [switch]$dynamicMemory
 )
 Write-Host "Starting all tests for $Test"
 $Test = $Test.ToLowerInvariant()
@@ -51,6 +52,11 @@ foreach ($testjson in $Tests) {
             $config.cmOptions.version = $cmVersion
             write-host "updating cmVersion to $cmVersion"
         }        
+    }
+    if ($dynamicMemory) {
+        foreach ($vm in $config.virtualMachines) {
+            $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value "1GB" -Force
+        }       
     }
     $domainName = $config.vmOptions.domainName
     $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force

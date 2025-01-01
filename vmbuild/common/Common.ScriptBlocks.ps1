@@ -549,7 +549,7 @@ $global:VM_Create = {
                 #$common.AzureFilesPath
                 $sourceLocation = Join-Path $Common.AzureFilesPath "support\baselines.zip"
                 $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $sourceLocation -Destination "C:\tools" -Recurse -Container -Force
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM." -Completed
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM."
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying OS ISO files to the VM."
                 Write-Progress2 -Activity "$($currentItem.vmName): Copying OS ISO files to the VM" -Completed
@@ -903,7 +903,7 @@ $global:VM_Config = {
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 15 -value $deployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                        Start-DHCP
+                        Start-DHCP | out-null
                         Start-Sleep -seconds 30
                         $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "renew DHCP"
                     }

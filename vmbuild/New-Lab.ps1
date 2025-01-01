@@ -706,6 +706,7 @@ finally {
     if ($global:vm_remove_list.Count -gt 0) {
         if ($NewLabsuccess) {
             Write-Log "Phase 1 encountered failures. Removing all VM's created in Phase 1." -Warning
+            $NewLabsuccess = $false
         }
         else {
             Write-Log "Script exited before Phase 1 completion. Removing all VM's created in Phase 1." -Warning
@@ -730,5 +731,8 @@ finally {
 
     Write-Host
     Write-Host Script exited.
+    if ($NewLabsuccess -ne $true){
+        exit 1
+    }
     
 }
