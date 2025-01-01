@@ -305,27 +305,28 @@ if ($containsPassive) {
 }
 
 
-Write-DscStatus "Finished setting up ConfigMgr."
-
+Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
+if ($CurrentRole -eq "CAS") {
+    #If we are on the CAS, we can mark this early, to allow the primary to start while we run other tasks.
 # Mark ScriptWorkflow completed for DSC to move on.
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 $Configuration.ScriptWorkflow.Status = "Completed"
 $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-Write-DscStatus "Complete!"
+
+}
+
 
 if (-not $deployConfig.cmOptions.UsePKI) {
     # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
     Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
     . $ScriptFile $ConfigFilePath $LogPath $firstRun
-    Write-DscStatus "Complete!"
 }
 else {
     Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
     . $ScriptFile $ConfigFilePath $LogPath $firstRun
-    Write-DscStatus "Complete!"
 }
 
 if ($TopLevelSiteServer) {
@@ -333,7 +334,6 @@ if ($TopLevelSiteServer) {
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
-    Write-DscStatus "Complete!"
 
     $AdminConsoleVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "AdminConsoleVersion" -ErrorAction SilentlyContinue
     if ($AdminConsoleVersion) {
@@ -341,13 +341,22 @@ if ($TopLevelSiteServer) {
     }
     if ($deployConfig.cmOptions.Version -eq $ConsoleShortVersion) { 
         # Do Nothing
+        Write-DScStatus "Console is already at the correct version"
     }
     else {
+        Write-DScStatus "Calling Upgrade-Console.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
 }
+
+# Mark ScriptWorkflow completed for DSC to move on.
+$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+$Configuration.ScriptWorkflow.Status = "Completed"
+$Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-DscStatus "Complete!"
 
 if ($ThisVM.role -ne "CAS") {
     Write-DscStatus "Always Running PushClients.ps1"

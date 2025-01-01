@@ -254,12 +254,21 @@ function Get-FilesForConfiguration {
         }
     }
 
-    foreach ($file in $Common.AzureFileList.OSISO) {
-        if (-not $DownloadAll -and $OsVersionsToGet -notcontains $file.id) { continue }
-        $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
+    if ($config.cmOptions.PrePopulateObjects) {
+        $baselineFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "Prepopulate Baselines" }
+        $worked = Get-FileFromStorage -File $baselineFile -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
-            Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
+            Write-Log -Verbose "$baselineFile Failed to download via Get-FileFromStorage"
             $allSuccess = $false
+        }
+        
+        foreach ($file in $Common.AzureFileList.OSISO) {
+            if (-not $DownloadAll -and $OsVersionsToGet -notcontains $file.id) { continue }
+            $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
+            if (-not $worked) {
+                Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
+                $allSuccess = $false
+            }
         }
     }
     
@@ -277,7 +286,7 @@ function New-DeployConfig {
 
 
         if ($null -ne ($configObject.vmOptions.domainName)) { 
-            if (($configObject.vmOptions.domainName) -eq "AUTO"){
+            if (($configObject.vmOptions.domainName) -eq "AUTO") {
                 $domains = (Get-ValidDomainNames)
                 $domainEntry = ($domains.Keys | sort-object { $_.Length } | Select-Object -first 1)
                 $domainPrefix = $domains[$domainEntry] 
@@ -286,7 +295,7 @@ function New-DeployConfig {
             }
         }
         if ($null -ne ($configObject.vmOptions.network)) { 
-            if (($configObject.vmOptions.network) -eq "AUTO"){                
+            if (($configObject.vmOptions.network) -eq "AUTO") {                
                 $configObject.vmOptions.network = (Get-ValidSubnets)[0]                
             }
         }
@@ -2460,7 +2469,8 @@ Function Show-Summary {
            
             if ($deployConfig.cmOptions.PrePopulateObjects) {
                 Write-GreenCheck "ConfigMgr: Scripts/apps/task sequences/etc will be pre-populated"
-            }else{
+            }
+            else {
                 Write-OrangePoint "ConfigMgr: Scripts/apps/task sequences/etc will NOT be pre-populated"
             }
 

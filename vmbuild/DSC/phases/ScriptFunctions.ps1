@@ -57,6 +57,7 @@ function Write-DscStatus {
         "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $status" | Out-File -Append $global:StatusLog
     }
 
+    write-host $Status
     if ($Failure.IsPresent) {
         # Add a sleep so host VM has had time to poll for this entry
         Start-Sleep -Seconds 10
@@ -506,11 +507,16 @@ function Get-UpdatePack {
     )
 
     Write-DscStatus "Get CM Update..." -NoStatus
-
+    $updatepack = ""
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
     $CMPSSuppressFastNotUsedCheck = $true
 
     $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" } # filter hotfixes
+    $doneUpdates = Get-CMSiteUpdate | Where-Object { $_.State -eq 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" }
+    if ($doneUpdates.Count -ge 1 -and $updatepacklist.Count -eq 0) {
+        Write-DscStatus "$UpdateVersion Update already installed. Skipping."
+        return $updatepack
+    }
     $getupdateretrycount = 0
     while ($updatepacklist.Count -eq 0) {
 
@@ -527,7 +533,7 @@ function Get-UpdatePack {
         $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" } # filter hotfixes
     }
 
-    $updatepack = ""
+   
 
     if ($updatepacklist.Count -eq 0) {
         # No updates

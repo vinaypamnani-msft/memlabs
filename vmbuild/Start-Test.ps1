@@ -42,9 +42,9 @@ Write-Host "Starting all tests for $Test"
 $Test = $Test.ToLowerInvariant()
 $Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name } | Where-Object {$_.Name.ToLowerInvariant().StartsWith($Test)}
 $history = @()
-$ModifiedtestFile = "c:\temp\test.json"
 foreach ($testjson in $Tests) {
-
+    $outputFile = Split-Path $testjson -leaf
+    $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
     $config = Get-Content $testjson -Force | ConvertFrom-Json
     if ($cmVersion) {
         if ($config.cmOptions.version -ne $cmVersion) {
@@ -54,7 +54,7 @@ foreach ($testjson in $Tests) {
     }
     $domainName = $config.vmOptions.domainName
     $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
-    
+    Write-Host "Starting test for $testjson"
     ./New-Lab.ps1 -Configuration $ModifiedtestFile
     if ($LASTEXITCODE -eq 55) {
         ./New-Lab.ps1 -Configuration $ModifiedtestFile

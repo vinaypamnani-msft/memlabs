@@ -103,11 +103,25 @@ $global:VM_Create = {
                 $tpmEnabled = $currentItem.tpmEnabled
             }
 
+
+            $dynamicMinRam = 0
+            if ($currentItem.dynamicMinRam) {
+            $dynamicMinRam = $currentItem.dynamicMinRam
+            }
+
+            if ($currentItem.Role -eq "DomainMember" -and $currentItem.SqlVersion) {
+                $role = "SqlServer"                
+            }
+            else {
+                $role = $currentItem.Role
+            }
             $HashArguments = @{
                 VmName          = $currentItem.vmName
                 VmPath          = $virtualMachinePath
                 AdditionalDisks = $currentItem.additionalDisks
                 Memory          = $currentItem.memory
+                Role            = $role
+                DynamicMinRam   = $dynamicMinRam
                 Generation      = $Generation
                 Processors      = $currentItem.virtualProcs
                 SwitchName      = $vmSwitch.Name
@@ -525,16 +539,25 @@ $global:VM_Create = {
 
             # This is the Top Level Site Server
             if ($Parent -eq $currentItem.vmName) {
+
+                if ($currentItem.cmInstallDir) {
+                    $driveLetter = (Split-Path -Path $currentItem.cmInstallDir -Qualifier)
+                }
+
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM."
+                #E:\repos\memlabs\vmbuild\azureFiles \support\baselines.zip
+                #$common.AzureFilesPath
+                $sourceLocation = Join-Path $Common.AzureFilesPath "support\baselines.zip"
+                $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $sourceLocation -Destination "C:\tools" -Recurse -Container -Force
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM." -Completed
+
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying OS ISO files to the VM."
                 Write-Progress2 -Activity "$($currentItem.vmName): Copying OS ISO files to the VM" -Completed
 
                 $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
 
                 $isoFiles = $azureFileList.OSISO | Where-Object { $_.id -in $OsVersionsToGet }
-
-                if ($currentItem.cmInstallDir) {
-                    $driveLetter = (Split-Path -Path $currentItem.cmInstallDir -Qualifier)
-                }
+                
                 foreach ($isoFile in $isoFiles) {
                     
                     # SQL Iso Path

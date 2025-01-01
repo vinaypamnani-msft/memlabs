@@ -1306,6 +1306,7 @@ function Select-NewDomainConfig {
         DefaultClientOS     = "Windows 11 Latest"
         DefaultServerOS     = "Server 2022"
         DefaultSqlVersion   = "Sql Server 2022"
+        UseDynamicMemory    = $false
         IncludeClients      = $true
         IncludeSSMSOnNONSQL = $true
     }
@@ -3264,6 +3265,11 @@ Function Set-SiteServerRemoteSQL {
         }
     }
     $virtualMachine.memory = "4GB"
+    $virtualMachine.dynamicMinRam = "4GB"
+    if ($global:Config.domainDefaults.UseDynamicMemory){
+        $virtualMachine.dynamicMinRam = "1GB"
+    }
+
     $virtualMachine.virtualProcs = 4
     if ($null -ne $virtualMachine.additionalDisks.F) {
         $virtualMachine.additionalDisks.PsObject.Members.Remove('F')
@@ -4178,6 +4184,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "DefaultSqlVersion") {
         $sorted += "DefaultSqlVersion"
     }
+    if ($members.Name -contains "UseDynamicMemory") {
+        $sorted += "UseDynamicMemory"
+    }
     if ($members.Name -contains "IncludeClients") {
         $sorted += "IncludeClients"
     }
@@ -4198,6 +4207,9 @@ function Get-SortedProperties {
     }
     if ($members.Name -contains "memory") {
         $sorted += "memory"
+    }
+    if ($members.Name -contains "dynamicMinRam") {
+        $sorted += "dynamicMinRam"
     }
     if ($members.Name -contains "virtualProcs") {
         $sorted += "virtualProcs"
@@ -4293,6 +4305,7 @@ function Get-SortedProperties {
         "vmName" {  }
         "role" {  }
         "memory" { }
+        "dynamicMinRam" { }
         "domainUser" {}
         "virtualProcs" { }
         "operatingSystem" {  }
@@ -4313,6 +4326,7 @@ function Get-SortedProperties {
         "DefaultServerOS" { }
         "DefaultClientOS" { }
         "DefaultSqlVersion" { }
+        "UseDynamicMemory" {}
         "IncludeClients" { }
         "IncludeSSMSOnNONSQL" { }  
         "adminName" { }
@@ -5429,6 +5443,7 @@ function Add-NewVMForRole {
     }
     if ($OperatingSystem.Contains("Windows 11") -and ($role -notin ("DC", "BDC"))) {
         $memory = "4GB"
+        
         $installSSMS = $false
     }
 
@@ -5770,6 +5785,13 @@ function Add-NewVMForRole {
 
     if ($null -eq $ConfigToModify.VirtualMachines) {
         $ConfigToModify | Add-Member -MemberType NoteProperty -Name "VirtualMachines" -Value @() -Force
+    }
+    
+    if ($ConfigToModify.domainDefaults.UseDynamicMemory){
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value "1GB" -force
+    }
+    else {
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $virtualMachine.memory -force
     }
 
     $ConfigToModify.virtualMachines += $virtualMachine

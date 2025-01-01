@@ -747,11 +747,11 @@ function Copy-ItemSafe {
     $location = $PSScriptRoot
     $testpath = Join-Path $location "Common.ps1"
     if (-not (Test-Path -PathType Leaf $testpath)) {
-        write-host "Could not find $testpath"
+        Write-Log "Could not find $testpath"
         $location = Split-Path $location -Parent
         $testpath = Join-Path $location "Common.ps1"
         if (-not (Test-Path -PathType Leaf $testpath)) {
-            write-host "Could not find $testpath"
+            Write-Log "Could not find $testpath"
             return $false
         }
     }
@@ -790,21 +790,21 @@ function Copy-ItemSafe {
         $wait = Wait-Job -Timeout $TimeoutSeconds -Job $job
         $job
         if ($wait.State -eq "Running") {
-            Stop-Job $job
-            remove-job -job $job
+            Stop-Job $job | out-null
+            remove-job -job $job | out-null
             $retries--
         }
         else {
             if ($wait.State -eq "Completed") {
                 $result = Receive-Job $job
                 write-log "[Copy-ItemSafe] returned: $result"
-                remove-job $job
+                remove-job $job | out-null
                 return $true
             }
             else {
                 write-log "[Copy-ItemSafe] State = $($wait.State)" -logonly
-                Stop-Job $job
-                remove-job $job
+                Stop-Job $job | out-null
+                remove-job $job | out-null
                 $retries--
             }
 
@@ -1851,6 +1851,10 @@ function New-VirtualMachine {
         [string]$SourceDiskPath,
         [Parameter(Mandatory = $true)]
         [string]$Memory,
+        [Parameter(Mandatory = $false)]
+        [string]$dynamicMinRam,
+        [Parameter(Mandatory = $false)]
+        [string]$role,
         [Parameter(Mandatory = $true)]
         [int]$Processors,
         [Parameter(Mandatory = $true)]
@@ -1946,6 +1950,15 @@ function New-VirtualMachine {
         # Create new VM
         try {
             $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop 
+            if ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($Memory / 1))) {   
+                $priority = 25
+                $buffer = 10
+                if ($role -in ("DC", "SQLSqlServer", "Primary", "SQLAO", "CAS")) {
+                    $priority = 50
+                    $buffer = 20
+                }
+                $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes ($dynamicMinRam / 1) -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop               
+            }
         }
         catch {
             Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
@@ -3944,7 +3957,7 @@ Function Install-HostToServer2025 {
             Write-Host "Stopping all VMs"
 
             Get-VM | Where-Object {$_.State -eq "Running" } | Stop-VM -Force
-            Get-VM | Where-Object {$_.State -eq "Running" } | Stop-VM -TurnOff -Force
+            Get-VM | Where-Object {$_.State -ne "Off" } | Stop-VM -TurnOff -Force
             Write-Host "Running $exe /auto upgrade /dynamicupdate disable /eula accept /imageindex 4"            
         Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept /imageindex 4" -Wait
         }

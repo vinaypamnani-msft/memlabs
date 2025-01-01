@@ -489,7 +489,7 @@ function Get-ConfigurationData {
 
         $global:preparePhasePercent++
         Start-Sleep -Milliseconds 251
-        Write-Progress2 "Preparing Phase $Phase" -Status "Starting required VMs (if needed)" -PercentComplete $global:preparePhasePercent
+        Write-Progress2 "Preparing Phase $Phase" -Status "Starting required VMs (if needed)" -PercentComplete $global:preparePhasePercent -log
 
         if ($critlist) {
             $failures = Invoke-SmartStartVMs -CritList $critlist
@@ -503,7 +503,7 @@ function Get-ConfigurationData {
 
             $global:preparePhasePercent++
             Start-Sleep -Milliseconds 251
-            Write-Progress2 "Preparing Phase $Phase" -Status "Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent
+            Write-Progress2 "Preparing Phase $Phase" -Status "Testing net connection to 3389 on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent -Log
 
             $OriginalProgressPreference = $Global:ProgressPreference
             try {
@@ -519,6 +519,7 @@ function Get-ConfigurationData {
             }
             catch {}
             finally {
+                Write-Progress2 "Preparing Phase $Phase" -Status "Done Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent -Log
                 $Global:ProgressPreference = $OriginalProgressPreference
             }
         }
