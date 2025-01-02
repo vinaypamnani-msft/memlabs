@@ -542,7 +542,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-DomainAccounts"
         FixVersion        = "211125.1"
-        AppliesToThisVM   = $false
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("DC")
@@ -553,6 +552,25 @@ function Get-VMFixes {
     }
 #endregion
     ### Local account password expiration
+
+#region Fix-Upgrade-Console
+$Fix_UpgradeConsole = {
+    & C:\staging\DSC\phases\Upgrade-Console.ps1
+    return $true
+}
+
+$fixesToPerform += [PSCustomObject]@{
+    FixName           = "Fix-Upgrade-Console"
+    FixVersion        = "250101.0"
+    AppliesToNew      = $true
+    AppliesToExisting = $false
+    AppliesToRoles    = @("Primary", "CAS")
+    NotAppliesToRoles = @()
+    DependentVMs      = @()
+    ScriptBlock       = $Fix_UpgradeConsole
+}
+#endregion
+
 
 #region Fix-LocalAccount
     $Fix_LocalAccount = {
@@ -568,7 +586,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-LocalAccount"
         FixVersion        = "211125.2"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -593,7 +610,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-DefaultUserProfile"
         FixVersion        = "211126"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -749,7 +765,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-CMFullAdmin"
         FixVersion        = "211127"
-        AppliesToThisVM   = $false
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("CASorStandalonePrimary")
@@ -809,7 +824,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-DisableIEESC"
         FixVersion        = "220422"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -873,7 +887,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-CleanupSQL"
         FixVersion        = "241124"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -925,7 +938,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-EnableLogMachine"
         FixVersion        = "240307"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -952,7 +964,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-AccountExpiry"
         FixVersion        = "230922"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -975,7 +986,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_LocalAdminAccount"
         FixVersion        = "240710"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -1014,7 +1024,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_ActivateWindows"
         FixVersion        = "240713"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @('DomainMember', 'WorkgroupMember', "InternetClient")
@@ -1046,7 +1055,7 @@ function Get-VMFixes {
                 $applicable = $true
             }
         }
-        $vmFix.AppliesToThisVM = $applicable
+        $vmfix | Add-Member -MemberType NoteProperty -Name AppliesToThisVM -Value $applicable -force
 
         # Filter out null's'
         $vmFix.DependentVMs = $vmFix.DependentVMs | Where-Object { $_ -and $_.Trim() }

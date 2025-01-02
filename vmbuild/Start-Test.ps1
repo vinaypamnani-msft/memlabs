@@ -25,7 +25,7 @@ param (
             }                        
             $Tests = $Tests | Select-Object -Unique
 
-            if ($WordToComplete) { $Tests = $Tests | Where-Object { $_.ToLowerInvariant().StartsWith($WordToComplete) } }
+            if ($WordToComplete) { $Tests = $Tests | Where-Object { $_.ToLowerInvariant().StartsWith($WordToComplete.ToLowerInvariant()) } }
             return [string[]] $Tests
         })]   
         [string]$Test,

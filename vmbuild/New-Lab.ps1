@@ -637,6 +637,7 @@ if ($Common.DevBranch) {
         }
 
         Write-Host
+        Set-TitleBar "SCRIPT FINISHED"
         Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
     }
 
@@ -736,7 +737,11 @@ finally {
     Write-Host
     Write-Host Script exited.
     if ($NewLabsuccess -ne $true){
+        Set-TitleBar "SCRIPT FAILED"
         exit 1
+    }
+    else{
+        Set-TitleBar "SCRIPT FINISHED"
     }
     
 }

@@ -335,20 +335,6 @@ if ($TopLevelSiteServer) {
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
-    $AdminConsoleVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "AdminConsoleVersion" -ErrorAction SilentlyContinue
-    if ($AdminConsoleVersion) {
-        $ConsoleShortVersion = ([System.Version]$AdminConsoleVersion).Minor
-    }
-    if ($deployConfig.cmOptions.Version -eq $ConsoleShortVersion) { 
-        # Do Nothing
-        Write-DScStatus "Console is already at the correct version"
-    }
-    else {
-        Write-DScStatus "Calling Upgrade-Console.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
-        . $ScriptFile $ConfigFilePath $LogPath
-    }
-
 }
 
 # Mark ScriptWorkflow completed for DSC to move on.

@@ -5,6 +5,9 @@ param(
 )
 #"E:\ConfigMgr\bin\I386\ConsoleSetup.exe" LangPackDir="E:\ConfigMgr\bin\i386\LanguagePack" TargetDir="E:\ConfigMgr\AdminConsole" DEFAULTSITESERVERNAME="ADA-PS1SITE.adatum.com"
 #SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup
+# dot source functions
+. $PSScriptRoot\ScriptFunctions.ps1
+
 
 function Install-Console {
     param(
@@ -30,6 +33,43 @@ function Install-Console {
     Wait-Process -Name ConsoleSetup -ErrorAction SilentlyContinue
     Write-DscStatus -NoStatus "Upgrade-Console: Install Complete"
 }
+
+
+if ( -not $ConfigFilePath) {
+    $ConfigFilePath = "C:\staging\DSC\deployConfig.json"
+}
+
+# Read config json
+$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
+$sitecode = $ThisVM.SiteCode
+
+$AdminConsoleVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "AdminConsoleVersion" -ErrorAction SilentlyContinue
+$RequiredExtensionVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "RequiredExtensionVersion" -ErrorAction SilentlyContinue
+$RequiredExtensionSiteVersion = (gwmi -namespace "root\sms\Site_$($sitecode)" -Query "SELECT FileVersion from SMS_ConsoleSetupInfo WHERE FileName = ""ConfigMgr.AC_Extension.i386.cab""").FileVersion
+
+
+if ($AdminConsoleVersion) {
+    $ConsoleShortVersion = ([System.Version]$AdminConsoleVersion).Minor
+}
+if ($deployConfig.cmOptions.Version -eq $ConsoleShortVersion) { 
+
+    if ($RequiredExtensionVersion -ne $RequiredExtensionSiteVersion) {
+        Write-DscStatus "Upgrade-Console: RequiredExtensionVersion is not the same as RequiredExtensionSiteVersion.  Upgrading to $RequiredExtensionSiteVersion"
+    }
+    else {    
+        # Do Nothing
+        Write-DScStatus "Upgrade-Console: Console is already at the correct version Console: $ConsoleShortVersion Extensions: $RequiredExtensionSiteVersion"
+        return
+    }
+}
+else {
+    Write-DScStatus "Upgrade-Console: $ConsoleShortVersion is not the correct version.  Upgrading to $($deployConfig.cmOptions.Version)"
+
+}
+
+
+
 
 $CMInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
 if (-not $CMInstallDir) {
@@ -68,15 +108,25 @@ if (-not $localSiteServer) {
 
 
 Install-Console -ConsoleUIExe $ConsoleUIExe -LangPackDir $LangPackDir -UIInstallDir $UIInstallDir -localsiteserver $localsiteserver
+start-sleep -Seconds 5
 
-$content = Get-Content "C:\ConfigMgrAdminUISetup.log" -tail 1 -ErrorAction SilentlyContinue
-if (-not $content -like "*Starting to execute install extensions command line*") {
+$AdminConsoleVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "AdminConsoleVersion" -ErrorAction SilentlyContinue
+$RequiredExtensionVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "RequiredExtensionVersion" -ErrorAction SilentlyContinue
+if ($AdminConsoleVersion) {
+    $ConsoleShortVersion = ([System.Version]$AdminConsoleVersion).Minor
+}
+
+Write-DscStatus -NoStatus "Upgrade-Console: Checking if the console installed successfully"
+
+
+if ($deployConfig.cmOptions.Version -eq $ConsoleShortVersion -and $RequiredExtensionVersion -eq $RequiredExtensionSiteVersion) { 
+    Write-DscStatus "Console installed successfully Console: $ConsoleShortVersion Extensions: $RequiredExtensionSiteVersion"
+}
+else {
+    
     Write-DscStatus "Console failed to install.  Retrying."
     Start-Sleep -Seconds 60
     Install-Console -ConsoleUIExe $ConsoleUIExe -LangPackDir $LangPackDir -UIInstallDir $UIInstallDir -localsiteserver $localsiteserver
 
-}
-else {
-    Write-DscStatus "Console installed successfully"
 }
 
