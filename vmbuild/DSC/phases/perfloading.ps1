@@ -481,6 +481,8 @@ else {
 
 ### CI and baselines 
 
+#expand archive for importing cab files
+Expand-Archive -Path "C:\tools\baselines.zip" -DestinationPath "C:\tools\baselines" -Force
 
 # Define the path to the CAB files
 $baselineFolder = "C:\tools\baselines"
