@@ -1171,7 +1171,7 @@ function Test-NoRRAS {
         $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal and IpEnableRouter TCP Value. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
         if ($response -eq "n") {
             Write-log "Please Reboot."
-            Exit
+            Exit 1
         }
         Write-Log "Rebooting computer. Please re-run vmbuild.cmd when it comes up."
         Restart-Computer -Force
@@ -1181,7 +1181,7 @@ function Test-NoRRAS {
         # RRAS not found, test NAT
         $natValid = Test-Networks
         if (-not $natValid) {
-            exit
+            exit 1
         }
     }
 }
@@ -3938,28 +3938,37 @@ Function Set-PS7ProgressWidth {
     }
 }
 Function Install-HostToServer2025 {
-    $server2025 = $common.azureFilelist.SupportFiles | Where-Object {$_.id -like "*Server 2025*"}
+    $server2025 = $common.azureFilelist.SupportFiles | Where-Object { $_.id -like "*Server 2025*" }
     Get-FileFromStorage $server2025
     $filename = (Join-Path $common.AzureFilesPath $server2025.filename)
     if (Test-Path $filename) {
 
-    $expandLocation = "C:\temp\Upgrade2025"
-    Expand-Archive -Path  $filename -DestinationPath $expandLocation -Force    
-    }else{
+        Read-YesorNoWithTimeout -Message "Do you want to install Windows Server 2025 on this host?" -Timeout 180 
+        $response = Read-YesorNoWithTimeout -Prompt "Do you want to install Windows Server 2025 on this host?" -HideHelp -Default "y" -timeout 180
+        if ($response -eq "n") {
+            return
+        }
+
+        $expandLocation = "C:\temp\Upgrade2025"
+        Expand-Archive -Path  $filename -DestinationPath $expandLocation -Force    
+    }
+    else {
         Write-Log "Failed to download $filename" -Failure
+        return
     }
     $exeLocation = (Join-Path $expandLocation "Windows Server 2025")
     $exe = (Join-Path $exeLocation "setup.exe")
     if (Test-Path $exe) {
         if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
             write-host "Host is already on Server 2025. Not running $exe /auto upgrade /dynamicupdate disable /eula accept"
-        }else {
+        }
+        else {
             Write-Host "Stopping all VMs"
 
-            Get-VM | Where-Object {$_.State -eq "Running" } | Stop-VM -Force
-            Get-VM | Where-Object {$_.State -ne "Off" } | Stop-VM -TurnOff -Force
+            Get-VM | Where-Object { $_.State -eq "Running" } | Stop-VM -Force
+            Get-VM | Where-Object { $_.State -ne "Off" } | Stop-VM -TurnOff -Force
             Write-Host "Running $exe /auto upgrade /dynamicupdate disable /eula accept /imageindex 4"            
-        Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept /imageindex 4" -Wait
+            Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept /imageindex 4" -Wait
         }
     }
     
