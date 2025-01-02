@@ -2951,6 +2951,7 @@ function Get-StorageConfig {
         # Update StorageConfig
 
         if (-not $InJob.IsPresent) {
+           
 
             if ($GetNewStorageConfig) {
                 $storageConfigLocation = "$($StorageConfig.StorageLocation)/$newStorageConfigName"
@@ -3018,7 +3019,18 @@ function Get-StorageConfig {
                 }
             }
 
-
+            if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+                if (test-path "C:\temp\Upgrade2025") {
+                    write-host "Removing 2025 Upgrade Support files - C:\temp\Upgrade2025"
+                    Remove-Item -Path "C:\temp\Upgrade2025" -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                $sourceLocation = Join-Path $Common.AzureFilesPath "support\WindowsServer2025.zip"
+                if (test-path $sourceLocation) {
+                    write-host "Removing 2025 Upgrade Support files - $sourceLocation"
+                    remove-item -Path $sourceLocation -Force -ErrorAction SilentlyContinue                
+                }
+            }
+           
         }
 
         if ($InJob.IsPresent) {

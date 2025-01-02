@@ -1,7 +1,7 @@
 #Start-Test.ps1
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $true, HelpMessage = "TestName")]
+    [Parameter(Mandatory = $true, HelpMessage = "Prefix of tests to perform", ParameterSetName = 'TestName')]
     [ArgumentCompleter( {
             param ( $CommandName,
                 $ParameterName,
@@ -14,66 +14,151 @@ param (
             $Tests = @()
             foreach ($name  in $ConfigPaths.Name) {
              
-            $Testname = ($name -split "-")[0]
-            if ($Testname.contains("json")) {
-                continue
-            }
-            if ($Testname.Contains("storageconfig")) {
-                continue
-            }
-            $Tests += $Testname
+                $Testname = ($name -split "-")[0]
+                if ($Testname.contains("json")) {
+                    continue
+                }
+                if ($Testname.Contains("storageconfig")) {
+                    continue
+                }
+                $Tests += $Testname
             }                        
             $Tests = $Tests | Select-Object -Unique
 
             if ($WordToComplete) { $Tests = $Tests | Where-Object { $_.ToLowerInvariant().StartsWith($WordToComplete.ToLowerInvariant()) } }
             return [string[]] $Tests
         })]   
-        [string]$Test,
-        [Parameter(Mandatory = $false, HelpMessage = "CMVersion")]
-        [ArgumentCompleter({
+    [string]$Test,
+
+    [Parameter(Mandatory = $true, HelpMessage = "Prefix of tests to perform", ParameterSetName = 'ALL')]
+    [switch]$All,
+
+    [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'TestName')]
+    [ArgumentCompleter({
             param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
             . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -InJob:$true
             $argument = @(Get-CMVersions)
-            return $argument | Where-Object {$_ -match $WordToComplete}
-        })]
-        [string]$cmVersion,
-        [switch]$dynamicMemory
-)
-Write-Host "Starting all tests for $Test"
-$Test = $Test.ToLowerInvariant()
-$Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name } | Where-Object {$_.Name.ToLowerInvariant().StartsWith($Test)}
-$history = @()
-foreach ($testjson in $Tests) {
-    $outputFile = Split-Path $testjson -leaf
-    $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
-    $config = Get-Content $testjson -Force | ConvertFrom-Json
-    if ($cmVersion) {
-        if ($config.cmOptions.version -ne $cmVersion) {
-            $config.cmOptions.version = $cmVersion
-            write-host "updating cmVersion to $cmVersion"
-        }        
-    }
-    if ($dynamicMemory) {
-        foreach ($vm in $config.virtualMachines) {
-            $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value "1GB" -Force
-        }       
-    }
-    $domainName = $config.vmOptions.domainName
-    $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
-    Write-Host "Starting test for $testjson"
-    ./New-Lab.ps1 -Configuration $ModifiedtestFile
-    if ($LASTEXITCODE -eq 55) {
-        ./New-Lab.ps1 -Configuration $ModifiedtestFile
-    }
+            return $argument | Where-Object { $_ -match $WordToComplete }
+        })]        
+    [string]$cmVersion,
 
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
-        exit 1
-    }   
-    $history += "$testjson Completed Successfully"
+    [Parameter(Mandatory = $false, HelpMessage = "Override Dynamic Memory", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Override Dynamic Memory", ParameterSetName = 'TestName')]
+    [switch]$dynamicMemory,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'TestName')]
+    [ArgumentCompleter({
+            param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
+            . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -InJob:$true
+            $argument = @(Get-SupportedOperatingSystemsForRole "DC")
+            $newArgument = @()
+            foreach ($arg in $argument) {
+                if ($arg -like "* *") {
+                    $newArgument += "'$arg'"
+                }
+                else {
+                    $newArgument += $arg
+                }
+            }
+            return $newArgument | Where-Object { $_ -match $WordToComplete }
+        })]        
+    [string]$serverVersion
+)
+
+
+function Run-Test {
+    param(
+        [string]$Test
+    )
+    Write-Host "Starting all tests for $Test"
+    $Test = $Test.ToLowerInvariant()
+    $Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name } | Where-Object { $_.Name.ToLowerInvariant().StartsWith($Test) }
+
+    foreach ($testjson in $Tests) {
+        $outputFile = Split-Path $testjson -leaf
+        $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
+        $config = Get-Content $testjson -Force | ConvertFrom-Json
+        if ($cmVersion) {
+            if ($config.cmOptions.version -ne $cmVersion) {
+                $config.cmOptions.version = $cmVersion
+                write-host "updating cmVersion to $cmVersion"
+            }        
+        }
+        if ($dynamicMemory) {
+            foreach ($vm in $config.virtualMachines) {
+                $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value "1GB" -Force
+            }       
+        }
+        if ($serverVersion) {
+            foreach ($vm in $config.virtualMachines) {
+                if ($vm.operatingSystem -like "*server*") {
+                    $vm.operatingSystem = $serverVersion
+                }
+            }    
+        }
+        $domainName = $config.vmOptions.domainName
+        $removedomains += $domainName
+        $removedomains = $removedomains | Select-Object -Unique
+
+        $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
+        Write-Host "Starting test for $testjson"
+        ./New-Lab.ps1 -Configuration $ModifiedtestFile
+        if ($LASTEXITCODE -eq 55) {
+            ./New-Lab.ps1 -Configuration $ModifiedtestFile
+        }
+
+        if ($LASTEXITCODE -ne 0) {
+            $history += "$testjson Failed"
+            Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
+            return $false
+        }   
+        $history += "$testjson Completed Successfully"
+        return $true
+    }
+    
+    [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./Remove-lab.ps1 -DomainName $domainName")
+
 }
 
+$history = @()
+$removedomains = @()
+if ($test) {
+    $result = Run-Test -Test $Test
+}
+
+if ($all) {
+    $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name }
+    $Tests = @()
+    foreach ($name  in $ConfigPaths.Name) {
+     
+        $Testname = ($name -split "-")[0]
+        if ($Testname.contains("json")) {
+            continue
+        }
+        if ($Testname.Contains("storageconfig")) {
+            continue
+        }
+        $Tests += $Testname
+    }                        
+    $Tests = $Tests | Select-Object -Unique
+
+    foreach ($Test in $Tests) {
+        $result = Run-Test -Test $Test
+        if (-not $result) {
+            break
+        }
+        if ($removedomains.Count -gt 0) {
+            foreach ($domain in $removedomains) {
+                ./Remove-lab.ps1 -DomainName $domain
+            }
+            $removedomains = @()
+        }
+    }
+}
+
+Write-Host "History of tests run"
 foreach ($historyitem in $history) {
     Write-Host $historyitem
 }
-[Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./Remove-lab.ps1 -DomainName $domainName")
