@@ -2491,6 +2491,12 @@ function Wait-ForVm {
     }
 
     if ($PathToVerify) {
+
+        Write-Progress2 "Testing Disks" -Status "Testing Disks" -percentcomplete 0 -force
+        if ((Get-VMHardDiskDrive -VMName $VmName).Count -eq 0) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): VM has no disks attached." -Failure
+            return $false
+        }
         if ($PathToVerify -eq "C:\Users") {
             $msg = "Waiting for VM to respond"
         }

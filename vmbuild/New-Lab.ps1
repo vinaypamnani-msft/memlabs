@@ -580,6 +580,7 @@ if ($Common.DevBranch) {
     if (-not $prepared -or -not $configured) {
         Write-Host
         Set-TitleBar "SCRIPT FINISHED WITH FAILURES"
+        $NewLabsuccess = $false
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
         if ($currentPhase -ge 2) {
             if ($currentPhase -eq 8) {
@@ -639,12 +640,13 @@ if ($Common.DevBranch) {
         Write-Host
         Set-TitleBar "SCRIPT FINISHED"
         Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
+        $NewLabsuccess = $true
     }
 
-    $NewLabsuccess = $true
 }
 catch {
     Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json)
+    $NewLabsuccess = $false
 }
 finally {
 
@@ -735,12 +737,13 @@ finally {
     Set-QuickEdit
 
     Write-Host
-    Write-Host Script exited.
     if ($NewLabsuccess -ne $true){
+        Write-Host "Script exited (FAILED)."
         Set-TitleBar "SCRIPT FAILED"
         exit 1
     }
     else{
+        Write-Host "Script exited. SUCCESS"
         Set-TitleBar "SCRIPT FINISHED"
     }
     

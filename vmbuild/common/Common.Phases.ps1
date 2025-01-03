@@ -393,7 +393,7 @@ function Wait-Phase {
                         if ($incrementCount) {
                             $return.Failed++
                         }
-                        if ($phase -gt 2 -and $jobName.Contains("[DC]")) {
+                        if ($phase -ge 2 -and $jobName.Contains("[DC]")) {
                             Write-RedX "DC failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try {
                                 $jobs | Stop-Job

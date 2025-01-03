@@ -797,6 +797,7 @@ $global:VM_Config = {
         if ($Phase -ge 2) {
             $retryCount = 0
             $success = $false
+          
             while ($retrycount -le 3 -and $success -eq $false) {
                 Write-Progress2 $Activity -Status "Testing IP Address" -percentcomplete 9 -force
                 #169.254.239.16
