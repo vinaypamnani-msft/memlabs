@@ -485,9 +485,20 @@ $global:VM_Create = {
             Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed -Log
             $count = 0
             $label = $null
+            $diskNum = 1
             foreach ($disk in $currentItem.AdditionalDisks.psobject.properties) {
                 $label = $null
                 Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Log
+
+                if ($currentItem.Role -eq "FileServer") {
+                    if ($diskNum -eq 1) {
+                        $label = "CONTENTLIB"
+                    }
+                     if ($diskNum -eq 2) {
+                        $label = "CLUSTER"
+                    }
+                    $diskNum++
+                }
                 if ($currentItem.cmInstallDir -like "$($disk.Name)*") {
                     if ($label) {
                         $label = $label + "_"
@@ -506,6 +517,7 @@ $global:VM_Create = {
                     }
                     $label = $label + "WSUS"
                 }
+
                 if (-not $label) {
                     $label = "DATA`_$count"
                     $count++
