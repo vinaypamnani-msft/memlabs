@@ -782,7 +782,7 @@ $global:VM_Config = {
             $result = Invoke-VmCommand -AsJob -TimeoutSeconds 60 -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
             if ($result.ScriptBlockFailed) {
                 Write-Progress2 $Activity -Status "Restarting VM then Stopping DSCs" -percentcomplete 5 -force
-                Stop-vm2 -name $currentItem.vmName -force
+                Stop-vm2 -name $currentItem.vmName
                 Start-Sleep -Seconds 10
                 start-vm2 -name  $currentItem.vmName
                 Write-Progress2 $Activity -Status "Restarting VM then Stopping DSCs" -percentcomplete 5 -force
@@ -1662,7 +1662,7 @@ $global:VM_Config = {
                     if ($attempts -eq 80) {
                         foreach ($node in $nodeList) {
                             Write-Progress2 "Restarting $node" -PercentComplete $percent
-                            Stop-Vm2 -Name $node -force:$true
+                            Stop-Vm2 -Name $node
                             Start-Sleep -seconds 20
                             Start-VM2 -Name $node
                             Start-Sleep -seconds 60
@@ -1929,7 +1929,7 @@ $global:VM_Config = {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, forcefully restarting the VM" -failcount $failedHeartbeats -failcountMax $failedHeartbeatThreshold
 
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
-                        Stop-VM2 -name $currentItem.vmName -Force
+                        Stop-VM2 -name $currentItem.vmName
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Stopped"
                         Start-Sleep -Seconds 20
                         Start-VM2 -Name $currentItem.vmName

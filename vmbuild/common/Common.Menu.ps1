@@ -579,7 +579,7 @@ function Select-StopDomain {
             return
         }
         else {
-            stop-vm2 $response -force
+            stop-vm2 $response
             get-list -type VM -SmartUpdate | out-null
         }
 

@@ -2343,7 +2343,7 @@ function Wait-ForVm {
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
         if (-not $ready -and ($vmState -eq "Off")) {
-            stop-vm2 -name $VMName -Force
+            stop-vm2 -name $VMName
         }
     }
 
@@ -2394,7 +2394,7 @@ function Wait-ForVm {
                     [int]$failures++
                 }
                 if ($failures -ge $maxFailures) {
-                    stop-vm2 -force -name $VmName -TurnOff
+                    stop-vm2 -name $VmName -TurnOff
                     start-sleep -seconds 8
                     Start-vm2 -name $VmName
                     Start-Sleep -Seconds 8

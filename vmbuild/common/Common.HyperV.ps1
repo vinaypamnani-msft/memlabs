@@ -158,12 +158,11 @@ function Stop-VM2 {
         [Parameter(Mandatory = $false)]
         [int]$RetrySeconds = 10,
         [Parameter(Mandatory = $false)]
-        [switch]$force,
-        [Parameter(Mandatory = $false)]
         [switch]$TurnOff
     )
 
     try {
+        $force = $true
         $vm = Get-VM2 -Name $Name
 
         if ($vm.State -eq "Off") {

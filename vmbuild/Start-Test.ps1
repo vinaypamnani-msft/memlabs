@@ -99,66 +99,87 @@ function Run-Test {
             }    
         }
         $domainName = $config.vmOptions.domainName
-        $removedomains += $domainName
-        $removedomains = $removedomains | Select-Object -Unique
+        $global:removedomains += $domainName
+        $global:removedomains = $removedomains | Select-Object -Unique
 
         $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
         Write-Host "Starting test for $testjson"
-        ./New-Lab.ps1 -Configuration $ModifiedtestFile
-        if ($LASTEXITCODE -eq 55) {
-            ./New-Lab.ps1 -Configuration $ModifiedtestFile
+        try {
+            & ./New-Lab.ps1 -Configuration $ModifiedtestFile
+            if ($LASTEXITCODE -eq 55) {
+                & ./New-Lab.ps1 -Configuration $ModifiedtestFile
+            }
+            if ($LASTEXITCODE -ne 0) {
+                return $false
+            }
+            return $true
         }
-
-        if ($LASTEXITCODE -ne 0) {
-            $history += "$testjson Failed"
-            Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
-            return $false
-        }   
-        $history += "$testjson Completed Successfully"
-        return $true
+        finally {
+            if ($LASTEXITCODE -ne 0) {
+                $global:history += "$testjson Failed"
+                Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
+            
+            }   
+            else {
+                $global:history += "$testjson Completed Successfully"
+            }
+        
+        }
     }
     
     [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./Remove-lab.ps1 -DomainName $domainName")
 
 }
 
-$history = @()
-$removedomains = @()
-if ($test) {
-    $result = Run-Test -Test $Test
-}
+. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
-if ($all) {
-    $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name }
-    $Tests = @()
-    foreach ($name  in $ConfigPaths.Name) {
-     
-        $Testname = ($name -split "-")[0]
-        if ($Testname.contains("json")) {
-            continue
-        }
-        if ($Testname.Contains("storageconfig")) {
-            continue
-        }
-        $Tests += $Testname
-    }                        
-    $Tests = $Tests | Select-Object -Unique
-
-    foreach ($Test in $Tests) {
+try {
+    $global:history = @()
+    $global:removedomains = @()
+    if ($test) {
         $result = Run-Test -Test $Test
-        if (-not $result) {
-            break
-        }
-        if ($removedomains.Count -gt 0) {
-            foreach ($domain in $removedomains) {
-                ./Remove-lab.ps1 -DomainName $domain
+    }
+
+    if ($all) {
+        $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name }
+        $Tests = @()
+        foreach ($name in $ConfigPaths.Name) {
+     
+            $Testname = ($name -split "-")[0]
+            if ($Testname.contains("json")) {
+                continue
             }
-            $removedomains = @()
+            if ($Testname.Contains("storageconfig")) {
+                continue
+            }
+            $Tests += $Testname
+        }                        
+        $Tests = $Tests | Select-Object -Unique
+
+        foreach ($Test in $Tests) {
+            $result = Run-Test -Test $Test
+            if (-not $result) {
+                break
+            }
+            if ($removedomains.Count -gt 0) {
+                foreach ($domain in $removedomains) {
+                    ./Remove-lab.ps1 -DomainName $domain
+                }
+                $removedomains = @()
+            }
         }
     }
 }
-
-Write-Host "History of tests run"
-foreach ($historyitem in $history) {
-    Write-Host $historyitem
+finally {
+    Write-Host
+    Write-Host "History of tests ran"
+    Write-Host "----------------------"
+    foreach ($historyitem in $history) {
+        if ($historyitem -like "*Failed*") {
+            Write-RedX $historyitem 
+        }
+        else {
+            Write-GreenCheck $historyitem
+        }
+    }
 }
