@@ -100,7 +100,7 @@ function Run-Test {
         }
         $domainName = $config.vmOptions.domainName
         $global:removedomains += $domainName
-        $global:removedomains = $removedomains | Select-Object -Unique
+        $global:removedomains = $global:removedomains | Select-Object -Unique
 
         $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
         Write-Host "Starting test for $testjson"
@@ -111,8 +111,7 @@ function Run-Test {
             }
             if ($LASTEXITCODE -ne 0) {
                 return $false
-            }
-            return $true
+            }            
         }
         finally {
             if ($LASTEXITCODE -ne 0) {
@@ -125,6 +124,7 @@ function Run-Test {
             }
         
         }
+        return $true
     }
     
     [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./Remove-lab.ps1 -DomainName $domainName")
@@ -157,16 +157,22 @@ try {
         $Tests = $Tests | Select-Object -Unique
 
         foreach ($Test in $Tests) {
+            if (Get-Content "c:\temp\CompletedTests.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -eq $Test }) {
+                write-host "$Test already ran skipping"
+                continue
+            }
             $result = Run-Test -Test $Test
             if (-not $result) {
                 break
             }
-            if ($removedomains.Count -gt 0) {
-                foreach ($domain in $removedomains) {
+            if ($global:removedomains.Count -gt 0) {
+                foreach ($domain in $global:removedomains) {
                     ./Remove-lab.ps1 -DomainName $domain
+                    $global:history += "$domain Removed"
                 }
                 $removedomains = @()
             }
+            $Test | Out-File "c:\temp\CompletedTests.txt" -Force -Append
         }
     }
 }
@@ -174,7 +180,7 @@ finally {
     Write-Host
     Write-Host "History of tests ran"
     Write-Host "----------------------"
-    foreach ($historyitem in $history) {
+    foreach ($historyitem in $global:history) {
         if ($historyitem -like "*Failed*") {
             Write-RedX $historyitem 
         }
