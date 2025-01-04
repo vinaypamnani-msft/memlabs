@@ -11,13 +11,15 @@ $global:Phase10Job = {
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
 
         # Get variables from parent scope
-        $deployConfig = $using:deployConfigCopy
         $currentItem = $using:currentItem
         $azureFileList = $using:Common.AzureFileList
         $Phase = $using:Phase
-        $Migrate = $using:Migrate
+        if (-not $Phase) {
+            $Phase = "Maintenance"
+        }
         $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$true
         if (-not $worked) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure
             throw "Could not run VM Maintenance on $($currentItem.vmName)"
         }else{
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Maintenance completed successfully for $($currentItem.role)." -OutputStream -Success

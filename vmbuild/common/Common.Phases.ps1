@@ -121,6 +121,62 @@ function Start-Phase {
     return $true
 }
 
+function Start-NormalJobs {
+    param (
+        [object]$machines,
+        [object]$scriptBlock,
+        [object]$phase
+    )
+
+    [System.Collections.ArrayList]$jobs = @()
+    $job_created_yes = 0
+    $job_created_no = 0
+    $maxVmNameLength = 0
+    $maxRoleNameLength = 0
+
+    $phase = "NormalJob"
+    foreach ($currentItem in $machines) {
+        $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
+        if ($currentItem.vmName.Length -gt $maxVmNameLength) {
+            $maxVmNameLength = $currentItem.vmName.Length
+        }
+        if ($currentItem.role.Length -gt $maxRoleNameLength) {
+            $maxRoleNameLength = $currentItem.role.Length
+        }
+
+        $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err
+        if (-not $job) {
+            Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
+            $job_created_no++
+        }
+        if ($Err.Count -ne 0) {
+            Write-Log "[Phase $Phase] Failed to start job for VM $($currentItem.vmName). $Err" -Failure
+            $job_created_no++
+        }
+        else {
+            Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
+            $jobs += $job
+            $job_created_yes++
+        }
+    }
+
+    $additionalData = [PSCustomObject]@{
+        MaxVmNameLength   = $maxVmNameLength
+        MaxRoleNameLength = $maxRoleNameLength + 2
+    }
+
+    # Create return object
+    $return = [PSCustomObject]@{
+        Failed         = $job_created_no
+        Success        = $job_created_yes
+        Jobs           = $jobs
+        Applicable     = $true
+        AdditionalData = $additionalData
+    }
+    return $return
+}
+
+
 function Start-PhaseJobs {
     param (
         [int]$Phase,
@@ -314,7 +370,7 @@ function Start-PhaseJobs {
 function Wait-Phase {
 
     param(
-        [int]$Phase,
+        [object]$Phase,
         $Jobs,
         $AdditionalData
     )

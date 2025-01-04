@@ -399,6 +399,9 @@ function New-DeployConfig {
             parameters      = $params
         }
 
+        if ($configObject.domainDefaults){
+            $deploy | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $configObject.domainDefaults -force
+        }
         return $deploy
     }
     catch {

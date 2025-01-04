@@ -1095,16 +1095,43 @@ function Test-NetworkSwitch {
     )
 
     $notes = $DomainName
+    $doNotRecreate = $false
     if (-not $notes) {
-        if ($NetworkName -eq "cluster") {
+        $notes = $NetworkName
+        if ($NetworkName -eq "Cluster") {
             $notes = "Cluster network shared by all domains"
+            $doNotRecreate = $true
         }
-        else {
-            $notes = $NetworkName
+        if ($NetworkName -eq "Internet") {
+            $notes = "Internet network shared by all domains"
+            $doNotRecreate = $true
         }
     }
-    $exists = Get-VMSwitch2 -NetworkName $NetworkName
-    if (-not $exists) {
+
+    $retries = 10
+    $count = 0
+
+    while ($count -lt $retries) {
+        $count++
+        $exists = Get-VMSwitch2 -NetworkName $NetworkName
+        if ($exists) {
+            if ($exists.Notes -eq $notes -or $doNotRecreate) {
+                Write-Log "HyperV Network switch for '$NetworkName' already exists."
+                break
+            }
+            else {
+                Write-Log "HyperV Network switch for '$NetworkName' already exists, but with different notes. Deleting and recreating."
+                try {
+                    Remove-VMSwitch2 -NetworkName $NetworkName | Out-Null
+                }
+                catch {
+                    Write-Log "Failed to remove HyperV Network switch for $NetworkName. Trying again in 30 seconds"
+                    start-sleep -seconds 30
+                    Remove-VMSwitch2 -NetworkName $NetworkName | Out-Null                    
+                }
+                continue
+            }
+        }
         Write-Log "HyperV Network switch for '$NetworkName' not found. Creating a new one."
         try {
             New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Stop | Out-Null
@@ -1115,12 +1142,10 @@ function Test-NetworkSwitch {
             New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Continue | Out-Null
         }
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
-    }
-
-    $exists = Get-VMSwitch2 -NetworkName $NetworkName
-    if (-not $exists) {
-        Write-Log "HyperV Network switch could not be created."
-        return $false
+        $exists = Get-VMSwitch2 -NetworkName $NetworkName
+        if ($exists) {
+            break
+        }    
     }
 
     try {
@@ -1509,7 +1534,13 @@ function New-VmNote {
             if ($prop.Name -eq "thisParams" -or $prop.Name -eq "SQLAO") {
                 continue
             }
-            $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+            $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force            
+        }
+
+        Write-Log "Checking if we can write out domainDefaults"
+        if ($null -ne $DeployConfig.domainDefaults && $ThisVm.role -eq "DC") {                 
+            Write-Log "Writing out domainDefaults Value: $($DeployConfig.domainDefaults.DeploymentType)"   
+            $vmNote | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $($DeployConfig.domainDefaults) -Force        
         }
 
         Set-VMNote -vmName $vmName -vmNote $vmNote -force:$Force
@@ -1593,8 +1624,8 @@ function Set-VMNote {
         #Old Note may have more properties than the new note, and we dont want to lose those.
         $oldvmNote = Get-VMNote -VMName $vmName
         if ($oldvmNote) {
-            foreach ($note in $vmNote.PSObject.Properties) {
-                $oldvmNote | Add-Member -MemberType NoteProperty -Name $note.Name -Value $note.Value -Force
+            foreach ($note in $vmNote.PSObject.Properties) {             
+               $oldvmNote | Add-Member -MemberType NoteProperty -Name $note.Name -Value $note.Value -Force
             }
             $vmNote = $oldvmNote
         }
@@ -1605,7 +1636,7 @@ function Set-VMNote {
         $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
         $vmVersionUpdated = $true
     }
-
+   
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
     $vm = Get-VM2 $VmName
@@ -2652,8 +2683,13 @@ function Invoke-VmCommand {
         }
 
         if (-not $ps -and $VmDomainName -eq "WORKGROUP") {
-            $domain2 = (Get-VMNote -VMName $vmName).domain
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount "admin" -ShowVMSessionError:$ShowVMSessionError
+            $note = Get-VMNote -VMName $VmName
+            $domain2 = $note.domain
+            $adminName = $note.adminName
+            if (-not $adminName) {
+                $adminName = "admin"
+            }
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError
         }
 
         $failed = $null -eq $ps
@@ -3369,6 +3405,9 @@ function Copy-ToolToVM {
     }
 
     $toolFileName = Split-Path $tool.url -Leaf
+    if ($toolFileName.Contains("?")) {
+        $toolFileName = $toolFileName.Split("?")[0]
+    }
     $fileTargetRelative = Join-Path $tool.Target $toolFileName
 
     Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative" -LogOnly

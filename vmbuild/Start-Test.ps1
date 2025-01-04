@@ -115,11 +115,13 @@ function Run-Test {
         }
         finally {
             if ($LASTEXITCODE -ne 0) {
+                write-host "$testjson Failed"
                 $global:history += "$testjson Failed"
                 Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
             
             }   
             else {
+                write-host "$testjson Completed Successfully"
                 $global:history += "$testjson Completed Successfully"
             }
         
@@ -170,7 +172,7 @@ try {
                     ./Remove-lab.ps1 -DomainName $domain
                     $global:history += "$domain Removed"
                 }
-                $removedomains = @()
+                $global:removedomains = @()
             }
             $Test | Out-File "c:\temp\CompletedTests.txt" -Force -Append
         }

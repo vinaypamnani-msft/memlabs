@@ -25,7 +25,8 @@ if ($deployConfig.cmOptions.PrePopulateObjects -ne $true) {
 $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
-$DCName = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" }).vmName
+$DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
+$DCName = $DCVM.vmName
 # Read Site Code from registry
 #Write-DscStatus "$Tag Setting PS Drive for ConfigMgr" -NoStatus
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -334,7 +335,7 @@ if (!$taskSequences) {
     Write-DscStatus "$Tag Successfully created windows 11 in-place upgrade TS"
     New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w10-In-Place Upgrade Task Sequence" -UpgradePackageId $win10UpgradePackageID -SoftwareUpdateStyle All
     Write-DscStatus "$Tag Successfully created windows 10 in-place upgrade TS"
-
+    $AdminName = $DCVM.adminName
     ## Build and capture TS
 
     $buildandcapturewin11 = @{
@@ -360,7 +361,7 @@ if (!$taskSequences) {
         ImageDescription                   = "MEMLABS autocreated"
         ImageVersion                       = "image version 1"
         CreatedBy                          = "MEMLABS"
-        OperatingSystemFileAccount         = "$DomainFullName\admin" 
+        OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
         OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
     }
 
@@ -390,7 +391,7 @@ if (!$taskSequences) {
         ImageDescription                   = "image description"
         ImageVersion                       = "image version 1"
         CreatedBy                          = "MEMLABS"
-        OperatingSystemFileAccount         = "$DomainFullName\admin" 
+        OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
         OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
     }
     New-CMTaskSequence @buildandcapturewin10
@@ -418,7 +419,7 @@ if (!$taskSequences) {
         GeneratePassword                = $true
         TimeZone                        = $tstimezone
         JoinDomain                      = "DomainType"
-        DomainAccount                   = "$DomainFullName\admin"
+        DomainAccount                   = "$DomainFullName\$AdminName"
         DomainName                      = "$DomainFullName"
         DomainOrganizationUnit          = "LDAP://OU=Workstations,OU=Devices,DC=na,DC=$DomainFullName,DC=com"
         DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
@@ -451,7 +452,7 @@ if (!$taskSequences) {
         GeneratePassword                = $true
         TimeZone                        = $tstimezone
         JoinDomain                      = "DomainType"
-        DomainAccount                   = "$DomainFullName\admin"
+        DomainAccount                   = "$DomainFullName\$AdminName"
         DomainName                      = "$DomainFullName"
         DomainOrganizationUnit          = "LDAP://OU=Workstations,OU=Devices,DC=na,DC=$DomainFullName,DC=com"
         DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force

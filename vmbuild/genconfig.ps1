@@ -2533,7 +2533,11 @@ function New-UserConfig {
         [string] $Subnet
     )
 
-    $adminUser = (Get-List -Type vm -DomainName $Domain | Where-Object { $_.Role -eq "DC" }).adminName
+    $DC = Get-List -Type VM -DomainName $Domain | Where-Object { $_.Role -eq "DC" }
+
+    $adminUser = $DC.adminName
+
+    $domainDefaults = $DC.domainDefaults
 
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
@@ -2559,6 +2563,10 @@ function New-UserConfig {
         vmOptions       = $vmOptions
         virtualMachines = $()
 
+    }
+
+    if ($domainDefaults) {
+        $configGenerated | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $domainDefaults -force
     }
     return $configGenerated
 }
@@ -4704,9 +4712,9 @@ function Select-Options {
                     if ($property.prefix) {
                         $property.prefix = get-PrefixForDomain -Domain $domain
                     }
-                    if ($property.DoomainNetBiosName) {
+                    if ($property.domainNetBiosName) {
                         $netbiosName = $domain.Split(".")[0]
-                        $property.DomainNetBiosName = $netbiosName
+                        $property.domainNetBiosName = $netbiosName
                     
                         Get-TestResult -SuccessOnError | out-null
                     }

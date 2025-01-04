@@ -62,7 +62,7 @@ $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
 $shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
 $shortcut.Save()
-
+$exitcode = 1
 $bytes = [System.IO.File]::ReadAllBytes($shortcutLocation)
 # Set byte 21 (0x15) bit 6 (0x20) ON
 $bytes[0x15] = $bytes[0x15] -bor 0x20
@@ -142,7 +142,8 @@ New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Nam
 if (-not $Common.DevBranch) {
     Clear-Host
     Get-Animate
-}else {
+}
+else {
     $image = (Join-Path $PSScriptRoot "MemLabs.png")
     Set-BackgroundImage $image "right" 5 "uniform"
     Get-Animate
@@ -226,19 +227,20 @@ try {
     Set-QuickEdit -DisableQuickEdit
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
-# Automatically update DSC.Zip
-if ($Common.DevBranch) {
-    $psdLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
-    $psmLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
-    if (Test-Path ".\DSC\DSC.zip") {
-        $zipLastWriteTime = (Get-ChildItem ".\DSC\DSC.zip").LastWriteTime + (New-TimeSpan -Minutes 1)
+    # Automatically update DSC.Zip
+    if ($Common.DevBranch) {
+        $psdLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
+        $psmLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
+        if (Test-Path ".\DSC\DSC.zip") {
+            $zipLastWriteTime = (Get-ChildItem ".\DSC\DSC.zip").LastWriteTime + (New-TimeSpan -Minutes 1)
+        }
+        if (-not $zipLastWriteTime -or ($psdLastWriteTime -gt $zipLastWriteTime) -or ($psmLastWriteTime -gt $zipLastWriteTime)) {
+            powershell .\dsc\createGuestDscZip.ps1 | Out-Host
+            Set-Location $PSScriptRoot | Out-Null
+            $exitcode = 55
+            exit 55
+        }
     }
-    if (-not $zipLastWriteTime -or ($psdLastWriteTime -gt $zipLastWriteTime) -or ($psmLastWriteTime -gt $zipLastWriteTime)) {
-        powershell .\dsc\createGuestDscZip.ps1 | Out-Host
-        Set-Location $PSScriptRoot | Out-Null
-        exit 55
-    }
-}
 
 
 
@@ -616,7 +618,7 @@ if ($Common.DevBranch) {
         $global:mutexes = @()
 
         #This is now done in Phase 10
-       # Start-Maintenance -DeployConfig $deployConfig
+        # Start-Maintenance -DeployConfig $deployConfig
 
         $updateExistingRequired = $false
         foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
@@ -672,7 +674,7 @@ finally {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
         Set-TitleBar "Script Cancelled"
         Write-Log "### $Configuration Terminated $currentPhase" -HostOnly
-
+        $exitcode = 2
         if ($currentPhase -ge 2 -and $currentPhase -le $maxPhase) {
             if ($currentPhase -eq 8) {
                 write-host
@@ -724,7 +726,7 @@ finally {
             Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force
         }
 
-       # Get-Job | Stop-Job
+        # Get-Job | Stop-Job
     }
 
     # Clear vm remove list
@@ -737,12 +739,19 @@ finally {
     Set-QuickEdit
 
     Write-Host
-    if ($NewLabsuccess -ne $true){
-        Write-Host "Script exited (FAILED)."
-        Set-TitleBar "SCRIPT FAILED"
-        exit 1
+    if ($NewLabsuccess -ne $true) {
+        if ($exitcode -ne 2) {
+            Write-Host "Script exited (FAILED)."
+            Set-TitleBar "SCRIPT FAILED"
+        }
+        if ($exitcode -gt 0) {
+            exit $exitcode
+        }
+        else {
+            exit 1
+        }        
     }
-    else{
+    else {
         Write-Host "Script exited. SUCCESS"
         Set-TitleBar "SCRIPT FINISHED"
     }

@@ -209,11 +209,13 @@ function Remove-ForestTrust {
                     param(
                         [String]$forestDomain,
                         [String]$DomainName,
+                        [String]$adminName,
+                        [String]$adminName2,
                         [String]$pw
                     )
-                    & netdom trust $($forestDomain) /d:$($DomainName) /userD:admin /passwordD:$pw /userO:admin /PasswordO:$pw /verify /twoway
+                    & netdom trust $($forestDomain) /d:$($DomainName) /userD:$adminName /passwordD:$pw /userO:$adminName2 /PasswordO:$pw /verify /twoway
                 }
-                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlockTest -ArgumentList @($forestDomain, $domainName, $($Common.LocalAdmin.GetNetworkCredential().Password)) -SuppressLog  
+                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlockTest -ArgumentList @($forestDomain, $domainName, $DC1.AdminName, $DC2.AdminName, $($Common.LocalAdmin.GetNetworkCredential().Password)) -SuppressLog  
 
                 write-host -verbose "Netdom results: $($result.ScriptBlockOutput)"
                 if ($result.ScriptBlockOutput -and  $result.ScriptBlockOutput -like "*has been successfully verified*") {

@@ -231,7 +231,7 @@ class InstallSSMS {
                 & $cmd $arg1 $arg2 $arg3 | out-null
                 Write-Status "SSMS Installed Successfully!"
 
-                start-sleep -Seconds 60
+                start-sleep -Seconds 20
                 # Reboot
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
@@ -312,13 +312,13 @@ class InstallDotNet4 {
 
             $processName = ($this.FileName -split ".exe")[0]
             while ($true) {
-                Start-Sleep -Seconds 15
+                Start-Sleep -Seconds 10
                 $process = Get-Process $processName -ErrorAction SilentlyContinue
                 if ($null -eq $process) {
                     break
                 }
             }
-            Start-Sleep -Seconds 120 ## Buffer Wait
+            Start-Sleep -Seconds 60 ## Buffer Wait
             Write-Status ".NET $($this.FileName) Installed Successfully!"
 
             # Reboot
@@ -622,23 +622,24 @@ class InstallVCRedist {
         $arg4 = "/l"
         if ($_path -like "*x64*") {
             $arg5 = "c:\temp\vc_redistx64.log"
-        } else {
+        }
+        else {
             $arg5 = "c:\temp\vc_redistx86.log"
         }
 
 
         try {
-            Write-Status "Installing VC Redist..."
+            Write-Status "Installing VC Redist $_path..."
             Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4 $arg5")
             & $cmd $arg1 $arg2 $arg3 $arg4 $arg5
-            Write-Status "VC Redist was Installed Successfully!"
+            Write-Status "VC Redist $_path was Installed Successfully!"
         }
         catch {
             $ErrorMessage = $_.Exception.Message
             Write-Status "Failed to install VC Redist with error: $ErrorMessage"
             throw "Failed to install VC Redist with error: $ErrorMessage"
         }
-        Start-Sleep -Seconds 20
+        Start-Sleep -Seconds 10
     }
 
     [bool] Test() {
@@ -830,8 +831,8 @@ class WaitForEvent {
         $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
 
         while (!(Test-Path $ConfigurationFile)) {
-            Write-Verbose "Wait for configuration file to exist on $($this.MachineName), will try 60 seconds later..."
-            Start-Sleep -Seconds 60
+            Write-Verbose "Wait for configuration file to exist on $($this.MachineName), will try 30 seconds later..."
+            Start-Sleep -Seconds 30
             $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
         }
 
@@ -848,8 +849,8 @@ class WaitForEvent {
             [void]$mtx.Dispose()
         }
         while ($Configuration.$($this.ReadNode).Status -ne $this.ReadNodeValue) {
-            Write-Verbose "Wait for step: [$($this.ReadNode)] to finish on $($this.MachineName), will try 60 seconds later..."
-            Start-Sleep -Seconds 60
+            Write-Verbose "Wait for step: [$($this.ReadNode)] to finish on $($this.MachineName), will try 30 seconds later..."
+            Start-Sleep -Seconds 30
             $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
             Write-Verbose "Attempting to acquire '$_FileName' Mutex"
             [void]$mtx.WaitOne()
@@ -1295,7 +1296,7 @@ class WaitForDomainReady {
     [string] $DomainName
 
     [DscProperty(Mandatory = $false)]
-    [int] $WaitSeconds = 30
+    [int] $WaitSeconds = 20
 
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
@@ -1311,7 +1312,7 @@ class WaitForDomainReady {
         Write-Verbose "Domain Controller is: $_DCName"
         $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         while (!$testconnection) {
-            Write-Status "Waiting for Domain ready. Trying to ping $_DCName, will try again 30 seconds later..."
+            Write-Status "Waiting for Domain ready. Trying to ping $_DCName, will try again $_WaitSeconds seconds later..."
             ipconfig /flushdns
             ipconfig /renew
             ipconfig /registerdns
@@ -2424,7 +2425,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "4"
+    [string] $Version = "5"
 
     [void] Set() {
         $_Role = $this.Role
@@ -2461,16 +2462,29 @@ class InstallFeatureForSCCM {
             #
             #
 
-            # Always install BITS
-            Write-Status "Installing Windows Features: BITS, BITS-IIS-Ext"
-            Install-WindowsFeature BITS, BITS-IIS-Ext
+            if ($_Role -contains "DC") {
+                #Moved to All Servers
+                #Install-WindowsFeature RSAT-AD-PowerShell
+            }
+            else {
+                # Always install IIS unless we are on a DC
+                Write-Status "Installing Windows Features: Web-Windows-Auth, web-ISAPI-Ext"
+                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
 
-            # Always install IIS
-            Write-Status "Installing Windows Features: Web-Windows-Auth, web-ISAPI-Ext"
-            Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
+                # Always install BITS
+                Write-Status "Installing Windows Features: BITS, BITS-IIS-Ext"
+                Install-WindowsFeature BITS, BITS-IIS-Ext
+                
+                Write-Status "Installing Windows Features: Web-WMI, Web-Metabase"
+                Install-WindowsFeature Web-WMI, Web-Metabase
 
-            Write-Status "Installing Windows Features: Web-WMI, Web-Metabase"
-            Install-WindowsFeature Web-WMI, Web-Metabase
+                if ($_Role -notcontains "DomainMember") {
+                    Write-Status "Installing Windows Features: Rdc"
+                    Install-WindowsFeature -Name "Rdc"
+                }
+            }
+
+
 
             Write-Status "Installing Windows Features: RSAT-AD-PowerShell"
             Install-WindowsFeature RSAT-AD-PowerShell
@@ -2481,16 +2495,8 @@ class InstallFeatureForSCCM {
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
-
-            if ($_Role -notcontains "DomainMember") {
-                Write-Status "Installing Windows Features: Rdc"
-                Install-WindowsFeature -Name "Rdc"
-            }
-
-            if ($_Role -contains "DC") {
-                #Moved to All Servers
-                #Install-WindowsFeature RSAT-AD-PowerShell
-            }
+            
+          
             if ($_Role -contains "SQLAO") {
                 Write-Status "Installing Windows Features: Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell"
                 Install-WindowsFeature Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell
@@ -2610,7 +2616,7 @@ class SetCustomPagingFile {
         $_Drive = $this.Drive
         $_InitialSize = $this.InitialSize
         $_MaximumSize = $this.MaximumSize
-        Write-Status "Creating Page file on $_Drive"
+        Write-Status "Creating Page file $_Drive\pagefile.sys Size: $_MaximumSize MB "
         $currentstatus = Get-CimInstance -ClassName 'Win32_ComputerSystem'
         if ($currentstatus.AutomaticManagedPagefile) {
             set-ciminstance $currentstatus -Property @{AutomaticManagedPagefile = $false }
@@ -2624,7 +2630,7 @@ class SetCustomPagingFile {
         else {
             Set-CimInstance $currentpagingfile -Property @{InitialSize = $_InitialSize ; MaximumSize = $_MaximumSize }
         }
-        Write-Status "Page file configured. Rebooting"
+        Write-Status "Page file configured. $_Drive\pagefile.sys Size: $_MaximumSize MB. Rebooting."
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
@@ -2963,7 +2969,7 @@ class ModuleAdd {
                 Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
             }
             catch {
-                write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope"
+                write-Status "Retry. Installing powershell module PowerShellGet for scope $_userScope"
                 Start-Sleep -Seconds 120
                 Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             }
@@ -3453,7 +3459,7 @@ class RebootNow {
 
         if (-not (Test-Path $_FileName)) {
             Write-Status "Rebooting machine."
-            Start-sleep -seconds 5
+            Start-sleep -seconds 4
             New-Item $_FileName
             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
@@ -3898,7 +3904,7 @@ class RunPkiSync {
                 ipconfig /flushdns
                 gpupdate.exe /force
                 Write-Verbose $_
-                Start-Sleep -Seconds 30
+                Start-Sleep -Seconds 20
                 continue
             }
             try {
@@ -3913,7 +3919,7 @@ class RunPkiSync {
                 ipconfig /flushdns
                 gpupdate.exe /force
                 Write-Verbose $_
-                Start-Sleep -Seconds 30
+                Start-Sleep -Seconds 20
                 continue
             }
 

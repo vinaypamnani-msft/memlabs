@@ -1255,6 +1255,7 @@ function ConvertTo-DeployConfigEx {
     # Add Apps
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
+
     return $deployConfigEx
 }
 
