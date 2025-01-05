@@ -2080,7 +2080,7 @@ class JoinDomain {
                 if ($count -lt $_retryCount) {
                     $count++
                     Write-Status "Current Domain of $CurrentDomain does not match $_DomainName. Retry count: $count/$_retryCount"
-                    Start-Sleep -Seconds 30
+                    Start-Sleep -Seconds 20
                     Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Ignore
 
                     $CurrentDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
@@ -2462,7 +2462,7 @@ class InstallFeatureForSCCM {
             #
             #
 
-            if ($_Role -contains "DC") {
+            if ($_Role -contains "DC" -or $_Role -contains "BDC") {
                 #Moved to All Servers
                 #Install-WindowsFeature RSAT-AD-PowerShell
             }
@@ -2590,10 +2590,27 @@ class InstallFeatureForSCCM {
     [bool] Test() {
         $StatusPath = "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt"
         if (Test-Path $StatusPath) {
+            $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+            if ($os) {
+                $IsServerOS = $true
+                if ($os.ProductType -eq 1) {
+                    $IsServerOS = $false
+                }
+            }
+            else {
+                $IsServerOS = $false
+            }
+
+            if ($IsServerOS) {
+                if ((Get-WindowsFeature -name AD-Domain-Services).InstallState -ne "Installed") {
+                    return $false
+                }
+            }
+
             return $true
         }
-
         return $false
+       
     }
 
     [InstallFeatureForSCCM] Get() {
@@ -2971,7 +2988,7 @@ class ModuleAdd {
             catch {
                 write-Status "Retry. Installing powershell module PowerShellGet for scope $_userScope"
                 Start-Sleep -Seconds 120
-                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             }
         }
 
@@ -2986,7 +3003,7 @@ class ModuleAdd {
                 catch {
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope.."
                     Start-Sleep -Seconds 120
-                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
                 }
             }
             ELSE {
@@ -2997,7 +3014,7 @@ class ModuleAdd {
                 catch {
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope...."
                     Start-Sleep -Seconds 120
-                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -Force -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
                 }
             }
         }

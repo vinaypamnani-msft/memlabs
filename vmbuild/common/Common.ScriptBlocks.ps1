@@ -17,6 +17,9 @@ $global:Phase10Job = {
         if (-not $Phase) {
             $Phase = "Maintenance"
         }
+        if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")){
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
+        }
         $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$true
         if (-not $worked) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure
@@ -1546,10 +1549,10 @@ $global:VM_Config = {
                 if ($ConfigurationData.AllNodes.NodeName -contains "LOCALHOST") {
                     try {
                         "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
-                        Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose
+                        Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose -force
                     }
                     catch {
-                        $data = "Could not run Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose"
+                        $data = "Could not run Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose -force"
                         $data | Out-File $log -Append      
                         $_ | Out-File $log -Append              
                         Write-Error $data
@@ -1707,12 +1710,21 @@ $global:VM_Config = {
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Start-Sleep -Seconds 15
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying once. $($result.ScriptBlockOutput)" -Warning
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying. $($result.ScriptBlockOutput)" -Warning
                 # Retry once before exiting
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
                 if ($result.ScriptBlockFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                    return
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Rebooting. $($result.ScriptBlockOutput)" -Warning
+                    stop-vm2 -name $currentItem.vmName
+                    start-sleep -seconds 30
+                    start-vm2 -name $currentItem.vmName
+                    start-sleep -seconds 30 
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
+                    if ($result.ScriptBlockFailed) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                        return
+                    }
+                                        
                 }
             }
             Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -PercentComplete 100
@@ -1761,8 +1773,9 @@ $global:VM_Config = {
                         $ProgressPreference = 'Continue'
                     } -SuppressLog:$suppressNoisyLogging
 
-                    if (-not $dscStatus) {
+                    if ($dscStatus.ScriptBlockFailed -or $dscStatus.ScriptBlockOutput.Error) {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Get-DscConfigurationStatus did not complete"
+                        Write-log "[Phase $Phase]: $($currentItem.vmName): $($dscStatus.ScriptBlockOutput) $($dscStatus.ScriptBlockOutput) $($dscStatus.ScriptBlockOutput.Error)"
                         $dscFails++
                         if ($dscFails -ge 20) {
                             stop-vm2 -name $currentItem.vmName
@@ -1776,16 +1789,18 @@ $global:VM_Config = {
                         $dscFails = 0
                     }
 
-                    if (-not $rebooted -and $dscStatus.RebootRequested -eq $true) {
+                    if (-not $rebooted -and $dscStatus.ScriptBlockOutput.RebootRequested -eq $true) {
                         # Reboot the machine
                         start-sleep -Seconds 90 # Wait 90 seconds and re-request.. maybe its going to reboot itself.
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, Waiting 90 seconds to see if it reboots itself."
                         $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
                             $ProgressPreference = 'SilentlyContinue'
                             Get-DscConfigurationStatus
                             $ProgressPreference = 'Continue'
                         } -SuppressLog:$suppressNoisyLogging
                         # Reboot the machine
-                        if ($dscStatus.RebootRequested) {
+                        if ($dscStatus.ScriptBlockOutput.RebootRequested) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, but has not rebooted.  Forcing Restart."
                             stop-vm2 -name $currentItem.vmName
                             start-sleep -Seconds 30
                             start-vm2 -name $currentItem.vmName

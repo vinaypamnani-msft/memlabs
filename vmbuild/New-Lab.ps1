@@ -10,7 +10,7 @@ param (
                 $FakeBoundParameters
             )
             $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config" -Filter *.json | Sort-Object -Property { $_.LastWriteTime -as [Datetime] } -Descending
-            if ($WordToComplete) { $ConfigPaths = $ConfigPaths | Where-Object { $_.Name.ToLowerInvariant().StartsWith($WordToComplete) } }
+            if ($WordToComplete) { $ConfigPaths = $ConfigPaths | Where-Object { $_.Name.ToLowerInvariant().StartsWith($WordToComplete.ToLowerInvariant()) } }
             $ConfigNames = ForEach ($Path in $ConfigPaths) {
                 if ($Path.Name -eq "_storageConfig.json") { continue }
                 if ($Path.Name -eq "_storageConfig2022.json") { continue }
@@ -589,13 +589,19 @@ try {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+                try {
                 [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore")
+                }
+                catch{}
             }
             else {
                 Write-Host
                 Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
+                try {
                 [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase")
+                }
+                catch {}
             }
 
 
@@ -694,12 +700,12 @@ finally {
     Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
     foreach ($job in Get-Job) {
-        $job | Stop-Job
+      #  $job | Stop-Job
         Write-Host -NoNewline "."
     }
     if (-not $global:Common.DevBranch) {
         foreach ($job in Get-Job) {
-            $job | Remove-Job
+         #   $job | Remove-Job
             Write-Host -NoNewline "."
         }
     }

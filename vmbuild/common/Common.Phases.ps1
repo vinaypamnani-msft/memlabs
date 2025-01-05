@@ -231,8 +231,8 @@ function Start-PhaseJobs {
             continue
         }
 
-        # Don't touch hidden VM's in Phase 1
-        if ($Phase -eq 1 -and $currentItem.hidden) {
+        # Don't touch hidden VM's in Phase 1 or 10
+        if ($currentItem.hidden -and $Phase -in @(1,10)) {
             continue
         }
 
@@ -290,7 +290,10 @@ function Start-PhaseJobs {
 
         if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10) {
 
-            if ($Phase -eq 10) {                
+            if ($Phase -eq 10) {         
+                if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
+                    continue
+                }       
                 $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ErrorAction Stop -ErrorVariable Err
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
@@ -614,8 +617,8 @@ function Get-Phase2ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -notin "AADClient", "OSDClient", "Linux") {
+        # Filter out machines with an unconnectable OS, except AADClient, which has a special case to skip the DSC
+        if ($vm.role -notin "OSDClient", "Linux") {
             if (-not $vm.Hidden) {
                 $cd
                 #Write-Host "xxxReturning $cd for $($vm.vmName)"

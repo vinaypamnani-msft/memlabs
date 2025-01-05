@@ -88,6 +88,13 @@
 
         $nextDepend = "[WaitForDomainReady]WaitForDomain"
 
+        #ModuleAdd ActiveDirectory {
+        #    Key             = 'Always'
+        #    CheckModuleName = 'ActiveDirectory'
+        #}
+
+        #$nextDepend = "[ModuleAdd]ActiveDirectory"
+
         WriteStatus NewDS {
             DependsOn = $nextDepend
             Status    = "Configuring ADDS and setting up the domain Controller."
@@ -190,9 +197,5 @@
             DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
         }
 
-        WriteStatus Complete {
-            DependsOn = "[WriteEvent]WriteConfigFinished"
-            Status    = "Complete!"
-        }
     }
 }

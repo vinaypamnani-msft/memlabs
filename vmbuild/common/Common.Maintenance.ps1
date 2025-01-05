@@ -21,7 +21,7 @@ function Start-Maintenance {
     Write-Log -Verbose "Latest Hotfix Version: $($Common.LatestHotfixVersion)"
     $countWorked = $countFailed = $countSkipped = 0
     # Filter in-progress
-    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
+    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true -and -not $_.Role -in @("OSDClient", "Linux", "AADClient")}
     $newVmsNeedingMaintenance = @()
     foreach ($vm in $vmsNeedingMaintenance) {
         Write-Log -Verbose "VM Name: $($vm.vmName) Version: $($vm.memLabsVersion)"

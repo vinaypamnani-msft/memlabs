@@ -1538,7 +1538,7 @@ function New-VmNote {
         }
 
         Write-Log "Checking if we can write out domainDefaults"
-        if ($null -ne $DeployConfig.domainDefaults && $ThisVm.role -eq "DC") {                 
+        if ($null -ne $DeployConfig.domainDefaults -and $ThisVm.role -eq "DC") {                 
             Write-Log "Writing out domainDefaults Value: $($DeployConfig.domainDefaults.DeploymentType)"   
             $vmNote | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $($DeployConfig.domainDefaults) -Force        
         }
@@ -2350,7 +2350,7 @@ function Wait-ForVm {
     $stopWatch.Start()
     $vmTest = Get-VM2 -Name $VmName
     if ($VmState) {
-        Write-Log "$VmName`: Waiting for VM to go in $VmState state..."
+        Write-Log "$VmName`: Waiting for VM to enter $VmState state..."
         do {
             try {
                 $vmTest = Get-VM2 -Name $VmName
@@ -2361,7 +2361,7 @@ function Wait-ForVm {
                 }
 
                 try {
-                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)"
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Waiting for VM to enter '$VmState' state. Current State: $($vmTest.State)"
                 }
                 catch {
 
