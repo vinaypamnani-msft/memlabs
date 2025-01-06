@@ -1750,6 +1750,7 @@ function Remove-DHCPReservation {
         [string] $vmName
     )
   
+    $job = $null
     $scopes = (Get-DhcpServerv4Scope).ScopeID
 
     if ($ip) {
@@ -1791,6 +1792,7 @@ function Remove-DHCPReservation {
     }
 
     if ($job) {
+        try {
         $wait = Wait-Job -Timeout 60 -Job $job        
         if ($wait.State -eq "Running") {
             Stop-Job $job | out-null
@@ -1808,6 +1810,10 @@ function Remove-DHCPReservation {
                 remove-job $job | out-null           
             }
         }
+    }
+    catch {
+        Write-Log -LogOnly "Failed to remove job $_"
+    }
     }
 }
 
@@ -2857,9 +2863,10 @@ function Get-VmSession {
     while ($true) {
         $ps = $null
         $failCount++
-        if ($failCount -gt 1) {
+        if ($failCount -gt 2) {
             start-sleep -seconds 15
         }
+               
         if ($failCount -gt 3) {
             break
         }
@@ -4030,6 +4037,30 @@ Function Install-HostToServer2025 {
     }
     
 }
+
+Function Add-CmdHistory {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $Text
+    )
+    if (-not $common.PS7) {
+        return
+    }
+
+    if ($global:AddHistoryLine) {
+        return
+    }
+
+    $global:AddHistoryLine = $Text
+
+    try {
+    [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($Text)
+    }
+    catch {}
+
+}
 Function Set-TitleBar {
     [CmdletBinding()]
     param (
@@ -4080,6 +4111,8 @@ if (-not $Common.Initialized) {
     Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
     $global:vm_remove_list = @()
     $global:init_failed = $false
+    $global:AddHistoryLine = $null
+
     try {
         ###################
         ### GIT BRANCH  ###

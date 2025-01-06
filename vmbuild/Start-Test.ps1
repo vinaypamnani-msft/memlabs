@@ -109,6 +109,7 @@ function Run-Test {
             if ($LASTEXITCODE -eq 55) {
                 & ./New-Lab.ps1 -Configuration $ModifiedtestFile
             }
+            Write-Host "$LASTEXITCODE was returned from $testjson"
             if ($LASTEXITCODE -ne 0) {
                 return $false
             }            
@@ -164,6 +165,7 @@ try {
                 continue
             }
             $result = Run-Test -Test $Test
+            Write-Host "$Test returned $result"
             if (-not $result) {
                 break
             }

@@ -17,14 +17,15 @@ $global:Phase10Job = {
         if (-not $Phase) {
             $Phase = "Maintenance"
         }
-        if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")){
+        if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
         }
         $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$true
         if (-not $worked) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure
             throw "Could not run VM Maintenance on $($currentItem.vmName)"
-        }else{
+        }
+        else {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Maintenance completed successfully for $($currentItem.role)." -OutputStream -Success
         }
     }
@@ -499,7 +500,7 @@ $global:VM_Create = {
                     if ($diskNum -eq 1) {
                         $label = "CONTENTLIB"
                     }
-                     if ($diskNum -eq 2) {
+                    if ($diskNum -eq 2) {
                         $label = "CLUSTER"
                     }
                     $diskNum++
@@ -751,8 +752,25 @@ $global:VM_Config = {
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
         if (-not $ps) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
-            return
+
+            Write-Log "$($currentItem.vmName)`: Failed to connect.  Attempting to reboot vm." 
+            stop-vm2 -Name $currentItem.vmName
+            Start-Sleep -seconds 10
+            start-vm2 -Name $currentItem.vmName
+            Start-Sleep -seconds 20
+            
+            $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
+            if (-not $connected) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
+                return
+            }
+            
+            $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+            
+            if (-not $ps) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
+                return
+            }
         }
 
 

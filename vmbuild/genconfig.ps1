@@ -817,7 +817,7 @@ function Select-MainMenu {
                 $params = @{configName = $filename; vmName = $vmName; Debug = $false }
 
                 write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"    
-                [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory(".\dsc\createGuestDscZip.ps1 -configName `"$fileName`" -vmName $vmName") 
+                Add-CmdHistory ".\dsc\createGuestDscZip.ps1 -configName `"$fileName`" -vmName $vmName"
                 #Invoke-Expression  ".\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName -confirm:$false"
                 & ".\dsc\createGuestDscZip.ps1" @params | Out-Host
                 Set-Location $PSScriptRoot | Out-Null
@@ -6882,7 +6882,7 @@ $return.ConfigFileName = Save-Config $Global:Config
 if (-not $InternalUseOnly.IsPresent) {
     Write-Host "You may deploy this configuration by running the following command:"
     Write-Host "$($PSScriptRoot)\New-Lab.ps1 -Configuration ""$($return.ConfigFileName)"""
-    [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("$($PSScriptRoot)\New-Lab.ps1 -Configuration ""$($return.ConfigFileName)""")
+    Add-CmdHistory "$($PSScriptRoot)\New-Lab.ps1 -Configuration ""$($return.ConfigFileName)"""
 }
 
 #================================= NEW LAB SCENERIO ============================================

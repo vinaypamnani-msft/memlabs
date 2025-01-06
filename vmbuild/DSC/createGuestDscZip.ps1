@@ -124,7 +124,7 @@ try {
     }
 write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath ""C:\Temp\$($role)-Config"" "
     & "$($dscRole)" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config" | out-host
-    #[Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("$($dscRole) -DeployConfigPath $filePath -AdminCreds (Get-Credential) -ConfigurationData $cd -OutputPath `"C:\Temp\$($role)-Config`"")
+    Add-CmdHistory "$($dscRole) -DeployConfigPath $filePath -AdminCreds (Get-Credential) -ConfigurationData $cd -OutputPath `"C:\Temp\$($role)-Config`""
 }
 finally {
     $parentDir = Split-Path -Path $PSScriptRoot -Parent

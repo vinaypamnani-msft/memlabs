@@ -329,7 +329,7 @@ try {
                             write-host
                             Write-Log "Validation failed. If you want to continue bypassing the checks, run the following command" 
                             Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
-                            [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation")
+                            Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
                             write-host
                             exit 1
                         }
@@ -351,7 +351,7 @@ try {
             write-host
             Write-Log "Validation failed. If you want to continue bypassing the checks, run the following command" 
             Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
-            [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation")
+            Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
             write-host
             exit 1
         }
@@ -589,19 +589,17 @@ try {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
-                try {
-                [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore")
-                }
-                catch{}
+
+                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+
             }
             else {
                 Write-Host
                 Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
-                try {
-                [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase")
-                }
-                catch {}
+
+                    Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase" 
+
             }
 
 
@@ -686,13 +684,13 @@ finally {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
-                [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore")
+                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
             }
             else {
                 write-host
                 Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
-                [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase")
+                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
             }
         }
         Write-Host
