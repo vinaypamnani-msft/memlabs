@@ -1991,7 +1991,7 @@ function Select-RolesForExisting {
     $existingRoles2 = Format-Roles $existingRoles2
 
     $OptionArray = @{ "H" = $ha_Text }
-    $OptionArray = @{  "L" = "Add Linux VM from Hyper-V Gallery" }
+    $OptionArray += @{  "L" = "Add Linux VM from Hyper-V Gallery" }
     Write-Log -Activity -NoNewLine "Add roles to Existing domain"
     $role = Get-Menu -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
 
@@ -5976,7 +5976,7 @@ function select-FileServerMenu {
 
     $additionalOptions = @{}
     if ($HA) {
-        $additionalOptions += @{ "N" = "Create new FileServer to host Content Library" }
+        $additionalOptions += @{ "N" = "Create new FileServer to host Content Library (Needed for HA)" }
     }
     else {
         $additionalOptions += @{ "N" = "Create a New FileServer VM" }
