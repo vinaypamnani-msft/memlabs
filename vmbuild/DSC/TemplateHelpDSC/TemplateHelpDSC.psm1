@@ -10,9 +10,7 @@ function Invoke-DownloadFile {
     )
 
     if ((Test-Path $dest)) {
-        If (-not (Get-Item $dest).length -gt 0kb) {
-            Remove-Item $dest -Force -ErrorAction SilentlyContinue | Out-Null
-        }
+        Remove-Item $dest -Force -ErrorAction SilentlyContinue | Out-Null
     }
 
     if (!(Test-Path $dest)) {
