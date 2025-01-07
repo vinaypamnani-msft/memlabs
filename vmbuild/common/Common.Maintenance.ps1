@@ -9,11 +9,13 @@ function Start-Maintenance {
 
     $applyNewOnly = $false
     if ($DeployConfig) {
+        Write-log "Start-Maintenance called with DeployConfig"
         $allVMs = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden }
         $vmsNeedingMaintenance = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden } | Sort-Object vmName
         $applyNewOnly = $true
     }
     else {
+        Write-log "Start-Maintenance called without DeployConfig"
         $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
         $vmsNeedingMaintenance = $allVMs | Where-Object { -not $_.memLabsVersion -or $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     }
@@ -21,7 +23,7 @@ function Start-Maintenance {
     Write-Log -Verbose "Latest Hotfix Version: $($Common.LatestHotfixVersion)"
     $countWorked = $countFailed = $countSkipped = 0
     # Filter in-progress
-    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true -and -not $_.Role -in @("OSDClient", "Linux", "AADClient")}
+    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true -and -not ($_.Role -in @("OSDClient", "Linux", "AADClient"))}
     $newVmsNeedingMaintenance = @()
     foreach ($vm in $vmsNeedingMaintenance) {
         Write-Log -Verbose "VM Name: $($vm.vmName) Version: $($vm.memLabsVersion)"
