@@ -3732,6 +3732,14 @@ function Get-AdditionalValidations {
                 }
             }
             $value = $property."$($Name)"
+            if (($value / 1) -lt 50MB) {
+                Write-Log "Can not set Memory to less than 50MB"
+                $value = $CurrentValue
+            }
+            if (($value / 1) -gt 64GB) {
+                Write-Log "Can not set Memory to more than 64GB"
+                $value = $CurrentValue
+            }
             $property.$name = $value.ToUpperInvariant()
         }
         "memory" {
@@ -3744,6 +3752,14 @@ function Get-AdditionalValidations {
                 }
             }
             $value = $property."$($Name)"
+            if (($value / 1) -lt 50MB) {
+                Write-Log "Can not set Memory to less than 50MB"
+                $value = $CurrentValue
+            }
+            if (($value / 1) -gt 64GB) {
+                Write-Log "Can not set Memory to more than 64GB"
+                $value = $CurrentValue
+            }
             $property.$name = $value.ToUpperInvariant()
 
             if (-not $Global:Config.domainDefaults.UseDynamicMemory) {

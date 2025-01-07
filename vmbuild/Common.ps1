@@ -1625,7 +1625,7 @@ function Set-VMNote {
         $oldvmNote = Get-VMNote -VMName $vmName
         if ($oldvmNote) {
             foreach ($note in $vmNote.PSObject.Properties) {             
-               $oldvmNote | Add-Member -MemberType NoteProperty -Name $note.Name -Value $note.Value -Force
+                $oldvmNote | Add-Member -MemberType NoteProperty -Name $note.Name -Value $note.Value -Force
             }
             $vmNote = $oldvmNote
         }
@@ -1793,27 +1793,27 @@ function Remove-DHCPReservation {
 
     if ($job) {
         try {
-        $wait = Wait-Job -Timeout 60 -Job $job        
-        if ($wait.State -eq "Running") {
-            Stop-Job $job | out-null
-            remove-job -job $job | out-null
-        }
-        else {
-            if ($wait.State -eq "Completed") {
-                $result = Receive-Job $job
-                write-log -logonly "[DHCP] returned: $result"
-                remove-job $job | out-null
+            $wait = Wait-Job -Timeout 60 -Job $job        
+            if ($wait.State -eq "Running") {
+                Stop-Job $job | out-null
+                remove-job -job $job | out-null
             }
             else {
-                write-log -logonly "[DHCP] State = $($wait.State)" -logonly
-                Stop-Job $job | out-null
-                remove-job $job | out-null           
+                if ($wait.State -eq "Completed") {
+                    $result = Receive-Job $job
+                    write-log -logonly "[DHCP] returned: $result"
+                    remove-job $job | out-null
+                }
+                else {
+                    write-log -logonly "[DHCP] State = $($wait.State)" -logonly
+                    Stop-Job $job | out-null
+                    remove-job $job | out-null           
+                }
             }
         }
-    }
-    catch {
-        Write-Log -LogOnly "Failed to remove job $_"
-    }
+        catch {
+            Write-Log -LogOnly "Failed to remove job $_"
+        }
     }
 }
 
@@ -1994,7 +1994,9 @@ function New-VirtualMachine {
                     $priority = 50
                     $buffer = 20
                 }
-                $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes ($dynamicMinRam / 1) -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop               
+                if ($dynamicMinRam -gt 40MB) {
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes ($dynamicMinRam / 1) -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop               
+                }
             }
         }
         catch {
@@ -4056,7 +4058,7 @@ Function Add-CmdHistory {
     $global:AddHistoryLine = $Text
 
     try {
-    [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($Text)
+        [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($Text)
     }
     catch {}
 
