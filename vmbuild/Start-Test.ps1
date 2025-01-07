@@ -127,11 +127,10 @@ function Run-Test {
             }
         
         }
-        return $true
     }
     
     [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./Remove-lab.ps1 -DomainName $domainName")
-
+    return $true
 }
 
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose

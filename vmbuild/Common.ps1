@@ -2698,7 +2698,7 @@ function Invoke-VmCommand {
             $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError
         }
 
-        $failed = $null -eq $ps
+        $failed = ($null -eq $ps -or $ps -is []
 
         # Run script block inside VM
         if (-not $failed) {
@@ -2856,8 +2856,8 @@ function Get-VmSession {
 
     $vm = get-vm2 -Name $VmName
     if (-not $vm) {
-        Write-Log "$VmName`: Failed to find VM named $VmName" -Failure -OutputStream
-        return
+        Write-Log "[Get-VMSession] $VmName`: Failed to find VM named $VmName" -Failure
+        return $null
     }
     $failCount = 0
     while ($true) {
@@ -2866,7 +2866,7 @@ function Get-VmSession {
         if ($failCount -gt 2) {
             start-sleep -seconds 15
         }
-               
+
         if ($failCount -gt 3) {
             break
         }
