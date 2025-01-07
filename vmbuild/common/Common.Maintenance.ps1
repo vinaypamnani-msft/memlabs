@@ -543,7 +543,7 @@ function Get-VMFixes {
 
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-Upgrade-Console"
-        FixVersion        = "250101.2"
+        FixVersion        = "250107.0"
         AppliesToNew      = $true
         AppliesToExisting = $false
         AppliesToRoles    = @("Primary", "CAS")
