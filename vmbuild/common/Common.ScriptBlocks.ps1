@@ -764,7 +764,7 @@ $global:VM_Config = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
                 return
             }
-            
+
             $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
             
             if (-not $ps) {
@@ -2070,6 +2070,14 @@ $global:VM_Config = {
 
                     # ~Setup has encountered fatal errors
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "~Setup has encountered fatal errors" -Context 0, 0 } -SuppressLog
+                    if ($result.ScriptBlockOutput.Line) {
+                        $failEntry = $result.ScriptBlockOutput.Line
+                        $bailEarly = $true
+                    }
+
+                    
+                    #~Setup could not install SQL RMO, ConfigMgr installation cannot be completed.
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ConfigMgr installation cannot be completed." -Context 0, 0 } -SuppressLog
                     if ($result.ScriptBlockOutput.Line) {
                         $failEntry = $result.ScriptBlockOutput.Line
                         $bailEarly = $true
