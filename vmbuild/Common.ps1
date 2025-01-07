@@ -2698,7 +2698,7 @@ function Invoke-VmCommand {
             $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError
         }
 
-        $failed = ($null -eq $ps -or $ps -is []
+        $failed = ($null -eq $ps)
 
         # Run script block inside VM
         if (-not $failed) {
