@@ -261,7 +261,8 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
             #Do nothing as we are on server 2025
-        } else {
+        }
+        else {
             $customOptions += [ordered]@{"*BU" = ""; "*UBREAK" = "---  Host machine needs to be on server 2025 to activate Server 2025 VMs ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
             $customOptions += [ordered]@{ "U" = "Upgrade HOST to server 2025%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
         }
@@ -2634,6 +2635,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "SiteSystem" { return $ServerList }
         "WSUS" { return $ServerList }
         "SQLAO" { return $ServerList }
+        "PassiveSite" { return $ServerList }
         "DomainMember" {
             if ($vm -and $vm.SqlVersion) {
                 return $ServerList
@@ -3274,7 +3276,7 @@ Function Set-SiteServerRemoteSQL {
     }
     $virtualMachine.memory = "4GB"
     $virtualMachine.dynamicMinRam = "4GB"
-    if ($global:Config.domainDefaults.UseDynamicMemory){
+    if ($global:Config.domainDefaults.UseDynamicMemory) {
         $virtualMachine.dynamicMinRam = "1GB"
     }
 
@@ -5384,7 +5386,8 @@ function Add-NewVMForRole {
             if ($ConfigToModify.domainDefaults.DefaultClientOS) {
                 $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
             }
-            else {           
+            else {          
+                Write-Log -Verbose "No Default OS defined" 
                 Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
                 $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
             }
@@ -5419,6 +5422,7 @@ function Add-NewVMForRole {
                         $OperatingSystem = $ConfigToModify.domainDefaults.DefaultServerOS
                     }
                     else {
+                        Write-Log -Verbose "No Default OS defined" 
                         Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
                         $OperatingSystem = Get-Menu "Select OS Version for new $role VM" $OSList -Test:$false -CurrentValue $operatingSystem
                     }
@@ -5795,7 +5799,7 @@ function Add-NewVMForRole {
         $ConfigToModify | Add-Member -MemberType NoteProperty -Name "VirtualMachines" -Value @() -Force
     }
     
-    if ($ConfigToModify.domainDefaults.UseDynamicMemory){
+    if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value "1GB" -force
     }
     else {
@@ -6100,15 +6104,23 @@ function Get-ListOfPossibleDPMP {
 
 function show-NewVMMenu {
 
-    $role = Select-RolesForExisting -enhance:$true
+    param (
+        [string]$role,
+        [string]$SiteCode
+    )
+
+    write-log -Verbose "show-NewVMMenu called wite $role $SiteCode"
     if (-not $role) {
-        return
-    }
-    if ($role -eq "H") {
-        $role = "PassiveSite"
-    }
-    if ($role -eq "L") {
-        $role = "Linux"
+        $role = Select-RolesForExisting -enhance:$true
+        if (-not $role) {
+            return
+        }
+        if ($role -eq "H") {
+            $role = "PassiveSite"
+        }
+        if ($role -eq "L") {
+            $role = "Linux"
+        }
     }
 
     $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
@@ -6143,12 +6155,14 @@ function show-NewVMMenu {
             Write-Host "No siteservers found that are eligible for HA"
             return
         }
-        Write-Log -Activity -NoNewLine "Enable CM High Availability"
-        $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
-        if ([string]::IsNullOrWhiteSpace($result)) {
-            return
+        if (-not $SiteCode) {
+            Write-Log -Activity -NoNewLine "Enable CM High Availability"
+            $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
+            if ([string]::IsNullOrWhiteSpace($result)) {
+                return
+            }
+            $SiteCode = $result
         }
-        $SiteCode = $result
     }
     #$os = Select-OSForNew -Role $role
 
@@ -6254,17 +6268,28 @@ function Select-VirtualMachines {
                     $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
                     if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
 
+
+                        if ($virtualMachine.Role -in ("Primary", "CAS")) {
+                            $existingPassive += Get-List2 -deployConfig $global:config | Where-Object { $_.SiteCode -eq $virtualMachine.SiteCode -and $_.Role -eq "PassiveSite"}
+                            if (-not $existingPassive) {
+                                
+                                # No Passive Site for this sitecode.. We can offer it here.
+                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  CM High Availability%$($Global:Common.Colors.GenConfigHeader)"; "H" = "Add a Passive Node for this Site Server" }
+
+                            }
+                        }
+
                         if ($virtualMachine.Role -notin ("DC", "BDC")) {
                             if ($null -eq $virtualMachine.sqlVersion) {
                                 switch ($virtualMachine.Role) {
                                     "Secondary" {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
+                                        #$customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
                                     }
                                     "WSUS" {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                        #$customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
                                     }
                                     Default {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
+                                        #$customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
                                     }
                                 }
                             }
@@ -6272,13 +6297,13 @@ function Select-VirtualMachines {
 
                                 switch ($virtualMachine.Role) {
                                     "Secondary" {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
+                                        #$customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
                                     }
                                     "WSUS" {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                        #$customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
                                     }
                                     Default {
-                                        $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
+                                        #$customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
                                     }
                                 }
                             }
@@ -6321,7 +6346,12 @@ function Select-VirtualMachines {
                             Get-List -type VM -SmartUpdate | Out-Null
                             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
                             return
-                        }
+                        }                        
+                    }
+                    if ($newValue -eq "H") {
+                        Write-Log -Verbose "Calling show-NewVMMenu to add passive node"
+                        show-NewVMMenu -SiteCode $virtualMachine.SiteCode -role "PassiveSite"
+                        return
                     }
                     return
                 }
