@@ -3722,6 +3722,18 @@ function Get-AdditionalValidations {
             $value = $property."$($Name)"
             $property.$name = $value.ToUpperInvariant()
         }
+        "dynamicMinRam" {
+            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
+                if ($CurrentValue.ToUpper().EndsWith("GB")) {
+                    $property.$name = $value.Trim() + "GB"
+                }
+                if ($CurrentValue.ToUpper().EndsWith("MB")) {
+                    $property.$name = $value.Trim() + "MB"
+                }
+            }
+            $value = $property."$($Name)"
+            $property.$name = $value.ToUpperInvariant()
+        }
         "memory" {
             if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
                 if ($CurrentValue.ToUpper().EndsWith("GB")) {
@@ -3733,6 +3745,13 @@ function Get-AdditionalValidations {
             }
             $value = $property."$($Name)"
             $property.$name = $value.ToUpperInvariant()
+
+            if (-not $Global:Config.domainDefaults.UseDynamicMemory) {
+                if ($property.dynamicMinRam) {
+                    $property.dynamicMinRam = $value.ToUpperInvariant()
+                }
+            }
+            
         }
 
         "tpmEnabled" {
@@ -6270,7 +6289,7 @@ function Select-VirtualMachines {
 
 
                         if ($virtualMachine.Role -in ("Primary", "CAS")) {
-                            $existingPassive += Get-List2 -deployConfig $global:config | Where-Object { $_.SiteCode -eq $virtualMachine.SiteCode -and $_.Role -eq "PassiveSite"}
+                            $existingPassive += Get-List2 -deployConfig $global:config | Where-Object { $_.SiteCode -eq $virtualMachine.SiteCode -and $_.Role -eq "PassiveSite" }
                             if (-not $existingPassive) {
                                 
                                 # No Passive Site for this sitecode.. We can offer it here.
