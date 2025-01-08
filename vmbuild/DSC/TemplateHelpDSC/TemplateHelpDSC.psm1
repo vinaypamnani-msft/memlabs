@@ -1438,18 +1438,19 @@ function Write-Status {
         }
         catch {}
         $AlreadyComplete = $false
+        $InCMSetup = $false
         if (Test-Path $StatusFile) {
             try {
                 $AlreadyComplete = (Get-Content -Path $StatusFile -Force -ErrorAction SilentlyContinue) -eq "Complete!"
+                $InCMSetup = (Get-Content -Path $StatusFile -Force -ErrorAction SilentlyContinue) -eq "Setting up ConfigMgr. See ConfigMgrSetup.log"
             }
             catch {}
         }
 
-        if (-not $AlreadyComplete) {
+        if (-not $AlreadyComplete -and -not $InCMSetup) {
             "$_Status" | Out-File -FilePath $StatusFile -Force
         }
     
-
         try {
             try {
                 $caller = (Get-PSCallStack | Select-Object Command, Location, Arguments)[1].Command

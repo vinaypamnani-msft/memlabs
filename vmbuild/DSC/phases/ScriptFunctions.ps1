@@ -5,6 +5,7 @@ $global:StatusLog = "C:\staging\DSC\InstallCMLog.log"
 function Write-DscStatusSetup {
     $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
     $StatusPrefix | Out-File $global:StatusFile -Force
+    start-sleep -seconds 5
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $StatusPrefix" | Out-File -Append $global:StatusLog
 }
 

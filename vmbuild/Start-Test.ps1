@@ -100,7 +100,7 @@ function Run-Test {
         }
         $domainName = $config.vmOptions.domainName
         $global:removedomains += $domainName
-        $global:removedomains = $global:removedomains | Select-Object -Unique
+        $global:removedomains = @($global:removedomains | Select-Object -Unique)
 
         $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
         Write-Host "Starting test for $testjson"
