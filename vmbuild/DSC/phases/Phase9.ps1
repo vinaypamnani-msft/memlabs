@@ -111,8 +111,8 @@ Configuration Phase9
             WaitForAll WaitSCCM {
                 ResourceName     = '[WaitForEvent]WorkflowComplete'
                 NodeName         = $WaitFor
-                RetryIntervalSec = 60
-                RetryCount       = 300
+                RetryIntervalSec = 15
+                RetryCount       = 1200
                 Dependson        = $nextDepend
             }
             $nextDepend = '[WaitForAll]WaitSCCM'

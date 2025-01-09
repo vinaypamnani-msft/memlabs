@@ -67,9 +67,20 @@ if (-not $pushClients) {
 }
 
 # Wait for collection to populate
+
+$ClientNameList = $ClientNames.split(",")
+$AnyClientFound = $false
+foreach ($clientName in $ClientNameList) {
+    $isClient = (Get-CMDevice | Where-Object { $_.Name -eq $clientName -or $_Name -like "$($clientName).*" }).IsClient
+    if ($isClient) {
+        $ClientNameList = $ClientNameList | Where-Object { $_ -ne $clientName }
+        $AnyClientFound = $true
+    }    
+}
+
 $CollectionName = "All Systems"
 if ($ClientNames) {
-    Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
+    Write-DscStatus "Waiting for $($ClientNameList -join ',') to appear in '$CollectionName'"
 }
 else {
     Write-DscStatus "Skipping Client Push. No Clients to push."
@@ -78,15 +89,21 @@ else {
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return
 }
-$ClientNameList = $ClientNames.split(",")
+
+
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 Start-Sleep -Seconds 5
-Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+if (-not $AnyClientFound) {
+    Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+}
 $failCount = 0
 $success = $false
 while (-not $success) {
    
     $failCount++
+    if ($failCount -eq 2 -and $AnyClientFound) {
+        Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+    }
     Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
     $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
     Start-Sleep -Seconds 20

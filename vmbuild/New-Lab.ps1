@@ -49,24 +49,32 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Migrate old VMs")]
     [switch]$Migrate,
     [Parameter(Mandatory = $false, HelpMessage = "Activate restore menu before deployment")]
-    [switch]$Restore
+    [switch]$Restore,
+    [Parameter(Mandatory = $false, HelpMessage = "No prompt for domain snapshot")]
+    [switch]$NoSnapshot
 
 )
 
+$global:NoSnapshot = $NoSnapshot
 
-$desktopPath = [Environment]::GetFolderPath("CommonDesktop")
-$shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
-$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutLocation)
-$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+try {
+    $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
+    $shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
+    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutLocation)
+    $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
-$shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
-$shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
-$shortcut.Save()
-$exitcode = 1
-$bytes = [System.IO.File]::ReadAllBytes($shortcutLocation)
-# Set byte 21 (0x15) bit 6 (0x20) ON
-$bytes[0x15] = $bytes[0x15] -bor 0x20
-[System.IO.File]::WriteAllBytes($shortcutLocation, $bytes)
+    $shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
+    $shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
+    $shortcut.Save()
+    $exitcode = 1
+    $bytes = [System.IO.File]::ReadAllBytes($shortcutLocation)
+    # Set byte 21 (0x15) bit 6 (0x20) ON
+    $bytes[0x15] = $bytes[0x15] -bor 0x20
+    [System.IO.File]::WriteAllBytes($shortcutLocation, $bytes)
+}
+catch {
+    write-log -Verbose "Could not Set Shortcut $_" -logonly
+}
 
 # Tell common to re-init
 if ($Common.Initialized) {
@@ -598,7 +606,7 @@ try {
                 Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
 
-                    Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase" 
+                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase" 
 
             }
 
@@ -698,12 +706,12 @@ finally {
     Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
     foreach ($job in Get-Job) {
-      #  $job | Stop-Job
+        #  $job | Stop-Job
         Write-Host -NoNewline "."
     }
     if (-not $global:Common.DevBranch) {
         foreach ($job in Get-Job) {
-         #   $job | Remove-Job
+            #   $job | Remove-Job
             Write-Host -NoNewline "."
         }
     }

@@ -325,6 +325,18 @@ function Start-PhaseJobs {
                 $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
                 $reservation = $reservation -replace "-", ""
             }
+            $alreadyCopiedDSC = $false
+            if (-not $global:DSC_Copied) {
+                $global:DSC_Copied = @()
+            }
+            if ($currentitem.VmName -in $global:DSC_Copied) {
+                write-log "[alreadyCopiedDSC] $($currentItem.VmName) was in $($global:DSC_Copied -join ','))" -verbose -logonly
+                $alreadyCopiedDSC = $true
+            }
+            else {
+                $global:DSC_Copied += $currentItem.VmName
+            }
+            Write-Log -verbose "[Phase $Phase] $($currentItem.vmName) alreadyCopiedDSC = $alreadyCopiedDSC"
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
                 Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
@@ -517,7 +529,7 @@ function Get-ConfigurationData {
         "7" { $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig }
         "8" {
             $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
-            if ($cd) {
+            if ($cd -and -not $global:NoSnapshot) {
                 $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $ConfigurationShort
                 $snapshot = $null
                 $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }

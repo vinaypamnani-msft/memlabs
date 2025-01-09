@@ -111,8 +111,8 @@ Configuration Phase8
             WaitForAll WaitSCCM {
                 ResourceName     = '[WaitForEvent]WorkflowComplete'
                 NodeName         = $WaitFor
-                RetryIntervalSec = 90
-                RetryCount       = 400
+                RetryIntervalSec = 15
+                RetryCount       = 2400
                 Dependson        = $nextDepend
             }
             $nextDepend = '[WaitForAll]WaitSCCM'

@@ -12,7 +12,6 @@ $global:Phase10Job = {
 
         # Get variables from parent scope
         $currentItem = $using:currentItem
-        $azureFileList = $using:Common.AzureFileList
         $Phase = $using:Phase
         if (-not $Phase) {
             $Phase = "Maintenance"
@@ -688,7 +687,7 @@ $global:VM_Config = {
         $ConfigurationData = $using:ConfigurationData
         $multiNodeDsc = $using:multiNodeDsc
         $reservation = $using:reservation
-
+        $alreadyCopiedDSC = $using:alreadyCopiedDSC
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
@@ -893,7 +892,7 @@ $global:VM_Config = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning
             }
         }
-
+        
         # copy language packs when locale is set to other than en-US
         if (($Phase -eq 2) -and ($deployConfig.vmOptions.locale -and $deployConfig.vmOptions.locale -ne "en-US")) {
             Write-Progress2 $Activity -Status "Copying language packs" -percentcomplete 15 -force
@@ -1033,15 +1032,20 @@ $global:VM_Config = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue } -DisplayName "DSC: Detect modules."
         $guestZipHash = $result.ScriptBlockOutput.Hash
 
-        # Copy DSC files
-        Write-Progress2 $Activity -Status "Copying DSC files to the VM." -percentcomplete 35 -force
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force }
-        if ($result.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC Files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-        }
-        $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
+        if (-not $alreadyCopiedDSC -or -not $guestZipHash) {
+            # Copy DSC files
+            Write-Progress2 $Activity -Status "Copying DSC files to the VM." -percentcomplete 35 -force
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force }
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC Files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+            }
+            $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+        }
+        else {
+            Write-Progress2 $Activity -Status "Skip copying DSC files to the VM." -percentcomplete 35 -force -Log
+        }
         $Expand_Archive = {
 
             $global:ScriptBlockName = "Expand_Archive"

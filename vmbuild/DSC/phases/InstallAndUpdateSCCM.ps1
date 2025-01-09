@@ -913,10 +913,11 @@ else {
                 $PSSiteCode = $PSVM.siteCode
                 # Wait for replication ready
                 $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
-                Start-Sleep -Seconds 30
+                
                 if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
                     Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
                     $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
+                    Start-Sleep -Seconds 30
                 }
                 else {
                     Write-DscStatus "Data Replication Complete. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
@@ -925,6 +926,7 @@ else {
                     $Configuration.$propName.Status = 'Completed'
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+                    Start-Sleep -Seconds 30
                 }
             }
         }

@@ -105,9 +105,9 @@ function Run-Test {
         $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
         Write-Host "Starting test for $testjson"
         try {
-            & ./New-Lab.ps1 -Configuration $ModifiedtestFile
+            & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
             if ($LASTEXITCODE -eq 55) {
-                & ./New-Lab.ps1 -Configuration $ModifiedtestFile
+                & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
             }
             Write-Host "$LASTEXITCODE was returned from $testjson"
             if ($LASTEXITCODE -ne 0) {

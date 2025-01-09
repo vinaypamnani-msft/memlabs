@@ -2531,11 +2531,18 @@ function Wait-ForVm {
 
     if ($PathToVerify) {
 
-        Write-Progress2 "Testing Disks" -Status "Testing Disks" -percentcomplete 0 -force
-        if ((Get-VMHardDiskDrive -VMName $VmName).Count -eq 0) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): VM has no disks attached." -Failure
-            return $false
+        if (-not $global:DSC_Copied) {
+            $global:DSC_Copied = @()
         }
+        if (-not ($VmName -in $global:DSC_Copied)) {
+            #If we already copied a DSC at least once, Disks are valid. Run if this is the first time.
+            Write-Progress2 "Testing Disks" -Status "Testing Disks" -percentcomplete 0 -force
+            if ((Get-VMHardDiskDrive -VMName $VmName).Count -eq 0) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM has no disks attached." -Failure
+                return $false
+            }
+        }
+       
         if ($PathToVerify -eq "C:\Users") {
             $msg = "Waiting for VM to respond"
         }
@@ -4208,6 +4215,8 @@ if (-not $Common.Initialized) {
             StorageLocation = $null
             StorageToken    = $null
         }
+        $global:DSC_Copied = @()
+        
         Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
 
         Set-TitleBar "Init Phase"

@@ -218,7 +218,7 @@ function Remove-ForestTrust {
                 $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlockTest -ArgumentList @($forestDomain, $domainName, $DC1.AdminName, $DC2.AdminName, $($Common.LocalAdmin.GetNetworkCredential().Password)) -SuppressLog  
 
                 write-host -verbose "Netdom results: $($result.ScriptBlockOutput)"
-                if ($result.ScriptBlockOutput -and  $result.ScriptBlockOutput -like "*has been successfully verified*") {
+                if ($result.ScriptBlockOutput -and $result.ScriptBlockOutput -like "*has been successfully verified*") {
 
                     if ($IfBroken) {
                         Write-GreenCheck "Trust Verified Successfully"
@@ -290,11 +290,33 @@ function Remove-Domain {
     $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
 
     Remove-ForestTrust -DomainName $DomainName
+    $DeleteVMs = {
     
-    if ($vmsToDelete) {
-        foreach ($vm in $vmsToDelete) {
-            Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
+        try {
+            $global:ScriptBlockName = "Delete Domain"
+            # Dot source common
+            #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    
+            $rootPath = Split-Path $using:PSScriptRoot -Parent
+            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+
+            $currentItem = $using:currentItem
+            $Phase = $using:Phase
+            $vm = $currentItem
+            Remove-VirtualMachine -VmName $vm.VmName
+            Write-Log "[Phase $Phase]: $($vm.vmName): Remove VM Successful" -OutputStream -Success
         }
+        catch {
+            Write-Log "[Phase $Phase]: $($vm.vmName): Failed to delete VM." -OutputStream -Failure
+        }
+    }
+
+
+    if ($vmsToDelete) {        
+        $start = Start-NormalJobs -machines $vmsToDelete -ScriptBlock $DeleteVMs -Phase "DomainRemove"
+
+        $result = Wait-Phase -Phase "DomainRemove" -Jobs $start.Jobs -AdditionalData $start.AdditionalData           
+        
     }
 
 
