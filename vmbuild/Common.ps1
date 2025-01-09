@@ -4016,7 +4016,7 @@ Function Install-HostToServer2025 {
     $filename = (Join-Path $common.AzureFilesPath $server2025.filename)
     if (Test-Path $filename) {
 
-        $response = Read-YesorNoWithTimeout -Prompt "Do you want to install Windows Server 2025 on this host?" -HideHelp -Default "y" -timeout 180
+        $response = Read-YesorNoWithTimeout -Prompt "Do you want to install Windows Server 2025 on this host? (Y/n)" -HideHelp -Default "y" -timeout 180
         if ($response -eq "n") {
             return
         }
