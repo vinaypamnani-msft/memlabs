@@ -4016,7 +4016,6 @@ Function Install-HostToServer2025 {
     $filename = (Join-Path $common.AzureFilesPath $server2025.filename)
     if (Test-Path $filename) {
 
-        Read-YesorNoWithTimeout -Message "Do you want to install Windows Server 2025 on this host?" -Timeout 180 
         $response = Read-YesorNoWithTimeout -Prompt "Do you want to install Windows Server 2025 on this host?" -HideHelp -Default "y" -timeout 180
         if ($response -eq "n") {
             return
@@ -4216,7 +4215,7 @@ if (-not $Common.Initialized) {
             StorageToken    = $null
         }
         $global:DSC_Copied = @()
-        
+
         Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
 
         Set-TitleBar "Init Phase"
