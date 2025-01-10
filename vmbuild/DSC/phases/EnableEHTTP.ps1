@@ -51,29 +51,31 @@ Set-Location "$($SiteCode):\" @initParams
 # Keep setting it every 30 seconds, 10 times and bail...
 $enabled = $false
 $attempts = 0
-$maxAttempts = 30
+$maxAttempts = 40
 
 if (-not $FirstRun) {
     # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
     $attempts = $maxAttempts
 }
+else {
 
-#Hack.. Set to HTTPS first, then back to EHTTP:
+    #Hack.. Set to HTTPS first, then back to EHTTP (First Run only):
 
-$NameSpace = "ROOT\SMS\site_$SiteCode"
-#Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
-# Get the WMI object
-$component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
-# Get the Props array
-$props = $component.Props
-# Find the index of the IISSSLState property in the Props array
-$index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
-# Change the Value of the IISSSLState property
-$props[$index].Value = 63
-# Assign the modified Props array back to the component
-$component.Props = $props
-# Save the changes
-$component.Put()
+    $NameSpace = "ROOT\SMS\site_$SiteCode"
+    #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
+    # Get the WMI object
+    $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+    # Get the Props array
+    $props = $component.Props
+    # Find the index of the IISSSLState property in the Props array
+    $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+    # Change the Value of the IISSSLState property
+    $props[$index].Value = 63
+    # Assign the modified Props array back to the component
+    $component.Props = $props
+    # Save the changes
+    $component.Put()
+}
 
 
 Write-DscStatus "Enabling e-HTTP" -NoStatus
