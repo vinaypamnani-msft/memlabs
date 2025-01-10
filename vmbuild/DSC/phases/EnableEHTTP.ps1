@@ -11,7 +11,7 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 
 # Read Site Code from registry
 Write-DscStatus "Setting PS Drive for ConfigMgr" -NoStatus
@@ -58,10 +58,44 @@ if (-not $FirstRun) {
     $attempts = $maxAttempts
 }
 
+#Hack.. Set to HTTPS first, then back to EHTTP:
+
+$NameSpace = "ROOT\SMS\site_$SiteCode"
+#Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
+# Get the WMI object
+$component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+# Get the Props array
+$props = $component.Props
+# Find the index of the IISSSLState property in the Props array
+$index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+# Change the Value of the IISSSLState property
+$props[$index].Value = 63
+# Assign the modified Props array back to the component
+$component.Props = $props
+# Save the changes
+$component.Put()
+
+
 Write-DscStatus "Enabling e-HTTP" -NoStatus
 do {
     $attempts++
     Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
+
+    $NameSpace = "ROOT\SMS\site_$SiteCode"
+    #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
+    # Get the WMI object
+    $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+    # Get the Props array
+    $props = $component.Props
+    # Find the index of the IISSSLState property in the Props array
+    $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+    # Change the Value of the IISSSLState property
+    $props[$index].Value = 1024
+    # Assign the modified Props array back to the component
+    $component.Props = $props
+    # Save the changes
+    $component.Put()
+
     Start-Sleep 15
     $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
     $enabled = ($prop.Value -band 1024) -eq 1024
