@@ -80,7 +80,7 @@ function Run-Test {
         $outputFile = Split-Path $testjson -leaf
         $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
         $config = Get-Content $testjson -Force | ConvertFrom-Json
-        if ($cmVersion) {
+        if ($cmVersion -and $config.cmOptions.version) {
             if ($config.cmOptions.version -ne $cmVersion) {
                 $config.cmOptions.version = $cmVersion
                 write-host "updating cmVersion to $cmVersion"
