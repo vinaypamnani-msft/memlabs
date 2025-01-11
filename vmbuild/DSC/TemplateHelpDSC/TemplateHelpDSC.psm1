@@ -1207,7 +1207,7 @@ class DownloadSCCM {
             Write-Status "Extracting $cmpath to $cmsourcepath"
             if (($_CMURL -like "*MCM_*") -or ($_CMURL -like "*go.microsoft.com*")) {
                 $size = (Get-Item $cmpath).length / 1GB
-                if ($size -gt 1) {
+                if ($size -gt 1 -or $_CM -eq "CMTP") {
                     Write-Status "Extracting $cmpath to $cmsourcepath using: Start-Process -Filepath ($cmpath) -ArgumentList ('-d' + $cmsourcepath + ' -s2') -Wait"
                     $process = Start-Process -Filepath ($cmpath) -ArgumentList ('-d' + $cmsourcepath + ' -s2') -Wait -PassThru
                     Write-Status "$cmPath return code: $($process.ExitCode)"

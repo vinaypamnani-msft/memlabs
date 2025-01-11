@@ -69,6 +69,7 @@
             ReplicationScope = 'Forest'
             Ensure           = 'Present'
             DependsOn        = "[RemoteDesktopAdmin]RemoteDesktopSettings"
+            PsDscRunAsCredential = $Admincreds
         }
 
         $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"

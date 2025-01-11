@@ -134,7 +134,9 @@ function Start-NormalJobs {
     $maxVmNameLength = 0
     $maxRoleNameLength = 0
 
-    $phase = "NormalJob"
+    if (-not $phase) {
+        $phase = "NormalJob"
+    }
     foreach ($currentItem in $machines) {
         $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
         if ($currentItem.vmName.Length -gt $maxVmNameLength) {
@@ -232,7 +234,7 @@ function Start-PhaseJobs {
         }
 
         # Don't touch hidden VM's in Phase 1 or 10
-        if ($currentItem.hidden -and $Phase -in @(1,10)) {
+        if ($currentItem.hidden -and $Phase -in @(1, 10)) {
             continue
         }
 
