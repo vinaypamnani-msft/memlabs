@@ -292,6 +292,10 @@ function Select-ConfigMenu {
                 $testPath = Join-Path $configDir "tests"
                 $SelectedConfig = Select-Config $testPath -NoMore
             }
+            "x" {
+                $testPath = Join-Path $configDir "tests"
+                $SelectedConfig = Select-Config $testPath -NoMore
+            }
             "!" {
                 $SelectedConfig = $Global:SavedConfig
                 $Global:SavedConfig = $null
@@ -4209,16 +4213,16 @@ function Get-SortedProperties {
         $sorted += "DeploymentType"
     }
     if ($members.Name -contains "domainName") {
-        $sorted += "domainName"
+        $sorted += "DomainName"
     }
     if ($members.Name -contains "CMVersion") {
         $sorted += "CMVersion"
     }
     if ($members.Name -contains "prefix") {
-        $sorted += "prefix"
+        $sorted += "Prefix"
     }
     if ($members.Name -contains "network") {
-        $sorted += "network"
+        $sorted += "Network"
     }
     if ($members.Name -contains "DefaultServerOS") {
         $sorted += "DefaultServerOS"
@@ -4239,28 +4243,28 @@ function Get-SortedProperties {
         $sorted += "IncludeSSMSOnNONSQL"
     }
     if ($members.Name -contains "adminName") {
-        $sorted += "adminName"
+        $sorted += "AdminName"
     }
     if ($members.Name -contains "basePath") {
-        $sorted += "basePath"
+        $sorted += "BasePath"
     }
     if ($members.Name -contains "domainUser") {
-        $sorted += "domainUser"
+        $sorted += "DomainUser"
     }
     if ($members.Name -contains "role") {
-        $sorted += "role"
+        $sorted += "Role"
     }
     if ($members.Name -contains "memory") {
-        $sorted += "memory"
+        $sorted += "Memory"
     }
     if ($members.Name -contains "dynamicMinRam") {
-        $sorted += "dynamicMinRam"
+        $sorted += "DynamicMinRam"
     }
     if ($members.Name -contains "virtualProcs") {
-        $sorted += "virtualProcs"
+        $sorted += "VirtualProcs"
     }
     if ($members.Name -contains "operatingSystem") {
-        $sorted += "operatingSystem"
+        $sorted += "OperatingSystem"
     }
     if ($members.Name -contains "sqlVersion") {
         $sorted += "sqlVersion"
@@ -4275,22 +4279,22 @@ function Get-SortedProperties {
         $sorted += "sqlPort"
     }
     if ($members.Name -contains "remoteSQLVM") {
-        $sorted += "remoteSQLVM"
+        $sorted += "RemoteSQLVM"
     }
     if ($members.Name -contains "cmInstallDir") {
         $sorted += "cmInstallDir"
     }
     if ($members.Name -contains "parentSiteCode") {
-        $sorted += "parentSiteCode"
+        $sorted += "ParentSiteCode"
     }
     if ($members.Name -contains "siteCode") {
-        $sorted += "siteCode"
+        $sorted += "SiteCode"
     }
     if ($members.Name -contains "siteName") {
-        $sorted += "siteName"
+        $sorted += "SiteName"
     }
     if ($members.Name -contains "remoteContentLibVM") {
-        $sorted += "remoteContentLibVM"
+        $sorted += "RemoteContentLibVM"
     }
     if ($members.Name -contains "tpmEnabled") {
         $sorted += "tpmEnabled"
@@ -4303,22 +4307,22 @@ function Get-SortedProperties {
     }
 
     if ($members.Name -contains "additionalDisks") {
-        $sorted += "additionalDisks"
+        $sorted += "AdditionalDisks"
     }
     if ($members.Name -contains "installDP") {
-        $sorted += "installDP"
+        $sorted += "InstallDP"
     }
     if ($members.Name -contains "enablePullDP") {
-        $sorted += "enablePullDP"
+        $sorted += "EnablePullDP"
     }
     if ($members.Name -contains "installMP") {
-        $sorted += "installMP"
+        $sorted += "InstallMP"
     }
     if ($members.Name -contains "installRP") {
-        $sorted += "installRP"
+        $sorted += "InstallRP"
     }
     if ($members.Name -contains "installSUP") {
-        $sorted += "installSUP"
+        $sorted += "InstallSUP"
     }
 
     if ($members.Name -contains "Version") {

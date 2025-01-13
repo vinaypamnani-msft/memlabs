@@ -406,6 +406,7 @@ function Write-Log {
 
     # Write progress if output stream and failure present
     if ($OutputStream.IsPresent -and $Failure.IsPresent) {
+        Write-Error $Text
         Write-Progress -Activity $Text -Status "Failed :-(" -Completed
     }
 

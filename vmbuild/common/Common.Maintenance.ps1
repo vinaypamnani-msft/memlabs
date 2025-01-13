@@ -23,7 +23,7 @@ function Start-Maintenance {
     Write-Log -Verbose "Latest Hotfix Version: $($Common.LatestHotfixVersion)"
     $countWorked = $countFailed = $countSkipped = 0
     # Filter in-progress
-    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true -and -not ($_.Role -in @("OSDClient", "Linux", "AADClient"))}
+    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true -and -not ($_.Role -in @("OSDClient", "Linux", "AADClient")) }
     $newVmsNeedingMaintenance = @()
     foreach ($vm in $vmsNeedingMaintenance) {
         Write-Log -Verbose "VM Name: $($vm.vmName) Version: $($vm.memLabsVersion)"
@@ -226,7 +226,9 @@ function Start-VMMaintenance {
             catch {}
         }
         try {
-            Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $logoffusers
+            if ($ApplyNewOnly.IsPresent) {
+                Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $logoffusers
+            }
         }
         catch {}
     }

@@ -1,0 +1,71 @@
+{
+  "vmOptions": {
+    "prefix": "NOC-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "nocm.com",
+    "domainNetBiosName": "nocm",
+    "adminName": "admin2",
+    "network": "10.220.203.0",
+    "timeZone": "Eastern Standard Time",
+    "locale": "en-US"
+  },
+  "domainDefaults": {
+    "DeploymentType": "No ConfigMgr",
+    "CMVersion": "2403",
+    "DomainName": "adatum.com",
+    "Network": "10.220.201.0",
+    "DefaultClientOS": "Windows 11 Latest",
+    "DefaultServerOS": "Server 2022",
+    "DefaultSqlVersion": "Sql Server 2022",
+    "UseDynamicMemory": true,
+    "IncludeClients": false,
+    "IncludeSSMSOnNONSQL": false
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "OSD1",
+      "role": "OSDClient",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "useFakeWSUSServer": false,
+      "vmGeneration": "2",
+      "dynamicMinRam": "1GB"
+    },
+    {
+      "vmName": "W22SQL1",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2022",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "sqlVersion": "Sql Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "LocalSystem",
+      "SqlAgentAccount": "LocalSystem",
+      "installSSMS": true,
+      "dynamicMinRam": "1GB",
+      "installRP": false
+    },
+    {
+      "vmName": "WSUS1",
+      "role": "WSUS",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "wsusContentDir": "E:\\WSUS",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "dynamicMinRam": "1GB",
+      "remoteSQLVM": "W22SQL1"
+    }
+  ]
+}

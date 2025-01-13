@@ -1,0 +1,37 @@
+{
+  "vmOptions": {
+    "prefix": "NOC-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "nocm.com",
+    "domainNetBiosName": "nocm",
+    "adminName": "admin2",
+    "network": "10.220.201.0",
+    "timeZone": "Eastern Standard Time",
+    "locale": "en-US"
+  },
+  "domainDefaults": {
+    "DeploymentType": "No ConfigMgr",
+    "CMVersion": "2403",
+    "DomainName": "adatum.com",
+    "Network": "10.220.201.0",
+    "DefaultClientOS": "Windows 11 Latest",
+    "DefaultServerOS": "Server 2022",
+    "DefaultSqlVersion": "Sql Server 2022",
+    "UseDynamicMemory": true,
+    "IncludeClients": false,
+    "IncludeSSMSOnNONSQL": false
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "DC1",
+      "role": "DC",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": false,
+      "InstallCA": true,
+      "ForestTrust": "NONE",
+      "dynamicMinRam": "1GB"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "vmOptions": {
+    "prefix": "NOC-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "nocm.com",
+    "domainNetBiosName": "nocm",
+    "adminName": "admin2",
+    "network": "10.220.202.0",
+    "timeZone": "Eastern Standard Time",
+    "locale": "en-US"
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "W10CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 Latest (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": false,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user2",
+      "dynamicMinRam": "2GB"
+    }
+  ]
+}

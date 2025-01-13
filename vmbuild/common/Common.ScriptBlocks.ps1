@@ -478,6 +478,7 @@ $global:VM_Create = {
                 )
                 $OriginalPref = $ProgressPreference
                 $ProgressPreference = "SilentlyContinue"
+                Import-Module Storage
                 $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
                 $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null     
                 $ProgressPreference = $OriginalPref  

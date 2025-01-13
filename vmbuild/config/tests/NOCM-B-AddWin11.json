@@ -1,0 +1,30 @@
+{
+  "vmOptions": {
+    "prefix": "NOC-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "nocm.com",
+    "domainNetBiosName": "nocm",
+    "adminName": "admin2",
+    "network": "10.220.201.0",
+    "timeZone": "Eastern Standard Time",
+    "locale": "en-US"
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "W11CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 Latest",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user1",
+      "dynamicMinRam": "4GB",
+      "additionalDisks": {
+        "E": "400GB",
+        "F": "250GB"
+      }
+    }
+  ]
+}
