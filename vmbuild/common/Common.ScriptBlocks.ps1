@@ -478,9 +478,37 @@ $global:VM_Create = {
                 )
                 $OriginalPref = $ProgressPreference
                 $ProgressPreference = "SilentlyContinue"
-                Import-Module Storage
-                $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
-                $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null     
+                try {
+                    Import-Module Storage
+                }
+                catch {}
+                
+                try {
+                    $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+                }
+                catch {
+                    try {
+                    (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
+                        Get-Disk | Update-Disk
+                        start-sleep -Seconds 30
+                    }
+                    catch {}
+                    $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+                }
+                if ($rawdisk) {
+                    try {
+                        $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null     
+                    }
+                    catch {
+                        try {
+                            (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
+                            Get-Disk | Update-Disk
+                            start-sleep -Seconds 30
+                        }
+                        catch {}
+                        $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null 
+                    }
+                }
                 $ProgressPreference = $OriginalPref  
  
                 # Create NO_SMS_ON_DRIVE.SMS
