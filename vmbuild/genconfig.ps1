@@ -224,7 +224,13 @@ function Check-OverallHealth {
         }
    
         if ($rebootedInLast12Hours) {
-            Write-GreenCheck "It's patch Tuesday, but the machine has already rebooted in the last 12 hours."
+            $hotfixCount = (Get-HotFix | Where-Object { $_.InstalledOn -eq (Get-Date).Date }).Count
+            if ($hotfixCount -gt 0) {
+                Write-GreenCheck "It's patch Tuesday, and $hotfixCount hotfixes were installed today"
+            }
+            else {
+                Write-OrangePoint2 "It's patch Tuesday, Machine was rebooted, but 0 hotfixes were installed today"
+            }
         }
         else {
             Write-RedX "It's patch Tuesday, your machine will reboot today at 2-3 PM EST."
