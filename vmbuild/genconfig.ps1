@@ -208,7 +208,32 @@ function Check-OverallHealth {
             Write-RedX "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
         }
     }
+    
+    $today = Get-Date
+    $firstDayOfMonth = Get-Date -Year $today.Year -Month $today.Month -Day 1
+    $firstTuesday = $firstDayOfMonth.AddDays((([int][DayOfWeek]::Tuesday) - [int]$firstDayOfMonth.DayOfWeek + 7) % 7)
+    $secondTuesday = $firstTuesday.AddDays(7)
+    
+    if ($today.Date -eq $secondTuesday.Date) {
 
+        $rebootedInLast12Hours = $false
+        $timeSinceLastReboot = (get-uptime).hours
+
+        if ($timeSinceLastReboot.TotalHours -le 12) {
+            $rebootedInLast12Hours = $true
+        }
+   
+        if ($rebootedInLast12Hours) {
+            Write-GreenCheck "It's patch Tuesday, but the machine has already rebooted in the last 12 hours."
+        }
+        else {
+            Write-RedX "It's patch Tuesday, your machine will reboot today at 2-3 PM EST."
+        }
+
+    }
+  
+
+ 
     
 
 }
