@@ -230,15 +230,15 @@ if ($scenario -eq "Standalone") {
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
-    #Install BGs
-    Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
-   
 
     Write-DscStatus "$scenario Running InstallRoles.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+
+    #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
+    Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
@@ -284,17 +284,16 @@ if ($scenario -eq "Hierarchy") {
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
-        #Install DP/MP/Client
-        Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
-        Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
-
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
+         #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
+        Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
 
     }
 }
@@ -311,11 +310,11 @@ if ($containsPassive) {
 Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
 if ($CurrentRole -eq "CAS") {
     #If we are on the CAS, we can mark this early, to allow the primary to start while we run other tasks.
-# Mark ScriptWorkflow completed for DSC to move on.
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-$Configuration.ScriptWorkflow.Status = "Completed"
-$Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    # Mark ScriptWorkflow completed for DSC to move on.
+    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration.ScriptWorkflow.Status = "Completed"
+    $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 }
 
