@@ -7,6 +7,9 @@ param(
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 
+
+Write-DscStatus "ScriptWorkflow.ps1 called with $ConfigFilePath and $LogPath)"
+
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }

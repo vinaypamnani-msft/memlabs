@@ -281,6 +281,7 @@ CurrentBranch=1
 
     Write-DscStatus "Starting Pre-Req Download using $CMSetupDL /NOUI $CMRedist"
 
+    $maxTries = 20
     # We require 2 success entries in a row
     while ($success -le 1) {
 
@@ -300,17 +301,18 @@ CurrentBranch=1
         }
         else {
             #If we didnt find it, increment fail count, and bail after 10 fails
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
             $success = 0
             $fail++
             if ($fail -ge 20) {
-                Write-DscStatus "Pre-Req Downloading failed after 20 tries. see $CMLog"
+                Write-DscStatus "Pre-Req Downloading failed after $maxTries tries. see $CMLog"
                 # Set Status to not 'Running' so it can run again.
                 $Configuration.InstallSCCM.Status = 'Failed'
                 $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                 Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
                 return
             }
-            Write-DscStatus "Pre-Req downloading Failed. Try $fail out of 10 See $CMLog for progress"
+            Write-DscStatus "Pre-Req downloading Failed. Try $fail out of $maxTries See $CMLog for progress"
             start-sleep -Seconds 30
         }
     }

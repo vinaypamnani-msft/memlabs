@@ -115,20 +115,7 @@
       "apiVersion": "2019-02-01",
       "location": "[variables('location')]",
       "properties": {
-        "securityRules": [
-          {
-            "name": "windows-admin-center",
-            "properties": {
-              "priority": 900,
-              "access": "Allow",
-              "direction": "Inbound",
-              "destinationPortRange": "[variables('windowsAdminCenterPort')]",
-              "protocol": "Tcp",
-              "sourceAddressPrefix": "*",
-              "sourcePortRange": "*",
-              "destinationAddressPrefix": "*"
-            }
-          },
+        "securityRules": [          
           {
             "name": "AllowCorpnet",
             "properties": {
@@ -150,7 +137,7 @@
         ]
       },
       "tags": {
-        "CSSLAB": "[variables('tagName')]"
+        "CSSLAB": "[variables('tagName')]"        
       }
     },
     {
@@ -306,7 +293,8 @@
       },
       "tags": {
         "CSSLAB": "[variables('tagName')]",
-        "Automation": "Ignore"
+        "Automation": "Ignore",
+        "CostControl" : "Ignore"
       }
     },
     {

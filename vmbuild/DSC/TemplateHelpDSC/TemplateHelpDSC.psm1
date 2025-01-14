@@ -25,7 +25,7 @@ function Invoke-DownloadFile {
         catch {
             Write-Verbose $_
             Write-Status "Failed Downloading $url to $dest Using WebClient. Retrying using Start-BitsTransfer"
-            ipconfig /flushdns
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
             try {
                 Start-BitsTransfer -Source $url -Destination $dest -Priority Foreground -ErrorAction Stop
             }
@@ -1054,7 +1054,7 @@ class DelegateControl {
         $maxretries = 15
         while ($retries -le $maxretries) {
 
-            ipconfig /flushdns
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
 
             if ($retries -eq 5) {
                 $_FileName = "C:\temp\SysMgmt.txt"
@@ -1312,9 +1312,9 @@ class WaitForDomainReady {
         $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         while (!$testconnection) {
             Write-Status "Waiting for Domain ready. Trying to ping $_DCName, will try again $_WaitSeconds seconds later..."
-            ipconfig /flushdns
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
             ipconfig /renew
-            ipconfig /registerdns
+            Register-DnsClient -ErrorAction SilentlyContinue
             Start-Sleep -Seconds $_WaitSeconds
             $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         }
@@ -1333,7 +1333,7 @@ class WaitForDomainReady {
             return $false
         }
 
-        ipconfig /registerdns
+        Register-DnsClient -ErrorAction SilentlyContinue
         return $true
     }
 
@@ -2981,40 +2981,46 @@ class ModuleAdd {
 
         $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue 
 
-        IF ($null -eq $module) {
+        if ($null -eq $module) {
             try { 
                 Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
             }
             catch {
+                Write-Verbose "$_"
                 write-Status "Retry. Installing powershell module PowerShellGet for scope $_userScope"
-                Start-Sleep -Seconds 120
-                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                Clear-DnsClientCache -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 20
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             }
         }
 
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
-        IF ($null -eq $module) {
-            IF ($this.Clobber -eq 'Yes') {
+        if ($null -eq $module) {
+            if ($this.Clobber -eq 'Yes') {
                 try {
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope."
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop
                 }
                 catch {
+                    Write-Verbose "$_"
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope.."
-                    Start-Sleep -Seconds 120
-                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    Clear-DnsClientCache -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 20
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
                 }
             }
-            ELSE {
+            else {
                 try {
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope..."
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
                 }
                 catch {
+                    Write-Verbose "$_"
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope...."
-                    Start-Sleep -Seconds 120
-                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -AcceptLicense -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    Clear-DnsClientCache -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 20
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
                 }
             }
         }
@@ -3918,7 +3924,7 @@ class RunPkiSync {
 
             }
             catch {
-                ipconfig /flushdns
+                Clear-DnsClientCache -ErrorAction SilentlyContinue
                 gpupdate.exe /force
                 Write-Verbose $_
                 Start-Sleep -Seconds 20
@@ -3933,7 +3939,7 @@ class RunPkiSync {
                 }
             }
             catch {
-                ipconfig /flushdns
+                Clear-DnsClientCache -ErrorAction SilentlyContinue
                 gpupdate.exe /force
                 Write-Verbose $_
                 Start-Sleep -Seconds 20

@@ -1121,12 +1121,14 @@ function Test-NetworkSwitch {
                 break
             }
             else {
-                Write-Log "HyperV Network switch for '$NetworkName' already exists, but with different notes. Deleting and recreating."
+                Write-Log "HyperV Network switch for '$NetworkName' already exists, but with different notes. Updating note"
+                Write-Log "Current switch has $($exists.Notes) but we expected $notes"
                 try {
-                    Remove-VMSwitch2 -NetworkName $NetworkName | Out-Null
+                    set-vmswitch -name $NetworkName -Notes $notes
+                    #Remove-VMSwitch2 -NetworkName $NetworkName | Out-Null
                 }
                 catch {
-                    Write-Log "Failed to remove HyperV Network switch for $NetworkName. Trying again in 30 seconds"
+                    Write-Log "Failed to set HyperV Network switch for $NetworkName. Trying again in 30 seconds"
                     start-sleep -seconds 30
                     Remove-VMSwitch2 -NetworkName $NetworkName | Out-Null                    
                 }
@@ -1429,17 +1431,26 @@ function Test-DHCPScope {
                         }
                     }
                     $retry++
-                    Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction Stop
+                    Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction Stop -ErrorVariable ScopeErr
                     $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction Stop
                     if ($scope) {
                         Write-GreenCheck "'$ScopeID ($ScopeName)' scope added to DHCP."
                     }
                     else {
-                        Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
+                        Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure 
                     }
                 }
                 catch {
-                    Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
+                    Write-Log "Exception: Failed to add '$ScopeID ($ScopeName)' to DHCP. $_" -Failure
+                    if ($_ -like '*Failed to get version of the DHCP server*') {
+                        write-log -Failure "DCHP service is not connectable.  Please reboot your LABHOST VM."
+                        return $false
+                    }
+                    $dhcp = Start-DHCP -restart
+                        if (-not $dhcp) {
+                            Write-Log "DHCP Could not be started" -Failure
+                            return $false
+                        }
                 }
             }
 
@@ -1995,8 +2006,11 @@ function New-VirtualMachine {
                     $priority = 50
                     $buffer = 20
                 }
-                if ($dynamicMinRam -gt 40MB) {
+                if (($dynamicMinRam /1) -gt 40MB) {
+                    Write-log -logonly "$VmName` Setting Dynamic Ram to $dynamicMinRam / $Memory"
                     $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes ($dynamicMinRam / 1) -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop               
+                }else {
+                    Write-log -logonly "$VmName` Not Setting Dynamic Ram to $dynamicMinRam / $Memory"
                 }
             }
         }

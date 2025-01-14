@@ -88,6 +88,7 @@ function Run-Test {
         }
         if ($dynamicMemory) {
             foreach ($vm in $config.virtualMachines) {
+                write-host "updating dynamicMinRam to 1GB on $($vm.VmName)"
                 $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value "1GB" -Force
             }       
         }
@@ -103,7 +104,7 @@ function Run-Test {
         $global:removedomains = @($global:removedomains | Select-Object -Unique)
 
         $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
-        Write-Host "Starting test for $testjson"
+        Write-Host "Starting test for $testjson.  Adding $domainName to $($global:removeddomains -join ',')"
         try {
             & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
             if ($LASTEXITCODE -eq 55) {
@@ -163,17 +164,20 @@ try {
                 write-host "$Test already ran skipping"
                 continue
             }
-            $result = Run-Test -Test $Test
+            $result = Run-Test -Test $($Test + "-")
             Write-Host "$Test returned $result"
             if (-not $result) {
                 break
             }
             if ($global:removedomains.Count -gt 0) {
                 foreach ($domain in $global:removedomains) {
-                    ./Remove-lab.ps1 -DomainName $domain
+                    write-host "calling ./Remove-lab.ps1 -DomainName $domain"
+                    & ./Remove-lab.ps1 -DomainName $domain
                     $global:history += "$domain Removed"
                 }
                 $global:removedomains = @()
+            }else {
+                write-host "global:removedomains was empty"
             }
             $Test | Out-File "c:\temp\CompletedTests.txt" -Force -Append
         }

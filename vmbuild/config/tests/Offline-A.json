@@ -1,0 +1,130 @@
+{
+    "vmOptions": {
+      "prefix": "ADV-",
+      "basePath": "E:\\VirtualMachines",
+      "domainName": "adventure-works.com",
+      "domainNetBiosName": "adventure-works",
+      "adminName": "admin",
+      "network": "10.10.53.0",
+      "timeZone": "Central Standard Time",
+      "locale": "en-US"
+    },
+    "VirtualMachines": [
+      {
+        "vmName": "DC1",
+        "role": "DC",
+        "operatingSystem": "Server 2022",
+        "memory": "4GB",
+        "virtualProcs": 2,
+        "tpmEnabled": false,
+        "InstallCA": false,
+        "ForestTrust": "NONE"
+      },
+      {
+        "vmName": "PS1DPMPSUP1",
+        "role": "SiteSystem",
+        "operatingSystem": "Server 2022",
+        "memory": "3GB",
+        "virtualProcs": 4,
+        "tpmEnabled": true,
+        "installSSMS": true,
+        "additionalDisks": {
+          "E": "250GB"
+        },
+        "installDP": true,
+        "installMP": true,
+        "installSUP": true,
+        "installRP": false,
+        "siteCode": "PS1",
+        "wsusContentDir": "E:\\WSUS"
+      },
+      {
+        "vmName": "PS1SITE",
+        "role": "Primary",
+        "operatingSystem": "Server 2022",
+        "memory": "4GB",
+        "virtualProcs": 4,
+        "tpmEnabled": true,
+        "installSSMS": true,
+        "cmInstallDir": "E:\\ConfigMgr",
+        "additionalDisks": {
+          "E": "600GB"
+        },
+        "siteCode": "PS1",
+        "installSUP": false,
+        "installRP": false,
+        "siteName": "ConfigMgr Primary Site",
+        "remoteSQLVM": "PS1SQL"
+      },
+      {
+        "vmName": "PS1SQL",
+        "role": "DomainMember",
+        "operatingSystem": "Server 2022",
+        "memory": "7GB",
+        "virtualProcs": 8,
+        "tpmEnabled": false,
+        "installSSMS": true,
+        "sqlVersion": "SQL Server 2019",
+        "sqlInstanceName": "MSSQLSERVER",
+        "sqlInstanceDir": "E:\\SQL",
+        "sqlPort": "1433",
+        "additionalDisks": {
+          "E": "250GB"
+        },
+        "SqlServiceAccount": "LocalSystem",
+        "SqlAgentAccount": "LocalSystem",
+        "installRP": true
+      },
+      {
+        "vmName": "W10CLIENT1",
+        "role": "DomainMember",
+        "operatingSystem": "Windows 10 Latest (64-bit)",
+        "memory": "2GB",
+        "virtualProcs": 2,
+        "tpmEnabled": true,
+        "installSSMS": false,
+        "useFakeWSUSServer": false,
+        "domainUser": "user1"
+      },
+      {
+        "vmName": "W11CLIENT1",
+        "role": "DomainMember",
+        "operatingSystem": "Windows 11 Latest",
+        "memory": "4GB",
+        "virtualProcs": 2,
+        "tpmEnabled": true,
+        "installSSMS": false,
+        "useFakeWSUSServer": false,
+        "domainUser": "user2"
+      },
+      {
+        "vmName": "WSUS1",
+        "role": "WSUS",
+        "operatingSystem": "Server 2022",
+        "memory": "6GB",
+        "virtualProcs": 4,
+        "tpmEnabled": true,
+        "installSSMS": true,
+        "wsusContentDir": "E:\\WSUS",
+        "additionalDisks": {
+          "E": "250GB",
+          "F": "200GB"
+        },
+        "sqlVersion": "SQL Server 2022",
+        "sqlInstanceName": "MSSQLSERVER",
+        "sqlInstanceDir": "F:\\SQL",
+        "sqlPort": "1433",
+        "network": "10.10.52.0"
+      }
+    ],
+    "cmOptions": {
+      "Version": "2303",
+      "Install": true,
+      "PushClientToDomainMembers": true,
+      "EVALVersion": false,
+      "OfflineSCP": true,
+      "OfflineSUP": true,
+      "UsePKI": false
+    }
+  }
+  
