@@ -829,7 +829,7 @@ class WaitForEvent {
         $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
 
         while (!(Test-Path $ConfigurationFile)) {
-            Write-Verbose "Wait for configuration file to exist on $($this.MachineName), will try 30 seconds later..."
+            Write-Verbose "Wait for configuration file to exist on $($this.MachineName), will try again in 30 seconds..."
             Start-Sleep -Seconds 30
             $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
         }
@@ -847,7 +847,7 @@ class WaitForEvent {
             [void]$mtx.Dispose()
         }
         while ($Configuration.$($this.ReadNode).Status -ne $this.ReadNodeValue) {
-            Write-Verbose "Wait for step: [$($this.ReadNode)] to finish on $($this.MachineName), will try 30 seconds later..."
+            Write-Verbose "Wait for step: [$($this.ReadNode)] to finish on $($this.MachineName), will try again in 30 seconds..."
             Start-Sleep -Seconds 30
             $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
             Write-Verbose "Attempting to acquire '$_FileName' Mutex"
@@ -1311,7 +1311,7 @@ class WaitForDomainReady {
         Write-Verbose "Domain Controller is: $_DCName"
         $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
         while (!$testconnection) {
-            Write-Status "Waiting for Domain ready. Trying to ping $_DCName, will try again $_WaitSeconds seconds later..."
+            Write-Status "Waiting for Domain ready. Trying to ping $_DCName, will try again in $_WaitSeconds seconds..."
             Clear-DnsClientCache -ErrorAction SilentlyContinue
             ipconfig /renew
             Register-DnsClient -ErrorAction SilentlyContinue

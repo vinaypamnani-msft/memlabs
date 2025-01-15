@@ -399,7 +399,7 @@ function New-DeployConfig {
             parameters      = $params
         }
 
-        if ($configObject.domainDefaults){
+        if ($configObject.domainDefaults) {
             $deploy | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $configObject.domainDefaults -force
         }
         return $deploy
@@ -2615,7 +2615,18 @@ Function Show-Summary {
         Write-Host2 -ForegroundColor DeepPink "$($Common.LocalAdmin.GetNetworkCredential().Password)"
     }
 
-    $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,
+    $out = $fixedConfig | Format-table vmName, 
+    @{Label = "Role"; Expression = { $_.role } },
+    @{Label = "OperatingSystem"; Expression = { $_.operatingSystem } },
+    @{Label = "Memory" ; Expression = {
+            if (($_.dynamicMinRam / 1 ) -lt ($_.memory / 1 ) -and ($_.dynamicMinRam / 1 ) -ne 0 ) {    
+                $_.dynamicMinRam + "-" + $_.memory
+            }
+            else {
+                $_.memory
+            }
+        }
+    },
     @{Label = "Procs"; Expression = { $_.virtualProcs } },
     @{Label = "SiteCode"; Expression = {
             $SiteCode = $_.siteCode
@@ -2664,8 +2675,7 @@ Function Show-Summary {
                 }
             }
         }
-    } `
-    | Out-String
+    } ` | Out-String
     Write-Host
     $outIndented = $out.Trim() -split "\r\n"
     foreach ($line in $outIndented) {

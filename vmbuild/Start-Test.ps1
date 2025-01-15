@@ -47,6 +47,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Override Dynamic Memory", ParameterSetName = 'TestName')]
     [switch]$dynamicMemory,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Override Install CM", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Override Install CM", ParameterSetName = 'TestName')]
+    [switch]$DoNotInstallCM,
+
     [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'TestName')]
     [ArgumentCompleter({
@@ -84,8 +88,12 @@ function Run-Test {
             if ($config.cmOptions.version -ne $cmVersion) {
                 $config.cmOptions.version = $cmVersion
                 write-host "updating cmVersion to $cmVersion"
-            }        
+            } 
+            if ($DoNotInstallCM -and $config.cmOptions.Install)  {
+                $config.cmOptions.Install = $false
+            }
         }
+        
         if ($dynamicMemory) {
             foreach ($vm in $config.virtualMachines) {
                 write-host "updating dynamicMinRam to 1GB on $($vm.VmName)"

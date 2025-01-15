@@ -748,11 +748,11 @@ function Copy-ItemSafe {
     $location = $PSScriptRoot
     $testpath = Join-Path $location "Common.ps1"
     if (-not (Test-Path -PathType Leaf $testpath)) {
-        Write-Log "Could not find $testpath"
+        Write-Log "Could not find $testpath" -LogOnly
         $location = Split-Path $location -Parent
         $testpath = Join-Path $location "Common.ps1"
         if (-not (Test-Path -PathType Leaf $testpath)) {
-            Write-Log "Could not find $testpath"
+            Write-Log "Could not find $testpath" -LogOnly
             return $false
         }
     }
@@ -768,11 +768,11 @@ function Copy-ItemSafe {
             $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName
 
             if ($ps) {
-                Write-Log "[Copy-ItemSafe] [$($using:VMName)] Copying $($using:Path) to $($using:Destination) Whatif:$($using:WhatIF)"
+                Write-Log "[Copy-ItemSafe] [$($using:VMName)] Copying $($using:Path) to $($using:Destination) Whatif:$($using:WhatIF)" -LogOnly
                 Copy-Item -ToSession $ps -Path $using:Path -Destination $using:Destination -Recurse:$using:Recurse -Container:$using:Container -Force:$using:Force -verbose:$using:enableVerbose -WhatIf:$using:WhatIF
             }
             else {
-                Write-Log "[Copy-ItemSafe] Failed to get Powershell Session for $using:VMName"
+                Write-Log "[Copy-ItemSafe] Failed to get Powershell Session for $using:VMName" -Failure
                 return $false
             }
         }
@@ -783,7 +783,7 @@ function Copy-ItemSafe {
         return $true
     }
 
-    write-log "[Copy-Itemsafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force"
+    write-log "[Copy-Itemsafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force" -LogOnly
 
     $retries = 3
     while ($retries -gt 0) {
@@ -798,7 +798,7 @@ function Copy-ItemSafe {
         else {
             if ($wait.State -eq "Completed") {
                 $result = Receive-Job $job
-                write-log "[Copy-ItemSafe] returned: $result"
+                write-log "[Copy-ItemSafe] returned: $result" -LogOnly
                 remove-job $job | out-null
                 return $true
             }
@@ -3474,12 +3474,12 @@ function Copy-ToolToVM {
         }
         catch {}
         if ($isContainer) {
-            #Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+            Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+            #Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
         else {
-            #Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
-            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+            Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
+            #Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
         Write-Log "$vmName`: Done Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
     }

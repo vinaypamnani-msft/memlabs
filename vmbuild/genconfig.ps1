@@ -233,7 +233,7 @@ function Check-OverallHealth {
             }
         }
         else {
-            Write-RedX "It's patch Tuesday, your machine will reboot today at 2-3 PM EST."
+            Write-RedX "It's patch Tuesday, your machine will likely reboot today at 2-3 PM EST."
         }
 
     }

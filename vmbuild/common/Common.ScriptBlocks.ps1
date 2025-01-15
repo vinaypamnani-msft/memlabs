@@ -611,6 +611,7 @@ $global:VM_Create = {
         }
         
         if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.SiteCode -and $createVM) {
+            Write-Progress2 -Activity "$($currentItem.vmName): Prepopulating ISO files"
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if this is the Top Level SiteServer to prepopulate objects"
             $Parent = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -siteCode $currentItem.SiteCode -type Name -SmartUpdate:$false
 
@@ -688,6 +689,7 @@ $global:VM_Create = {
 
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
                 }
+                Write-Progress2 -Activity "$($currentItem.vmName): Prepopulating ISO files" -Completed
             }
         }
 
