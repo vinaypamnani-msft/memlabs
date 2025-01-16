@@ -51,7 +51,7 @@
     $adsites = $ThisVM.thisParams.sitesAndNetworks
 
     # Wait on machines to join domain
-    $waitOnDomainJoin = @($ThisVM.thisParams.ServersToWaitOn)
+    [System.Collections.ArrayList]$waitOnDomainJoin = @($ThisVM.thisParams.ServersToWaitOn)
 
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
@@ -90,7 +90,7 @@
         }
 
         if (-not $waitOnDomainJoin.Contains($member.vmName)) {
-            $waitOnDomainJoin = $waitOnDomainJoin.Add($member.vmName)
+            $waitOnDomainJoin += $member.vmName
         }
     }
 
