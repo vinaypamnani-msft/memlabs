@@ -539,6 +539,45 @@ function Get-VMFixes {
     #endregion
     ### Local account password expiration
 
+    #region Fix-Prereq
+    $Fix_Prereq = {
+        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+        if (-not $SiteCode) {
+            Write-host "Umm.. No sitecode in HKLM:\SOFTWARE\Microsoft\SMS\Identification"
+            return $true
+        }
+        $NameSpace = "ROOT\SMS\site_$SiteCode"
+        $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+        $props = $component.Props
+        $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+        $value = $props[$index].Value    
+        $enabled = ($value -band 1024) -eq 1024 -or ($value -eq 63)
+        if (-not $enabled) {
+            Write-Host  "IISSSLSTATE $value is not correct.. Updated for EHTTP"
+            $props[$index].Value = 1024
+            $component.Props = $props
+            $component.Put()
+            return $true
+        }
+        else {
+            write-host "IISSSLSTATE of $value looks good.. You should not be failing at prereq check"
+            return $true
+        }
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-PreReq"
+        FixVersion        = "250116.0"
+        AppliesToNew      = $false
+        AppliesToExisting = $true
+        AppliesToRoles    = @("Primary", "CAS")
+        NotAppliesToRoles = @()
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_Prereq 
+    }
+    #endregion
+
+
     #region Fix-Upgrade-Console
     $Fix_UpgradeConsole = {
         & C:\staging\DSC\phases\Upgrade-Console.ps1
