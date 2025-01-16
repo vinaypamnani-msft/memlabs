@@ -677,7 +677,7 @@
             }
         }
 
-        if ($ThisVM.externalDomainJoinSiteCode) {
+        if ($ThisVM.externalDomainJoinSiteCode -and $ThisVM.externalDomainJoinSiteCode -ne "NONE") {
             [System.Management.Automation.PSCredential]$groupCreds = New-Object System.Management.Automation.PSCredential ("$($ThisVM.ForestTrust)\Admin", $Admincreds.Password)
 
             WriteStatus WaitExtSchema {
@@ -706,18 +706,21 @@
                 DependsOn      = $waitOnDependency
                 IsGroup        = $true
             }
-
             $waitOnDependency = "[DelegateControl]AddremoteIISGroup"
-            if ($ThisVM.ForestTrust) {
-                AddToAdminGroup AddRemoteAdmins {
-                    DomainName   = $ThisVM.ForestTrust
-                    AccountNames = @($DomainAdminName, $Admincreds.UserName)
-                    RemoteCreds  = $groupCreds
-                    TargetGroup  = "Administrators"
-                    DependsOn    = $waitOnDependency
-                }
-                $waitOnDependency = "[AddToAdminGroup]AddRemoteAdmins"
+        }
 
+        
+        if ($ThisVM.ForestTrust) {
+            AddToAdminGroup AddRemoteAdmins {
+                DomainName   = $ThisVM.ForestTrust
+                AccountNames = @($DomainAdminName, $Admincreds.UserName)
+                RemoteCreds  = $groupCreds
+                TargetGroup  = "Administrators"
+                DependsOn    = $waitOnDependency
+            }
+            $waitOnDependency = "[AddToAdminGroup]AddRemoteAdmins"
+
+            if ($ThisVM.ThisParams.RootCA) {
                 AddToAdminGroup AddCertPublisher {
                     DomainName   = $ThisVM.ForestTrust
                     AccountNames = "$($OtherDCVM.VmName)$"
@@ -740,10 +743,11 @@
                 }
                 $waitOnDependency = "[RunPkiSync]RunPkiSync"
             }
-
-
-
         }
+
+
+
+        
         RemoteDesktopAdmin RemoteDesktopSettings {
             IsSingleInstance   = 'yes'
             Ensure             = 'Present'
