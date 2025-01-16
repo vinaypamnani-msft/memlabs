@@ -123,6 +123,7 @@
                 GroupName    = "$DomainName\ConfigMgr IIS Servers"
                 Permissions  = 'Read, Enroll'
                 PermissionsOnly = $true
+                SkipIfNotExist = $true
                 DependsOn    = $nextDepend
             }
             $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
@@ -132,22 +133,20 @@
                 GroupName    = "$DomainName\ConfigMgr IIS Servers"
                 Permissions  = 'Read, Enroll'
                 PermissionsOnly = $true
+                SkipIfNotExist = $true
                 DependsOn    = $nextDepend
             }
             $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
         }
-        ImportCertifcateTemplate ConfigMgrClientCertificate {
-            TemplateName = "ConfigMgrClientCertificate"
-            DNPath       = $DNName
-            DependsOn    = $nextDepend
-        }
-        $nextDepend = "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
         
+        $nextDepend = "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
+
         AddCertificateTemplate ConfigMgrClientCertificate {
             TemplateName = "ConfigMgrClientCertificate"
             GroupName    = "$DomainName\Domain Computers"
             Permissions  = 'Read, Enroll, AutoEnroll'
             PermissionsOnly = $true
+            SkipIfNotExist = $true
             DependsOn    = $nextDepend
         }
         $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"

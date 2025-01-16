@@ -3573,11 +3573,15 @@ class AddCertificateTemplate {
     [DscProperty()]
     [bool]$PermissionsOnly
 
+    [DscProperty()]
+    [bool]$SkipIfNotExist
+
     [void] Set() {
 
         $_TemplateName = $this.TemplateName
         $_Group = $this.GroupName
         $_Permissions = $this.Permissions
+        $_Skip = $this.SkipIfNotExist
 
         Write-Status "Adding Certificate Template $_TemplateName"           
 
@@ -3620,6 +3624,9 @@ class AddCertificateTemplate {
                     Write-Status "PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop"
                     $template = PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop
 
+                    if (-not $template -and $_Skip) {
+                        return
+                    }
                     Write-Status "PSPKI\Get-CertificateTemplateAcl -ErrorAction stop"
                     $templateacl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction stop
 
@@ -3631,6 +3638,9 @@ class AddCertificateTemplate {
                     $success = $true
                 }
                 catch {
+                    if ($_Skip) {
+                        return
+                    }
                     try {
                         $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
                         Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
@@ -3725,16 +3735,32 @@ class AddCertificateTemplate {
 
     [bool] Test() {
 
+        $_Skip = $this.SkipIfNotExist
+        $_TemplateName = $this.TemplateName
 
         if ($this.PermissionsOnly) {
+            if ($_Skip) {
+                try {
+                    $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
+                }
+                catch {
+                    return $true
+                }
+                if ($count -eq 0) {
+                    return $true
+                }
+            }
             return $false
         }
-        $_TemplateName = $this.TemplateName
+        
         try {
             Write-Verbose " -- ADCSAdministration\get-Catemplate"
             $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
         }
         catch {
+            if ($_Skip) {
+                return $true
+            }
             Write-Verbose "$_"
             Write-Verbose " -- Restart-Service -Name CertSvc"
             $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
@@ -3746,6 +3772,11 @@ class AddCertificateTemplate {
         }
         if ($count -gt 0) {
             return $true
+        }
+        else {
+            if ($_Skip) {
+                return $true
+            }
         }
 
         return $false
