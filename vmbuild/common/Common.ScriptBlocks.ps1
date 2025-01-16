@@ -1425,8 +1425,9 @@ $global:VM_Config = {
                 }
 
                 # Compile config, to create MOF
-                "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
+                "[Phase $Phase]: $($currentItem.vmName): Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append                
                 & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
+                "[Phase $Phase]: $($currentItem.vmName): Done Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
@@ -1557,8 +1558,9 @@ $global:VM_Config = {
 
                 # Compile config, to create MOF
                 $cd
-                "Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
+                "[Phase $Phase]: $($currentItem.vmName): Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
                 & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $credsForDSC -ConfigurationData $cd -OutputPath $dscConfigPath
+                "[Phase $Phase]: $($currentItem.vmName): Done Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
@@ -1574,7 +1576,7 @@ $global:VM_Config = {
             param($DscFolder)
             try {
                 $global:ScriptBlockName = "DSC_StartConfig"
-                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+                #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $ConfigurationData = $using:ConfigurationData
@@ -1759,7 +1761,7 @@ $global:VM_Config = {
             }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished waiting on all nodes"
 
-            Write-Progress2 "Starting DSC" -status "Invoking DSC_CreateConfig" -PercentComplete 0
+            Write-Progress2 "Creating DSC" -status "Invoking DSC_CreateConfig" -PercentComplete 0
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
