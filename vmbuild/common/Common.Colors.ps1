@@ -14,7 +14,6 @@ function Set-BackgroundImage {
         [ValidateSet("center", "left", "right", "top", "bottom", "topLeft", "topRight", "bottomLeft", "bottomRight")]
         [string] $alignment,
         [Parameter(Mandatory = $true, HelpMessage = "Enter the opacity of the image as a percentage (5-100)")]
-        [ValidateRange(0, 100)]
         [int] $opacityPercent,
         [Parameter(Mandatory = $true, HelpMessage = "Enter the stretch mode of the image")]
         [ValidateSet("none", "fill", "uniform", "uniformToFill")]
