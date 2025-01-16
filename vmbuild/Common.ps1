@@ -4098,9 +4098,9 @@ Function Set-TitleBar {
         $Text
     )
 
-    $VersionString = "MemLabs version $($global:Common.MemLabsVersion)"
+    $VersionString = "MemLabs $($global:Common.MemLabsVersion)"
     if ($devBranch) {
-        $VersionString = $VersionString + " (DevBranch)"
+        $VersionString = "DevLabs $($global:Common.MemLabsVersion)"        
     }
 
     if ($Global:ConfigFile) {
@@ -4134,9 +4134,7 @@ Function Set-TitleBar {
 
 if (-not $Common.Initialized) {
 
-    $image = (Join-Path $PSScriptRoot "MemLabs.png")    
-    # Write progress
-    Set-BackgroundImage $image "right" (50 - 1) "uniform" -InJob:$InJob
+
     Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
     $global:vm_remove_list = @()
     $global:init_failed = $false
@@ -4145,10 +4143,10 @@ if (-not $Common.Initialized) {
     try {
         ###################
         ### GIT BRANCH  ###
-        ###################
-        Set-BackgroundImage $image "right" (50 - 2) "uniform" -InJob:$InJob
+        ###################        
         Write-Progress2 "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
         write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
+        $image = (Join-Path $PSScriptRoot "MemLabs.png")    
         $devBranch = $false
         try {
             if ($pwd.Path -like '*memlabs*') {
@@ -4165,6 +4163,12 @@ if (-not $Common.Initialized) {
             $devBranch = $true
         }
 
+        if ($devBranch) {
+            $image = (Join-Path $PSScriptRoot "DevLabs.png")    
+        }
+       
+        # Write progress
+        Set-BackgroundImage $image "right" (50 - 1) "uniform" -InJob:$InJob
         # PS Version
         $PS7 = $false
         Set-BackgroundImage $image "right" (50 - 3) "uniform" -InJob:$InJob

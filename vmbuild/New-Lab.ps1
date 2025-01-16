@@ -148,11 +148,12 @@ Set-PS7ProgressWidth
 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "WinREVersion" -PropertyType String -Value "10.0.20348.2201" -Force | Out-Null
 
 if (-not $Common.DevBranch) {
-    Clear-Host
+    $image = (Join-Path $PSScriptRoot "MemLabs.png")
+    Set-BackgroundImage $image "right" 5 "uniform"
     Get-Animate
 }
 else {
-    $image = (Join-Path $PSScriptRoot "MemLabs.png")
+    $image = (Join-Path $PSScriptRoot "DevLabs.png")
     Set-BackgroundImage $image "right" 5 "uniform"
     Get-Animate
 }
