@@ -34,6 +34,58 @@ $global:Phase10Job = {
     }
 
 }
+ # Initialize disks
+ $global:Initialize_Disk = {
+    param($letter,
+        $size,
+        $label
+    )
+    $OriginalPref = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        Import-Module Storage
+    }
+    catch {}
+    if (-not $letter -or $letter -eq "AUTO") {
+        $usedLetters = Get-Volume | Select-Object -ExpandProperty DriveLetter
+        $allLetters = [char[]]([char]'E'..[char]'X')
+        $availableLetters = $allLetters | Where-Object { $_ -notin $usedLetters }
+        $letter = $availableLetters[0]
+    }
+
+
+    $size = ($size /1 )
+    try {
+        $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+    }
+    catch {
+        try {
+        (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
+            Get-Disk | Update-Disk
+            start-sleep -Seconds 30
+        }
+        catch {}
+        $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+    }
+    if ($rawdisk) {
+        try {
+            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null     
+        }
+        catch {
+            try {
+                (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
+                Get-Disk | Update-Disk
+                start-sleep -Seconds 30
+            }
+            catch {}
+            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null 
+        }
+    }
+    $ProgressPreference = $OriginalPref  
+
+    # Create NO_SMS_ON_DRIVE.SMS
+    New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
+}
 
 # Create VM script block
 $global:VM_Create = {
@@ -468,52 +520,7 @@ $global:VM_Create = {
                 $inProgress = (-not $Migrate)
                 New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $inProgress
             }
-        
-
-            # Initialize disks
-            $Initialize_Disk = {
-                param($letter,
-                    $size,
-                    $label
-                )
-                $OriginalPref = $ProgressPreference
-                $ProgressPreference = "SilentlyContinue"
-                try {
-                    Import-Module Storage
-                }
-                catch {}
-                
-                try {
-                    $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
-                }
-                catch {
-                    try {
-                    (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
-                        Get-Disk | Update-Disk
-                        start-sleep -Seconds 30
-                    }
-                    catch {}
-                    $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
-                }
-                if ($rawdisk) {
-                    try {
-                        $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null     
-                    }
-                    catch {
-                        try {
-                            (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
-                            Get-Disk | Update-Disk
-                            start-sleep -Seconds 30
-                        }
-                        catch {}
-                        $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null 
-                    }
-                }
-                $ProgressPreference = $OriginalPref  
- 
-                # Create NO_SMS_ON_DRIVE.SMS
-                New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
-            }
+                   
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
             Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed -Log
@@ -556,7 +563,7 @@ $global:VM_Create = {
                     $label = "DATA`_$count"
                     $count++
                 }
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Initialize_Disk -ArgumentList @($disk.Name, $disk.Value, $label)
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $global:Initialize_Disk -ArgumentList @($disk.Name, $disk.Value, $label)
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return

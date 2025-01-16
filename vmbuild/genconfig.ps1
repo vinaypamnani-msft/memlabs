@@ -6336,6 +6336,7 @@ function Select-VirtualMachines {
                     $existingVM = $true
                     $customOptions = [ordered] @{}
                     $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
+                    $customOptions += [ordered]@{"*N2" = ""; "*N" = "---  Add new Disk%$($Global:Common.Colors.GenConfigHeader)"; "N" = "Add a new VHDX to this VM" }
                     if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
 
 
@@ -6421,6 +6422,61 @@ function Select-VirtualMachines {
                     if ($newValue -eq "H") {
                         Write-Log -Verbose "Calling show-NewVMMenu to add passive node"
                         show-NewVMMenu -SiteCode $virtualMachine.SiteCode -role "PassiveSite"
+                        return
+                    }
+                    if ($newValue -eq "N") {
+
+                        Write-Log -Verbose "Adding new disk to VM"
+                        $count = 0
+                        $VmName = $virtualMachine.vmName
+                        $vmObject = get-vm2 -name $VmName
+                        Write-Log "Stopping $VmName"
+                        $stopped = Stop-Vm2 -Name $VmName -Passthru
+                        if (-not $stopped) {
+                            Write-Log "$VmName`: VM Not Stopped."
+                            return $false
+                        }
+                        while ($true) {
+                            $count++
+
+                            $Label = "NewDisk_$count"                        
+                            $newDiskName = "$VmName`_$label.vhdx"
+                            $newDiskPath = Join-Path $vmObject.Path $newDiskName
+                            if (Test-Path $newDiskPath) {
+                                continue
+                            }
+                            break
+                        }
+                        $size = "500GB"
+                        Write-Log "$VmName`: Adding $newDiskPath"
+                        if (-not $Migrate) {
+                            New-VHD -Path $newDiskPath -SizeBytes ($size / 1) -Dynamic | out-null
+                        }
+                        if (-not (Test-Path $newDiskPath)) {
+                            Write-Log "Failed to find $newDiskPath" -Failure
+                            return
+                        }
+                        Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath | out-null
+                        Write-Log "Starting $VmName"
+                        $Started = Start-Vm2 -Name $VmName -Passthru
+                        if (-not $Started) {
+                            Write-Log "$VmName`: VM Not Started."
+                            return $false
+                        }
+                        $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $virtualMachine.Domain -TimeoutMinutes 2 -Quiet
+                        if (-not $connected) {
+                            #Write-Progress2 -Log -PercentComplete 0 -Activity "StartVM" -Status "Could not connect to the VM after waiting for 2 minutes."
+                            Write-Log "$VmName`: Could not connect to the VM after waiting for 2 minutes."
+                            return $false
+                        }
+                        Write-Log "Initializing disk.." -NoNewLine
+                        $result = Invoke-VmCommand -VmName $VmName -VmDomainName $virtualMachine.Domain -ScriptBlock $global:Initialize_Disk -SuppressLog -ArgumentList @("AUTO", $size, $label)
+                        if ($result.ScriptBlockFailed) {
+                            Write-Log "Could not Initialize new disk" -LogOnly
+                        }
+                        else {
+                            Write-Log ".done"
+                        }
                         return
                     }
                     return

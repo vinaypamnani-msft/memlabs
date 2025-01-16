@@ -840,8 +840,13 @@ function Test-URL {
             return $true       
         }
         else {
-            Write-RedX "[$name] $url"
-            return $false
+            start-sleep -seconds 10
+            $output = & $curlPath -s -L --head -f $url
+            if ($LASTEXITCODE -ne 0) {
+                Write-RedX "[$name] curl -s -L --head $url returned $LASTEXITCODE" 
+                Write-Log -LogOnly "[$name] curl -s -L --head $url returned $LASTEXITCODE $output"
+                return $false
+            }
         }
     }
     catch {
@@ -1447,10 +1452,10 @@ function Test-DHCPScope {
                         return $false
                     }
                     $dhcp = Start-DHCP -restart
-                        if (-not $dhcp) {
-                            Write-Log "DHCP Could not be started" -Failure
-                            return $false
-                        }
+                    if (-not $dhcp) {
+                        Write-Log "DHCP Could not be started" -Failure
+                        return $false
+                    }
                 }
             }
 
@@ -2006,10 +2011,11 @@ function New-VirtualMachine {
                     $priority = 50
                     $buffer = 20
                 }
-                if (($dynamicMinRam /1) -gt 40MB) {
+                if (($dynamicMinRam / 1) -gt 40MB) {
                     Write-log -logonly "$VmName` Setting Dynamic Ram to $dynamicMinRam / $Memory"
                     $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes ($dynamicMinRam / 1) -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop               
-                }else {
+                }
+                else {
                     Write-log -logonly "$VmName` Not Setting Dynamic Ram to $dynamicMinRam / $Memory"
                 }
             }

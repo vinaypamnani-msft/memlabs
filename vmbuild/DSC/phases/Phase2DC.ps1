@@ -51,7 +51,7 @@
     $adsites = $ThisVM.thisParams.sitesAndNetworks
 
     # Wait on machines to join domain
-    $waitOnDomainJoin = $ThisVM.thisParams.ServersToWaitOn
+    $waitOnDomainJoin = @($ThisVM.thisParams.ServersToWaitOn)
 
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
@@ -63,14 +63,24 @@
         $OtherDC = $true
     }
 
-    $iiscount = 0
-    [System.Collections.ArrayList]$groupMembers = @()
+ 
+    $sitecount = 0
     $GroupMembersList = @()
     $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.Hidden }
+    [System.Collections.ArrayList]$cmgroupMembers = @()
+    foreach ($member in $GroupMembersList) {
+        $memberName = $member.vmName + "$"
+        if (-not $cmgroupMembers.Contains($memberName)) {
+            $sitecount = $cmgroupMembers.Add($memberName)
+            $sitecount++
+        }
+    }
+
     $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP -and -not $_.Hidden }
     $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP -and -not $_.Hidden }
     $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and -not $_.Hidden }
     $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and -not $_.Hidden }
+    $iiscount = 0
     [System.Collections.ArrayList]$iisgroupMembers = @()
     foreach ($member in $GroupMembersList) {
         $memberName = $member.vmName + "$"
@@ -78,7 +88,12 @@
             $iiscount = $iisgroupMembers.Add($memberName)
             $iiscount++
         }
+
+        if (-not $waitOnDomainJoin.Contains($member.vmName)) {
+            $waitOnDomainJoin = $waitOnDomainJoin.Add($member.vmName)
+        }
     }
+
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -541,17 +556,7 @@
 
             $waitOnDependency += "[DelegateControl]Add$server"
         }
-
-
-
-        $sitecount = 0
-        [System.Collections.ArrayList]$groupMembers = @()
-        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.hidden }
-        foreach ($member in $GroupMembersList) {
-            $sitecount = $groupMembers.Add($member.vmName + "$")
-            $sitecount++
-        }
-
+      
         if ($sitecount) {
 
             ADGroup ConfigMgrSiteServers {
@@ -560,7 +565,7 @@
                 GroupScope       = "Global"
                 Category         = "Security"
                 Description      = 'ConfigMgr Site Servers'
-                MembersToInclude = $groupMembers
+                MembersToInclude = $cmgroupMembers
                 DependsOn        = $waitOnDependency
             }
             $waitOnDependency = "[ADGroup]ConfigMgrSiteServers"
