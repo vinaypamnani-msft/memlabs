@@ -710,7 +710,7 @@
         }
 
         
-        if ($ThisVM.ForestTrust) {
+        if ($ThisVM.ForestTrust -and $ThisVM.ForestTrust -ne "NONE") {
             AddToAdminGroup AddRemoteAdmins {
                 DomainName   = $ThisVM.ForestTrust
                 AccountNames = @($DomainAdminName, $Admincreds.UserName)
