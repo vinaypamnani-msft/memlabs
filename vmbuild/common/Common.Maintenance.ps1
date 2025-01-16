@@ -546,6 +546,18 @@ function Get-VMFixes {
             Write-host "Umm.. No sitecode in HKLM:\SOFTWARE\Microsoft\SMS\Identification"
             return $true
         }
+        $version = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS' -Name 'Full Version'
+        if (-not $version) {
+            Write-host "Umm.. No Version found in HKLM:\SOFTWARE\Microsoft\SMS\Full Version"
+            return $false
+        }
+
+        if ([System.Version]$version -lt [System.Version]"5.0.9128")
+        {
+            Write-Host "2309 or older.. Should not force EHTTP"
+            return $true
+        }
+        
         $NameSpace = "ROOT\SMS\site_$SiteCode"
         $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
         $props = $component.Props
@@ -558,8 +570,7 @@ function Get-VMFixes {
             $component.Props = $props
             $component.Put()
             return $true
-        }
-        else {
+        } else {
             write-host "IISSSLSTATE of $value looks good.. You should not be failing at prereq check"
             return $true
         }
