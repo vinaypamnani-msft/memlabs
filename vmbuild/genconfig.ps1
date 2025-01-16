@@ -1759,58 +1759,59 @@ function Show-ExistingNetwork2 {
     #[string]$role = Select-RolesForExisting
 
 
-    if ($role -eq "H") {
-        $role = "PassiveSite"
-    }
-    if ($role -eq "L") {
-        $role = "Linux"
-    }
+    #if ($role -eq "H") {
+    #    $role = "PassiveSite"
+    #}
+    #if ($role -eq "L") {
+    #    $role = "Linux"
+    #}
 
-    if ($role) {
-        $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $domain
-    }
+    #if ($role) {
+    #    $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $domain
+    #}
    
-    if ($role -eq "Secondary") {
-        if (-not $parentSiteCode) {
-            return
-        }
-    }
-    if ($role -eq "PassiveSite") {
-        if (-not $global:Config) {
-            $existingPassive = Get-List -type VM -domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
-        }
-        else {
-            $existingPassive = Get-List2 -deployConfig $global:Config | Where-Object { $_.Role -eq "PassiveSite" }
-        }
-        $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+    #if ($role -eq "Secondary") {
+    #    if (-not $parentSiteCode) {
+    #        return
+    #    }
+    #}
+    #if ($role -eq "PassiveSite") {
+    #    if (-not $global:Config) {
+    #        $existingPassive = Get-List -type VM -domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
+    #    }
+    #    else {
+    #        $existingPassive = Get-List2 -deployConfig $global:Config | Where-Object { $_.Role -eq "PassiveSite" }
+    #    }
+    #    $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
 
-        $PossibleSS = @()
-        foreach ($item in $existingSS) {
-            if ($existingPassive.SiteCode -contains $item.Sitecode) {
-                continue
-            }
-            $PossibleSS += $item
-        }
+    #    $PossibleSS = @()
+    #    foreach ($item in $existingSS) {
+    #        if ($existingPassive.SiteCode -contains $item.Sitecode) {
+    #            continue
+    #        }
+    #        $PossibleSS += $item
+    #    }
 
-        if ($PossibleSS.Count -eq 0) {
-            Write-Host
-            Write-Host "No siteservers found that are elegible for HA"
-            return
-        }
-        $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
-        if ([string]::IsNullOrWhiteSpace($result)) {
-            return
-        }
-        $SiteCode = $result
-    }
+    #    if ($PossibleSS.Count -eq 0) {
+    #        Write-Host
+    #        Write-Host "No siteservers found that are elegible for HA"
+    #        return
+    #    }
+    #    $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
+    #    if ([string]::IsNullOrWhiteSpace($result)) {
+    #        return
+    #    }
+    #    $SiteCode = $result
+    #}
 
-    if ($role -eq "SiteSystem") {
-        $SiteCode = Get-SiteCodeForDPMP -Domain $domain
-        #write-host "Get-SiteCodeForDPMP return $SiteCode"
-    }
+    #if ($role -eq "SiteSystem") {
+    #    $SiteCode = Get-SiteCodeForDPMP -Domain $domain
+    #    #write-host "Get-SiteCodeForDPMP return $SiteCode"
+    #}
 
     [string]$subnet = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1).network
-    if ($role -ne "InternetClient" -and $role -ne "AADClient" -and $role -ne "PassiveSite") {
+    if (-not $subnet) {
+    #if ($role -ne "InternetClient" -and $role -ne "AADClient" -and $role -ne "PassiveSite") {
         $subnet = Select-ExistingSubnets -Domain $domain -Role $role -SiteCode $SiteCode
         Write-verbose "[Show-ExistingNetwork] Subnet returned from Select-ExistingSubnets '$subnet'"
         if ([string]::IsNullOrWhiteSpace($subnet)) {
