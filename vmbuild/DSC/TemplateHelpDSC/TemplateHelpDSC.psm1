@@ -1070,7 +1070,7 @@ class DelegateControl {
             }
 
             $retries++
-            Write-Status "Running dsacls.exe to add FULL Control to CN=System Management. Try $retries/$maxretries"
+            Write-Status "Running dsacls.exe to add FULL Control ($arg3) to $arg1. Try $retries/$maxretries"
             Write-Verbose "Running $cmd $arg1 $arg2 $arg3 $arg4"
             $result = & $cmd $arg1 $arg2 $arg3 $arg4 *>&1
 
@@ -3868,43 +3868,49 @@ class AddToAdminGroup {
 
 
         Write-Status "Adding accounts to $($this.TargetGroup)"
-        $retries = 30
+        $retries = 120
         $tryno = 0
+        $DisplayAccountName = "$($this.AccountNames -join ',')"
         while ($tryno -le $retries) {
             $tryno++
             try {
                 if ($this.DomainName -ne "NONE") {
                     foreach ($AccountName in $this.AccountNames) {
+                        $DisplayAccountName = "$($this.DomainName)\$AccountName"
 
-                        if ($AccountName.EndsWith("$")) {
-                            Write-Status "Adding Computer $($this.DomainName)\$AccountName"
+                        if ($AccountName.EndsWith("$")) {                           
+                            Write-Status "Adding Computer $DisplayAccountName to $($this.TargetGroup)"
                             $user1 = Get-ADComputer -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
                         }
                         else {
-                            Write-Status "Adding User  $($this.DomainName)\$AccountName"
+                            Write-Status "Adding User  $DisplayAccountName to $($this.TargetGroup)"
                             $user1 = Get-ADuser -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
                         }
+                        Write-Verbose "Add-ADGroupMember -Identity $($this.TargetGroup) -Members $user1 ($DisplayAccountName)"
                         Add-ADGroupMember -Identity $this.TargetGroup -Members $user1
                     }
                 }
                 else {
                     foreach ($AccountName in $this.AccountNames) {
 
+                        $DisplayAccountName = "$AccountName"
                         if ($AccountName.EndsWith("$")) {
-                            Write-Status "Adding Computer $AccountName"
+                            Write-Status "Adding Computer $DisplayAccountName"
                             $user2 = Get-ADComputer -Identity $AccountName
                         }
                         else {
-                            Write-Status "Adding User $AccountName"
+                            Write-Status "Adding User $DisplayAccountName"
                             $user2 = Get-ADuser -Identity $AccountName
                         }
+                        Write-Verbose "Add-ADGroupMember -Identity $($this.TargetGroup) -Members $user2 ($DisplayAccountName)"
                         Add-ADGroupMember -Identity $this.TargetGroup -Members $user2
                     }
                 }
             }
             catch {
+                Write-Status "Failed to add $DisplayAccountName To $($this.TargetGroup).  Retrying. $tryno/$retries"
                 Write-Verbose $_
-                start-sleep -seconds 60
+                start-sleep -seconds 5
                 continue
             }
             Write-Status "Done."
