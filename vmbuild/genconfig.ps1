@@ -5849,6 +5849,7 @@ function Add-NewVMForRole {
         }
         "BDC" {
             $virtualMachine.memory = "4GB"
+            $virtualMachine.tpmEnabled = $false
         }
     }
 

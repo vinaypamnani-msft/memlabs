@@ -2425,7 +2425,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "5"
+    [string] $Version = "6"
 
     [void] Set() {
         $_Role = $this.Role
@@ -2461,6 +2461,8 @@ class InstallFeatureForSCCM {
             #
             #
             #
+            Write-Status "Installing Windows Features: Web-Windows-Auth, web-ISAPI-Ext"
+            Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
 
             if ($_Role -contains "DC" -or $_Role -contains "BDC") {
                 #Moved to All Servers
@@ -2468,8 +2470,7 @@ class InstallFeatureForSCCM {
             }
             else {
                 # Always install IIS unless we are on a DC
-                Write-Status "Installing Windows Features: Web-Windows-Auth, web-ISAPI-Ext"
-                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
+  
 
                 # Always install BITS
                 Write-Status "Installing Windows Features: BITS, BITS-IIS-Ext"

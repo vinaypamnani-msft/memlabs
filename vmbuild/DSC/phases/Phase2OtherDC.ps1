@@ -139,8 +139,6 @@
             $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
         }
         
-        $nextDepend = "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
-
         AddCertificateTemplate ConfigMgrClientCertificate {
             TemplateName = "ConfigMgrClientCertificate"
             GroupName    = "$DomainName\Domain Computers"
