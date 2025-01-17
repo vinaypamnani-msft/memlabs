@@ -48,6 +48,8 @@ function Get-ValidSubnets {
     $usedSubnets = @()
     $usedSubnets += (Get-NetworkList).Network
 
+    #exclude any networks that already exist on the host
+    $usedSubnets += ((Get-NetIPAddress -AddressFamily IPV4).IPAddress | ForEach-Object { $_ -replace "\d{1,3}$","0" } )
     $usedSubnets += $excludeList
     if (-not $AllowExisting) {
         $usedSubnets += $configToCheck.vmOptions.network
