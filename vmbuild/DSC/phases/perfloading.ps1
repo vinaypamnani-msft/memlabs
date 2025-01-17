@@ -335,7 +335,7 @@ if (!$taskSequences) {
     Write-DscStatus "$Tag Successfully created windows 11 in-place upgrade TS"
     New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w10-In-Place Upgrade Task Sequence" -UpgradePackageId $win10UpgradePackageID -SoftwareUpdateStyle All
     Write-DscStatus "$Tag Successfully created windows 10 in-place upgrade TS"
-    $AdminName = $DCVM.adminName
+    $AdminName = $deployConfig.vmOptions.adminName
     ## Build and capture TS
 
     $buildandcapturewin11 = @{

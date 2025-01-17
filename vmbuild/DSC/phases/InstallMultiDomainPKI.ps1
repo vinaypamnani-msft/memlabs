@@ -91,7 +91,7 @@ if (Test-Path $cm_svc_file) {
     #Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
     #Start-Sleep -Seconds 5
 
-    $ForestDiscoveryAccount = "$DomainFullName\$($DC.adminName)"
+    $ForestDiscoveryAccount = "$DomainFullName\$($deployConfig.vmOptions.adminName)"
 
     Write-DscStatus "Adding $ForestDiscoveryAccount domain account as CM account for sitecode $SiteCode" -Log
     Start-Sleep -Seconds 5
