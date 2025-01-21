@@ -51,10 +51,38 @@ function Invoke-DownloadFile {
     }
 
     if ((Test-Path $dest)) {
+        $pattern = "https://.*/sqlserver.*-.*-x64_(.*).exe"
+        if ($url -match $pattern) {
+            $hash = get-filehash -Algorithm SHA1 $dest
+            if ($hash.Hash.ToLowerInvariant() -eq $matches[1])
+            {
+                Write-Verbose "Hash check passed for $dest ($($hash.Hash))"
+            }else {
+                $badfile = $dest + ".bad"
+                if (Test-Path $badfile) {
+                    remove-item $badfile -force
+                }
+                rename-item $dest $badfile
+                write-status "Hash check failed for $dest ($($hash.Hash))"
+                throw "Hash check failed for $dest ($($hash.Hash))"
+            }
+        }
+        If ((Get-Item $dest).length -gt 0kb) {
         write-status "Download of $url Succeeded"
+        }
+        else {
+            write-status "Failed to Download $url Destination file $dest is 0kb."
+            $badfile = $dest + ".bad"
+                if (Test-Path $badfile) {
+                    remove-item $badfile -force
+                }
+                rename-item $dest $badfile
+            throw "Failed to Download $url Destination file $dest is 0kb."
+        }
     }
     else {
         write-status "Failed to Download $url Destination file $dest missing."
+        throw "Failed to Download $url Destination file $dest missing."
     }
 
 }
@@ -553,6 +581,12 @@ class InstallSqlClient {
     }
 
     [bool] Test() {
+        $_path = $this.Path
+
+        if (-not (Test-Path -Path $_path)) {
+            return $false
+        }
+
         Write-Status "DSC Test- Checking deployment status"
         try {
             #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
@@ -1270,15 +1304,16 @@ class DownloadFile {
     }
 
     [bool] Test() {
-        if (!(Test-Path $this.FilePath)) {
-            return $false
-        }
+        #if (!(Test-Path $this.FilePath)) {
+        #    return $false
+        #}
 
-        If (!(Get-Item $this.FilePath).length -gt 0kb) {
-            return $false
-        }
+        #If (!(Get-Item $this.FilePath).length -gt 0kb) {
+        #    return $false
+        #}
 
-        return $true
+        #Let logic in Invoke-DownloadFile handle this
+        return $false
     }
 
     [DownloadFile] Get() {
@@ -3250,7 +3285,7 @@ class InstallPBIRS {
     [void] Set() {
         try {
             $_Creds = $this.DBcredentials
-            write-Status ("Configuring PBIRS for $($this.SqlServer) in $($this.InstallPath)")
+            write-Status ("Configuring PBIRS for $($this.SqlServer) in $($this.InstallPath) downloading from $($this.DownloadUrl)")
 
 
             $pbirsSetup = "C:\temp\PowerBIReportServer.exe"
