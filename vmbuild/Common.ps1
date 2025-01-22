@@ -825,7 +825,7 @@ function Test-URL {
 
     $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
     if (-not (Test-Path $curlPath)) {
-        Write-Log "Curl was not found, and could not be installed." -Failure
+        Write-Log "Curl was not found." -Failure
         return $false
     }
 
@@ -833,24 +833,31 @@ function Test-URL {
         $output = & $curlPath -s -L --head -f $url
         if ($LASTEXITCODE -eq 0) {        
             if ($output -match 'Location: https://www.bing.com') {
+                Write-Log -LogOnly "[$name] $url (Redirects to bing)" -Failure
                 Write-RedX "[$name] $url (Redirects to bing)"
                 return $false
             }
             Write-GreenCheck "[$name] $url"
+            Write-Log -LogOnly "[$name] $url Successful"
             return $true       
         }
         else {
+            #ipconfig /flushdns
+            Clear-DnsClientCache
             start-sleep -seconds 10
+            write-log "Curl retrying.. Last failure $output" -LogOnly
             $output = & $curlPath -s -L --head -f $url
+
             if ($LASTEXITCODE -ne 0) {
                 Write-RedX "[$name] curl -s -L --head $url returned $LASTEXITCODE" 
-                Write-Log -LogOnly "[$name] curl -s -L --head $url returned $LASTEXITCODE $output"
+                Write-Log -LogOnly "[$name] curl -s -L --head $url returned $LASTEXITCODE $output" -Failure
                 return $false
             }
         }
     }
     catch {
-        Write-Log "An error occurred while testing the URL: $_" -Failure
+        Write-RedX "[$name] An error occurred while testing the URL: $url $_" 
+        Write-Log "An error occurred while testing the URL: $url $_" -Failure
         return $false
     }
 }

@@ -222,8 +222,34 @@ Configuration Phase8
         #$ParentSiteCode = ($deployConfig.virtualMachines | where-object { $_.vmName -eq ($Node.NodeName) }).ParentSiteCode
         #$PSName = ($deployConfig.virtualMachines | where-object { $_.Role -eq "Primary" -and $_.SiteCode -eq $ParentSiteCode }).vmName
 
+        WriteStatus ODBCDriverInstall {            
+            Status = "Downloading and installing ODBC driver version 18"
+        }
+
+        InstallODBCDriver ODBCDriverInstall {
+            ODBCPath  = "C:\temp\msodbcsql.msi"
+            URL       = $deployConfig.URLS.ODBC
+            Ensure    = "Present"
+            DependsOn = "[WriteStatus]ODBCDriverInstall"
+        }
+        $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
+
+        WriteStatus ReportBuilderInstall {            
+            Status = "Downloading and installing ODBC driver version 18"
+            DependsOn     = $nextDepend
+        }
+
+        InstallReportBuilder InstallReportBuilder {
+            Path  = "C:\temp\ReportBuilder.msi"
+            URL       = $deployConfig.URLS.ReportBuilder
+            Ensure    = "Present"
+            DependsOn     = $nextDepend
+        }
+        $nextDepend = "[InstallReportBuilder]InstallReportBuilder"
+
         WriteStatus WaitPrimary {
             Status = "Waiting for Site Server $PSName to finish configuration."
+            DependsOn     = $nextDepend
         }
 
         WaitForEvent WaitPrimary {
@@ -233,7 +259,7 @@ Configuration Phase8
             ReadNode      = "ScriptWorkflow"
             ReadNodeValue = "Completed"
             Ensure        = "Present"
-            DependsOn     = "[WriteStatus]WaitPrimary"
+            DependsOn     = $nextDepend
         }
 
         WriteEvent WriteConfigFinished {
@@ -244,17 +270,9 @@ Configuration Phase8
             DependsOn = "[WaitForEvent]WaitPrimary"
         }
 
-        WriteStatus ODBCDriverInstall {
-            DependsOn = "[WriteEvent]WriteConfigFinished"
-            Status = "Downloading and installing ODBC driver version 18"
-        }
+     
 
-        InstallODBCDriver ODBCDriverInstall {
-            ODBCPath  = "C:\temp\msodbcsql.msi"
-            URL       = $deployConfig.URLS.ODBC
-            Ensure    = "Present"
-            DependsOn = "[WriteStatus]ODBCDriverInstall"
-        }
+
 
         WriteStatus Complete {
             DependsOn = "[InstallODBCDriver]ODBCDriverInstall"
@@ -271,7 +289,7 @@ Configuration Phase8
     if ($ThisVM.Domain) {
         $DomainName = $ThisVM.Domain
     }
-    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    #[System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         WriteStatus ADKInstall {
@@ -288,6 +306,14 @@ Configuration Phase8
         }
 
         $nextDepend = "[InstallADK]ADKInstall"
+
+        InstallReportBuilder InstallReportBuilder {
+            Path  = "C:\temp\ReportBuilder.msi"
+            URL       = $deployConfig.URLS.ReportBuilder
+            Ensure    = "Present"
+            DependsOn     = $nextDepend
+        }
+        $nextDepend = "[InstallReportBuilder]InstallReportBuilder"
 
         WriteStatus ODBCDriverInstall {
             DependsOn = $nextDepend
@@ -392,6 +418,15 @@ Configuration Phase8
             Ensure       = "Present"
             DependsOn    = "[WriteStatus]ADKInstall"
         }
+        $nextDepend = "[InstallADK]ADKInstall"
+
+        InstallReportBuilder InstallReportBuilder {
+            Path  = "C:\temp\ReportBuilder.msi"
+            URL       = $deployConfig.URLS.ReportBuilder
+            Ensure    = "Present"
+            DependsOn     = $nextDepend
+        }
+        $nextDepend = "[InstallReportBuilder]InstallReportBuilder"
 
         WriteStatus WaitActive {
             Status    = "Waiting for $($ThisVM.thisParams.ActiveNode) to finish adding passive site server role"

@@ -3,6 +3,21 @@
     Present
 }
 
+function Get-InstalledProducts {
+    $Installer = New-Object -ComObject WindowsInstaller.Installer
+    $InstallerProducts = $Installer.ProductsEx("", "", 7)
+    $InstalledProducts = ForEach ($Product in $InstallerProducts) {
+        [PSCustomObject]@{
+            ProductCode   = $Product.ProductCode()
+            LocalPackage  = $Product.InstallProperty("LocalPackage")
+            VersionString = $Product.InstallProperty("VersionString")
+            ProductName   = $Product.InstallProperty("ProductName")
+        }
+    } 
+    return $InstalledProducts
+}
+
+
 function Invoke-DownloadFile {
     param(
         [string] $url,
@@ -54,10 +69,10 @@ function Invoke-DownloadFile {
         $pattern = "https://.*/sqlserver.*-.*-x64_(.*).exe"
         if ($url -match $pattern) {
             $hash = get-filehash -Algorithm SHA1 $dest
-            if ($hash.Hash.ToLowerInvariant() -eq $matches[1])
-            {
+            if ($hash.Hash.ToLowerInvariant() -eq $matches[1]) {
                 Write-Verbose "Hash check passed for $dest ($($hash.Hash))"
-            }else {
+            }
+            else {
                 $badfile = $dest + ".bad"
                 if (Test-Path $badfile) {
                     remove-item $badfile -force
@@ -68,15 +83,15 @@ function Invoke-DownloadFile {
             }
         }
         If ((Get-Item $dest).length -gt 0kb) {
-        write-status "Download of $url Succeeded"
+            write-status "Download of $url Succeeded"
         }
         else {
             write-status "Failed to Download $url Destination file $dest is 0kb."
             $badfile = $dest + ".bad"
-                if (Test-Path $badfile) {
-                    remove-item $badfile -force
-                }
-                rename-item $dest $badfile
+            if (Test-Path $badfile) {
+                remove-item $badfile -force
+            }
+            rename-item $dest $badfile
             throw "Failed to Download $url Destination file $dest is 0kb."
         }
     }
@@ -376,7 +391,71 @@ class InstallDotNet4 {
 }
 
 
+[DscResource()]
+class InstallReportBuilder {
+    [DscProperty(Key)]
+    [string] $Path
 
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(Mandatory)]
+    [string] $URL
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [void] Set() {
+        $_Path = $this.Path
+        $_URL = $this.URL
+
+        Invoke-DownloadFile $_URL $_Path
+       
+        # Install ODBC Driver
+        $cmd = "msiexec"
+        $arg1 = "/i"
+        $arg2 = $_Path
+        #$arg3 = "IACCEPTMSODBCSQLLICENSETERMS=YES"
+        $arg4 = "/qn"
+        $arg5 = "/l*v"
+        $arg6 = "c:\temp\reportbuilder.log"
+
+        try {
+            Write-Status "Installing Report Builder..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg4 $arg5 $arg6")
+            & $cmd $arg1 $arg2 $arg4 $arg5 $arg6
+            Write-Status "Report Builder was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            Write-Status "Failed to install Report Builder with error: $ErrorMessage"
+            throw "Failed to install Report Builder with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 10
+    }
+
+    [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
+        try {
+
+            $product = Get-InstalledProducts | Where-Object { $_.ProductName -like "*Report Builder*" }
+
+            if (-not $product) {
+                return $false
+            }
+
+            return $true
+       
+        }
+        catch {
+            return $false
+        }
+    }
+
+    [InstallReportBuilder] Get() {
+        return $this
+    }
+}
 [DscResource()]
 class InstallODBCDriver {
     [DscProperty(Key)]

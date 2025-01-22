@@ -319,16 +319,16 @@ CurrentBranch=1
 
     #Fix 0 byte files in CMCB
 
-   # Get-ChildItem $CMBIN | ForEach-Object {
-   #     if(!$_.PSIsContainer -and $_.length -eq 0) {
-   #        write-host (“{0} -> {1} {2}” -f $_.FullName, $_.Name, $_.Length)
-   #        $RedistFile = (Join-Path $CMRedist $_.Name)
-   #        if ((Test-Path $RedistFile)) {
-   #        write-host "found $RedistFile"
-   #        Copy-Item $RedistFile $_.FullName -force
-   #        }
-   #        }
-   #     }
+    # Get-ChildItem $CMBIN | ForEach-Object {
+    #     if(!$_.PSIsContainer -and $_.length -eq 0) {
+    #        write-host (“{0} -> {1} {2}” -f $_.FullName, $_.Name, $_.Length)
+    #        $RedistFile = (Join-Path $CMRedist $_.Name)
+    #        if ((Test-Path $RedistFile)) {
+    #        write-host "found $RedistFile"
+    #        Copy-Item $RedistFile $_.FullName -force
+    #        }
+    #        }
+    #     }
 
     # Create ini
     $cmini > $CMINIPath
@@ -450,39 +450,67 @@ if ($UpdateRequired) {
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
-    # Wait for 2 mins before checking DMP Downloader status
-    Write-DscStatus "Checking for updates. Waiting for DMP Downloader."
-    Start-Sleep -Seconds 120
+    # Check if DMP Downloader is has recently checked for updates
 
-    # Set var
-    $upgradingfailed = $false
-    $originalbuildnumber = ""
-
-    # Wait for SMS_DMP_DOWNLOADER running
-    $counter = 0
-    $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
-    $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\SMS\Components\SMS_Executive\Threads\SMS_DMP_DOWNLOADER")
-    $DMPState = $subKey.GetValue("Current State")
-
-    if ($DMPState -ne "Running") {
-        Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
+    $registryPath = "HKLM:\Software\Microsoft\SMS\COMPONENTS\SMS_DMP_DOWNLOADER"
+    $valueName = "LastSyncedTime"
+    
+    $lastSyncedTimeHex = (Get-ItemProperty -Path $registryPath -Name $valueName).$valueName
+    
+    $epoch = [DateTime]::ParseExact("1970-01-01", "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+    
+    $lastSyncedTime = $epoch.AddSeconds($lastSyncedTimeHex)
+    
+    $currentTimeUTC = (Get-Date).ToUniversalTime()
+    
+    $timeDifference = $currentTimeUTC - $lastSyncedTime
+    
+    # Check if the time difference is less than or equal to 60 minutes
+    if ($timeDifference.TotalMinutes -le 60) {
+        Write-DscStatus "[DMP Downloader] The LastSyncedTime was updated in the last 60 minutes. Checking for updates."
     }
+    else {
+        Write-DscStatus "[DMP Downloader] The LastSyncedTime was not updated in the last 60 minutes."
+        Set-ItemProperty -Path $registryPath -Name $valueName -Value 0 -Force
+        Set-ItemProperty -Path $registryPath -Name "LastSyncRequestTime" -Value 0 -Force
+        # Wait for 2 mins before checking DMP Downloader status
+        Start-Sleep -Seconds 120
+        Write-DscStatus "Checking for updates. Waiting for DMP Downloader."
 
-    while ($DMPState -ne "Running") {
-        $counter += 1
-        Write-DscStatus "SMS_DMP_DOWNLOADER state is: $DMPState" -RetrySeconds 30
-        Start-Sleep -Seconds 30
+        # Set var
+        $upgradingfailed = $false
+        $originalbuildnumber = ""
+
+        # Wait for SMS_DMP_DOWNLOADER running
+        $counter = 0
+        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+        $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\SMS\Components\SMS_Executive\Threads\SMS_DMP_DOWNLOADER")
         $DMPState = $subKey.GetValue("Current State")
 
-        if (0 -eq $counter % 10) {
-            Write-DscStatus "SMS_DMP_DOWNLOADER state is still $DMPState. Restarting SiteComp service."
+        if ($DMPState -ne "Running") {
             Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
-            Start-Sleep 30
         }
+
+        while ($DMPState -ne "Running") {
+            $counter += 1
+            Write-DscStatus "SMS_DMP_DOWNLOADER state is: $DMPState" -RetrySeconds 30
+            Start-Sleep -Seconds 30
+            $DMPState = $subKey.GetValue("Current State")
+
+            if (0 -eq $counter % 10) {
+                Write-DscStatus "SMS_DMP_DOWNLOADER state is still $DMPState. Restarting SiteComp service."
+                Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
+                Start-Sleep 30
+            }
+        }
+
+
+        Write-DscStatus "SMS_DMP_DOWNLOADER state is: $DMPState. Checking for updates."
+
     }
 
 
-    Write-DscStatus "SMS_DMP_DOWNLOADER state is: $DMPState. Checking for updates."
+
 
     #----------------------------------------------------
     $state = @{
@@ -686,14 +714,14 @@ if ($UpdateRequired) {
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612 -and $updatepack.State -ne 196609) {
 
             $count++
-            if ($count -eq 6) {
+            if ($count -eq 12) {
                 Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
             }
-            if ($count -ge 12) {
+            if ($count -ge 30) {
                 breaK
             }
             Write-DscStatus "[$($state[$updatepack.State])] Prereq check for '$($updatepack.Name)'."
-            Start-Sleep 120
+            Start-Sleep 90
             $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
             
         }
@@ -714,9 +742,19 @@ if ($UpdateRequired) {
             catch {}
         }
         # trigger setup after the prerequisites check
-        Write-DscStatus "Calling Install-CMSiteUpdate"
+        Write-DscStatus "Calling Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force"
+        
         Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
-        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {           
+        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {   
+            if ($updatepack.Flag -eq 1) {
+                Write-DscStatus "Update State: PREREQ_ONLY"
+                Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
+            }    
+            #if ($updatepack.State -eq 131074 -and $updatepack.Flag -eq 1) {
+            # PREREQ_SUCCESS and Flag = 1 means the update is in prereq only mode.
+            #    Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
+            #}
+
             Write-DscStatus "Updating to '$($updatepack.Name)'. Current State: $($state[$updatepack.State])"
             Start-Sleep -Seconds 60
             try {
