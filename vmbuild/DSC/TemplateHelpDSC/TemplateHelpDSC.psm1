@@ -435,7 +435,14 @@ class InstallReportBuilder {
     }
 
     [bool] Test() {
+
         Write-Status "DSC Test- Checking deployment status"
+        $_path = $this.Path
+
+        if (-not (Test-Path -Path $_path)) {
+            return $false
+        }
+
         try {
 
             $product = Get-InstalledProducts | Where-Object { $_.ProductName -like "*Report Builder*" }
@@ -500,6 +507,12 @@ class InstallODBCDriver {
 
     [bool] Test() {
         Write-Status "DSC Test- Checking deployment status"
+        $_path = $this.ODBCPath
+
+        if (-not (Test-Path -Path $_path)) {
+            return $false
+        }
+
         try {
             $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
 
