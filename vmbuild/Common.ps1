@@ -1200,6 +1200,12 @@ function Test-NetworkSwitch {
 
 function Test-NoRRAS {
 
+    $skiprrastxt = Join-Path $Common.ConfigPath "skipnoRRAS.txt"
+    if (test-path $skiprrastxt) {
+        Write-Log "Skipping No RRAS check."
+        return
+    }
+
     $router = (get-itemproperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters).IpEnableRouter
     if ((Get-WindowsFeature Routing).Installed -or $router -eq 0) {
         Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
