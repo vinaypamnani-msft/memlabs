@@ -25,7 +25,10 @@ param (
             }                        
             $Tests = $Tests | Select-Object -Unique
 
-            if ($WordToComplete) { $Tests = $Tests | Where-Object { $_.ToLowerInvariant().StartsWith($WordToComplete.ToLowerInvariant()) } }
+
+            if ($WordToComplete) {                
+                $Tests = $Tests | Where-Object { $_.ToLowerInvariant().StartsWith($WordToComplete.ToLowerInvariant()) 
+                } }
             return [string[]] $Tests
         })]   
     [string]$Test,
@@ -66,6 +69,7 @@ param (
                     $newArgument += $arg
                 }
             }
+            $WordToComplete = $WordToComplete -replace '''',''
             return $newArgument | Where-Object { $_ -match $WordToComplete }
         })]        
     [string]$serverVersion
