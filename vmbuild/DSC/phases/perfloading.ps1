@@ -1,3 +1,34 @@
+#
+# Press 'F5' to run this script. Running this script will load the ConfigurationManager
+# module for Windows PowerShell and will connect to the site.
+#
+# This script was auto-generated at '1/22/2025 9:52:16 AM'.
+
+# Site configuration
+$SiteCode = "CS1" # Site code 
+$ProviderMachineName = "CT1-CS1SITE.cstest1.com" # SMS Provider machine name
+
+# Customizations
+$initParams = @{}
+#$initParams.Add("Verbose", $true) # Uncomment this line to enable verbose logging
+#$initParams.Add("ErrorAction", "Stop") # Uncomment this line to stop the script on any errors
+
+# Do not change anything below this line
+
+# Import the ConfigurationManager.psd1 module 
+if((Get-Module ConfigurationManager) -eq $null) {
+    Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1" @initParams 
+}
+
+# Connect to the site's drive if it is not already present
+if((Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null) {
+    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+}
+
+# Set the current location to be the site code.
+Set-Location "$($SiteCode):\" @initParams
+
+
 #perfloading.ps1
 param(
     [string]$ConfigFilePath,
@@ -28,7 +59,7 @@ $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMach
 $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
 $DCName = $DCVM.vmName
 # Read Site Code from registry
-#Write-DscStatus "$Tag Setting PS Drive for ConfigMgr" -NoStatus
+#write-host "$Tag Setting PS Drive for ConfigMgr" -NoStatus
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
 $ProviderMachineName = $ThisMachineName + "." + $DomainFullName # SMS Provider machine name
 
@@ -50,10 +81,10 @@ $psDriveFailcount = 0
 while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
     $psDriveFailcount++
     if ($psDriveFailcount -gt 20) {
-        Write-DscStatus "$Tag Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log" -NoStatus
+        write-host "$Tag Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log" -NoStatus
         return
     }
-    Write-DscStatus "$Tag Retry in 10s to Set PS Drive" -NoStatus
+    write-host "$Tag Retry in 10s to Set PS Drive" -NoStatus
     Start-Sleep -Seconds 10
     New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
 }
@@ -67,12 +98,12 @@ $checkDP = Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name
 
 if ($DPGroupName -eq $checkDP) {
 
-    Write-DscStatus "$Tag DP group: $DPGroupName already exists"
+    write-host "$Tag DP group: $DPGroupName already exists"
 
 }
 else { 
     $DPGroup = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
-    Write-DscStatus "$Tag DP group: $DPGroup created successfully"
+    write-host "$Tag DP group: $DPGroup created successfully"
 
     # Get all Distribution Points
     $DistributionPoints = Get-CMDistributionPoint -AllSite
@@ -81,13 +112,13 @@ else {
     $DistributionPoints | ForEach-Object {
         $DPPath = $_.NetworkOSPath
         $DPName = ($DPPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
-        Write-DscStatus "$Tag Distribution Point Name: $DPName"
+        write-host "$Tag Distribution Point Name: $DPName"
         try {
             Add-CMDistributionPointToGroup -DistributionPointGroupName "ALL DPS" -DistributionPointName $DPName 
-            Write-DscStatus "$Tag Successfully added Distribution Point: $DPName to Group: $($DPGroupName)"
+            write-host "$Tag Successfully added Distribution Point: $DPName to Group: $($DPGroupName)"
         }
         catch {
-            Write-DscStatus "$Tag Failed to add Distribution Point: $DPName to Group: $($DPGroupName). Error: $_"
+            write-host "$Tag Failed to add Distribution Point: $DPName to Group: $($DPGroupName). Error: $_"
         }
     }
 }
@@ -98,62 +129,62 @@ else {
 $apps = $deployconfig.Tools | where-object { $_.Appinstall -eq $True }
 $apps | ForEach-Object {
     
-    Write-DscStatus "$Tag Creating a directory under c:\apps for the application $($_.Name)"
+    write-host "$Tag Creating a directory under c:\apps for the application $($_.Name)"
     #create a directory for the application source files
     new-item -ItemType Directory -Path "c:\Apps\$($_.Name)" -force
-    Write-DscStatus "$Tag Successfully created directory under c:\apps for the application $($_.Name)"
+    write-host "$Tag Successfully created directory under c:\apps for the application $($_.Name)"
 
 
-    Write-DscStatus "$Tag Creating a Hardlink under c:\apps for the application $($_.Name) "
+    write-host "$Tag Creating a Hardlink under c:\apps for the application $($_.Name) "
     #create a hardlink for the source file (this is to save space on the C drive)
     new-item -ItemType HardLink -Value "c:\tools\$($_.AppMsi)" -Path "C:\Apps\$($_.Name)\$($_.AppMsi)" -force
-    Write-DscStatus "$Tag Successfully created Hardlink under c:\apps for the application $($_.Name)"
+    write-host "$Tag Successfully created Hardlink under c:\apps for the application $($_.Name)"
 
     #creating an application
     $appname = "MEMLABS-" + "$($_.Name)" 
-    Write-DscStatus "$Tag Creating an MEMLBAS application for $($_.Name) as App model"
+    write-host "$Tag Creating an MEMLBAS application for $($_.Name) as App model"
     New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
-    Write-DscStatus "$Tag Successfully created an MEMLBAS application for $($_.Name) as App model"
+    write-host "$Tag Successfully created an MEMLBAS application for $($_.Name) as App model"
     #remove an application
     #Remove-CMApplication -Name "MEMLABS-*" -Force
 
-    Write-DscStatus "$Tag Creating an MEMLBAS application deployment for $($_.Name) as App model"
+    write-host "$Tag Creating an MEMLBAS application deployment for $($_.Name) as App model"
     #create a deployment for each application (tim help on pulling the site server name)
     Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
-    Write-DscStatus "$Tag Sucessfully an MEMLBAS application deployment for $($_.Name) as App model"
+    write-host "$Tag Sucessfully an MEMLBAS application deployment for $($_.Name) as App model"
 
-    Write-DscStatus "$Tag Distributing MEMLBAS application $($_.Name) to all DPs"
+    write-host "$Tag Distributing MEMLBAS application $($_.Name) to all DPs"
     #distribute the content to All DPs
     Start-CMContentDistribution -ApplicationName "$appname" -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-    Write-DscStatus "$Tag Successfully distributed MEMLBAS application $($_.Name) to all DPs"
+    write-host "$Tag Successfully distributed MEMLBAS application $($_.Name) to all DPs"
 
-    Write-DscStatus "$Tag Deploying MEMLBAS application $($_.Name) to all Systems as available deployment"
+    write-host "$Tag Deploying MEMLBAS application $($_.Name) to all Systems as available deployment"
     #deploy apps to all systems
     New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
-    Write-DscStatus "$Tag successfully deployed MEMLBAS application $($_.Name) to all Systems as available deployment"
+    write-host "$Tag successfully deployed MEMLBAS application $($_.Name) to all Systems as available deployment"
 
-    Write-DscStatus "$Tag Creating an MEMLBAS application deployment for $($_.Name) as Package model"
+    write-host "$Tag Creating an MEMLBAS application deployment for $($_.Name) as Package model"
     # Create the Package
     $Package = New-CMPackage -Name "MEMLABS-$($_.Name)" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
-    Write-DscStatus "$Tag Sucessfully created a MEMLBAS application deployment for $($_.Name) as Package model"
+    write-host "$Tag Sucessfully created a MEMLBAS application deployment for $($_.Name) as Package model"
     #Remove a package
     #Remove-CMPackage -Id "CS100023" -Force
 
-    Write-DscStatus "$Tag Creating an MEMLBAS pacakage deployment for $($_.Name) as Package model"
+    write-host "$Tag Creating an MEMLBAS pacakage deployment for $($_.Name) as Package model"
     $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn /l*v c:\windows\temp\$($_.Name).log"
     # Create a Program for the Package
     New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
-    Write-DscStatus "$Tag Sucessfully created a MEMLBAS pacakage deployment for $($_.Name) as Package model"
+    write-host "$Tag Sucessfully created a MEMLBAS pacakage deployment for $($_.Name) as Package model"
 
-    Write-DscStatus "$Tag Distributing MEMLBAS pacakage $($_.Name) to all DPs"
+    write-host "$Tag Distributing MEMLBAS pacakage $($_.Name) to all DPs"
     #Distribute all packages to ALL DPs group
     Start-CMContentDistribution -PackageId $Package.PackageID -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-    Write-DscStatus "$Tag Successfully distributed MEMLBAS package $($_.Name) to all DPs"
+    write-host "$Tag Successfully distributed MEMLBAS package $($_.Name) to all DPs"
 
-    Write-DscStatus "$Tag Deploying MEMLBAS package $($_.Name) to all Systems as available deployment"
+    write-host "$Tag Deploying MEMLBAS package $($_.Name) to all Systems as available deployment"
     #Deploy all packages to all systems
     New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
-    Write-DscStatus "$Tag successfully deployed MEMLBAS package $($_.Name) to all Systems as available deployment"
+    write-host "$Tag successfully deployed MEMLBAS package $($_.Name) to all Systems as available deployment"
 }
 
 
@@ -162,13 +193,13 @@ $apps | ForEach-Object {
 $namespace = "ROOT\SMS\site_$SiteCode"
 $classname = "SMS_SCI_SiteDefinition"
 
-Write-DscStatus "$Tag Current namespace is: $namespace and class name is: $classname"
+write-host "$Tag Current namespace is: $namespace and class name is: $classname"
 
 # Fetch the instance of the class
 $instance = Get-CimInstance -ClassName $className -Namespace $namespace -Filter "SiteCode like '$SiteCode'"
 
 if ($instance -ne $null) {
-    Write-DscStatus "$Tag Instance found: modifying existing instance."
+    write-host "$Tag Instance found: modifying existing instance."
 
     # Get the Props array
     $propsArray = $instance.Props
@@ -178,8 +209,8 @@ if ($instance -ne $null) {
     for ($i = 0; $i -lt $propsArray.Length; $i++) {
         if ($propsArray[$i].PropertyName -eq "TwoKeyApproval") {
             $propertyFound = $true
-            Write-DscStatus "$Tag Current property name is: $propsArray[$i].PropertyName and its value is $propsArray[$i].Value"
-            Write-DscStatus "$Tag Setting the value to 0 to override the self-approval for author."
+            write-host "$Tag Current property name is: $propsArray[$i].PropertyName and its value is $propsArray[$i].Value"
+            write-host "$Tag Setting the value to 0 to override the self-approval for author."
             $propsArray[$i].Value = 0 # Set your desired value here
 
             # Update the Props array in the instance
@@ -188,28 +219,28 @@ if ($instance -ne $null) {
             # Save the modified instance back to the class
             Set-CimInstance -InputObject $instance
 
-            Write-DscStatus "$Tag TwoKeyApproval value updated successfully."
+            write-host "$Tag TwoKeyApproval value updated successfully."
             break
         }
     }
 
     if (-not $propertyFound) {
-        Write-DscStatus "$Tag Property 'TwoKeyApproval' not found in existing instance. Adding it."
+        write-host "$Tag Property 'TwoKeyApproval' not found in existing instance. Adding it."
       
         $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace $namespace
         $i = New-CimInstance -CimClass $class -Property @{PropertyName = "TwoKeyApproval"; Value = "0"; Value1 = $null; Value2 = $null }
         $propsArray += $i
         $instance.Props = $propsArray
         Set-CimInstance -InputObject $instance
-        Write-DscStatus "$Tag TwoKeyApproval property added and value set successfully."
+        write-host "$Tag TwoKeyApproval property added and value set successfully."
 
     }
         
 }
 else {
-    Write-DscStatus "$Tag Instance not found. Manually approve the scripts"
+    write-host "$Tag Instance not found. Manually approve the scripts"
 }
-Write-DscStatus "$Tag New instance created with TwoKeyApproval set to 0."
+write-host "$Tag New instance created with TwoKeyApproval set to 0."
 
 
 ## Scripts ( used our scripts from Wiki)
@@ -228,7 +259,7 @@ foreach ($ScriptFile in $ScriptFiles) {
         #check if script already exists or else create it
         if (-not (Get-CMScript -ScriptName $ScriptName -Fast)) {
             $script = New-CMScript -ScriptName "$ScriptName" -ScriptText $ScriptContent -Fast
-            Write-DscStatus "$Tag Successfully imported: $ScriptName"
+            write-host "$Tag Successfully imported: $ScriptName"
             # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesnt have that feature yet) Tim help needed here
             Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved" 
 
@@ -237,7 +268,7 @@ foreach ($ScriptFile in $ScriptFiles) {
         }
     }
     catch {
-        Write-DscStatus "$Tag Failed to import: $ScriptName. Error: $_"
+        write-host "$Tag Failed to import: $ScriptName. Error: $_"
     }
 }
 
@@ -253,37 +284,37 @@ foreach ($BootImage in $BootImages) {
         $packageId = $BootImage.PackageID
         # Distribute the boot image
         Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"        
-        Write-DscStatus "$Tag Successfully started distribution for boot image: $($BootImage.Name)"
+        write-host "$Tag Successfully started distribution for boot image: $($BootImage.Name)"
     }
     catch {
-        Write-DscStatus "$Tag Failed to start distribution for boot image: $($BootImage.Name). Error: $_"
+        write-host "$Tag Failed to start distribution for boot image: $($BootImage.Name). Error: $_"
     }
 }
 
 
 #Tim is copying the iso directly at phase 1
-Write-DscStatus "$Tag ISO files are already copied from phase 1"
+write-host "$Tag ISO files are already copied from phase 1"
 
 $DriveLetter = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" | Select-Object -ExpandProperty "Installation Directory" | Split-Path -Qualifier
 
-Write-DscStatus "$Tag SCCM is installed on the drive -  $DriveLetter"
+write-host "$Tag SCCM is installed on the drive -  $DriveLetter"
 
 # Define the folder path and share name
 $folderPath = "$DriveLetter\OSD"
 $shareName = "OSD"
 
-Write-DscStatus "$Tag sharing the OSD folder as - $folderPath"
+write-host "$Tag sharing the OSD folder as - $folderPath"
 
 # Create the folder if it doesn't exist
 if (-not (Test-Path -Path $folderPath)) {
     New-Item -ItemType Directory -Path $folderPath
-    Write-DscStatus "$Tag OSD folder does not exist and creating one"
+    write-host "$Tag OSD folder does not exist and creating one"
 }
 
 # Create the share with read access for "Everyone"
 New-SmbShare -Name $shareName -Path $folderPath -FullAccess "Administrators" -ReadAccess "Everyone"
 
-Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
+write-host "$Tag $shareName share successfully shared with Administrators"
 
 # Verify the share was created
 #Get-SmbShare -Name $shareName
@@ -292,13 +323,13 @@ Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
 #get OS upgrade package 
 New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 
 New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 
-Write-DscStatus "$Tag Windows 10 and 11 OS upgrade packages created"
+write-host "$Tag Windows 10 and 11 OS upgrade packages created"
 
 #get OS package
 if (!(Get-CMOperatingSystemImage -Name "windows 11")) { New-CMOperatingSystemImage -Name "Windows 11" -Path "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim" -Version 10.0.26100 }
 if (!(Get-CMOperatingSystemImage -Name "windows 10")) { New-CMOperatingSystemImage -Name "Windows 10" -Path "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim" -Version 10.0.19041 }
 
-Write-DscStatus "$Tag Windows 10 and 11 OS packages created"
+write-host "$Tag Windows 10 and 11 OS packages created"
 
 # Get all Task Sequences with names starting with the specified prefix
 $taskSequences = Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" }
@@ -327,14 +358,14 @@ if (!$taskSequences) {
     #distribute the OS packages and upgrade packages 
     Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS"
     Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS"
-    Write-DscStatus "$Tag Successfully distributed for OS Image and upgrade packages"
+    write-host "$Tag Successfully distributed for OS Image and upgrade packages"
      
 
     # Create the in-place upgrade task sequence
     New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w11-In-Place Upgrade Task Sequence" -UpgradePackageId $win11UpgradePackageID -SoftwareUpdateStyle All
-    Write-DscStatus "$Tag Successfully created windows 11 in-place upgrade TS"
+    write-host "$Tag Successfully created windows 11 in-place upgrade TS"
     New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w10-In-Place Upgrade Task Sequence" -UpgradePackageId $win10UpgradePackageID -SoftwareUpdateStyle All
-    Write-DscStatus "$Tag Successfully created windows 10 in-place upgrade TS"
+    write-host "$Tag Successfully created windows 10 in-place upgrade TS"
     $AdminName = $deployConfig.vmOptions.adminName
     ## Build and capture TS
 
@@ -366,7 +397,7 @@ if (!$taskSequences) {
     }
 
     New-CMTaskSequence @buildandcapturewin11
-    Write-DscStatus "$Tag Successfully created MEMLABS-w11-Build and capture TS"
+    write-host "$Tag Successfully created MEMLABS-w11-Build and capture TS"
 
     $buildandcapturewin10 = @{
         BuildOperatingSystemImage          = $true
@@ -395,7 +426,7 @@ if (!$taskSequences) {
         OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
     }
     New-CMTaskSequence @buildandcapturewin10
-    Write-DscStatus "$Tag Successfully created MEMLABS-w10-Build and capture TS"
+    write-host "$Tag Successfully created MEMLABS-w10-Build and capture TS"
     ##Create a task sequence to install an OS image
 
     $installw11OSimage = @{
@@ -429,7 +460,7 @@ if (!$taskSequences) {
     }
 
     New-CMTaskSequence @installw11OSimage
-    Write-DscStatus "$Tag Successfully created MEMLABS-w11-Install OS image TS"
+    write-host "$Tag Successfully created MEMLABS-w11-Install OS image TS"
 
     $installw10OSimage = @{
         InstallOperatingSystemImage     = $true
@@ -462,7 +493,7 @@ if (!$taskSequences) {
     }
 
     New-CMTaskSequence @installw10OSimage
-    Write-DscStatus "$Tag Successfully created MEMLABS-w10-Install OS image TS"
+    write-host "$Tag Successfully created MEMLABS-w10-Install OS image TS"
 
     $customTS = @{
         CustomTaskSequence = $true
@@ -473,19 +504,19 @@ if (!$taskSequences) {
     }
 
     New-CMTaskSequence @customTS
-    Write-DscStatus "$Tag Successfully created MEMLABS-Custom TS Example"
+    write-host "$Tag Successfully created MEMLABS-Custom TS Example"
 
 }
 else {
 
-    Write-DscStatus "$Tag Task sequences were already created, skipping the duplicate creation"
+    write-host "$Tag Task sequences were already created, skipping the duplicate creation"
 
 }
 
 ### CI and baselines 
 
 #expand archive for importing cab files
-Expand-Archive -Path "C:\tools\baselines.zip" -DestinationPath "C:\tools\baselines" -Force
+Expand-Archive -Path "C:\tools\baselines.zip" -DestinationPath "C:\tools\" -Force
 
 # Define the path to the CAB files
 $baselineFolder = "C:\tools\baselines"
@@ -502,23 +533,23 @@ ForEach ($ConfigName in $ConfigNames) {
 
         # Create a configuration item (we are importing the cab files directly here)
         $filename = $baselineFolder + "\" + $ConfigName.Name
-        Write-DscStatus "$Tag Importing cab from $filename location"
+        write-host "$Tag Importing cab from $filename location"
         Import-CMConfigurationItem -FileName $filename -Force
-        Write-DscStatus "$Tag Succesfully created Configuration Item for $baselinename"
+        write-host "$Tag Succesfully created Configuration Item for $baselinename"
     
         # Create the configuration baseline
         New-CMBaseline -Name $baselinename -Description "MEMLABS auto imported" 
-        Write-DscStatus "$Tag Succesfully created Configuration Baseline for $baselinename"
+        write-host "$Tag Succesfully created Configuration Baseline for $baselinename"
 
         # Link the configuration item to the configuration baseline (we are using the same name for CI and baseline so using the same name here)
         $ciinfo = Get-CMConfigurationItem -Name $baselinename -Fast
         Set-CMBaseline -Name $baselinename -AddOSConfigurationItem $ciinfo.CI_ID 
-        Write-DscStatus "$Tag Succesfully linked CI and CB for $baselinename"
+        write-host "$Tag Succesfully linked CI and CB for $baselinename"
 
         # Deploy the configuration baseline to a collection
 
         New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" 
-        Write-DscStatus "$Tag Succesfully deployed the baseline $baselinename to All systems"
+        write-host "$Tag Succesfully deployed the baseline $baselinename to All systems"
 
     }
     else {
@@ -800,6 +831,60 @@ WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.26100'
 "@
     },
     @{
+        Name  = "MEMLABS-Windows 10 21H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.19044'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 10 22H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.19045'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 11 23H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22631'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 11 24H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.26100'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 11 21H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22000'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 11 22H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22621'
+"@
+    },
+    @{
         Name  = "MEMLABS-All Non client Devices"
         Query = @"
 select Name, SMSAssignedSites, IPAddresses, IPSubnets, OperatingSystemNameandVersion, ResourceDomainORWorkgroup, LastLogonUserDomain, LastLogonUserName, SMSUniqueIdentifier, ResourceId, ResourceType, NetbiosName 
@@ -818,18 +903,18 @@ foreach ($Collection in $Collections) {
         # Create the device collection
         $NewCollection = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
 
-        Write-DscStatus "$Tag Created collection: $CollectionName"
+        write-host "$Tag Created collection: $CollectionName"
 
         # Add a query rule to the collection
         Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule" -ErrorAction Stop
     
-        Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
+        write-host "$Tag Created collection query: $CollectionName Rule"
     }
 }
 
-Write-DscStatus "$Tag Completed the perf loading the environment"
-Write-DscStatus "$Tag ******************************************" -NoStatus
-Write-DscStatus "$Tag ******************************************" -NoStatus
+write-host "$Tag Completed the perf loading the environment"
+write-host "$Tag ******************************************" -NoStatus
+write-host "$Tag ******************************************" -NoStatus
 
 
 
