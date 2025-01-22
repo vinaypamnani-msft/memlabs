@@ -1,3 +1,34 @@
+#
+# Press 'F5' to run this script. Running this script will load the ConfigurationManager
+# module for Windows PowerShell and will connect to the site.
+#
+# This script was auto-generated at '1/22/2025 9:52:16 AM'.
+
+# Site configuration
+$SiteCode = "CS1" # Site code 
+$ProviderMachineName = "CT1-CS1SITE.cstest1.com" # SMS Provider machine name
+
+# Customizations
+$initParams = @{}
+#$initParams.Add("Verbose", $true) # Uncomment this line to enable verbose logging
+#$initParams.Add("ErrorAction", "Stop") # Uncomment this line to stop the script on any errors
+
+# Do not change anything below this line
+
+# Import the ConfigurationManager.psd1 module 
+if((Get-Module ConfigurationManager) -eq $null) {
+    Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1" @initParams 
+}
+
+# Connect to the site's drive if it is not already present
+if((Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null) {
+    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+}
+
+# Set the current location to be the site code.
+Set-Location "$($SiteCode):\" @initParams
+
+
 #perfloading.ps1
 param(
     [string]$ConfigFilePath,
@@ -485,7 +516,7 @@ else {
 ### CI and baselines 
 
 #expand archive for importing cab files
-Expand-Archive -Path "C:\tools\baselines.zip" -DestinationPath "C:\tools\baselines" -Force
+Expand-Archive -Path "C:\tools\baselines.zip" -DestinationPath "C:\tools\" -Force
 
 # Define the path to the CAB files
 $baselineFolder = "C:\tools\baselines"
@@ -522,7 +553,7 @@ ForEach ($ConfigName in $ConfigNames) {
 
     }
     else {
-        Write-host "Baseline $baselinename are already in place"
+        Write-DscStatus "Baseline $baselinename are already in place"
 
     }
 }
@@ -797,6 +828,60 @@ SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SM
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.26100'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 10 21H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.19044'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 10 22H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.19045'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 11 23H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22631'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 11 24H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.26100'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 11 21H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22000'
+"@
+    },
+    @{
+        Name  = "MEMLABS-Windows 11 22H2"
+        Query = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+FROM SMS_R_System
+INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
+WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22621'
 "@
     },
     @{
