@@ -49,13 +49,13 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 
 # Get info for Passive Site Server
 $ThisMachineName = $deployconfig.Parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $deployconfig.Parameters.ThisMachineName}
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
 $SSVM = $deployConfig.virtualMachines | Where-Object { $_.siteCode -eq $ThisVM.siteCode -and $_.role -eq "PassiveSite" }
 $shareName = $SiteCode
 $sharePath = "E:\$shareName"
 $remoteLibVMName = $SSVM.remoteContentLibVM
 $passiveFQDN = $SSVM.vmName + "." + $DomainFullName
-if ($remoteLibVMName -is [string]) {$remoteLibVMName = $remoteLibVMName.Trim() }
+if ($remoteLibVMName -is [string]) { $remoteLibVMName = $remoteLibVMName.Trim() }
 $computersToAdd = @("$($SSVM.vmName)$", "$($ThisMachineName)$")
 $contentLibShare = "\\$remoteLibVMName\$shareName\ContentLib"
 
@@ -114,7 +114,7 @@ if ($Err2.Count -ne 0) {
 
 $add_local_admin = {
     param($computersToAdd, $domainName)
-    foreach($computer in $computersToAdd) {
+    foreach ($computer in $computersToAdd) {
         if ($computer -eq "$($env:COMPUTERNAME)$") { continue }
         $memberToCheck = "$domainName\$computer"
         $exists = Get-LocalGroupMember -Name "Administrators" -Member $memberToCheck
@@ -199,6 +199,7 @@ if ($bailOut) {
 }
 else {
     Write-DscStatus "Content Library moved to $($moveStatus.ContentLibraryLocation)"
+    start-sleep -Seconds 60
 }
 
 # Add Passive site
@@ -206,14 +207,23 @@ $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
 if ($SSVM.cmInstallDir) {
     $SMSInstallDir = $SSVM.cmInstallDir
 }
-Write-DscStatus "Adding passive site server on $passiveFQDN"
-try {
-    New-CMSiteSystemServer -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN *>&1 | Out-File $global:StatusLog -Append
-    Add-CMPassiveSite -InstallDirectory $SMSInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite *>&1 | Out-File $global:StatusLog -Append
-}
-catch {
-    Write-DscStatus "Failed to add passive site on $passiveFQDN. Error: $_" -Failure
-    return
+while ($true) { 
+    Write-DscStatus "Adding passive site server on $passiveFQDN"
+    try {
+        New-CMSiteSystemServer -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN *>&1 | Out-File $global:StatusLog -Append
+        Add-CMPassiveSite -InstallDirectory $SMSInstallDir -SiteCode $SiteCode -SiteSystemServerName $passiveFQDN -SourceFilePathOption CopySourceFileFromActiveSite *>&1 | Out-File $global:StatusLog -Append
+        break
+    }
+    catch {
+        if ($_ -like "*Content library move is in progress, please try again after the move is completed*") {
+            Write-DscStatus "Content Library move is in progress, retrying in 5 minutes"
+            Start-Sleep -Seconds 300
+            continue
+        }
+
+        Write-DscStatus "Failed to add passive site on $passiveFQDN. Error: $_" -Failure
+        return
+    }
 }
 
 $i = 0

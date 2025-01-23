@@ -34,8 +34,8 @@ $global:Phase10Job = {
     }
 
 }
- # Initialize disks
- $global:Initialize_Disk = {
+# Initialize disks
+$global:Initialize_Disk = {
     param($letter,
         $size,
         $label
@@ -54,7 +54,7 @@ $global:Phase10Job = {
     }
 
 
-    $size = ($size /1 )
+    $size = ($size / 1 )
     try {
         $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
     }
@@ -1831,7 +1831,11 @@ $global:VM_Config = {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Polling DSC Status via Get-DscConfigurationStatus" -Verbose
                     $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
                         $ProgressPreference = 'SilentlyContinue'
-                        Get-DscConfigurationStatus
+                        try { 
+                            Get-DscConfigurationStatus | out-null
+                        }
+                        catch {}
+
                         $ProgressPreference = 'Continue'
                     } -SuppressLog:$suppressNoisyLogging
 
@@ -1857,7 +1861,11 @@ $global:VM_Config = {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, Waiting 90 seconds to see if it reboots itself."
                         $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
                             $ProgressPreference = 'SilentlyContinue'
-                            Get-DscConfigurationStatus
+                            try { 
+                                Get-DscConfigurationStatus | out-null
+                            }
+                            catch {}
+
                             $ProgressPreference = 'Continue'
                         } -SuppressLog:$suppressNoisyLogging
                         # Reboot the machine

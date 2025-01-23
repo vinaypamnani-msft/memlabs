@@ -356,6 +356,7 @@ if (!$taskSequences) {
         $unencrypted = Get-Content $cm_svc_file
     }
     #distribute the OS packages and upgrade packages 
+    Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
     Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS"
     Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS"
     Write-DscStatus "$Tag Successfully distributed for OS Image and upgrade packages"
