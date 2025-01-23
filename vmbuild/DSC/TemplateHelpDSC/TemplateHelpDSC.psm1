@@ -2226,6 +2226,8 @@ class JoinDomain {
             }
             $global:DSCMachineStatus = 1
         }
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        $global:DSCMachineStatus = 1
     }
 
     [bool] Test() {
