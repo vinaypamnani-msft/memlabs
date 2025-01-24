@@ -1284,6 +1284,11 @@ function Test-NetworkNat {
 
     try {
         Write-OrangePoint "'$NetworkSubnet' not found in NAT. Adding it."
+        $skiprrastxt = Join-Path $Common.ConfigPath "skipnoRRAS.txt"
+        if (test-path $skiprrastxt) {
+            Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
+        }
+
         New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
         return $true
     }
