@@ -1286,6 +1286,7 @@ function Test-NetworkNat {
         Write-OrangePoint "'$NetworkSubnet' not found in NAT. Adding it."
         $skiprrastxt = Join-Path $Common.ConfigPath "skipnoRRAS.txt"
         if (test-path $skiprrastxt) {
+            Write-WhiteI "Restarting RRAS service"
             Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
         }
 

@@ -108,6 +108,8 @@ function Test-ValidVmOptions {
         $pattern2 = "^(10)(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])){2,2}.0$"
         $pattern3 = "^(172).(1[6-9]|2[0-9]|3[0-1])(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])).0$"
 
+        
+
         if ($ConfigObject.vmOptions.network -eq "10.250.250.0") {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'Cluster'. Please use a different subnet." -ReturnObject $ReturnObject -Warning
         }
@@ -120,28 +122,43 @@ function Test-ValidVmOptions {
         if ($ConfigObject.vmOptions.network -eq "172.31.250.0") {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'Internet' clients. Please use a different subnet." -ReturnObject $ReturnObject -Warning
         }
-        elseif (-not ($ConfigObject.vmOptions.network -match $pattern1 -or $ConfigObject.vmOptions.network -match $pattern2 -or $ConfigObject.vmOptions.network -match $pattern3)) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
-        }
 
-        $existingSubnet = Get-List -Type Network -SmartUpdate | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) }
-        if ($existingSubnet) {
-            if (-not ($($ConfigObject.vmoptions.domainName) -in $($existingSubnet.Domain))) {
-                Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+
+        $networks = @($ConfigObject.vmOptions.network)
+
+        foreach ($vm in $($ConfigObject.virtualMachines)) {
+            if ($vm.network) {
+                #write-log "Adding $($vm.network)"
+                $networks += $vm.network
+            }
+        }
+        $existingSubnets = Get-List -Type Network -SmartUpdate 
+        foreach ($testNetwork in $networks) {
+            write-log "testing $testNetwork" -Verbose
+            if (-not ($testNetwork -match $pattern1 -or $testNetwork -match $pattern2 -or $testNetwork -match $pattern3)) {
+                Add-ValidationMessage -Message "VM Options Validation: Network [$($testNetwork)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
             }
 
-            $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" -and (-not $_.Network) -and (-not $_.Hidden) })
-            if ($CASorPRIorSEC) {
-                $existingCASorPRIorSEC = @()
-                $existingCASorPRIorSEC += Get-List -Type VM -SmartUpdate | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
-                if ($existingCASorPRIorSEC.Count -gt 0) {
-                    if ($ConfigObject.vmOptions.domainName -ne $existingSubnet.Domain) {
-                        Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
-                    }
+            $existingSubnet = $existingSubnets | Where-Object { $_.Network -eq $($testNetwork) }
+            if ($existingSubnet) {
+                if (-not ($($ConfigObject.vmoptions.domainName) -in $($existingSubnet.Domain))) {
+                    Add-ValidationMessage -Message "VM Options Validation: Network [$($testNetwork)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Failure
                 }
 
+                $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" -and (-not $_.Network) -and (-not $_.Hidden) })
+                if ($CASorPRIorSEC) {
+                    $existingCASorPRIorSEC = @()
+                    $existingCASorPRIorSEC += Get-List -Type VM -SmartUpdate | Where-Object { $_.Network -eq $($testNetwork) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
+                    if ($existingCASorPRIorSEC.Count -gt 0) {
+                        if ($ConfigObject.vmOptions.domainName -ne $existingSubnet.Domain) {
+                            Add-ValidationMessage -Message "VM Options Validation: Network [$($testNetwork)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                        }
+                    }
+
+                }
             }
         }
+
 
     }
 }
