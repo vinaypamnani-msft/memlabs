@@ -1203,6 +1203,10 @@ function Test-NoRRAS {
     $skiprrastxt = Join-Path $Common.ConfigPath "skipnoRRAS.txt"
     if (test-path $skiprrastxt) {
         Write-Log "Skipping No RRAS check."
+        $natValid = Test-Networks
+        if (-not $natValid) {
+            exit 1
+        }
         return
     }
 
