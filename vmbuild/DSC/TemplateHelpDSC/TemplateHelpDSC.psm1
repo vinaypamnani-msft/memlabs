@@ -2191,7 +2191,7 @@ class JoinDomain {
     [void] Set() {
         $_credential = $this.Credential
         $_DomainName = $this.DomainName
-        $_retryCount = 100
+        $_retryCount = 25
         try {
             Write-Status "Joining computer to Domain $_DomainName"
             Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Stop
@@ -2207,7 +2207,7 @@ class JoinDomain {
                 if ($count -lt $_retryCount) {
                     $count++
                     Write-Status "Current Domain of $CurrentDomain does not match $_DomainName. Retry count: $count/$_retryCount"
-                    Start-Sleep -Seconds 20
+                    Start-Sleep -Seconds 60
                     Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Ignore
 
                     $CurrentDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
