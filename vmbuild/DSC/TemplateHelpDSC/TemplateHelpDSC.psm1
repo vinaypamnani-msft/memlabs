@@ -2218,7 +2218,7 @@ class JoinDomain {
                 }
             }
             if ($flag) {
-                Write-Status "Failed too many times.  Rejoining domain, and rebooting."
+                Write-Status "Failed too many times.  Rebooting, then Rejoining domain."
                 Add-Computer -DomainName $_DomainName -Credential $_credential
             }
             else {
