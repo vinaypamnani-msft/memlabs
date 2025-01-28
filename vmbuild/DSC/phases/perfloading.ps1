@@ -356,6 +356,7 @@ if (!$taskSequences) {
         $unencrypted = Get-Content $cm_svc_file
     }
     #distribute the OS packages and upgrade packages 
+    Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
     Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS"
     Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS"
     Write-DscStatus "$Tag Successfully distributed for OS Image and upgrade packages"
@@ -558,6 +559,18 @@ ForEach ($ConfigName in $ConfigNames) {
     }
 }
 
+#we have to make powershell bypass for the baselines to work as expected
+$customclientsetting = "MEMLABS-powershellbypass"
+ 
+New-CMClientSetting -Name $customclientsetting -Description "Client settings for making powershell execution policy as bypass" -Type Device -ErrorAction SilentlyContinue
+Write-DscStatus "$Tag $customclientsetting client setting created"
+
+# Enable the PowerShell Execution Policy setting
+Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customclientsetting
+Write-DscStatus "$Tag Powershell policy succesfully changed for $customclientsetting client setting "
+
+New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
+Write-DscStatus "$Tag Deployed the client setting to all systems collection"
 
 # Define additional device collection information
 $Collections += @(
