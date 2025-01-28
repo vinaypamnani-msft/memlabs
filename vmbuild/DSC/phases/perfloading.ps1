@@ -528,6 +528,18 @@ ForEach ($ConfigName in $ConfigNames) {
     }
 }
 
+#we have to make powershell bypass for the baselines to work as expected
+$customclientsetting = "MEMLABS-powershellbypass"
+ 
+New-CMClientSetting -Name $customclientsetting -Description "Client settings for making powershell execution policy as bypass" -Type Device -ErrorAction SilentlyContinue
+Write-DscStatus "$Tag $customclientsetting client setting created"
+
+# Enable the PowerShell Execution Policy setting
+Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customclientsetting
+Write-DscStatus "$Tag Powershell policy succesfully changed for $customclientsetting client setting "
+
+New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
+Write-DscStatus "$Tag Deployed the client setting to all systems collection"
 
 # Define additional device collection information
 $Collections += @(
