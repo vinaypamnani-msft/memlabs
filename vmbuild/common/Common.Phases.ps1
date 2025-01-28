@@ -425,7 +425,41 @@ function Wait-Phase {
             foreach ($job in $failedJobs) {
                 $FailRetry = $FailRetry + 1
                 if ($FailRetry -gt 30) {
-                    $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
+                    try {
+                        $childJobs = $job | Select-Object -ExpandProperty childjobs
+                        if ($job.Name) {
+                            $jobOutput = $job.Name
+                            $jobOutput += " "
+                        }
+                        else {
+                            $jobOutput = ""
+                        }
+                        $joberror = $childJobs | Select-Object -ExpandProperty Error
+                        if ($joberror -is [string]) {
+                            $jobOutput += $joberror
+                            $jobOutput += " "
+                        }
+                   
+                        if ($childJobs.JobStateInfo.Reason.ErrorRecord.Exception) {
+                            if ($childJobs.JobStateInfo.Reason.ErrorRecord.Exception.Message) {
+                                $jobOutput += $childJobs.JobStateInfo.Reason.ErrorRecord.Exception.Message
+                                $jobOutput += " "
+                            }
+                            else {
+                                $jobOutput += $childJobs.JobStateInfo.Reason.ErrorRecord.Exception
+                                $jobOutput += " "
+                            }
+                        }
+                        if ($childJobs.JobStateInfo.Message) {
+                            $jobOutput += $childJobs.JobStateInfo.Message
+                            $jobOutput += " "
+                        }
+                    }
+                    catch {
+                        Write-Log "Job failed Error Gathering Job Output: : $_" -LogOnly
+                        $jobOutput = "Error Gathering Job Output: " + $jobOutput
+                    }
+                                   
                     $jobJson = $job | convertTo-Json -depth 5 -WarningAction SilentlyContinue
                     Write-Log "[Phase $Phase] Job failed: $jobJson" -LogOnly
                     Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red

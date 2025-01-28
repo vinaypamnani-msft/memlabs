@@ -1203,6 +1203,10 @@ function Test-NoRRAS {
     $skiprrastxt = Join-Path $Common.ConfigPath "skipnoRRAS.txt"
     if (test-path $skiprrastxt) {
         Write-Log "Skipping No RRAS check."
+        $natValid = Test-Networks
+        if (-not $natValid) {
+            exit 1
+        }
         return
     }
 
@@ -1280,6 +1284,12 @@ function Test-NetworkNat {
 
     try {
         Write-OrangePoint "'$NetworkSubnet' not found in NAT. Adding it."
+        $skiprrastxt = Join-Path $Common.ConfigPath "skipnoRRAS.txt"
+        if (test-path $skiprrastxt) {
+            Write-WhiteI "Restarting RRAS service"
+            Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
+        }
+
         New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
         return $true
     }

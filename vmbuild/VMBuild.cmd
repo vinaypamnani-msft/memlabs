@@ -12,7 +12,7 @@ git config --global --add safe.directory E:/memlabs
 
 git pull
 
-REM @ECHO OFF
+@ECHO OFF
 
 where /q wt
 IF ERRORLEVEL 1 (

@@ -12,6 +12,7 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$isCas = $ThisVM.Role -eq "CAS"
 $DCName = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" }).vmName
 # Read Site Code from registry
 Write-DscStatus "Setting PS Drive for ConfigMgr" -NoStatus
@@ -73,26 +74,28 @@ if (-not (Test-Path $CertPath)) {
 }
 
 do {
-    $attempts++
-    Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath *>&1 | Out-File $global:StatusLog -Append
+    $attempts++   
     Write-DscStatus "Enable HTTPS"
-    $NameSpace = "ROOT\SMS\site_$SiteCode"
-    #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
-    # Get the WMI object
-    $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
-    # Get the Props array
-    $props = $component.Props
-    # Find the index of the IISSSLState property in the Props array
-    $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
-    # Change the Value of the IISSSLState property
-    $props[$index].Value = 63
-    # Assign the modified Props array back to the component
-    $component.Props = $props
-    # Save the changes
-    $component.Put()
-    #End Hack
+    if ($isCas) {
+        $NameSpace = "ROOT\SMS\site_$SiteCode"
+        #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
+        # Get the WMI object
+        $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+        # Get the Props array
+        $props = $component.Props
+        # Find the index of the IISSSLState property in the Props array
+        $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+        # Change the Value of the IISSSLState property
+        $props[$index].Value = 63
+        # Assign the modified Props array back to the component
+        $component.Props = $props
+        # Save the changes
+        $component.Put()
+        #End Hack 
+    }
+    Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath *>&1 | Out-File $global:StatusLog -Append
 
-    Start-Sleep 15
+    Start-Sleep 10
 
     $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
     $enabled = ($prop.Value -eq 63)
